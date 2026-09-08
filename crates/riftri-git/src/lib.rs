@@ -70,6 +70,22 @@ pub struct ResolvedRevision {
     pub tree: ObjectId,
 }
 
+/// One recursive entry from an exact Git tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    pub mode: u32,
+    pub object_kind: Vec<u8>,
+    pub object_id: ObjectId,
+    pub path: PathBuf,
+}
+
+/// Branch behavior for a new linked worktree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeHead<'a> {
+    NewBranch(&'a OsStr),
+    Detached,
+}
+
 /// One record from `git worktree list --porcelain -z`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorktreeInfo {
@@ -203,6 +219,189 @@ impl Git {
         parse_worktree_porcelain(&output.stdout)
     }
 
+    /// List every entry in an exact tree without interpreting path bytes.
+    pub fn list_tree(&self, path: &Path, tree: &ObjectId) -> Result<Vec<TreeEntry>, GitError> {
+        let arguments = [
+            OsString::from("ls-tree"),
+            OsString::from("-r"),
+            OsString::from("-z"),
+            OsString::from("--full-tree"),
+            OsString::from(tree.as_str()),
+        ];
+        let output = self.run_os(Some(path), &arguments)?;
+        parse_tree_entries(&output.stdout)
+    }
+
+    /// Check whether any repository configuration key matches a Git regexp.
+    pub fn has_config_matching(&self, path: &Path, pattern: &str) -> Result<bool, GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--null"),
+            OsString::from("--get-regexp"),
+            OsString::from(pattern),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            Ok(true)
+        } else if output.status.code() == Some(1) {
+            Ok(false)
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
+    }
+
+    /// Read one repository configuration value as raw Git bytes.
+    pub fn config_value(&self, path: &Path, key: &str) -> Result<Option<Vec<u8>>, GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--null"),
+            OsString::from("--get"),
+            OsString::from(key),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            Ok(Some(
+                output
+                    .stdout
+                    .strip_suffix(&[0])
+                    .unwrap_or(&output.stdout)
+                    .to_vec(),
+            ))
+        } else if output.status.code() == Some(1) {
+            Ok(None)
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
+    }
+
+    /// Materialize an exact tree with Git's checkout machinery and an isolated
+    /// temporary index. `destination` must already exist and `temporary_index`
+    /// must not exist.
+    pub fn materialize_tree(
+        &self,
+        repository: &Path,
+        tree: &ObjectId,
+        destination: &Path,
+        temporary_index: &Path,
+    ) -> Result<(), GitError> {
+        let environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
+        let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
+        self.run_os_with_env(Some(repository), &read_tree, &environment)?;
+
+        let mut prefix = destination.as_os_str().to_os_string();
+        prefix.push(std::path::MAIN_SEPARATOR.to_string());
+        let checkout = [
+            OsString::from("checkout-index"),
+            OsString::from("--all"),
+            OsString::from("--force"),
+            OsString::from("--prefix"),
+            prefix,
+        ];
+        self.run_os_with_env(Some(repository), &checkout, &environment)?;
+        Ok(())
+    }
+
+    /// Create real linked-worktree metadata while suppressing Git's checkout.
+    pub fn add_worktree_no_checkout(
+        &self,
+        repository: &Path,
+        destination: &Path,
+        revision: &OsStr,
+        head: WorktreeHead<'_>,
+    ) -> Result<(), GitError> {
+        let mut arguments = vec![
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("--quiet"),
+            OsString::from("--no-checkout"),
+        ];
+        match head {
+            WorktreeHead::NewBranch(branch) => {
+                arguments.push(OsString::from("-b"));
+                arguments.push(branch.to_os_string());
+            }
+            WorktreeHead::Detached => arguments.push(OsString::from("--detach")),
+        }
+        arguments.push(destination.as_os_str().to_os_string());
+        arguments.push(revision.to_os_string());
+        self.run_os(Some(repository), &arguments)?;
+        Ok(())
+    }
+
+    /// Populate the linked worktree index from HEAD without writing files.
+    pub fn synchronize_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
+        self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+        self.run(Some(worktree), &["update-index", "--refresh"])?;
+        Ok(())
+    }
+
+    pub fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, GitError> {
+        let output = self.run(Some(worktree), &["status", "--porcelain=v1", "-z"])?;
+        Ok(output.stdout.is_empty())
+    }
+
+    /// Remove Git's linked-worktree registration and the worktree directory.
+    /// Callers must enforce Riftri's clean-worktree policy before using force.
+    pub fn remove_worktree_force(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+    ) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("worktree"),
+            OsString::from("remove"),
+            OsString::from("--force"),
+            worktree.as_os_str().to_os_string(),
+        ];
+        self.run_os(Some(repository), &arguments)?;
+        Ok(())
+    }
+
+    /// Resolve a local branch only when that exact ref exists.
+    pub fn local_branch_target(
+        &self,
+        repository: &Path,
+        branch: &OsStr,
+    ) -> Result<Option<ObjectId>, GitError> {
+        let mut reference = OsString::from("refs/heads/");
+        reference.push(branch);
+        let exists_arguments = [
+            OsString::from("show-ref"),
+            OsString::from("--verify"),
+            OsString::from("--quiet"),
+            reference.clone(),
+        ];
+        let exists = self.output_os(Some(repository), &exists_arguments)?;
+        if exists.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !exists.status.success() {
+            return Err(command_failed(&exists_arguments, &exists));
+        }
+
+        let arguments = [
+            OsString::from("show-ref"),
+            OsString::from("--verify"),
+            OsString::from("--hash"),
+            reference,
+        ];
+        let output = self.run_os(Some(repository), &arguments)?;
+        parse_object_output(&output.stdout).map(Some)
+    }
+
+    /// Delete a local branch during rollback after the caller verifies its
+    /// target still matches the commit created for the failed transaction.
+    pub fn delete_branch_force(&self, repository: &Path, branch: &OsStr) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("branch"),
+            OsString::from("-D"),
+            OsString::from("--"),
+            branch.to_os_string(),
+        ];
+        self.run_os(Some(repository), &arguments)?;
+        Ok(())
+    }
+
     fn resolve_optional_object(
         &self,
         path: &Path,
@@ -281,10 +480,21 @@ impl Git {
         if output.status.success() {
             Ok(output)
         } else {
-            Err(GitError::CommandFailed {
-                arguments: display_arguments(arguments),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            })
+            Err(command_failed(arguments, &output))
+        }
+    }
+
+    fn run_os_with_env(
+        &self,
+        path: Option<&Path>,
+        arguments: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<Output, GitError> {
+        let output = self.output_os_with_env(path, arguments, environment)?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err(command_failed(arguments, &output))
         }
     }
 
@@ -294,8 +504,17 @@ impl Git {
     }
 
     fn output_os(&self, path: Option<&Path>, arguments: &[OsString]) -> Result<Output, GitError> {
+        self.output_os_with_env(path, arguments, &[])
+    }
+
+    fn output_os_with_env(
+        &self,
+        path: Option<&Path>,
+        arguments: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<Output, GitError> {
         let mut command = Command::new(&self.command);
-        command.args(arguments);
+        command.args(arguments).envs(environment.iter().copied());
 
         if let Some(path) = path {
             command.current_dir(path);
@@ -422,6 +641,61 @@ fn parse_object_bytes(bytes: &[u8]) -> Result<ObjectId, GitError> {
     ObjectId::parse(value)
 }
 
+/// Parse `git ls-tree -r -z --full-tree` records without decoding paths.
+pub fn parse_tree_entries(input: &[u8]) -> Result<Vec<TreeEntry>, GitError> {
+    let mut entries = Vec::new();
+    for record in input
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let delimiter = record
+            .iter()
+            .position(|byte| *byte == b'\t')
+            .ok_or_else(|| GitError::InvalidOutput {
+                context: "tree entry",
+                detail: "record did not contain a tab-delimited path".to_owned(),
+            })?;
+        let metadata = &record[..delimiter];
+        let path = &record[delimiter + 1..];
+        let mut fields = metadata.split(|byte| *byte == b' ');
+        let mode_bytes = fields.next().unwrap_or_default();
+        let object_kind = fields.next().unwrap_or_default();
+        let object_id = fields.next().unwrap_or_default();
+        if fields.next().is_some()
+            || mode_bytes.is_empty()
+            || object_kind.is_empty()
+            || object_id.is_empty()
+        {
+            return Err(GitError::InvalidOutput {
+                context: "tree entry",
+                detail: "record metadata did not contain mode, type, and object ID".to_owned(),
+            });
+        }
+        let mode_text =
+            std::str::from_utf8(mode_bytes).map_err(|error| GitError::InvalidOutput {
+                context: "tree mode",
+                detail: error.to_string(),
+            })?;
+        let mode = u32::from_str_radix(mode_text, 8).map_err(|error| GitError::InvalidOutput {
+            context: "tree mode",
+            detail: error.to_string(),
+        })?;
+        if path.is_empty() {
+            return Err(GitError::InvalidOutput {
+                context: "tree entry",
+                detail: "path was empty".to_owned(),
+            });
+        }
+        entries.push(TreeEntry {
+            mode,
+            object_kind: object_kind.to_vec(),
+            object_id: parse_object_bytes(object_id)?,
+            path: PathBuf::from(os_string_from_git(path, "tree path")?),
+        });
+    }
+    Ok(entries)
+}
+
 fn utf8_line(bytes: &[u8], context: &'static str) -> Result<String, GitError> {
     let value =
         std::str::from_utf8(trim_line_endings(bytes)).map_err(|error| GitError::InvalidOutput {
@@ -462,6 +736,13 @@ fn display_arguments(arguments: &[OsString]) -> String {
         .join(" ")
 }
 
+fn command_failed(arguments: &[OsString], output: &Output) -> GitError {
+    GitError::CommandFailed {
+        arguments: display_arguments(arguments),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -471,7 +752,7 @@ mod tests {
 
     use tempfile::{TempDir, tempdir};
 
-    use super::{Git, parse_worktree_porcelain};
+    use super::{Git, WorktreeHead, parse_worktree_porcelain};
 
     struct RepositoryFixture {
         directory: TempDir,
@@ -486,6 +767,7 @@ mod tests {
                 directory.path(),
                 &["config", "user.email", "riftri@example.invalid"],
             );
+            git(directory.path(), &["config", "core.autocrlf", "false"]);
             Self { directory }
         }
 
@@ -556,6 +838,132 @@ mod tests {
         assert_eq!(repository.head_commit, Some(resolved.commit));
         assert_eq!(repository.head_tree, Some(resolved.tree));
         assert_eq!(repository.clean, Some(true));
+    }
+
+    #[test]
+    fn lists_and_materializes_an_exact_tree_with_an_isolated_index() {
+        let fixture = RepositoryFixture::committed();
+        fs::create_dir(fixture.path().join("nested")).expect("create nested directory");
+        fs::write(fixture.path().join("nested/file.txt"), "nested\n").expect("write nested file");
+        git(fixture.path(), &["add", "--", "nested/file.txt"]);
+        git(fixture.path(), &["commit", "--quiet", "-m", "nested"]);
+        let git = Git::default();
+        let resolved = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve tree");
+
+        let entries = git
+            .list_tree(fixture.path(), &resolved.tree)
+            .expect("list exact tree");
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.object_kind == b"blob"));
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == Path::new("tracked.txt"))
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.path == Path::new("nested/file.txt"))
+        );
+
+        let output = tempdir().expect("materialization parent");
+        let destination = output.path().join("tree");
+        fs::create_dir(&destination).expect("create materialization destination");
+        let temporary_index = output.path().join("temporary.index");
+        git.materialize_tree(
+            fixture.path(),
+            &resolved.tree,
+            &destination,
+            &temporary_index,
+        )
+        .expect("materialize exact tree");
+
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).expect("read materialized file"),
+            "tracked\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("nested/file.txt"))
+                .expect("read nested materialized file"),
+            "nested\n"
+        );
+    }
+
+    #[test]
+    fn creates_suppressed_checkout_and_synchronizes_its_index() {
+        let fixture = RepositoryFixture::committed();
+        let linked_parent = tempdir().expect("linked parent");
+        let linked = linked_parent.path().join("suppressed");
+        let git = Git::default();
+        let revision = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve HEAD");
+
+        git.add_worktree_no_checkout(
+            fixture.path(),
+            &linked,
+            OsStr::new("HEAD"),
+            WorktreeHead::NewBranch(OsStr::new("feature/suppressed")),
+        )
+        .expect("add no-checkout worktree");
+
+        assert!(linked.join(".git").is_file());
+        assert!(!linked.join("tracked.txt").exists());
+        assert_eq!(
+            git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
+                .expect("read branch"),
+            Some(revision.commit.clone())
+        );
+
+        fs::write(linked.join("tracked.txt"), "tracked\n").expect("materialize linked file");
+        git.synchronize_worktree_index(&linked)
+            .expect("synchronize index");
+        assert!(git.worktree_is_clean(&linked).expect("check clean"));
+
+        fs::write(linked.join("tracked.txt"), "changed\n").expect("modify linked file");
+        assert!(!git.worktree_is_clean(&linked).expect("check dirty"));
+        fs::write(linked.join("tracked.txt"), "tracked\n").expect("restore linked file");
+        assert!(git.worktree_is_clean(&linked).expect("check restored"));
+
+        git.remove_worktree_force(fixture.path(), &linked)
+            .expect("remove linked worktree");
+        git.delete_branch_force(fixture.path(), OsStr::new("feature/suppressed"))
+            .expect("delete rollback branch");
+        assert!(!linked.exists());
+        assert_eq!(
+            git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
+                .expect("check removed branch"),
+            None
+        );
+    }
+
+    #[test]
+    fn reads_repository_configuration_without_human_output() {
+        let fixture = RepositoryFixture::committed();
+        git(
+            fixture.path(),
+            &["config", "filter.riftri-test.clean", "cat"],
+        );
+        let git = Git::default();
+
+        assert!(
+            git.has_config_matching(fixture.path(), r"^filter\.")
+                .expect("match filter config")
+        );
+        assert_eq!(
+            git.config_value(fixture.path(), "filter.riftri-test.clean")
+                .expect("read filter config")
+                .as_deref(),
+            Some(b"cat".as_slice())
+        );
+        assert_eq!(
+            git.config_value(fixture.path(), "filter.missing.clean")
+                .expect("read missing config"),
+            None
+        );
     }
 
     #[test]
@@ -704,5 +1112,19 @@ mod tests {
         let error = parse_worktree_porcelain(input).expect_err("ambiguous state must fail");
 
         assert!(error.to_string().contains("exactly one"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_parser_preserves_non_utf8_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let input = b"100644 blob 0123456789abcdef0123456789abcdef01234567\tname-\xff\0";
+
+        let entries = super::parse_tree_entries(input).expect("parse tree entries");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].mode, 0o100644);
+        assert_eq!(entries[0].path.as_os_str().as_bytes(), b"name-\xff");
     }
 }
