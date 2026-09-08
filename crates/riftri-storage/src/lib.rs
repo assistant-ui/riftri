@@ -212,13 +212,19 @@ fn nearest_existing_ancestor(destination: &Path) -> Result<PathBuf, VolumeProbeE
 
     for candidate in absolute.ancestors() {
         match std::fs::metadata(candidate) {
-            Ok(_) => {
+            Ok(metadata) if metadata.is_dir() => {
                 return std::fs::canonicalize(candidate).map_err(|error| {
                     VolumeProbeError::new(format!(
                         "resolve destination ancestor {}: {error}",
                         candidate.display()
                     ))
                 });
+            }
+            Ok(_) => {
+                return Err(VolumeProbeError::new(format!(
+                    "destination ancestor {} is not a directory",
+                    candidate.display()
+                )));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
@@ -586,7 +592,10 @@ mod tests {
 
     #[test]
     fn an_uninspectable_destination_is_unavailable() {
-        let capabilities = probe_backends(Path::new("/dev/null/child"));
+        let directory = tempdir().expect("temporary directory");
+        let file = directory.path().join("file");
+        std::fs::write(&file, b"not a directory").expect("write fixture file");
+        let capabilities = probe_backends(&file.join("child"));
 
         assert!(
             capabilities
@@ -618,6 +627,4 @@ mod tests {
         assert_eq!(supported[0].status, CapabilityStatus::Supported);
         assert_eq!(unsupported[0].status, CapabilityStatus::Unsupported);
     }
-
-    use std::path::Path;
 }
