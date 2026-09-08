@@ -442,12 +442,6 @@ fn validate_compatibility(
                 .to_owned(),
         ));
     }
-    if git.has_config_matching(repository, r"^filter\.")? {
-        return Err(WorktreeError::Unsupported(
-            "Git filter configuration is active; filters and Git LFS are not supported yet"
-                .to_owned(),
-        ));
-    }
     let mut profile = Sha256::new();
     profile.update(b"riftri-checkout-profile-v1\0");
     let git_version = git.detect()?.version;

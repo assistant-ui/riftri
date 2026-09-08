@@ -101,7 +101,7 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
 }
 
 #[test]
-fn rejects_checkout_filters_before_creating_state_or_git_metadata() {
+fn rejects_effective_attributes_before_creating_state_or_git_metadata() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");
     let state = fixture.path().join("state");
@@ -115,6 +115,11 @@ fn rejects_checkout_filters_before_creating_state_or_git_metadata() {
     );
     git(&repository, &["config", "core.autocrlf", "false"]);
     git(&repository, &["config", "filter.example.clean", "cat"]);
+    fs::write(
+        repository.join(".git/info/attributes"),
+        "*.txt filter=example\n",
+    )
+    .expect("write active filter attributes");
     fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
     git(&repository, &["add", "--", "tracked.txt"]);
     git(&repository, &["commit", "--quiet", "-m", "initial"]);
@@ -128,7 +133,7 @@ fn rejects_checkout_filters_before_creating_state_or_git_metadata() {
     })
     .expect_err("active filter must be rejected");
 
-    assert!(error.to_string().contains("filter"));
+    assert!(error.to_string().contains("attributes"));
     assert!(!destination.exists());
     assert!(!state.exists());
     assert!(

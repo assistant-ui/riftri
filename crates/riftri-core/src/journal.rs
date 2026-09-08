@@ -50,7 +50,7 @@ enum NativeOsString {
 }
 
 impl NativeOsString {
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     fn encode(value: &OsStr) -> Self {
         use std::os::unix::ffi::OsStrExt;
         Self::UnixBytes(value.as_bytes().to_vec())
@@ -332,7 +332,7 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> JournalEr
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use std::path::Path;
 
