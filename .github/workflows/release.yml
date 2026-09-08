@@ -1,0 +1,137 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.package }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            package: riftri-darwin-arm64
+            executable: riftri
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            package: riftri-darwin-x64
+            executable: riftri
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            package: riftri-linux-arm64-gnu
+            executable: riftri
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            package: riftri-linux-x64-gnu
+            executable: riftri
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            package: riftri-win32-arm64
+            executable: riftri.exe
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            package: riftri-win32-x64
+            executable: riftri.exe
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p riftri-cli
+
+      - name: Upload native binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.package }}
+          path: target/${{ matrix.target }}/release/${{ matrix.executable }}
+          if-no-files-found: error
+          retention-days: 2
+
+  publish:
+    name: Publish GitHub and npm release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Download native binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: riftri-*
+          path: artifacts
+
+      - name: Install npm metadata only
+        run: npm ci --ignore-scripts --omit=optional
+
+      - name: Validate package versions
+        run: npm run check:packages
+
+      - name: Stage npm packages and GitHub assets
+        run: node npm/scripts/prepare-release.mjs "${GITHUB_REF_NAME}" artifacts
+
+      - name: Verify GitHub release checksums
+        working-directory: dist/release
+        run: sha256sum --check SHA256SUMS
+
+      - name: Inspect all npm tarballs
+        shell: bash
+        run: |
+          mkdir -p dist/npm
+          for package_directory in npm/platforms/*; do
+            npm pack "${package_directory}" --pack-destination dist/npm
+          done
+          npm pack --pack-destination dist/npm
+
+      - name: Configure bootstrap npm token when present
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
+            npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
+          else
+            echo "Using npm trusted publishing"
+          fi
+
+      - name: Publish npm packages
+        run: node npm/scripts/publish-packages.mjs
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/release/* --clobber
+          else
+            release_options=(--verify-tag --generate-notes)
+            if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+              release_options+=(--prerelease)
+            fi
+            gh release create "${GITHUB_REF_NAME}" dist/release/* "${release_options[@]}"
+          fi

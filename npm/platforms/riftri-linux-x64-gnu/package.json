@@ -1,0 +1,16 @@
+{
+  "name": "riftri-linux-x64-gnu",
+  "version": "0.1.0",
+  "description": "Riftri native binary for Linux x64 (glibc)",
+  "license": "MIT",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "libc": ["glibc"],
+  "files": ["bin/riftri"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/assistant-ui/riftri.git",
+    "directory": "npm/platforms/riftri-linux-x64-gnu"
+  },
+  "publishConfig": { "access": "public", "provenance": true }
+}

@@ -1,0 +1,16 @@
+[package]
+name = "riftri-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "riftri"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+riftri-core = { path = "../riftri-core" }
+serde_json.workspace = true

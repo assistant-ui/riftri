@@ -1,0 +1,53 @@
+{
+  "name": "riftri",
+  "version": "0.1.0",
+  "description": "Copy-on-write acceleration for real Git worktrees",
+  "license": "MIT",
+  "author": "Riftri contributors",
+  "type": "commonjs",
+  "bin": {
+    "riftri": "npm/bin/riftri.js"
+  },
+  "files": [
+    "npm/bin",
+    "npm/lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build:native": "cargo build --locked -p riftri-cli",
+    "check:packages": "node npm/scripts/check-packages.mjs",
+    "test": "npm run build:native && node --test npm/test/*.test.js",
+    "pack:check": "npm run check:packages && npm pack --dry-run"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "optionalDependencies": {
+    "riftri-darwin-arm64": "0.1.0",
+    "riftri-darwin-x64": "0.1.0",
+    "riftri-linux-arm64-gnu": "0.1.0",
+    "riftri-linux-x64-gnu": "0.1.0",
+    "riftri-win32-arm64": "0.1.0",
+    "riftri-win32-x64": "0.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/assistant-ui/riftri.git"
+  },
+  "bugs": {
+    "url": "https://github.com/assistant-ui/riftri/issues"
+  },
+  "homepage": "https://github.com/assistant-ui/riftri#readme",
+  "keywords": [
+    "git",
+    "worktree",
+    "copy-on-write",
+    "developer-tools",
+    "coding-agents"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

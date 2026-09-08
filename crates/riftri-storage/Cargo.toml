@@ -1,0 +1,13 @@
+[package]
+name = "riftri-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

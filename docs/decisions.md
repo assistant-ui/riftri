@@ -1,0 +1,120 @@
+# Project decisions
+
+This file records foundational choices so future work does not repeatedly reopen
+the product boundary. Change a settled decision only with a documented reason,
+compatibility impact, and migration plan.
+
+## Settled decisions
+
+### D001: Riftri accelerates real Git worktrees
+
+Riftri does not create a competing workspace model. A Riftri-backed directory is
+a real linked worktree recognized by ordinary Git.
+
+### D002: Git remains the source of truth
+
+Cloning, fetching, branching, checkout, committing, merging, rebasing, and
+pushing remain Git operations. Riftri may invoke Git plumbing during worktree
+setup but does not reproduce Git semantics.
+
+### D003: activation is opt-in
+
+The explicit `riftri worktree` interface is the baseline. Transparent command
+handling is scoped to a process launched through Riftri or to a repository the
+user explicitly enables. System-wide interception is not the default.
+
+### D004: no prompt dependency
+
+Correctness cannot rely on Claude, Codex, or another agent remembering a skill or
+instruction. Process environment or harness integration provides transparent
+activation when desired.
+
+### D005: native filesystems own the hot path
+
+Riftri coordinates creation and cleanup. Normal reads and writes go directly to
+APFS, a reflink-capable filesystem, OverlayFS, ReFS, or an explicitly chosen
+fallback. FUSE and NFS are not primary backends.
+
+### D006: shared bases are immutable
+
+A live working directory cannot serve as a mutable lower layer. Each shared base
+represents an exact Git tree and checkout profile and remains unchanged while a
+view references it.
+
+### D007: backend capability is destination-specific
+
+Backend selection is based on the actual target volume and its capabilities,
+not merely the operating-system name. Clone and reflink bases may need to exist
+on the same volume as the requested worktree.
+
+### D008: implementation language is Rust
+
+The core, Git shim, storage engine, and any mount coordinator are native Rust.
+JavaScript may be used for distribution or optional integrations, not for the
+filesystem data path.
+
+### D009: full-copy fallback is explicit
+
+If COW cannot be provided, Riftri explains why and follows the configured
+policy. It does not silently consume the space of an ordinary checkout.
+
+### D010: filesystem isolation is not sandboxing
+
+Riftri isolates worktree changes. It does not by itself protect the host from
+untrusted code. Managed untrusted execution requires a separate VM, microVM,
+container, or operating-system sandbox boundary.
+
+### D011: capability results are destination-specific and conservative
+
+Riftri reports `supported`, `unsupported`, or `unavailable` for each backend on
+the proposed destination volume. A missing destination is mapped through its
+nearest existing ancestor. A result is `unavailable`, rather than optimistic,
+when read-only inspection cannot prove a required feature. Full-copy fallback
+always requires explicit policy even when it is technically supported.
+
+### D012: repository identity is Git's common directory
+
+Repository identity is the platform-native absolute path returned for Git's
+common directory. This is shared by the main and linked worktrees and does not
+require interpreting a worktree path as UTF-8. Git object IDs are accepted only
+after validating the real Git executable's SHA-1 or SHA-256 output.
+
+### D013: checkout profiles use versioned canonical inputs
+
+The base key contains the repository identity, exact Git tree, destination
+volume, and a versioned checkout profile. The profile is a sorted set of raw
+byte key/value inputs so discovery order and text encoding cannot change the
+identity. If an external checkout influence cannot be represented, the backend
+must refuse optimized creation rather than guess that two profiles match.
+
+### D014: add and removal use separate operation journals
+
+An add journal records intent before mutation, advances atomically after each
+recoverable step, and has an explicit rollback path from every incomplete
+state. Active adds and completed rollbacks are terminal. Removal will have its
+own state machine so a cleanup cannot be confused with reversal of an
+incomplete add. Journal path encoding must preserve platform-native paths.
+
+### D015: npm is a distribution layer for native Rust binaries
+
+The public `riftri` npm package contains a small Node.js launcher and exact
+optional dependencies on platform-native packages. The launcher selects by OS,
+CPU, and Linux libc, then executes the Rust CLI while preserving standard I/O
+and exit behavior. It never reimplements Riftri behavior in JavaScript and never
+downloads an executable during an install script. Unsupported targets fail with
+an explicit explanation.
+
+## Open design questions
+
+- Which checkout-profile inputs need first-class names beyond the canonical raw
+  input representation?
+- Should the first APFS base be materialized only from Git objects, or may a
+  verified clean worktree seed it?
+- Which Git filter and LFS configurations are safe for the first prototype?
+- How should operation journals and SQLite state reconcile after either one is
+  partially written?
+- What is the safest removal transaction for a mounted OverlayFS worktree?
+- Should clean-view compaction be manual, idle-time automatic, or policy-based?
+- Which Windows fallback provides acceptable performance on ordinary NTFS?
+- What integration is possible for harnesses that use libgit2 or another
+  embedded Git implementation instead of spawning `git`?

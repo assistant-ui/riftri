@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a scoped Riftri capability
+title: "proposal: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What worktree workflow or compatibility problem should Riftri solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Explain the desired user experience and supported platforms.
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: Product-boundary impact
+      description: Explain any effect on Git ownership, fallback behavior, cleanup safety, or the native filesystem fast path.
+    validations:
+      required: true
