@@ -4,8 +4,16 @@ use std::path::{Path, PathBuf};
 
 use riftri_git::{Git, GitInfo, ObjectId, RepositoryIdentity, RepositoryInfo};
 use riftri_storage::{BackendCapability, VolumeIdentity, probe_backends};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+mod journal;
+mod worktree;
+
+pub use worktree::{
+    AddWorktreeRequest, AddWorktreeResult, RecoveryReport, WorktreeError, WorktreeMode,
+    add_worktree, recover_incomplete_operations,
+};
 
 /// A diagnostic check and its optional failure explanation.
 #[derive(Debug, Clone, Serialize)]
@@ -94,7 +102,7 @@ pub struct BaseKey {
 }
 
 /// Durable phases of an explicit worktree-add transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
 pub enum AddWorktreePhase {
     IntentRecorded,
@@ -193,7 +201,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
     };
 
     DoctorReport {
-        project_stage: "capability-and-git-semantics-foundation",
+        project_stage: "explicit-apfs-prototype",
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
         cow_backend_active: false,

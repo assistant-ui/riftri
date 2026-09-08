@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -41,6 +42,53 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Create or recover Riftri-backed real Git worktrees.
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
+
+    /// Roll back incomplete add operations recorded in a Riftri state directory.
+    Recover {
+        /// Riftri state directory containing operation journals.
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorktreeCommand {
+    /// Create a real linked worktree using a native APFS COW clone.
+    Add {
+        /// New worktree directory.
+        path: PathBuf,
+
+        /// Create and check out a new branch.
+        #[arg(
+            short = 'b',
+            value_name = "BRANCH",
+            conflicts_with = "detach",
+            required_unless_present = "detach"
+        )]
+        branch: Option<OsString>,
+
+        /// Create a detached worktree instead of a branch.
+        #[arg(long, conflicts_with = "branch")]
+        detach: bool,
+
+        /// Commit-ish to use for the new worktree.
+        #[arg(default_value = "HEAD")]
+        revision: OsString,
+
+        /// Repository in which Git should create linked-worktree metadata.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Riftri state directory; defaults to <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -81,6 +129,59 @@ fn main() -> Result<()> {
                     );
                 }
                 println!("\nCapability support does not mean a backend is active yet.");
+            }
+        }
+        Command::Worktree { command } => match command {
+            WorktreeCommand::Add {
+                path,
+                branch,
+                detach,
+                revision,
+                repository,
+                state_dir,
+            } => {
+                let mode = match (branch, detach) {
+                    (Some(branch), false) => riftri_core::WorktreeMode::NewBranch(branch),
+                    (None, true) => riftri_core::WorktreeMode::Detached,
+                    _ => unreachable!("Clap enforces exactly one worktree head mode"),
+                };
+                let result = riftri_core::add_worktree(riftri_core::AddWorktreeRequest {
+                    repository,
+                    destination: path,
+                    revision,
+                    mode,
+                    state_dir,
+                })?;
+                println!("Created APFS-backed Git worktree");
+                println!("Destination: {}", result.destination.display());
+                println!("Commit: {}", result.commit.as_str());
+                println!("Tree: {}", result.tree.as_str());
+                println!("Immutable base: {}", result.base_path.display());
+                println!(
+                    "Base: {}",
+                    if result.reused_base {
+                        "reused"
+                    } else {
+                        "created"
+                    }
+                );
+                println!("Journal: {}", result.journal_path.display());
+            }
+        },
+        Command::Recover { state_dir } => {
+            let report = riftri_core::recover_incomplete_operations(&state_dir)?;
+            println!("Scanned operations: {}", report.scanned);
+            println!("Active worktrees: {}", report.active);
+            println!("Recovered operations: {}", report.recovered);
+            if !report.errors.is_empty() {
+                println!("Operations needing attention:");
+                for error in &report.errors {
+                    println!("- {error}");
+                }
+                anyhow::bail!(
+                    "{} operation(s) need manual attention; no changed worktree was deleted",
+                    report.errors.len()
+                );
             }
         }
     }
@@ -143,5 +244,54 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
             "- {:?} ({:?}): {}",
             backend.kind, backend.status, backend.explanation
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    use clap::Parser;
+    use clap::error::ErrorKind;
+
+    use super::{Cli, Command, WorktreeCommand};
+
+    #[test]
+    fn parses_the_documented_explicit_worktree_command() {
+        let cli = Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "add",
+            "../app-auth",
+            "-b",
+            "feature/auth",
+            "main",
+        ])
+        .expect("parse explicit worktree command");
+
+        let Command::Worktree {
+            command:
+                WorktreeCommand::Add {
+                    path,
+                    branch,
+                    revision,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(path, Path::new("../app-auth"));
+        assert_eq!(branch.as_deref(), Some(OsStr::new("feature/auth")));
+        assert_eq!(revision, OsStr::new("main"));
+    }
+
+    #[test]
+    fn requires_a_branch_or_detached_mode() {
+        let error = Cli::try_parse_from(["riftri", "worktree", "add", "../app-auth"])
+            .expect_err("head mode must be explicit");
+
+        assert_eq!(error.kind(), ErrorKind::MissingRequiredArgument);
     }
 }

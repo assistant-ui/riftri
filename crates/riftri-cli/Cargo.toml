@@ -14,3 +14,6 @@ anyhow.workspace = true
 clap.workspace = true
 riftri-core = { path = "../riftri-core" }
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

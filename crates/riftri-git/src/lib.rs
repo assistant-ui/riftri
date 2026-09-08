@@ -274,6 +274,32 @@ impl Git {
         }
     }
 
+    /// Return whether Git resolves any attribute for the supplied tree paths.
+    /// `--cached` prevents a mutable working-tree attributes file from being
+    /// treated as the requested tree; repository, global, and system attribute
+    /// sources still participate and therefore make the prototype refuse.
+    pub fn paths_have_effective_attributes(
+        &self,
+        path: &Path,
+        paths: &[PathBuf],
+    ) -> Result<bool, GitError> {
+        for chunk in paths.chunks(128) {
+            let mut arguments = vec![
+                OsString::from("check-attr"),
+                OsString::from("--cached"),
+                OsString::from("--all"),
+                OsString::from("-z"),
+                OsString::from("--"),
+            ];
+            arguments.extend(chunk.iter().map(|entry| entry.as_os_str().to_os_string()));
+            let output = self.run_os(Some(path), &arguments)?;
+            if !output.stdout.is_empty() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Materialize an exact tree with Git's checkout machinery and an isolated
     /// temporary index. `destination` must already exist and `temporary_index`
     /// must not exist.
@@ -963,6 +989,29 @@ mod tests {
             git.config_value(fixture.path(), "filter.missing.clean")
                 .expect("read missing config"),
             None
+        );
+    }
+
+    #[test]
+    fn detects_external_attributes_for_tree_paths() {
+        let fixture = RepositoryFixture::committed();
+        let attributes = fixture.path().join(".git/info/attributes");
+        fs::write(attributes, "*.txt riftri-test\n").expect("write info attributes");
+        let git = Git::default();
+
+        assert!(
+            git.paths_have_effective_attributes(
+                fixture.path(),
+                &[Path::new("tracked.txt").to_path_buf()]
+            )
+            .expect("check attributes")
+        );
+        assert!(
+            !git.paths_have_effective_attributes(
+                fixture.path(),
+                &[Path::new("unmatched.bin").to_path_buf()]
+            )
+            .expect("check unmatched attributes")
         );
     }
 
