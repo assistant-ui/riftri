@@ -105,7 +105,7 @@ jobs:
           for package_directory in npm/platforms/*; do
             npm pack "${package_directory}" --pack-destination dist/npm
           done
-          npm pack --pack-destination dist/npm
+          npm pack ./dist/npm-root --pack-destination dist/npm
 
       - name: Configure bootstrap npm token when present
         env:

@@ -18,18 +18,18 @@
     "build:native": "cargo build --locked -p riftri-cli",
     "check:packages": "node npm/scripts/check-packages.mjs",
     "test": "npm run build:native && node --test npm/test/*.test.js",
-    "pack:check": "npm run check:packages && npm pack --dry-run"
+    "pack:check": "npm run check:packages && node npm/scripts/stage-root-package.mjs && npm pack ./dist/npm-root --dry-run"
   },
   "engines": {
     "node": ">=18.18"
   },
   "optionalDependencies": {
-    "riftri-darwin-arm64": "0.1.0",
-    "riftri-darwin-x64": "0.1.0",
-    "riftri-linux-arm64-gnu": "0.1.0",
-    "riftri-linux-x64-gnu": "0.1.0",
-    "riftri-win32-arm64": "0.1.0",
-    "riftri-win32-x64": "0.1.0"
+    "riftri-darwin-arm64": "file:npm/platforms/riftri-darwin-arm64",
+    "riftri-darwin-x64": "file:npm/platforms/riftri-darwin-x64",
+    "riftri-linux-arm64-gnu": "file:npm/platforms/riftri-linux-arm64-gnu",
+    "riftri-linux-x64-gnu": "file:npm/platforms/riftri-linux-x64-gnu",
+    "riftri-win32-arm64": "file:npm/platforms/riftri-win32-arm64",
+    "riftri-win32-x64": "file:npm/platforms/riftri-win32-x64"
   },
   "repository": {
     "type": "git",

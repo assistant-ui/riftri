@@ -37,8 +37,9 @@ restartable: package versions already present in npm are detected and skipped.
 ## Cutting a release
 
 1. Update the version in the root `Cargo.toml`, root `package.json`,
-   `package-lock.json`, and every `npm/platforms/*/package.json`. All versions
-   and optional-dependency pins must match.
+   `package-lock.json`, and every `npm/platforms/*/package.json`. Source
+   optional dependencies remain local `file:` references; release staging
+   converts them to exact registry versions in the published manifest.
 2. Move relevant entries from `Unreleased` in `CHANGELOG.md` to a dated version.
 3. Run the full local checks:
 

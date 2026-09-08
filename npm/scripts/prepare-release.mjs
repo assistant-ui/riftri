@@ -4,6 +4,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { stageRootPackage } from "./stage-root-package.mjs";
+
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..", "..");
 const [tag, artifactsArgument = "artifacts"] = process.argv.slice(2);
@@ -68,4 +70,5 @@ await writeFile(
   path.join(releaseDirectory, "SHA256SUMS"),
   `${checksums.join("\n")}\n`,
 );
+await stageRootPackage();
 process.stdout.write(`staged ${checksums.length} native release archives for ${tag}\n`);

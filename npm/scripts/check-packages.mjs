@@ -60,8 +60,8 @@ for (const packageName of platformDirectories) {
   );
   assert.equal(
     rootPackage.optionalDependencies[packageName],
-    rootPackage.version,
-    `${packageName} dependency must be pinned to the release version`,
+    `file:npm/platforms/${packageName}`,
+    `${packageName} source dependency must point to its local package`,
   );
 }
 

@@ -10,8 +10,9 @@ const platformPackages = (await readdir(platformsDirectory, { withFileTypes: tru
   .filter((entry) => entry.isDirectory())
   .map((entry) => path.join(platformsDirectory, entry.name))
   .sort();
+const rootPackageDirectory = path.join(repositoryRoot, "dist", "npm-root");
 
-for (const packageDirectory of [...platformPackages, repositoryRoot]) {
+for (const packageDirectory of [...platformPackages, rootPackageDirectory]) {
   const manifest = JSON.parse(
     await readFile(path.join(packageDirectory, "package.json"), "utf8"),
   );
