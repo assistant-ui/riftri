@@ -104,13 +104,23 @@ and exit behavior. It never reimplements Riftri behavior in JavaScript and never
 downloads an executable during an install script. Unsupported targets fail with
 an explicit explanation.
 
+### D016: the first APFS base is materialized only from Git objects
+
+The explicit APFS prototype uses a temporary isolated Git index to materialize
+the exact requested tree. It never seeds a base from a mutable working directory.
+Base construction is serialized by a file lock and exposed through atomic rename
+plus a durable completion marker. The initial checkout profile is intentionally
+narrow: attributes, filters/Git LFS, sparse checkout, submodules, and ambiguous
+checkout-changing configuration are rejected rather than approximated.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
   input representation?
-- Should the first APFS base be materialized only from Git objects, or may a
-  verified clean worktree seed it?
-- Which Git filter and LFS configurations are safe for the first prototype?
+- Can a future optimization safely seed a base from a separately verified clean
+  worktree without weakening D016's correctness guarantee?
+- Which Git filter and LFS configurations can be added to a versioned checkout
+  profile without making base reuse ambiguous?
 - How should operation journals and SQLite state reconcile after either one is
   partially written?
 - What is the safest removal transaction for a mounted OverlayFS worktree?

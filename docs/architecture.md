@@ -86,9 +86,10 @@ worktree.
 
 ### State and recovery
 
-Local metadata records bases, views, mounts, reference counts, and incomplete
-operations. SQLite is the planned registry; small per-operation journals provide
-recovery breadcrumbs if creation is interrupted.
+Versioned JSON add-operation journals are written atomically and preserve native
+path units. They are the current recovery authority for the APFS prototype.
+SQLite remains the planned Milestone 3 registry for bases, views, mounts, and
+reference counts.
 
 ## Worktree-add transaction
 
@@ -135,6 +136,23 @@ state, so every rollback action must be idempotent and validate its exact target
 SQLite registration remains a Milestone 3 concern; the per-operation journal is
 the crash-recovery authority while an add is incomplete.
 
+The APFS prototype builds bases only from exact Git objects through an isolated
+temporary index. A SHA-256 repository bucket, tree object ID, restricted checkout
+profile version, and same-volume state placement implement the base-key
+boundaries. A per-base file lock serializes construction, atomic rename exposes
+the finished tree, and a synced completion marker prevents reuse of a partially
+prepared base.
+
+Native `clonefile` is used for every regular file in an APFS view. An error is
+returned if APFS cannot clone; there is no byte-copy path. Directory structure,
+symlinks, and executable modes are preserved. The base is made read-only and the
+cloned view restores owner write permission before Git index synchronization.
+
+Recovery validates every recorded cleanup path. It removes a visible incomplete
+view only when Git reports it clean or a byte/mode/symlink comparison proves it
+still equals the immutable base. Otherwise it retains the view and journal for
+manual attention.
+
 ## Fast path
 
 Once a worktree is ready, Riftri is absent from ordinary file operations:
@@ -166,8 +184,9 @@ concurrent worktree requests.
 ## Initial delivery sequence
 
 1. Read-only diagnostics and storage capability model. (complete)
-2. Explicit APFS worktree creation on macOS.
-3. Process-scoped Git shim.
-4. Linux reflink and OverlayFS backends.
-5. State recovery, compaction, and compatibility expansion.
-6. Windows native backends.
+2. Explicit APFS worktree creation on macOS. (complete)
+3. Removal, recovery inventory, and disk accounting.
+4. Process-scoped Git shim.
+5. Linux reflink and OverlayFS backends.
+6. Compaction and compatibility expansion.
+7. Windows native backends.

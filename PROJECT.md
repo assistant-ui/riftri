@@ -177,8 +177,10 @@ Riftri should eventually report and benchmark:
 
 ## Current state
 
-The Rust workspace and Milestone 1 read-only foundation exist. Diagnostics probe
-the actual destination volume, Git discovery handles main, linked, unborn,
-detached, and bare repositories, and the internal base-key and operation-state
-models are defined. No COW backend, worktree mutation, mount, Git shim, or daemon
-is active yet. The next work should follow Milestone 2 in `ROADMAP.md`.
+The Rust workspace, Milestone 1 foundation, and Milestone 2 explicit APFS
+prototype exist. On a writable APFS volume, `riftri worktree add` builds or
+reuses an exact-tree immutable base, creates real linked-worktree metadata with
+checkout suppressed, activates a native COW clone, synchronizes the index, and
+requires a clean Git status before success. Add operations are journaled and
+recoverable. No transparent Git shim, Linux/Windows mutation backend, mount, or
+daemon is active yet. The next work should follow Milestone 3 in `ROADMAP.md`.

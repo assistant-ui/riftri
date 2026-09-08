@@ -14,10 +14,12 @@ commands. Riftri changes only how worktree files are materialized and stored.
 
 ## Current stage
 
-The repository has completed the capability and Git-semantics foundation. It
-contains destination-volume probes, native-path Git discovery, cache-key and
-journal-state models, and safe read-only diagnostics. It still has no worktree
-interception, filesystem mounts, or destructive commands.
+The repository has completed the capability/Git-semantics foundation and the
+explicit APFS prototype. On macOS it can create real linked worktrees from
+strict native APFS clones, reuse exact-tree immutable bases, persist atomic add
+journals, roll back failures, and recover interrupted adds without deleting a
+changed view. It still has no transparent Git interception, removal
+transaction, filesystem mounts, Linux/Windows mutation backend, or daemon.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety
 or compatibility gates merely to reach a working demo faster.

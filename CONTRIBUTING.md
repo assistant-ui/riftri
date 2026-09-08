@@ -34,3 +34,8 @@ Pull requests should explain their safety impact, compatibility assumptions,
 and exact verification commands. Do not include credentials, private repository
 contents, generated native binaries, or benchmark data that exposes private
 paths.
+
+Use Conventional Commit subjects for commits and pull requests, including
+`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `perf:`, `build:`, `ci:`, and
+`chore:`. A focused scope such as `feat(storage):` is encouraged when it makes
+the history clearer.

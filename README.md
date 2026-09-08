@@ -6,31 +6,33 @@ Riftri is an opt-in copy-on-write storage accelerator for real Git worktrees.
 Git continues to own cloning, branches, commits, merges, and remotes. Riftri
 only changes how linked worktree files are materialized and stored.
 
-## Intended experience
+## Current macOS experience
 
 ```console
 $ git clone git@github.com:acme/app.git
 $ cd app
-$ riftri exec -- claude
-
-# Inside the enabled process, this remains an ordinary Git command:
-$ git worktree add ../app-auth -b feature/auth main
+$ riftri worktree add ../app-auth -b feature/auth main
 ```
 
 The resulting path is a real Git linked worktree. Unchanged data is shared with
 an immutable base while writes remain private to that worktree.
 
+Process-scoped transparent Git via `riftri exec` remains a later milestone.
+
 ## Project status
 
-Riftri has completed its read-only capability and Git-semantics foundation. The
-repository currently provides:
+Riftri has an explicit APFS prototype on macOS. The repository currently
+provides:
 
 - A Rust workspace with separate CLI, core, Git, and storage boundaries.
 - Destination-volume-specific `doctor` and `backends` diagnostics.
 - Git discovery for normal, linked, unborn, detached, and bare repositories.
 - Native-path, NUL-delimited Git worktree parsing.
-- Versioned immutable-base keys and add-operation journal states.
-- No Git interception, mounts, worktree creation, or destructive operations yet.
+- Exact-tree materialization through an isolated temporary Git index.
+- Reusable read-only bases and strict native APFS COW clones with no copy fallback.
+- Real `git worktree add --no-checkout` metadata and clean index synchronization.
+- Durable, atomic add-operation journals and conservative recovery.
+- Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
 
 Try the safe diagnostic commands:
 
@@ -39,7 +41,20 @@ $ cargo run -p riftri-cli -- doctor
 $ cargo run -p riftri-cli -- doctor --destination ../proposed-worktree
 $ cargo run -p riftri-cli -- doctor --json
 $ cargo run -p riftri-cli -- backends ../proposed-worktree
+$ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
 ```
+
+The add command currently requires macOS and a writable APFS volume. Its first
+compatibility envelope deliberately rejects attributes, filters/Git LFS,
+sparse checkout, submodules, and checkout-changing non-default configuration.
+It never falls back to a full copy. If an add is interrupted, run:
+
+```console
+$ cargo run -p riftri-cli -- recover --state-dir "$(git rev-parse --git-common-dir)/riftri"
+```
+
+Recovery deletes only an unchanged incomplete view. A changed view is preserved
+and reported for manual attention.
 
 ## Installation
 
@@ -78,6 +93,7 @@ Continue with:
 - [Project outline](PROJECT.md)
 - [Implementation roadmap](ROADMAP.md)
 - [Architecture overview](docs/architecture.md)
+- [APFS allocation evidence](docs/allocation-evidence.md)
 - [Settled decisions and open questions](docs/decisions.md)
 - [Agent instructions](AGENTS.md)
 
@@ -90,6 +106,14 @@ $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo test --workspace
 $ npm test
 $ npm run pack:check
+```
+
+To run the opt-in APFS physical-allocation check on a quiet volume:
+
+```console
+$ cargo test -p riftri-core --test apfs_worktree \
+    cached_view_uses_materially_less_physical_space_than_its_logical_size \
+    -- --ignored --nocapture
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development expectations and

@@ -33,7 +33,7 @@ Acceptance criteria:
 - Paths with spaces and non-UTF-8 bytes remain representable internally.
 - Git discovery works from the main tree and a linked worktree.
 
-## Milestone 2: explicit APFS prototype
+## Milestone 2: explicit APFS prototype — complete
 
 Outcome: create the first real COW-backed linked worktree through an explicit
 Riftri command on a supported APFS volume.
@@ -54,12 +54,15 @@ Acceptance criteria:
 - Physical allocation demonstrates meaningful sharing.
 - An interrupted creation can be rolled back or repaired.
 
+The allocation methodology and recorded development result are documented in
+[`docs/allocation-evidence.md`](docs/allocation-evidence.md).
+
 ## Milestone 3: removal, recovery, and accounting
 
 Outcome: make the APFS prototype safe for repeated local use.
 
 - Implement explicit worktree removal while preserving Git dirty-state checks.
-- Add local state and operation journals.
+- Extend local state and operation journals to removal and base lifecycle.
 - Add `status`, `doctor`, `repair`, and garbage-collection behavior.
 - Track base reference counts.
 - Report logical and physical storage use.
