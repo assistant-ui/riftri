@@ -7,6 +7,80 @@
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use thiserror::Error;
+
+/// Errors from concrete native storage operations.
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("APFS cloning is only available on macOS")]
+    UnsupportedPlatform,
+
+    #[error("clone source is not a directory: {0}")]
+    InvalidSource(PathBuf),
+
+    #[error("clone destination already exists: {0}")]
+    DestinationExists(PathBuf),
+
+    #[error("unsupported filesystem entry in immutable base: {0}")]
+    UnsupportedEntry(PathBuf),
+
+    #[error("{operation} {path}: {source}")]
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("clone {source_path} to {destination}: {source}")]
+    Clone {
+        source_path: PathBuf,
+        destination: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Native APFS clone operations used by the explicit macOS prototype.
+pub struct ApfsCloner;
+
+impl ApfsCloner {
+    /// Clone a directory tree without permitting a byte-copy fallback.
+    #[cfg(target_os = "macos")]
+    pub fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
+        apfs::clone_tree(source, destination)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn clone_tree(_source: &Path, _destination: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Remove write permission from an immutable base tree.
+    #[cfg(target_os = "macos")]
+    pub fn make_tree_read_only(path: &Path) -> Result<(), StorageError> {
+        apfs::make_tree_read_only(path)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn make_tree_read_only(_path: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+
+    /// Restore owner write/search permission after cloning a read-only base.
+    #[cfg(target_os = "macos")]
+    pub fn make_tree_owner_writable(path: &Path) -> Result<(), StorageError> {
+        apfs::make_tree_owner_writable(path)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn make_tree_owner_writable(_path: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod apfs;
 
 /// A storage strategy Riftri may eventually use to materialize a worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -127,7 +201,6 @@ impl VolumeProbeError {
     }
 }
 
-#[cfg(unix)]
 fn nearest_existing_ancestor(destination: &Path) -> Result<PathBuf, VolumeProbeError> {
     let absolute = if destination.is_absolute() {
         destination.to_path_buf()
@@ -193,7 +266,20 @@ fn inspect_destination(destination: &Path) -> Result<DestinationVolume, VolumePr
     // SAFETY: statfs returned success above.
     let stats = unsafe { stats.assume_init() };
     let filesystem = filesystem_name(&stats);
-    let read_only = is_read_only(&stats);
+    let mut volume_stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `volume_stats` is valid writable
+    // storage. A successful statvfs call initializes the value.
+    let result = unsafe { libc::statvfs(path.as_ptr(), volume_stats.as_mut_ptr()) };
+    if result != 0 {
+        return Err(VolumeProbeError::new(format!(
+            "inspect filesystem flags for {}: {}",
+            probe_path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: statvfs returned success above.
+    let volume_stats = unsafe { volume_stats.assume_init() };
+    let read_only = volume_stats.f_flag & libc::ST_RDONLY as libc::c_ulong != 0;
 
     Ok(DestinationVolume {
         requested_path: destination.to_path_buf(),
@@ -218,11 +304,6 @@ fn filesystem_name(stats: &libc::statfs) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-#[cfg(target_os = "macos")]
-fn is_read_only(stats: &libc::statfs) -> bool {
-    stats.f_flags & libc::MNT_RDONLY as u32 != 0
-}
-
 #[cfg(target_os = "linux")]
 fn filesystem_name(stats: &libc::statfs) -> String {
     const BTRFS_SUPER_MAGIC: libc::c_long = 0x9123_683e;
@@ -237,22 +318,85 @@ fn filesystem_name(stats: &libc::statfs) -> String {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn is_read_only(stats: &libc::statfs) -> bool {
-    stats.f_flags & libc::ST_RDONLY != 0
-}
-
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 fn filesystem_name(_stats: &libc::statfs) -> String {
     "unknown-unix-filesystem".to_owned()
 }
 
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
-fn is_read_only(stats: &libc::statfs) -> bool {
-    stats.f_flags & libc::ST_RDONLY != 0
+#[cfg(target_os = "windows")]
+fn inspect_destination(destination: &Path) -> Result<DestinationVolume, VolumeProbeError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{GetVolumeInformationW, GetVolumePathNameW};
+    use windows_sys::Win32::System::SystemServices::FILE_READ_ONLY_VOLUME;
+
+    const WINDOWS_MAX_PATH: usize = 32_768;
+
+    let probe_path = nearest_existing_ancestor(destination)?;
+    let mut wide_path = probe_path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide_path.push(0);
+    let mut volume_path = vec![0_u16; WINDOWS_MAX_PATH];
+
+    // SAFETY: the input is NUL-terminated and the output buffer is writable
+    // for the length passed to Windows.
+    let succeeded = unsafe {
+        GetVolumePathNameW(
+            wide_path.as_ptr(),
+            volume_path.as_mut_ptr(),
+            volume_path.len() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return Err(VolumeProbeError::new(format!(
+            "resolve volume for {}: {}",
+            probe_path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let mut serial = 0_u32;
+    let mut flags = 0_u32;
+    let mut filesystem = vec![0_u16; 256];
+    // SAFETY: the root path is a NUL-terminated buffer produced by Windows;
+    // optional output pointers are null and all provided outputs are writable.
+    let succeeded = unsafe {
+        GetVolumeInformationW(
+            volume_path.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            &mut serial,
+            std::ptr::null_mut(),
+            &mut flags,
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    };
+    if succeeded == 0 {
+        return Err(VolumeProbeError::new(format!(
+            "inspect volume for {}: {}",
+            probe_path.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    let filesystem_length = filesystem
+        .iter()
+        .position(|character| *character == 0)
+        .unwrap_or(filesystem.len());
+    let filesystem = String::from_utf16_lossy(&filesystem[..filesystem_length]);
+
+    Ok(DestinationVolume {
+        requested_path: destination.to_path_buf(),
+        probe_path,
+        identity: VolumeIdentity {
+            device_id: u64::from(serial),
+            filesystem,
+        },
+        read_only: flags & FILE_READ_ONLY_VOLUME != 0,
+    })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_os = "windows")))]
 fn inspect_destination(destination: &Path) -> Result<DestinationVolume, VolumeProbeError> {
     Err(VolumeProbeError::new(format!(
         "volume identity probing is not implemented on {} for {}",
@@ -346,7 +490,14 @@ fn platform_capabilities(
         })
         .ok();
     let overlay = match (volume, overlay_available) {
-        (Ok(volume), Some(true)) if !volume.read_only => BackendCapability {
+        (Ok(volume), _) if volume.read_only => BackendCapability {
+            kind: BackendKind::OverlayFs,
+            status: CapabilityStatus::Unsupported,
+            volume: Some(volume.clone()),
+            explanation: "OverlayFS needs writable upper and work directories".to_owned(),
+            requires_explicit_fallback: false,
+        },
+        (Ok(volume), Some(true)) => BackendCapability {
             kind: BackendKind::OverlayFs,
             status: CapabilityStatus::Unavailable,
             volume: Some(volume.clone()),
@@ -359,13 +510,6 @@ fn platform_capabilities(
             status: CapabilityStatus::Unsupported,
             volume: Some(volume.clone()),
             explanation: "the running kernel does not advertise OverlayFS".to_owned(),
-            requires_explicit_fallback: false,
-        },
-        (Ok(volume), _) if volume.read_only => BackendCapability {
-            kind: BackendKind::OverlayFs,
-            status: CapabilityStatus::Unsupported,
-            volume: Some(volume.clone()),
-            explanation: "OverlayFS needs writable upper and work directories".to_owned(),
             requires_explicit_fallback: false,
         },
         (Ok(volume), None) => BackendCapability {

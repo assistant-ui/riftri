@@ -251,6 +251,8 @@ dependencies = [
  "libc",
  "serde",
  "tempfile",
+ "thiserror",
+ "windows-sys",
 ]
 
 [[package]]
