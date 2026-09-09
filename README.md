@@ -11,13 +11,29 @@ only changes how linked worktree files are materialized and stored.
 ```console
 $ git clone git@github.com:acme/app.git
 $ cd app
-$ riftri worktree add ../app-auth -b feature/auth main
+$ riftri enable
+$ riftri exec -- claude
+$ git worktree add -b feature/auth ../app-auth main
 ```
 
-The resulting path is a real Git linked worktree. Unchanged data is shared with
-an immutable base while writes remain private to that worktree.
+`riftri enable` records repository-local consent in `riftri.enabled`. Inside the
+process started by `riftri exec`, supported `git worktree add` commands in that
+repository are routed through Riftri. Other Git commands and worktree adds in
+repositories that have not been enabled execute the real Git binary directly.
 
-Process-scoped transparent Git via `riftri exec` remains a later milestone.
+The resulting path is a real Git linked worktree. Unchanged data is shared with
+an immutable base while writes remain private to that worktree. Riftri does not
+modify the parent shell, shell startup files, or system Git. To stop opting in:
+
+```console
+$ riftri disable
+```
+
+The explicit interface remains available without process activation:
+
+```console
+$ riftri worktree add ../app-auth -b feature/auth main
+```
 
 ## Project status
 
@@ -33,6 +49,8 @@ provides:
 - Real `git worktree add --no-checkout` metadata and clean index synchronization.
 - Durable, atomic add-operation journals and conservative recovery.
 - Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
+- Repository-local `riftri enable`/`riftri disable` activation.
+- Process-scoped `riftri exec` interception for supported worktree adds.
 
 Try the safe diagnostic commands:
 
@@ -41,13 +59,18 @@ $ cargo run -p riftri-cli -- doctor
 $ cargo run -p riftri-cli -- doctor --destination ../proposed-worktree
 $ cargo run -p riftri-cli -- doctor --json
 $ cargo run -p riftri-cli -- backends ../proposed-worktree
+$ cargo run -p riftri-cli -- enable
+$ cargo run -p riftri-cli -- exec -- $SHELL
 $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
 ```
 
 The add command currently requires macOS and a writable APFS volume. Its first
 compatibility envelope deliberately rejects attributes, filters/Git LFS,
 sparse checkout, submodules, and checkout-changing non-default configuration.
-It never falls back to a full copy. If an add is interrupted, run:
+Transparent optimized adds currently require either `-b <new-branch>` or
+`--detach`. They never fall back to a full copy. Set `RIFTRI_BYPASS=1` only when
+you intentionally want an enabled command to use ordinary Git. If an add is
+interrupted, run:
 
 ```console
 $ cargo run -p riftri-cli -- recover --state-dir "$(git rev-parse --git-common-dir)/riftri"

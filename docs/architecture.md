@@ -15,13 +15,23 @@ The central rule is:
 Riftri is never a global Git replacement by default.
 
 1. Explicit operation: `riftri worktree add ...`
-2. Process-scoped activation: `riftri exec -- claude`
+2. Repository opt-in plus process-scoped activation: `riftri enable`, then
+   `riftri exec -- claude`
 3. Optional repository-scoped shell integration
 
 The process-scoped mode places a small Git shim at the front of `PATH` only for
-the selected process and its children. Normal Git commands are immediately
-delegated to the real Git executable. Worktree lifecycle commands are routed
-through Riftri.
+the selected process and its children. Repository consent is stored in local Git
+configuration as `riftri.enabled=true`. Normal Git commands and all commands in
+repositories without that marker are immediately delegated to the exact real
+Git executable resolved before the shim is installed. Supported worktree adds
+in enabled repositories are routed through Riftri. `RIFTRI_BYPASS=1` provides an
+explicit escape hatch to ordinary Git without disabling the repository.
+
+The initial shim accepts optimized `worktree add` with `-b <new-branch>` or
+`--detach`. Unsupported add forms fail before mutation instead of silently
+falling back to a full checkout. Worktree removal and the remaining lifecycle
+commands continue to be owned by Git until Riftri's journaled removal path is
+implemented.
 
 ## Components
 

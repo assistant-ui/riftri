@@ -7,9 +7,16 @@ use riftri_storage::{BackendCapability, VolumeIdentity, probe_backends};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod activation;
 mod journal;
 mod worktree;
 
+pub use activation::{
+    ActivationError, BYPASS_ENV, GitProxyOutcome, GitProxyPlan, RepositoryActivation,
+    SHIM_ACTIVE_ENV, disable_repository, enable_repository, execute_scoped_command,
+    plan_git_command, proxy_git_command, repository_activation,
+};
+pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, RecoveryReport, WorktreeError, WorktreeMode,
     add_worktree, recover_incomplete_operations,
@@ -50,6 +57,8 @@ pub struct DoctorReport {
     pub operating_system: &'static str,
     pub architecture: &'static str,
     pub cow_backend_active: bool,
+    pub repository_enabled: Option<bool>,
+    pub git_shim_active: bool,
     pub git: Diagnostic<GitInfo>,
     pub repository: Diagnostic<RepositoryInfo>,
     pub storage_capabilities: Vec<BackendCapability>,
@@ -199,12 +208,24 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
         Ok(info) => Diagnostic::success(info),
         Err(error) => Diagnostic::failure(error.to_string()),
     };
+    let repository_enabled = repository_check
+        .value
+        .as_ref()
+        .and_then(|repository| repository.root.as_deref())
+        .map(|root| {
+            git.local_config_bool(root, activation::ENABLED_CONFIG_KEY)
+                .ok()
+                .flatten()
+                .unwrap_or(false)
+        });
 
     DoctorReport {
-        project_stage: "explicit-apfs-prototype",
+        project_stage: "apfs-prototype-with-repository-activation",
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
         cow_backend_active: false,
+        repository_enabled,
+        git_shim_active: std::env::var_os(SHIM_ACTIVE_ENV).is_some(),
         git: git_check,
         repository: repository_check,
         storage_capabilities: probe_backends(destination),

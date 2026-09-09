@@ -80,6 +80,12 @@ Acceptance criteria:
 Outcome: let agents use ordinary `git worktree` commands without relying on a
 prompt or skill.
 
+Initial add-only slice complete: repository-local `riftri enable` and
+`riftri disable`, `riftri exec -- <command>`, exact real-Git delegation,
+supported `worktree add` routing, and `RIFTRI_BYPASS=1` are implemented. The
+milestone remains incomplete until removal and the full lifecycle use the safe
+journaled paths required below.
+
 - Add `riftri exec -- <command>` and `riftri shell`.
 - Add a small Git shim scoped to the child process environment.
 - Immediately delegate non-worktree Git commands to real Git.
