@@ -20,7 +20,8 @@ strict native APFS clones, reuse exact-tree immutable bases, persist atomic add
 journals, roll back failures, and recover interrupted adds without deleting a
 changed view. Repository-local activation, the process-scoped Git shim, and an
 explicitly evaluated sh/bash/zsh hook can route supported adds through the same
-transaction. It still has no removal transaction, full worktree-lifecycle
+transaction. Process-scoped commands can optionally start from a validated Git
+worktree root. It still has no removal transaction, full worktree-lifecycle
 interception, filesystem mounts, Linux/Windows mutation backend, or daemon.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety

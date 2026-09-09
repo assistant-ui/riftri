@@ -34,6 +34,10 @@ enum Command {
 
     /// Run a command with process-scoped Git worktree interception.
     Exec {
+        /// Start the command from this exact, registered Git worktree root.
+        #[arg(long, value_name = "PATH")]
+        worktree: Option<PathBuf>,
+
         /// Command and arguments to run.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<OsString>,
@@ -163,8 +167,14 @@ fn main() -> Result<()> {
             let activation = riftri_core::disable_repository(&path)?;
             println!("Disabled Riftri for {}", activation.repository.display());
         }
-        Command::Exec { command } => {
-            std::process::exit(riftri_core::execute_scoped_command(&command)?);
+        Command::Exec { worktree, command } => {
+            let status = match worktree {
+                Some(worktree) => {
+                    riftri_core::execute_scoped_command_in_worktree(&worktree, &command)?
+                }
+                None => riftri_core::execute_scoped_command(&command)?,
+            };
+            std::process::exit(status);
         }
         Command::Shell {
             command: ShellCommand::Hook { shell: _ },
@@ -417,9 +427,26 @@ mod tests {
     fn parses_process_scoped_activation_command() {
         let cli = Cli::try_parse_from(["riftri", "exec", "--", "agent", "--flag"])
             .expect("parse exec command");
-        let Command::Exec { command } = cli.command else {
+        let Command::Exec { worktree, command } = cli.command else {
             panic!("unexpected exec command");
         };
+        assert!(worktree.is_none());
+        assert_eq!(command, [OsStr::new("agent"), OsStr::new("--flag")]);
+
+        let bound = Cli::try_parse_from([
+            "riftri",
+            "exec",
+            "--worktree",
+            "../app-auth",
+            "--",
+            "agent",
+            "--flag",
+        ])
+        .expect("parse bound exec command");
+        let Command::Exec { worktree, command } = bound.command else {
+            panic!("unexpected bound exec command");
+        };
+        assert_eq!(worktree.as_deref(), Some(Path::new("../app-auth")));
         assert_eq!(command, [OsStr::new("agent"), OsStr::new("--flag")]);
     }
 

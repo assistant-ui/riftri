@@ -72,11 +72,18 @@ $ riftri enable
 $ riftri exec -- claude
 ```
 
+An existing worktree can be selected without coupling Riftri to an agent:
+
+```console
+$ riftri exec --worktree ../app-auth -- <command>
+```
+
 Within that process tree, supported `git worktree add` commands are routed
 through Riftri when their repository has been explicitly enabled. All other Git
 commands and commands in repositories that are not enabled go directly to the
-real Git executable. An explicit bypass environment variable is available for
-ordinary-Git operations.
+real Git executable. A worktree binding must resolve to an exact live root in
+Git's worktree inventory. An explicit bypass environment variable is available
+for ordinary-Git operations.
 
 ### Repository-scoped mode
 
@@ -199,6 +206,8 @@ checkout suppressed, activates a native COW clone, synchronizes the index, and
 requires a clean Git status before success. Add operations are journaled and
 recoverable. Repository-local enable/disable state, process-scoped execution,
 and an explicitly activated sh/bash/zsh hook now route supported normal Git
-adds through that same transaction. Removal and full lifecycle interception,
-Linux/Windows mutation backends, mounts, and a daemon are not implemented. The
-next storage-lifecycle work remains Milestone 3 in `ROADMAP.md`.
+adds through that same transaction. Process-scoped commands can also be bound
+to a validated existing worktree without agent-specific behavior. Removal and
+full lifecycle interception, Linux/Windows mutation backends, mounts, and a
+daemon are not implemented. The next storage-lifecycle work remains Milestone 3
+in `ROADMAP.md`.
