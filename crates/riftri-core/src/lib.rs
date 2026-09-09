@@ -20,10 +20,11 @@ pub use activation::{
 pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, GarbageCollectionCandidate,
-    GarbageCollectionReport, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
+    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PruneWorktreesRequest,
+    PruneWorktreesResult, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
     StateDiagnosticIssue, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
-    WorktreeMode, add_worktree, garbage_collect, is_managed_worktree,
-    recover_incomplete_operations, remove_worktree, storage_accounting,
+    WorktreeMode, add_worktree, garbage_collect, is_managed_worktree, move_worktree,
+    prune_worktrees, recover_incomplete_operations, remove_worktree, storage_accounting,
 };
 
 /// A diagnostic check and its optional failure explanation.
@@ -141,6 +142,25 @@ pub enum RemoveWorktreePhase {
     Complete,
 }
 
+/// Durable phases of a managed worktree-move transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum MoveWorktreePhase {
+    IntentRecorded,
+    WorktreeMoved,
+    AddJournalUpdated,
+    Complete,
+}
+
+/// Durable phases of a Git worktree-prune transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum PruneWorktreesPhase {
+    IntentRecorded,
+    GitMetadataPruned,
+    Complete,
+}
+
 /// Durable phases of an immutable-base garbage-collection transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "kebab-case")]
@@ -165,6 +185,32 @@ impl RemoveWorktreePhase {
                 | (CleanVerified, WorktreeRemoved)
                 | (WorktreeRemoved, BaseReleased)
                 | (BaseReleased, Complete)
+        )
+    }
+}
+
+impl MoveWorktreePhase {
+    /// Return whether a move journal may atomically advance to `next`.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        use MoveWorktreePhase::{AddJournalUpdated, Complete, IntentRecorded, WorktreeMoved};
+
+        matches!(
+            (self, next),
+            (IntentRecorded, WorktreeMoved)
+                | (WorktreeMoved, AddJournalUpdated)
+                | (AddJournalUpdated, Complete)
+        )
+    }
+}
+
+impl PruneWorktreesPhase {
+    /// Return whether a prune journal may atomically advance to `next`.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        use PruneWorktreesPhase::{Complete, GitMetadataPruned, IntentRecorded};
+
+        matches!(
+            (self, next),
+            (IntentRecorded, GitMetadataPruned) | (GitMetadataPruned, Complete)
         )
     }
 }
@@ -241,6 +287,20 @@ pub struct RemoveJournalTransitionError {
     pub requested: RemoveWorktreePhase,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid move-worktree journal transition from {current:?} to {requested:?}")]
+pub struct MoveJournalTransitionError {
+    pub current: MoveWorktreePhase,
+    pub requested: MoveWorktreePhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid prune-worktrees journal transition from {current:?} to {requested:?}")]
+pub struct PruneJournalTransitionError {
+    pub current: PruneWorktreesPhase,
+    pub requested: PruneWorktreesPhase,
+}
+
 /// Inspect a repository and the volume containing `path` without changing
 /// Git or filesystem state.
 pub fn doctor(path: &Path) -> DoctorReport {
@@ -296,7 +356,7 @@ mod tests {
 
     use super::{
         AddWorktreeJournal, AddWorktreePhase, BaseKey, CheckoutProfile, CheckoutProfileInput,
-        RemoveWorktreePhase,
+        MoveWorktreePhase, PruneWorktreesPhase, RemoveWorktreePhase,
     };
 
     #[test]
@@ -386,6 +446,31 @@ mod tests {
         assert!(RemoveWorktreePhase::BaseReleased.can_transition_to(RemoveWorktreePhase::Complete));
         assert!(
             !RemoveWorktreePhase::Complete.can_transition_to(RemoveWorktreePhase::IntentRecorded)
+        );
+    }
+
+    #[test]
+    fn move_and_prune_journals_accept_only_forward_transactions() {
+        assert!(
+            MoveWorktreePhase::IntentRecorded.can_transition_to(MoveWorktreePhase::WorktreeMoved)
+        );
+        assert!(
+            MoveWorktreePhase::WorktreeMoved
+                .can_transition_to(MoveWorktreePhase::AddJournalUpdated)
+        );
+        assert!(
+            MoveWorktreePhase::AddJournalUpdated.can_transition_to(MoveWorktreePhase::Complete)
+        );
+        assert!(!MoveWorktreePhase::Complete.can_transition_to(MoveWorktreePhase::IntentRecorded));
+        assert!(
+            PruneWorktreesPhase::IntentRecorded
+                .can_transition_to(PruneWorktreesPhase::GitMetadataPruned)
+        );
+        assert!(
+            PruneWorktreesPhase::GitMetadataPruned.can_transition_to(PruneWorktreesPhase::Complete)
+        );
+        assert!(
+            !PruneWorktreesPhase::Complete.can_transition_to(PruneWorktreesPhase::IntentRecorded)
         );
     }
 }

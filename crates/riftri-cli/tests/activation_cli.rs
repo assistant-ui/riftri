@@ -553,7 +553,7 @@ fn enabled_forced_removal_of_a_managed_view_fails_closed() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn enabled_move_of_a_managed_view_fails_closed() {
+fn enabled_move_of_a_managed_view_is_journaled() {
     let fixture = RepositoryFixture::new();
     let source = fixture.directory.path().join("guarded-move-source");
     let destination = fixture.directory.path().join("guarded-move-destination");
@@ -578,6 +578,8 @@ fn enabled_move_of_a_managed_view_fails_closed() {
         "{}",
         String::from_utf8_lossy(&added.stderr)
     );
+    fs::write(source.join("private.txt"), "private move data\n")
+        .expect("write private worktree data");
 
     let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "move"])
@@ -585,19 +587,51 @@ fn enabled_move_of_a_managed_view_fails_closed() {
         .arg(&destination)
         .current_dir(&fixture.repository)
         .output()
-        .expect("guard managed move");
+        .expect("move managed worktree");
 
-    assert!(!moved.status.success());
-    assert!(String::from_utf8_lossy(&moved.stderr).contains("managed Riftri worktree"));
-    assert!(source.is_dir());
-    assert!(!destination.exists());
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert!(String::from_utf8_lossy(&moved.stderr).contains("moved managed Riftri worktree"));
+    assert!(!source.exists());
+    assert_eq!(
+        fs::read_to_string(destination.join("private.txt")).expect("read private worktree data"),
+        "private move data\n"
+    );
+    assert!(fixture.repository.join(".git/riftri/moves").is_dir());
+
+    let status = riftri(&fixture.repository, &["status"]);
+    assert!(status.status.success());
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(status.contains("Active views: 1"));
+    assert!(status.contains(destination.to_string_lossy().as_ref()));
+    assert!(!status.contains(source.to_string_lossy().as_ref()));
 }
 
 #[cfg(target_os = "macos")]
 #[test]
-fn enabled_prune_with_managed_state_fails_closed() {
+fn enabled_prune_with_managed_state_is_journaled() {
     let fixture = RepositoryFixture::new();
     let destination = fixture.directory.path().join("guarded-prune-view");
+    let stale = fixture.directory.path().join("ordinary-stale-view");
+    assert!(
+        git(
+            &fixture.repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/ordinary-stale",
+                stale.to_str().expect("UTF-8 fixture path"),
+                "HEAD",
+            ],
+        )
+        .status
+        .success()
+    );
+    fs::remove_dir_all(&stale).expect("remove ordinary worktree outside Git");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
     let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args([
@@ -624,11 +658,69 @@ fn enabled_prune_with_managed_state_fails_closed() {
         .args(["exec", "--", "git", "worktree", "prune"])
         .current_dir(&fixture.repository)
         .output()
-        .expect("guard prune with managed state");
+        .expect("prune with managed state");
+
+    assert!(
+        pruned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pruned.stderr)
+    );
+    assert!(String::from_utf8_lossy(&pruned.stderr).contains("pruned stale Git worktree metadata"));
+    assert!(destination.is_dir());
+    assert!(fixture.repository.join(".git/riftri/prunes").is_dir());
+    let inventory = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
+    assert!(!String::from_utf8_lossy(&inventory.stdout).contains(stale.to_string_lossy().as_ref()));
+
+    let status = riftri(&fixture.repository, &["status"]);
+    assert!(status.status.success());
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(status.contains("Active views: 1"));
+    assert!(status.contains("Completed prunes: 1"));
+    assert!(status.contains("Pending prunes: 0"));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_prune_preserves_a_missing_managed_view_for_repair() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("missing-prune-view");
+    let preserved = fixture.directory.path().join("preserved-prune-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/missing-prune",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("create managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::rename(&destination, &preserved).expect("move managed view outside Riftri");
+
+    let pruned = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "prune"])
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("attempt guarded prune");
 
     assert!(!pruned.status.success());
-    assert!(String::from_utf8_lossy(&pruned.stderr).contains("managed Riftri state"));
-    assert!(destination.is_dir());
+    assert!(String::from_utf8_lossy(&pruned.stderr).contains("missing or not registered"));
+    assert!(preserved.is_dir());
+    let inventory = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
+    assert!(
+        String::from_utf8_lossy(&inventory.stdout).contains(destination.to_string_lossy().as_ref())
+    );
 }
 
 #[test]

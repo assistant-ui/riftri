@@ -27,8 +27,9 @@ and status reports retained-base references and disk usage with repository-aware
 repair for incomplete journals. Explicit garbage collection uses its own
 recoverable journal and revalidates references under the immutable-base lock.
 Status reports unexplained or inconsistent state paths but never deletes them.
-It still has no move, prune, automatic orphan-state repair, filesystem mounts,
-Linux/Windows mutation backend, or daemon.
+Managed move and prune now use separate recoverable journals. It still has no
+forced move/removal lifecycle path, automatic orphan-state repair, filesystem
+mounts, Linux/Windows mutation backend, or daemon.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety
 or compatibility gates merely to reach a working demo faster.

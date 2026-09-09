@@ -97,10 +97,12 @@ prompt or skill.
 Initial add/remove slice complete: repository-local `riftri enable` and
 `riftri disable`, `riftri exec -- <command>`, optional exact-worktree process
 binding, exact real-Git delegation, an explicitly evaluated sh/bash/zsh hook,
-supported `worktree add` and clean managed `worktree remove` routing, and
-`RIFTRI_BYPASS=1` are implemented. Managed forced/configured removals, moves,
-and prunes are guarded from unjournaled passthrough. The milestone remains
-incomplete until the remaining lifecycle commands use safe journaled paths.
+supported `worktree add`, clean managed `worktree remove`, managed
+`worktree move`, and guarded `worktree prune` routing, and `RIFTRI_BYPASS=1`
+are implemented. Move and prune have forward-only durable journals and
+idempotent recovery. Unsupported forced/configured lifecycle forms remain
+fail-closed for managed state. The milestone remains incomplete until the full
+agent/shell compatibility and process-behavior acceptance matrix passes.
 
 - Add `riftri exec -- <command>` and explicit shell activation.
 - Add a small Git shim scoped to the child process environment.

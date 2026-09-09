@@ -24,16 +24,22 @@ Activate Riftri's Git shim in the current shell once:
 $ eval "$(riftri shell hook zsh)"
 ```
 
-You may add that line to your shell profile yourself if you want it in every new
-shell. Riftri never edits shell startup files automatically. After shell
-activation, repository enablement is the interception switch:
+You may add that line to your shell profile yourself if you want the Git shim
+enabled globally for your user account in every new shell. That global shell
+activation does **not** optimize every repository: `riftri enable` remains the
+repository-local consent switch, and all other repositories delegate directly
+to the real Git executable. Riftri never edits shell startup files
+automatically. After shell activation, repository enablement is the
+interception switch:
 
 ```console
 $ git clone git@github.com:acme/app.git
 $ cd app
 $ riftri enable
 $ git worktree add -b feature/auth ../app-auth main
-$ git worktree remove ../app-auth
+$ git worktree move ../app-auth ../app-auth-renamed
+$ git worktree prune
+$ git worktree remove ../app-auth-renamed
 $ riftri status
 ```
 
@@ -89,6 +95,7 @@ storage-lifecycle milestones on macOS. The repository currently provides:
 - Real `git worktree add --no-checkout` metadata and clean index synchronization.
 - Durable, atomic add-operation journals and conservative recovery.
 - Journaled clean-worktree removal with resumable recovery.
+- Journaled managed-worktree moves and guarded, recoverable Git metadata pruning.
 - Retained-base reference counts plus logical and allocated-byte reporting.
 - Repository-aware `riftri repair` and actionable lifecycle status explanations.
 - Explicit, journaled `riftri gc --apply` for zero-reference immutable bases.
@@ -112,7 +119,9 @@ $ eval "$(cargo run --quiet -p riftri-cli -- shell hook zsh)"
 $ cargo run -p riftri-cli -- exec -- $SHELL
 $ cargo run -p riftri-cli -- exec --worktree ../app-auth -- codex
 $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
-$ cargo run -p riftri-cli -- worktree remove ../app-auth
+$ cargo run -p riftri-cli -- worktree move ../app-auth ../app-auth-renamed
+$ cargo run -p riftri-cli -- worktree remove ../app-auth-renamed
+$ cargo run -p riftri-cli -- worktree prune
 $ cargo run -p riftri-cli -- status
 $ cargo run -p riftri-cli -- repair
 $ cargo run -p riftri-cli -- gc
@@ -123,13 +132,14 @@ The add command currently requires macOS and a writable APFS volume. Its first
 compatibility envelope deliberately rejects attributes, filters/Git LFS,
 sparse checkout, submodules, and checkout-changing non-default configuration.
 Transparent optimized adds currently require either `-b <new-branch>` or
-`--detach`. Clean managed removes using the ordinary no-option
-`git worktree remove <path>` form are also routed through Riftri. Dirty views are
-preserved. Forced/configured removal, move, and prune commands that could bypass
-the journal fail closed when they affect managed state. Unmanaged worktrees
-continue to use ordinary Git. Zero-reference bases remain cached for reuse until
-an explicit `riftri gc --apply`; a plain `riftri gc` only prints the collection
-plan. These operations never fall back to a full copy. Set `RIFTRI_BYPASS=1`
+`--detach`. The ordinary no-option `git worktree remove <path>`, `git worktree
+move <source> <destination>`, and `git worktree prune` forms are also routed
+through Riftri when managed state is involved. Dirty views are preserved, and
+moves preserve private changes. Forced or configured lifecycle commands that
+could bypass the journal fail closed when they affect managed state. Unmanaged
+worktrees continue to use ordinary Git. Zero-reference bases remain cached for
+reuse until an explicit `riftri gc --apply`; a plain `riftri gc` only prints the
+collection plan. These operations never fall back to a full copy. Set `RIFTRI_BYPASS=1`
 only when you intentionally want an enabled command to use ordinary Git; using
 it for a managed lifecycle operation can require manual repair. If an operation
 is interrupted, run the repository-aware repair command:

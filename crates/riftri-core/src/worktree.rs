@@ -24,16 +24,18 @@ use thiserror::Error;
 
 #[cfg(target_os = "macos")]
 use crate::journal::{
-    CollectionJournalPaths, CollectionJournalRecord, JournalPaths, JournalRecord,
-    RemovalJournalPaths,
+    CollectionJournalPaths, CollectionJournalRecord, JournalPaths, JournalRecord, MoveJournalPaths,
+    MoveJournalRecord, PruneJournalRecord, RemovalJournalPaths,
 };
 use crate::journal::{
-    CollectionJournalStore, DecodedCollectionJournal, DecodedJournal, DecodedRemovalJournal,
-    JournalError, JournalStore, RemovalJournalRecord, RemovalJournalStore,
+    CollectionJournalStore, DecodedCollectionJournal, DecodedJournal, DecodedMoveJournal,
+    DecodedPruneJournal, DecodedRemovalJournal, JournalError, JournalStore, MoveJournalStore,
+    PruneJournalStore, RemovalJournalRecord, RemovalJournalStore,
 };
 use crate::{
-    AddWorktreePhase, GarbageCollectionPhase, JournalTransitionError, RemoveJournalTransitionError,
-    RemoveWorktreePhase,
+    AddWorktreePhase, GarbageCollectionPhase, JournalTransitionError, MoveJournalTransitionError,
+    MoveWorktreePhase, PruneJournalTransitionError, PruneWorktreesPhase,
+    RemoveJournalTransitionError, RemoveWorktreePhase,
 };
 
 #[cfg(target_os = "macos")]
@@ -78,6 +80,35 @@ pub struct RemoveWorktreeRequest {
 pub struct RemoveWorktreeResult {
     pub destination: PathBuf,
     pub base_path: PathBuf,
+    pub journal_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct MoveWorktreeRequest {
+    pub repository: PathBuf,
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    /// Defaults to `<common-git-dir>/riftri`.
+    pub state_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MoveWorktreeResult {
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub base_path: PathBuf,
+    pub journal_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct PruneWorktreesRequest {
+    pub repository: PathBuf,
+    /// Defaults to `<common-git-dir>/riftri`.
+    pub state_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PruneWorktreesResult {
     pub journal_path: PathBuf,
 }
 
@@ -133,6 +164,10 @@ pub struct StorageAccountingReport {
     pub pending_adds: usize,
     pub completed_removals: usize,
     pub pending_removals: usize,
+    pub completed_moves: usize,
+    pub pending_moves: usize,
+    pub completed_prunes: usize,
+    pub pending_prunes: usize,
     pub completed_collections: usize,
     pub cancelled_collections: usize,
     pub pending_collections: usize,
@@ -151,6 +186,10 @@ pub struct RecoveryReport {
     pub active: usize,
     pub completed_removals: usize,
     pub recovered_removals: usize,
+    pub completed_moves: usize,
+    pub recovered_moves: usize,
+    pub completed_prunes: usize,
+    pub recovered_prunes: usize,
     pub completed_collections: usize,
     pub recovered_collections: usize,
     pub errors: Vec<String>,
@@ -172,6 +211,12 @@ pub enum WorktreeError {
 
     #[error(transparent)]
     RemoveJournalTransition(#[from] RemoveJournalTransitionError),
+
+    #[error(transparent)]
+    MoveJournalTransition(#[from] MoveJournalTransitionError),
+
+    #[error(transparent)]
+    PruneJournalTransition(#[from] PruneJournalTransitionError),
 
     #[error("unsupported optimized checkout: {0}")]
     Unsupported(String),
@@ -196,6 +241,12 @@ pub enum WorktreeError {
     #[error("injected removal failure after {0:?}")]
     InjectedRemovalFailure(RemoveWorktreePhase),
 
+    #[error("injected move failure after {0:?}")]
+    InjectedMoveFailure(MoveWorktreePhase),
+
+    #[error("injected prune failure after {0:?}")]
+    InjectedPruneFailure(PruneWorktreesPhase),
+
     #[error("injected garbage-collection failure after {0:?}")]
     InjectedCollectionFailure(GarbageCollectionPhase),
 }
@@ -208,6 +259,16 @@ pub fn remove_worktree(
     request: RemoveWorktreeRequest,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
     remove_worktree_inner(request, None)
+}
+
+pub fn move_worktree(request: MoveWorktreeRequest) -> Result<MoveWorktreeResult, WorktreeError> {
+    move_worktree_inner(request, None)
+}
+
+pub fn prune_worktrees(
+    request: PruneWorktreesRequest,
+) -> Result<PruneWorktreesResult, WorktreeError> {
+    prune_worktrees_inner(request, None)
 }
 
 /// Plan or apply collection of immutable bases with no journaled references.
@@ -229,7 +290,16 @@ pub fn is_managed_worktree(repository: &Path, destination: &Path) -> Result<bool
     }
     let destination = fs::canonicalize(destination)
         .map_err(|source| io("resolve worktree destination", destination, source))?;
-    Ok(find_managed_add_journal(&state_directory, &destination)?.is_some())
+    if find_managed_add_journal(&state_directory, &destination)?.is_some() {
+        return Ok(true);
+    }
+    Ok(MoveJournalStore::open(&state_directory)
+        .load_all()?
+        .into_iter()
+        .any(|journal| {
+            journal.phase != MoveWorktreePhase::Complete
+                && (journal.source == destination || journal.destination == destination)
+        }))
 }
 
 /// Inventory retained immutable bases and active views from durable journals.
@@ -245,6 +315,8 @@ pub fn storage_accounting(
     };
     let add_journals = JournalStore::open(&state_directory).load_all()?;
     let removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
+    let move_journals = MoveJournalStore::open(&state_directory).load_all()?;
+    let prune_journals = PruneJournalStore::open(&state_directory).load_all()?;
     let collection_journals = CollectionJournalStore::open(&state_directory).load_all()?;
     let completed = removal_journals
         .iter()
@@ -302,6 +374,8 @@ pub fn storage_accounting(
         &state_directory,
         &add_journals,
         &removal_journals,
+        &move_journals,
+        &prune_journals,
         &collection_journals,
     )?;
 
@@ -323,6 +397,22 @@ pub fn storage_accounting(
         pending_removals: removal_journals
             .iter()
             .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
+            .count(),
+        completed_moves: move_journals
+            .iter()
+            .filter(|journal| journal.phase == MoveWorktreePhase::Complete)
+            .count(),
+        pending_moves: move_journals
+            .iter()
+            .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+            .count(),
+        completed_prunes: prune_journals
+            .iter()
+            .filter(|journal| journal.phase == PruneWorktreesPhase::Complete)
+            .count(),
+        pending_prunes: prune_journals
+            .iter()
+            .filter(|journal| journal.phase != PruneWorktreesPhase::Complete)
             .count(),
         completed_collections: collection_journals
             .iter()
@@ -830,6 +920,150 @@ fn remove_worktree_inner(
         base_path: managed.base_path,
         journal_path,
     })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn move_worktree_inner(
+    _request: MoveWorktreeRequest,
+    _fail_after: Option<MoveWorktreePhase>,
+) -> Result<MoveWorktreeResult, WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "journaled Riftri moves currently require macOS".to_owned(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn move_worktree_inner(
+    request: MoveWorktreeRequest,
+    fail_after: Option<MoveWorktreePhase>,
+) -> Result<MoveWorktreeResult, WorktreeError> {
+    let git = Git::default();
+    let repository = git.inspect_repository(&request.repository)?;
+    if repository.is_bare {
+        return Err(WorktreeError::Unsupported(
+            "bare repositories do not have movable linked worktree views".to_owned(),
+        ));
+    }
+    let repository_root = repository.root.ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+    })?;
+    let source = normalize_existing_destination(&request.source)?;
+    let destination = normalize_new_destination(&request.destination)?;
+    let source_volume = supported_apfs_volume(&source)?;
+    let destination_volume = supported_apfs_volume(&destination)?;
+    if source_volume.identity != destination_volume.identity {
+        return Err(WorktreeError::Unsupported(
+            "moving an optimized worktree across filesystem volumes is not supported".to_owned(),
+        ));
+    }
+
+    let requested_state = request
+        .state_dir
+        .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
+    let state_directory = fs::canonicalize(absolute_path(&requested_state)?)
+        .map_err(|source| io("resolve state directory", &requested_state, source))?;
+    let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "{} is not an active Riftri-managed worktree in {}",
+            source.display(),
+            state_directory.display()
+        ))
+    })?;
+    validate_recovery_paths(&state_directory, &managed)?;
+    let inventory = git.list_worktrees(&repository_root)?;
+    if !inventory.iter().any(|worktree| worktree.path == source) {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} is not registered as a Git linked worktree",
+            source.display()
+        )));
+    }
+    if MoveJournalStore::open(&state_directory)
+        .load_all()?
+        .iter()
+        .any(|journal| {
+            journal.source_add_operation_id == managed.operation_id
+                && journal.phase != MoveWorktreePhase::Complete
+        })
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "a move of {} is already pending; run `riftri repair --state-dir {}`",
+            source.display(),
+            state_directory.display()
+        )));
+    }
+
+    let store = MoveJournalStore::create(&state_directory)?;
+    let operation_id = allocate_move_operation_id(&store)?;
+    let journal = MoveJournalRecord::new(
+        operation_id,
+        MoveJournalPaths {
+            repository: &repository_root,
+            source: &source,
+            destination: &destination,
+        },
+        managed.operation_id,
+    );
+    let journal_path = store.persist(&journal)?;
+    fail_move_if_requested(journal.phase, fail_after)?;
+    resume_move(
+        &git,
+        &store,
+        journal.decode(journal_path.clone())?,
+        fail_after,
+    )?;
+
+    Ok(MoveWorktreeResult {
+        source,
+        destination,
+        base_path: managed.base_path,
+        journal_path,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn prune_worktrees_inner(
+    _request: PruneWorktreesRequest,
+    _fail_after: Option<PruneWorktreesPhase>,
+) -> Result<PruneWorktreesResult, WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "journaled Riftri pruning currently requires macOS".to_owned(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn prune_worktrees_inner(
+    request: PruneWorktreesRequest,
+    fail_after: Option<PruneWorktreesPhase>,
+) -> Result<PruneWorktreesResult, WorktreeError> {
+    let git = Git::default();
+    let repository = git.inspect_repository(&request.repository)?;
+    if repository.is_bare {
+        return Err(WorktreeError::Unsupported(
+            "bare repositories do not have linked worktree views to prune".to_owned(),
+        ));
+    }
+    let repository_root = repository.root.ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+    })?;
+    let requested_state = request
+        .state_dir
+        .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
+    let state_directory = fs::canonicalize(absolute_path(&requested_state)?)
+        .map_err(|source| io("resolve state directory", &requested_state, source))?;
+    verify_prune_safe(&git, &state_directory, &repository_root, None)?;
+
+    let store = PruneJournalStore::create(&state_directory)?;
+    let operation_id = allocate_prune_operation_id(&store)?;
+    let journal = PruneJournalRecord::new(operation_id, &repository_root);
+    let journal_path = store.persist(&journal)?;
+    fail_prune_if_requested(journal.phase, fail_after)?;
+    resume_prune(
+        &git,
+        &store,
+        journal.decode(journal_path.clone())?,
+        fail_after,
+    )?;
+    Ok(PruneWorktreesResult { journal_path })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1459,6 +1693,38 @@ fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, 
 }
 
 #[cfg(target_os = "macos")]
+fn allocate_move_operation_id(store: &MoveJournalStore) -> Result<String, WorktreeError> {
+    allocate_lifecycle_operation_id("move", |operation_id| store.path_for(operation_id).exists())
+}
+
+#[cfg(target_os = "macos")]
+fn allocate_prune_operation_id(store: &PruneJournalStore) -> Result<String, WorktreeError> {
+    allocate_lifecycle_operation_id("prune", |operation_id| {
+        store.path_for(operation_id).exists()
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn allocate_lifecycle_operation_id(
+    prefix: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Result<String, WorktreeError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| WorktreeError::InvalidRequest(format!("system clock error: {error}")))?
+        .as_nanos();
+    for _ in 0..1000_u16 {
+        let operation_id = format!("{prefix}-{}", next_operation_id(timestamp));
+        if !exists(&operation_id) {
+            return Ok(operation_id);
+        }
+    }
+    Err(WorktreeError::InvalidRequest(format!(
+        "could not allocate a unique {prefix} operation ID"
+    )))
+}
+
+#[cfg(target_os = "macos")]
 fn next_operation_id(timestamp: u128) -> String {
     let nonce = OPERATION_NONCE.fetch_add(1, Ordering::Relaxed);
     format!("{timestamp:x}-{:x}-{nonce:x}", std::process::id())
@@ -1492,6 +1758,8 @@ fn diagnose_state_paths(
     state_directory: &Path,
     add_journals: &[DecodedJournal],
     removal_journals: &[DecodedRemovalJournal],
+    move_journals: &[DecodedMoveJournal],
+    prune_journals: &[DecodedPruneJournal],
     collection_journals: &[DecodedCollectionJournal],
 ) -> Result<StatePathDiagnosis, WorktreeError> {
     if !state_directory.exists() {
@@ -1499,7 +1767,15 @@ fn diagnose_state_paths(
     }
 
     let mut issues = Vec::new();
-    let expected_roots = ["bases", "operations", "removals", "collections", "tmp"];
+    let expected_roots = [
+        "bases",
+        "operations",
+        "removals",
+        "moves",
+        "prunes",
+        "collections",
+        "tmp",
+    ];
     for path in child_paths(state_directory, "read Riftri state directory")? {
         let expected = path
             .file_name()
@@ -1531,6 +1807,22 @@ fn diagnose_state_paths(
     diagnose_journal_directory(
         &state_directory.join("removals"),
         removal_journals
+            .iter()
+            .map(|journal| journal.journal_path.clone())
+            .collect(),
+        &mut issues,
+    )?;
+    diagnose_journal_directory(
+        &state_directory.join("moves"),
+        move_journals
+            .iter()
+            .map(|journal| journal.journal_path.clone())
+            .collect(),
+        &mut issues,
+    )?;
+    diagnose_journal_directory(
+        &state_directory.join("prunes"),
+        prune_journals
             .iter()
             .map(|journal| journal.journal_path.clone())
             .collect(),
@@ -1620,6 +1912,8 @@ fn diagnose_state_paths(
     _state_directory: &Path,
     _add_journals: &[DecodedJournal],
     _removal_journals: &[DecodedRemovalJournal],
+    _move_journals: &[DecodedMoveJournal],
+    _prune_journals: &[DecodedPruneJournal],
     _collection_journals: &[DecodedCollectionJournal],
 ) -> Result<StatePathDiagnosis, WorktreeError> {
     Ok(StatePathDiagnosis::default())
@@ -1921,6 +2215,10 @@ pub fn recover_incomplete_operations(
     let journals = store.load_all()?;
     let removal_store = RemovalJournalStore::open(&state_directory);
     let removal_journals = removal_store.load_all()?;
+    let move_store = MoveJournalStore::open(&state_directory);
+    let move_journals = move_store.load_all()?;
+    let prune_store = PruneJournalStore::open(&state_directory);
+    let prune_journals = prune_store.load_all()?;
     let collection_store = CollectionJournalStore::open(&state_directory);
     let collection_journals = collection_store.load_all()?;
     let completed_adds = removal_journals
@@ -1932,6 +2230,8 @@ pub fn recover_incomplete_operations(
         scanned: journals
             .len()
             .saturating_add(removal_journals.len())
+            .saturating_add(move_journals.len())
+            .saturating_add(prune_journals.len())
             .saturating_add(collection_journals.len()),
         ..RecoveryReport::default()
     };
@@ -1981,6 +2281,38 @@ pub fn recover_incomplete_operations(
             report.recovered_removals += 1;
             report.completed_removals += 1;
             report.active = report.active.saturating_sub(1);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for journal in move_journals {
+        if journal.phase == MoveWorktreePhase::Complete {
+            report.completed_moves += 1;
+            continue;
+        }
+        if let Err(error) = resume_move(&git, &move_store, journal.clone(), None) {
+            report
+                .errors
+                .push(format!("move operation {}: {error}", journal.operation_id));
+        } else {
+            report.recovered_moves += 1;
+            report.completed_moves += 1;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for journal in prune_journals {
+        if journal.phase == PruneWorktreesPhase::Complete {
+            report.completed_prunes += 1;
+            continue;
+        }
+        if let Err(error) = resume_prune(&git, &prune_store, journal.clone(), None) {
+            report
+                .errors
+                .push(format!("prune operation {}: {error}", journal.operation_id));
+        } else {
+            report.recovered_prunes += 1;
+            report.completed_prunes += 1;
         }
     }
 
@@ -2120,6 +2452,348 @@ fn resume_removal(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn resume_move(
+    git: &Git,
+    store: &MoveJournalStore,
+    journal: DecodedMoveJournal,
+    fail_after: Option<MoveWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    let state_directory = lifecycle_state_directory(&journal.journal_path, "move")?;
+    if store.path_for(&journal.operation_id) != journal.journal_path {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "move journal {} has an operation ID that does not match its filename",
+            journal.journal_path.display()
+        )));
+    }
+    validate_move_paths(&state_directory, &journal)?;
+    let file = File::open(&journal.journal_path)
+        .map_err(|source| io("open move journal", &journal.journal_path, source))?;
+    let mut record: MoveJournalRecord = serde_json::from_reader(file).map_err(|source| {
+        WorktreeError::InvalidRequest(format!(
+            "read move journal {}: {source}",
+            journal.journal_path.display()
+        ))
+    })?;
+
+    if record.phase == MoveWorktreePhase::IntentRecorded {
+        let (source_registered, destination_registered) = move_registration(git, &journal)?;
+        let source_exists = journal.source.exists();
+        let destination_exists = journal.destination.exists();
+        if source_registered && source_exists && !destination_registered && !destination_exists {
+            git.move_worktree(&journal.repository, &journal.source, &journal.destination)?;
+        } else if !source_registered
+            && !source_exists
+            && destination_registered
+            && destination_exists
+        {
+            // Git completed the move before the phase update reached disk.
+        } else {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "move journal {} does not match a safe source/destination state; both paths were preserved",
+                journal.journal_path.display()
+            )));
+        }
+        advance_move(
+            store,
+            &mut record,
+            MoveWorktreePhase::WorktreeMoved,
+            fail_after,
+        )?;
+    }
+
+    if record.phase >= MoveWorktreePhase::WorktreeMoved {
+        let (source_registered, destination_registered) = move_registration(git, &journal)?;
+        if source_registered
+            || journal.source.exists()
+            || !destination_registered
+            || !journal.destination.is_dir()
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "move journal {} says Git moved the worktree, but its paths or registration disagree; both paths were preserved",
+                journal.journal_path.display()
+            )));
+        }
+    }
+
+    if record.phase == MoveWorktreePhase::WorktreeMoved {
+        let add_journal = JournalStore::open(&state_directory)
+            .load_all()?
+            .into_iter()
+            .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
+            .ok_or_else(|| {
+                WorktreeError::InvalidRequest(format!(
+                    "move journal {} does not reference a known add operation",
+                    journal.journal_path.display()
+                ))
+            })?;
+        JournalStore::open(&state_directory).update_active_destination(
+            &add_journal.journal_path,
+            &journal.source,
+            &journal.destination,
+        )?;
+        advance_move(
+            store,
+            &mut record,
+            MoveWorktreePhase::AddJournalUpdated,
+            fail_after,
+        )?;
+    }
+    if record.phase == MoveWorktreePhase::AddJournalUpdated {
+        validate_move_paths(&state_directory, &journal)?;
+        advance_move(store, &mut record, MoveWorktreePhase::Complete, fail_after)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_move_paths(
+    state_directory: &Path,
+    journal: &DecodedMoveJournal,
+) -> Result<(), WorktreeError> {
+    if !journal.repository.is_absolute()
+        || !journal.source.is_absolute()
+        || !journal.destination.is_absolute()
+        || journal.source == journal.destination
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "move journal {} contains paths outside its operation scope",
+            journal.journal_path.display()
+        )));
+    }
+    let source = JournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "move journal {} does not reference a known add operation",
+                journal.journal_path.display()
+            ))
+        })?;
+    if source.phase != AddWorktreePhase::Active
+        || source.repository != journal.repository
+        || (source.destination != journal.source && source.destination != journal.destination)
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "move journal {} does not match its active add operation",
+            journal.journal_path.display()
+        )));
+    }
+    validate_recovery_paths(state_directory, &source)
+}
+
+#[cfg(target_os = "macos")]
+fn move_registration(
+    git: &Git,
+    journal: &DecodedMoveJournal,
+) -> Result<(bool, bool), WorktreeError> {
+    let inventory = git.list_worktrees(&journal.repository)?;
+    Ok((
+        inventory
+            .iter()
+            .any(|worktree| worktree.path == journal.source),
+        inventory
+            .iter()
+            .any(|worktree| worktree.path == journal.destination),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn resume_prune(
+    git: &Git,
+    store: &PruneJournalStore,
+    journal: DecodedPruneJournal,
+    fail_after: Option<PruneWorktreesPhase>,
+) -> Result<(), WorktreeError> {
+    let state_directory = lifecycle_state_directory(&journal.journal_path, "prune")?;
+    if store.path_for(&journal.operation_id) != journal.journal_path {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "prune journal {} has an operation ID that does not match its filename",
+            journal.journal_path.display()
+        )));
+    }
+    if !journal.repository.is_absolute() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "prune journal {} contains a relative repository path",
+            journal.journal_path.display()
+        )));
+    }
+    let file = File::open(&journal.journal_path)
+        .map_err(|source| io("open prune journal", &journal.journal_path, source))?;
+    let mut record: PruneJournalRecord = serde_json::from_reader(file).map_err(|source| {
+        WorktreeError::InvalidRequest(format!(
+            "read prune journal {}: {source}",
+            journal.journal_path.display()
+        ))
+    })?;
+    if record.phase == PruneWorktreesPhase::IntentRecorded {
+        verify_prune_safe(
+            git,
+            &state_directory,
+            &journal.repository,
+            Some(&journal.operation_id),
+        )?;
+        git.prune_worktrees(&journal.repository)?;
+        advance_prune(
+            store,
+            &mut record,
+            PruneWorktreesPhase::GitMetadataPruned,
+            fail_after,
+        )?;
+    }
+    if record.phase == PruneWorktreesPhase::GitMetadataPruned {
+        verify_prune_safe(
+            git,
+            &state_directory,
+            &journal.repository,
+            Some(&journal.operation_id),
+        )?;
+        advance_prune(
+            store,
+            &mut record,
+            PruneWorktreesPhase::Complete,
+            fail_after,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_prune_safe(
+    git: &Git,
+    state_directory: &Path,
+    repository: &Path,
+    current_prune: Option<&str>,
+) -> Result<(), WorktreeError> {
+    let repository_info = git.inspect_repository(repository)?;
+    let repository_root = repository_info.root.ok_or_else(|| {
+        WorktreeError::InvalidRequest("prune journal references a bare repository".to_owned())
+    })?;
+    if repository_root != repository {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "prune journal repository {} does not match Git's worktree root {}",
+            repository.display(),
+            repository_root.display()
+        )));
+    }
+    let adds = JournalStore::open(state_directory).load_all()?;
+    if adds.iter().any(|journal| {
+        !matches!(
+            journal.phase,
+            AddWorktreePhase::Active | AddWorktreePhase::RolledBack
+        )
+    }) || RemovalJournalStore::open(state_directory)
+        .load_all()?
+        .iter()
+        .any(|journal| journal.phase != RemoveWorktreePhase::Complete)
+        || MoveJournalStore::open(state_directory)
+            .load_all()?
+            .iter()
+            .any(|journal| journal.phase != MoveWorktreePhase::Complete)
+        || PruneJournalStore::open(state_directory)
+            .load_all()?
+            .iter()
+            .any(|journal| {
+                journal.phase != PruneWorktreesPhase::Complete
+                    && Some(journal.operation_id.as_str()) != current_prune
+            })
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "another Riftri lifecycle operation is pending; run `riftri repair --state-dir {}` first",
+            state_directory.display()
+        )));
+    }
+    let completed_removals = RemovalJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id)
+        .collect::<HashSet<_>>();
+    let inventory = git.list_worktrees(repository)?;
+    for journal in adds.iter().filter(|journal| {
+        journal.phase == AddWorktreePhase::Active
+            && !completed_removals.contains(&journal.operation_id)
+    }) {
+        if !journal.destination.is_dir()
+            || !inventory
+                .iter()
+                .any(|worktree| worktree.path == journal.destination)
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "managed worktree {} is missing or not registered; prune was not run",
+                journal.destination.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn lifecycle_state_directory(
+    journal_path: &Path,
+    operation: &str,
+) -> Result<PathBuf, WorktreeError> {
+    journal_path
+        .parent()
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "{operation} journal has no state directory: {}",
+                journal_path.display()
+            ))
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn advance_move(
+    store: &MoveJournalStore,
+    record: &mut MoveJournalRecord,
+    phase: MoveWorktreePhase,
+    fail_after: Option<MoveWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    record.transition(phase)?;
+    store.persist(record)?;
+    fail_move_if_requested(phase, fail_after)
+}
+
+#[cfg(target_os = "macos")]
+fn fail_move_if_requested(
+    phase: MoveWorktreePhase,
+    fail_after: Option<MoveWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    if fail_after == Some(phase) {
+        Err(WorktreeError::InjectedMoveFailure(phase))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn advance_prune(
+    store: &PruneJournalStore,
+    record: &mut PruneJournalRecord,
+    phase: PruneWorktreesPhase,
+    fail_after: Option<PruneWorktreesPhase>,
+) -> Result<(), WorktreeError> {
+    record.transition(phase)?;
+    store.persist(record)?;
+    fail_prune_if_requested(phase, fail_after)
+}
+
+#[cfg(target_os = "macos")]
+fn fail_prune_if_requested(
+    phase: PruneWorktreesPhase,
+    fail_after: Option<PruneWorktreesPhase>,
+) -> Result<(), WorktreeError> {
+    if fail_after == Some(phase) {
+        Err(WorktreeError::InjectedPruneFailure(phase))
+    } else {
+        Ok(())
+    }
+}
+
 fn verify_recoverable_removal(
     git: &Git,
     journal: &DecodedRemovalJournal,
@@ -2165,7 +2839,8 @@ fn validate_recovery_paths(
             .file_name()
             .is_some_and(|name| name.to_string_lossy().starts_with(".riftri-build-"))
         || journal.temporary_index.parent() != Some(temporary.as_path())
-        || journal.scratch.parent() != journal.destination.parent()
+        || (journal.phase != AddWorktreePhase::Active
+            && journal.scratch.parent() != journal.destination.parent())
         || !journal
             .scratch
             .file_name()
@@ -2494,11 +3169,15 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
-        garbage_collect_inner, next_operation_id, recover_incomplete_operations,
+        AddWorktreeRequest, MoveWorktreeRequest, PruneWorktreesRequest, RemoveWorktreeRequest,
+        WorktreeMode, add_worktree_inner, garbage_collect_inner, move_worktree_inner,
+        next_operation_id, prune_worktrees_inner, recover_incomplete_operations,
         remove_worktree_inner, storage_accounting,
     };
-    use crate::{AddWorktreePhase, GarbageCollectionPhase, RemoveWorktreePhase};
+    use crate::{
+        AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
+        RemoveWorktreePhase,
+    };
 
     fn git(path: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -3217,5 +3896,166 @@ mod tests {
             fs::read_to_string(&protected_file).expect("read protected file"),
             "preserve\n"
         );
+    }
+
+    #[test]
+    fn recovery_is_idempotent_after_every_move_transition() {
+        let phases = [
+            MoveWorktreePhase::IntentRecorded,
+            MoveWorktreePhase::WorktreeMoved,
+            MoveWorktreePhase::AddJournalUpdated,
+            MoveWorktreePhase::Complete,
+        ];
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let source = fixture.path().join("source");
+            let destination = fixture.path().join("destination");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: source.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(format!(
+                        "feature/move-phase-{index}"
+                    ))),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            fs::write(source.join("private.txt"), "preserve\n").expect("write private file");
+
+            let error = move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository: repository.clone(),
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("simulate move interruption");
+            assert!(error.to_string().contains("injected move failure"));
+
+            let recovered = recover_incomplete_operations(&state).expect("recover move");
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert_eq!(
+                recovered.recovered_moves,
+                usize::from(phase != MoveWorktreePhase::Complete),
+                "phase {phase:?}"
+            );
+            assert!(!source.exists(), "phase {phase:?}");
+            assert_eq!(
+                fs::read_to_string(destination.join("private.txt")).expect("read private file"),
+                "preserve\n",
+                "phase {phase:?}"
+            );
+            let accounting = storage_accounting(&state).expect("account move");
+            assert_eq!(accounting.completed_moves, 1, "phase {phase:?}");
+            assert_eq!(accounting.pending_moves, 0, "phase {phase:?}");
+            assert_eq!(
+                accounting.views[0].destination,
+                destination.canonicalize().expect("resolve moved worktree"),
+                "phase {phase:?}"
+            );
+
+            let repeated = recover_incomplete_operations(&state).expect("repeat recovery");
+            assert_eq!(repeated.recovered_moves, 0, "phase {phase:?}");
+            assert_eq!(repeated.completed_moves, 1, "phase {phase:?}");
+        }
+    }
+
+    #[test]
+    fn recovery_is_idempotent_after_every_prune_transition() {
+        let phases = [
+            PruneWorktreesPhase::IntentRecorded,
+            PruneWorktreesPhase::GitMetadataPruned,
+            PruneWorktreesPhase::Complete,
+        ];
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let managed = fixture.path().join("managed");
+            let stale = fixture.path().join("stale");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: managed.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(format!(
+                        "feature/prune-managed-{index}"
+                    ))),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+                true,
+            )
+            .expect("create managed worktree");
+            let stale_text = stale.to_string_lossy().into_owned();
+            git(
+                &repository,
+                &["worktree", "add", "--detach", stale_text.as_str(), "HEAD"],
+            );
+            fs::remove_dir_all(&stale).expect("remove unmanaged worktree directory");
+
+            let error = prune_worktrees_inner(
+                PruneWorktreesRequest {
+                    repository: repository.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("simulate prune interruption");
+            assert!(error.to_string().contains("injected prune failure"));
+
+            let recovered = recover_incomplete_operations(&state).expect("recover prune");
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert_eq!(
+                recovered.recovered_prunes,
+                usize::from(phase != PruneWorktreesPhase::Complete),
+                "phase {phase:?}"
+            );
+            assert!(managed.is_dir(), "phase {phase:?}");
+            let inventory = riftri_git::Git::default()
+                .list_worktrees(&repository)
+                .expect("list worktrees");
+            assert!(
+                !inventory.iter().any(|worktree| worktree.path == stale),
+                "phase {phase:?}"
+            );
+            let accounting = storage_accounting(&state).expect("account prune");
+            assert_eq!(accounting.completed_prunes, 1, "phase {phase:?}");
+            assert_eq!(accounting.pending_prunes, 0, "phase {phase:?}");
+
+            let repeated = recover_incomplete_operations(&state).expect("repeat recovery");
+            assert_eq!(repeated.recovered_prunes, 0, "phase {phase:?}");
+            assert_eq!(repeated.completed_prunes, 1, "phase {phase:?}");
+        }
     }
 }
