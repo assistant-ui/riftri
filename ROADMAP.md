@@ -57,11 +57,11 @@ Acceptance criteria:
 The allocation methodology and recorded development result are documented in
 [`docs/allocation-evidence.md`](docs/allocation-evidence.md).
 
-## Milestone 3: removal, recovery, and accounting
+## Milestone 3: removal, recovery, and accounting (complete)
 
 Outcome: make the APFS prototype safe for repeated local use.
 
-Initial removal/accounting slice complete: clean managed worktrees can be
+Clean managed worktrees can be
 removed explicitly or through the enabled Git shim, removal intent and progress
 are journaled separately from adds, interrupted removals resume conservatively,
 `riftri repair` provides repository-aware conservative recovery, and `riftri
@@ -71,8 +71,9 @@ while `riftri gc --apply` revalidates references under the per-base lock and
 uses a recoverable collection journal before deleting an immutable base.
 Status now reports state paths that are unjournaled, structurally unsafe, or
 missing despite an active journal, while preserving them for manual inspection.
-The milestone remains incomplete until the creation transaction has failure
-coverage at every persisted phase.
+Deterministic failure injection covers every recoverable persisted creation,
+removal, and collection phase, including idempotent repeated recovery. All
+Milestone 3 acceptance criteria are covered by the macOS integration suite.
 
 - Implement explicit worktree removal while preserving Git dirty-state checks.
 - Extend local state and operation journals to removal and base lifecycle.

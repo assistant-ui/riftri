@@ -215,5 +215,6 @@ garbage collection can remove independently revalidated zero-reference bases.
 Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
 missing paths referenced by active journals without deleting them. Move, prune,
 automatic orphan-state repair, Linux/Windows mutation backends, mounts, and a
-daemon are not implemented. The remaining storage-lifecycle work stays in
-Milestone 3 of `ROADMAP.md`.
+daemon are not implemented. The APFS storage-lifecycle safety work through
+Milestone 3 is complete; subsequent roadmap milestones extend transparent Git
+compatibility and add native Linux and Windows backends.
