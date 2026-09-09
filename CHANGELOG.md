@@ -29,11 +29,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   shim, with conservative interrupted-removal recovery.
 - `riftri status` reporting for retained bases, active views, reference counts,
   logical bytes, and filesystem-allocated bytes.
+- Offline release-staging coverage for all six native npm packages, GitHub
+  archives, executable names, and SHA-256 checksums.
 
 ### Changed
 
-- Renamed the npm distribution source directory from `packaging/` to
-  `package/` without changing published package names or tarball layout.
+- npm distribution sources now live under `package/` without changing
+  published package names or tarball layout.
 - Milestone 2 now permits only explicit APFS worktree creation. Unsupported
   checkout configurations fail before mutation, and full-copy fallback remains
   disabled.
