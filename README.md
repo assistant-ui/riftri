@@ -67,8 +67,8 @@ $ riftri worktree add ../app-auth -b feature/auth main
 
 ## Project status
 
-Riftri has an explicit APFS prototype on macOS. The repository currently
-provides:
+Riftri has completed the roadmap's capability, explicit APFS, and recoverable
+storage-lifecycle milestones on macOS. The repository currently provides:
 
 - A Rust workspace with separate CLI, core, Git, and storage boundaries.
 - Destination-volume-specific `doctor` and `backends` diagnostics.

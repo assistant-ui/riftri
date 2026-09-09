@@ -14,8 +14,9 @@ commands. Riftri changes only how worktree files are materialized and stored.
 
 ## Current stage
 
-The repository has completed the capability/Git-semantics foundation and the
-explicit APFS prototype. On macOS it can create real linked worktrees from
+The repository has completed Milestones 1 through 3: the capability/Git-semantics
+foundation, explicit APFS prototype, and recoverable storage lifecycle. On macOS
+it can create real linked worktrees from
 strict native APFS clones, reuse exact-tree immutable bases, persist atomic add
 journals, roll back failures, and recover interrupted adds without deleting a
 changed view. Repository-local activation, the process-scoped Git shim, and an
