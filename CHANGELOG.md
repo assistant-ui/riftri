@@ -60,6 +60,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Concurrent worktree operations in one Riftri process now receive distinct
   journal and scratch identifiers even when the system clock returns the same
   timestamp to multiple threads.
+- Enabled Git interception now fails closed instead of allowing forced removal,
+  move, or prune to mutate managed Riftri lifecycle state outside its journals.
 
 ### Safety
 

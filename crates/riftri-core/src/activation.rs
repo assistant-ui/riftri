@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, RemoveWorktreeRequest, RemoveWorktreeResult,
     WorktreeError, WorktreeMode, add_worktree, is_managed_worktree, remove_worktree,
+    storage_accounting,
 };
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
@@ -128,11 +129,23 @@ pub fn plan_git_command(
             parse_enabled_add(&context.repository, &arguments[context.command_index + 2..])
                 .map(GitProxyPlan::OptimizedAdd)
         }
-        "remove" if context.optimization_compatible => Ok(parse_enabled_remove(
+        "remove" => plan_enabled_remove(
             &context.repository,
             &arguments[context.command_index + 2..],
-        )?
-        .map_or(GitProxyPlan::Passthrough, GitProxyPlan::OptimizedRemove)),
+            context.optimization_compatible,
+        ),
+        "move" => {
+            guard_managed_path_lifecycle(
+                &context.repository,
+                &arguments[context.command_index + 2..],
+                "move",
+            )?;
+            Ok(GitProxyPlan::Passthrough)
+        }
+        "prune" => {
+            guard_managed_prune(&activation)?;
+            Ok(GitProxyPlan::Passthrough)
+        }
         _ => Ok(GitProxyPlan::Passthrough),
     }
 }
@@ -559,6 +572,74 @@ fn parse_enabled_remove(
         destination,
         state_dir: None,
     }))
+}
+
+fn plan_enabled_remove(
+    repository: &Path,
+    arguments: &[OsString],
+    optimization_compatible: bool,
+) -> Result<GitProxyPlan, ActivationError> {
+    if optimization_compatible {
+        if let Some(request) = parse_enabled_remove(repository, arguments)? {
+            return Ok(GitProxyPlan::OptimizedRemove(request));
+        }
+    }
+    guard_managed_path_lifecycle(repository, arguments, "remove")?;
+    Ok(GitProxyPlan::Passthrough)
+}
+
+fn guard_managed_path_lifecycle(
+    repository: &Path,
+    arguments: &[OsString],
+    operation: &str,
+) -> Result<(), ActivationError> {
+    let Some(path) = positional_paths(arguments).first().copied() else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        repository.join(path)
+    };
+    if is_managed_worktree(repository, &path)? {
+        return Err(unsupported(format!(
+            "refusing `git worktree {operation}` options that would bypass the journal for managed Riftri worktree {}; use a supported Riftri lifecycle command instead",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn guard_managed_prune(activation: &RepositoryActivation) -> Result<(), ActivationError> {
+    let state_directory = activation.common_git_dir.join("riftri");
+    if !state_directory.exists() {
+        return Ok(());
+    }
+    let status = storage_accounting(&state_directory)?;
+    if status.active_views > 0 || status.pending_adds > 0 || status.pending_removals > 0 {
+        return Err(unsupported(
+            "refusing `git worktree prune` while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal",
+        ));
+    }
+    Ok(())
+}
+
+fn positional_paths(arguments: &[OsString]) -> Vec<&OsStr> {
+    let mut options = true;
+    arguments
+        .iter()
+        .filter_map(|argument| {
+            if options && argument == "--" {
+                options = false;
+                None
+            } else if options && argument.to_string_lossy().starts_with('-') {
+                None
+            } else {
+                Some(argument.as_os_str())
+            }
+        })
+        .collect()
 }
 
 fn set_mode(

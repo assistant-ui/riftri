@@ -125,11 +125,14 @@ sparse checkout, submodules, and checkout-changing non-default configuration.
 Transparent optimized adds currently require either `-b <new-branch>` or
 `--detach`. Clean managed removes using the ordinary no-option
 `git worktree remove <path>` form are also routed through Riftri. Dirty views are
-preserved, and zero-reference bases remain cached for reuse until an explicit
-`riftri gc --apply`. A plain `riftri gc` only prints the collection plan. These
-operations never fall back to a full copy. Set `RIFTRI_BYPASS=1` only when you intentionally
-want an enabled command to use ordinary Git. If an operation is interrupted,
-run the repository-aware repair command:
+preserved. Forced/configured removal, move, and prune commands that could bypass
+the journal fail closed when they affect managed state. Unmanaged worktrees
+continue to use ordinary Git. Zero-reference bases remain cached for reuse until
+an explicit `riftri gc --apply`; a plain `riftri gc` only prints the collection
+plan. These operations never fall back to a full copy. Set `RIFTRI_BYPASS=1`
+only when you intentionally want an enabled command to use ordinary Git; using
+it for a managed lifecycle operation can require manual repair. If an operation
+is interrupted, run the repository-aware repair command:
 
 ```console
 $ cargo run -p riftri-cli -- repair

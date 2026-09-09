@@ -46,8 +46,9 @@ real Git executable captured before `PATH` changes.
 The shim accepts optimized `worktree add` with `-b <new-branch>` or `--detach`
 and routes the ordinary no-option `worktree remove <path>` form through Riftri
 when the target has an active Riftri add journal. Unsupported add forms fail
-before mutation instead of silently falling back to a full checkout. Other
-remove forms and the remaining lifecycle commands continue to be owned by Git.
+before mutation instead of silently falling back to a full checkout. Removal
+options and move/prune commands continue to use Git for unmanaged worktrees but
+fail closed when they could mutate managed Riftri state outside a journal.
 
 ## Components
 

@@ -507,6 +507,130 @@ fn exec_routes_clean_managed_git_worktree_removal_through_riftri() {
     assert!(status.contains("refs=0"));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_forced_removal_of_a_managed_view_fails_closed() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("guarded-remove-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/guarded-remove",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove", "--force"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard forced managed removal");
+
+    assert!(!removal.status.success());
+    assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+    assert!(destination.is_dir());
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_move_of_a_managed_view_fails_closed() {
+    let fixture = RepositoryFixture::new();
+    let source = fixture.directory.path().join("guarded-move-source");
+    let destination = fixture.directory.path().join("guarded-move-destination");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/guarded-move",
+        ])
+        .arg(&source)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "move"])
+        .arg(&source)
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard managed move");
+
+    assert!(!moved.status.success());
+    assert!(String::from_utf8_lossy(&moved.stderr).contains("managed Riftri worktree"));
+    assert!(source.is_dir());
+    assert!(!destination.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_prune_with_managed_state_fails_closed() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("guarded-prune-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/guarded-prune",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let pruned = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "prune"])
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard prune with managed state");
+
+    assert!(!pruned.status.success());
+    assert!(String::from_utf8_lossy(&pruned.stderr).contains("managed Riftri state"));
+    assert!(destination.is_dir());
+}
+
 #[test]
 fn exec_leaves_non_riftri_worktree_removal_with_real_git() {
     let fixture = RepositoryFixture::new();
@@ -542,6 +666,73 @@ fn exec_leaves_non_riftri_worktree_removal_with_real_git() {
     );
     assert!(!destination.exists());
     assert!(!fixture.repository.join(".git/riftri/removals").exists());
+}
+
+#[test]
+fn enabled_unmanaged_force_remove_and_move_still_use_real_git() {
+    let fixture = RepositoryFixture::new();
+    let removed = fixture.directory.path().join("ordinary-force-remove");
+    let moved_from = fixture.directory.path().join("ordinary-move-source");
+    let moved_to = fixture.directory.path().join("ordinary-move-destination");
+    assert!(
+        git(
+            &fixture.repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/ordinary-force-remove",
+                removed.to_str().expect("UTF-8 fixture path"),
+                "HEAD",
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(
+            &fixture.repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/ordinary-move",
+                moved_from.to_str().expect("UTF-8 fixture path"),
+                "HEAD",
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove", "--force"])
+        .arg(&removed)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("force-remove unmanaged worktree");
+    assert!(
+        removal.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removal.stderr)
+    );
+    assert!(!removed.exists());
+
+    let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "move"])
+        .arg(&moved_from)
+        .arg(&moved_to)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("move unmanaged worktree");
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert!(!moved_from.exists());
+    assert!(moved_to.is_dir());
 }
 
 #[cfg(target_os = "macos")]
