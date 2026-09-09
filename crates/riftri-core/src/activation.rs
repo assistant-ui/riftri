@@ -11,7 +11,10 @@ use riftri_git::{Git, GitError};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::{AddWorktreeRequest, AddWorktreeResult, WorktreeError, WorktreeMode, add_worktree};
+use crate::{
+    AddWorktreeRequest, AddWorktreeResult, RemoveWorktreeRequest, RemoveWorktreeResult,
+    WorktreeError, WorktreeMode, add_worktree, is_managed_worktree, remove_worktree,
+};
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
@@ -28,12 +31,14 @@ pub struct RepositoryActivation {
 pub enum GitProxyPlan {
     Passthrough,
     OptimizedAdd(AddWorktreeRequest),
+    OptimizedRemove(RemoveWorktreeRequest),
 }
 
 #[derive(Debug)]
 pub enum GitProxyOutcome {
     Passthrough(i32),
     OptimizedAdd(AddWorktreeResult),
+    OptimizedRemove(RemoveWorktreeResult),
 }
 
 #[derive(Debug, Error)]
@@ -113,18 +118,23 @@ pub fn plan_git_command(
     let Some(subcommand) = arguments.get(context.command_index + 1) else {
         return Ok(GitProxyPlan::Passthrough);
     };
-    if subcommand != "add" {
-        return Ok(GitProxyPlan::Passthrough);
+    match subcommand.to_string_lossy().as_ref() {
+        "add" => {
+            if !context.optimization_compatible {
+                return Err(unsupported(format!(
+                    "Git invocation-level configuration is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+                )));
+            }
+            parse_enabled_add(&context.repository, &arguments[context.command_index + 2..])
+                .map(GitProxyPlan::OptimizedAdd)
+        }
+        "remove" if context.optimization_compatible => Ok(parse_enabled_remove(
+            &context.repository,
+            &arguments[context.command_index + 2..],
+        )?
+        .map_or(GitProxyPlan::Passthrough, GitProxyPlan::OptimizedRemove)),
+        _ => Ok(GitProxyPlan::Passthrough),
     }
-
-    if !context.optimization_compatible {
-        return Err(unsupported(format!(
-            "Git invocation-level configuration is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
-        )));
-    }
-
-    parse_enabled_add(&context.repository, &arguments[context.command_index + 2..])
-        .map(GitProxyPlan::OptimizedAdd)
 }
 
 pub fn proxy_git_command(
@@ -137,6 +147,9 @@ pub fn proxy_git_command(
         ))),
         GitProxyPlan::OptimizedAdd(request) => {
             Ok(GitProxyOutcome::OptimizedAdd(add_worktree(request)?))
+        }
+        GitProxyPlan::OptimizedRemove(request) => {
+            Ok(GitProxyOutcome::OptimizedRemove(remove_worktree(request)?))
         }
     }
 }
@@ -521,6 +534,31 @@ fn parse_enabled_add(
         mode,
         state_dir: None,
     })
+}
+
+fn parse_enabled_remove(
+    repository: &Path,
+    arguments: &[OsString],
+) -> Result<Option<RemoveWorktreeRequest>, ActivationError> {
+    let path = match arguments {
+        [path] => path,
+        [separator, path] if separator == "--" => path,
+        _ => return Ok(None),
+    };
+    let destination = PathBuf::from(path);
+    let destination = if destination.is_absolute() {
+        destination
+    } else {
+        repository.join(destination)
+    };
+    if !is_managed_worktree(repository, &destination)? {
+        return Ok(None);
+    }
+    Ok(Some(RemoveWorktreeRequest {
+        repository: repository.to_path_buf(),
+        destination,
+        state_dir: None,
+    }))
 }
 
 fn set_mode(

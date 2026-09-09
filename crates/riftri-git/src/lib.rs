@@ -468,6 +468,18 @@ impl Git {
         Ok(output.stdout.is_empty())
     }
 
+    /// Remove a linked worktree through Git's normal dirty-worktree checks.
+    pub fn remove_worktree(&self, repository: &Path, worktree: &Path) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("worktree"),
+            OsString::from("remove"),
+            OsString::from("--"),
+            worktree.as_os_str().to_os_string(),
+        ];
+        self.run_os(Some(repository), &arguments)?;
+        Ok(())
+    }
+
     /// Remove Git's linked-worktree registration and the worktree directory.
     /// Callers must enforce Riftri's clean-worktree policy before using force.
     pub fn remove_worktree_force(

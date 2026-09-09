@@ -427,6 +427,97 @@ fn exec_routes_enabled_git_worktree_add_through_apfs() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn exec_routes_clean_managed_git_worktree_removal_through_riftri() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("removed-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/removed",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add enabled worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let removed = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("remove enabled worktree");
+
+    assert!(
+        removed.status.success(),
+        "enabled removal failed: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&removed.stderr).contains("safely removed worktree"));
+    assert!(!destination.exists());
+    assert!(fixture.repository.join(".git/riftri/removals").is_dir());
+
+    let status = riftri(&fixture.repository, &["status"]);
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(status.contains("Active views: 0"));
+    assert!(status.contains("refs=0"));
+}
+
+#[test]
+fn exec_leaves_non_riftri_worktree_removal_with_real_git() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("ordinary-removed-view");
+    assert!(
+        git(
+            &fixture.repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/ordinary-removed",
+                destination.to_str().expect("UTF-8 fixture path"),
+                "HEAD",
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let removed = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("remove ordinary worktree through scoped Git");
+
+    assert!(
+        removed.status.success(),
+        "ordinary removal failed: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!destination.exists());
+    assert!(!fixture.repository.join(".git/riftri/removals").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn shell_hook_routes_normal_git_adds_in_enabled_repositories_through_apfs() {
     let fixture = RepositoryFixture::new();
     let cache = tempdir().expect("shell hook cache");

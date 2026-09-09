@@ -21,8 +21,10 @@ journals, roll back failures, and recover interrupted adds without deleting a
 changed view. Repository-local activation, the process-scoped Git shim, and an
 explicitly evaluated sh/bash/zsh hook can route supported adds through the same
 transaction. Process-scoped commands can optionally start from a validated Git
-worktree root. It still has no removal transaction, full worktree-lifecycle
-interception, filesystem mounts, Linux/Windows mutation backend, or daemon.
+worktree root. Clean managed removals now use a separate recoverable journal,
+and status reports retained-base references and disk usage. It still has no
+move, prune, repair, or garbage-collection transaction, filesystem mounts,
+Linux/Windows mutation backend, or daemon.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety
 or compatibility gates merely to reach a working demo faster.

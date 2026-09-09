@@ -75,6 +75,17 @@ enum Command {
         json: bool,
     },
 
+    /// Report retained bases, active views, reference counts, and disk use.
+    Status {
+        /// Repository whose default Riftri state should be inspected.
+        #[arg(default_value = ".")]
+        repository: PathBuf,
+
+        /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+
     /// Create or recover Riftri-backed real Git worktrees.
     Worktree {
         #[command(subcommand)]
@@ -114,6 +125,20 @@ enum WorktreeCommand {
         revision: OsString,
 
         /// Repository in which Git should create linked-worktree metadata.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Riftri state directory; defaults to <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+
+    /// Safely remove a clean Riftri-managed linked worktree.
+    Remove {
+        /// Existing Riftri-managed worktree directory.
+        path: PathBuf,
+
+        /// Repository owning the linked worktree.
         #[arg(long, default_value = ".")]
         repository: PathBuf,
 
@@ -217,6 +242,20 @@ fn main() -> Result<()> {
                 println!("\nCapability support does not mean a backend is active yet.");
             }
         }
+        Command::Status {
+            repository,
+            state_dir,
+        } => {
+            let state_directory = match state_dir {
+                Some(state_directory) => state_directory,
+                None => {
+                    let activation = riftri_core::repository_activation(&repository)?;
+                    activation.common_git_dir.join("riftri")
+                }
+            };
+            let report = riftri_core::storage_accounting(&state_directory)?;
+            print_storage_accounting(&state_directory, &report);
+        }
         Command::Worktree { command } => match command {
             WorktreeCommand::Add {
                 path,
@@ -240,12 +279,29 @@ fn main() -> Result<()> {
                 })?;
                 print_add_result(&result);
             }
+            WorktreeCommand::Remove {
+                path,
+                repository,
+                state_dir,
+            } => {
+                let result = riftri_core::remove_worktree(riftri_core::RemoveWorktreeRequest {
+                    repository,
+                    destination: path,
+                    state_dir,
+                })?;
+                println!("Removed Riftri-backed Git worktree");
+                println!("Destination: {}", result.destination.display());
+                println!("Retained immutable base: {}", result.base_path.display());
+                println!("Journal: {}", result.journal_path.display());
+            }
         },
         Command::Recover { state_dir } => {
             let report = riftri_core::recover_incomplete_operations(&state_dir)?;
             println!("Scanned operations: {}", report.scanned);
             println!("Active worktrees: {}", report.active);
             println!("Recovered operations: {}", report.recovered);
+            println!("Completed removals: {}", report.completed_removals);
+            println!("Recovered removals: {}", report.recovered_removals);
             if !report.errors.is_empty() {
                 println!("Operations needing attention:");
                 for error in &report.errors {
@@ -305,6 +361,13 @@ fn run_git_shim() -> Result<i32> {
             );
             Ok(0)
         }
+        riftri_core::GitProxyOutcome::OptimizedRemove(result) => {
+            eprintln!(
+                "Riftri safely removed worktree at {} (base retained)",
+                result.destination.display()
+            );
+            Ok(0)
+        }
     }
 }
 
@@ -323,6 +386,36 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult) {
         }
     );
     println!("Journal: {}", result.journal_path.display());
+}
+
+fn print_storage_accounting(state_directory: &Path, report: &riftri_core::StorageAccountingReport) {
+    println!("Riftri storage status");
+    println!("State: {}", state_directory.display());
+    println!("Active views: {}", report.active_views);
+    println!("Completed removals: {}", report.completed_removals);
+    println!("Pending removals: {}", report.pending_removals);
+    println!("Retained bases: {}", report.bases.len());
+    for base in &report.bases {
+        println!(
+            "- {}: refs={}, logical={} bytes, allocated={} bytes",
+            base.path.display(),
+            base.reference_count,
+            base.logical_bytes,
+            base.allocated_bytes
+        );
+    }
+    println!("Active view storage:");
+    for view in &report.views {
+        println!(
+            "- {}: logical={} bytes, allocated={} bytes, base={}",
+            view.destination.display(),
+            view.logical_bytes,
+            view.allocated_bytes,
+            view.base_path.display()
+        );
+    }
+    println!("Total logical: {} bytes", report.total_logical_bytes);
+    println!("Total allocated: {} bytes", report.total_allocated_bytes);
 }
 
 fn print_doctor(report: &riftri_core::DoctorReport) {
@@ -461,6 +554,45 @@ mod tests {
             panic!("unexpected shell command");
         };
         assert_eq!(shell, PosixShell::Zsh);
+    }
+
+    #[test]
+    fn parses_worktree_removal_and_storage_status() {
+        let remove = Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "remove",
+            "../app-auth",
+            "--repository",
+            "../app",
+        ])
+        .expect("parse worktree removal");
+        let Command::Worktree {
+            command:
+                WorktreeCommand::Remove {
+                    path,
+                    repository,
+                    state_dir,
+                },
+        } = remove.command
+        else {
+            panic!("unexpected removal command");
+        };
+        assert_eq!(path, Path::new("../app-auth"));
+        assert_eq!(repository, Path::new("../app"));
+        assert!(state_dir.is_none());
+
+        let status =
+            Cli::try_parse_from(["riftri", "status", "../app"]).expect("parse storage status");
+        let Command::Status {
+            repository,
+            state_dir,
+        } = status.command
+        else {
+            panic!("unexpected status command");
+        };
+        assert_eq!(repository, Path::new("../app"));
+        assert!(state_dir.is_none());
     }
 
     #[test]

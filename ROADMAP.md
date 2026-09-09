@@ -61,6 +61,13 @@ The allocation methodology and recorded development result are documented in
 
 Outcome: make the APFS prototype safe for repeated local use.
 
+Initial removal/accounting slice complete: clean managed worktrees can be
+removed explicitly or through the enabled Git shim, removal intent and progress
+are journaled separately from adds, interrupted removals resume conservatively,
+and `riftri status` derives base reference counts plus logical and allocated
+bytes. Zero-reference bases are retained until explicit garbage collection is
+implemented.
+
 - Implement explicit worktree removal while preserving Git dirty-state checks.
 - Extend local state and operation journals to removal and base lifecycle.
 - Add `status`, `doctor`, `repair`, and garbage-collection behavior.
@@ -80,12 +87,13 @@ Acceptance criteria:
 Outcome: let agents use ordinary `git worktree` commands without relying on a
 prompt or skill.
 
-Initial add-only slice complete: repository-local `riftri enable` and
+Initial add/remove slice complete: repository-local `riftri enable` and
 `riftri disable`, `riftri exec -- <command>`, optional exact-worktree process
 binding, exact real-Git delegation, an explicitly evaluated sh/bash/zsh hook,
-supported `worktree add` routing, and `RIFTRI_BYPASS=1` are implemented. The
-milestone remains incomplete until removal and the full lifecycle use the safe
-journaled paths required below.
+supported `worktree add` and clean managed `worktree remove` routing, and
+`RIFTRI_BYPASS=1` are implemented. The
+milestone remains incomplete until the remaining lifecycle commands use safe
+journaled paths.
 
 - Add `riftri exec -- <command>` and explicit shell activation.
 - Add a small Git shim scoped to the child process environment.
