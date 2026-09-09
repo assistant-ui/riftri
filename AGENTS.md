@@ -18,10 +18,10 @@ The repository has completed the capability/Git-semantics foundation and the
 explicit APFS prototype. On macOS it can create real linked worktrees from
 strict native APFS clones, reuse exact-tree immutable bases, persist atomic add
 journals, roll back failures, and recover interrupted adds without deleting a
-changed view. Repository-local activation and the initial process-scoped Git
-shim can route supported adds through the same transaction. It still has no
-removal transaction, full worktree-lifecycle interception, filesystem mounts,
-Linux/Windows mutation backend, or daemon.
+changed view. Repository-local activation, the process-scoped Git shim, and an
+explicitly evaluated sh/bash/zsh hook can route supported adds through the same
+transaction. It still has no removal transaction, full worktree-lifecycle
+interception, filesystem mounts, Linux/Windows mutation backend, or daemon.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety
 or compatibility gates merely to reach a working demo faster.
@@ -58,9 +58,18 @@ $ riftri exec -- claude
 $ git worktree add ../app-auth -b feature/auth main
 ```
 
-The process-scoped Git shim must pass normal Git commands directly to the real
-Git executable. Persistent shell integration may be offered later, but it must
-remain explicitly enabled. Never replace system Git globally by default.
+Users may explicitly activate normal Git interception in a shell:
+
+```console
+$ eval "$(riftri shell hook zsh)"
+$ riftri enable
+$ git worktree add ../app-auth -b feature/auth main
+```
+
+Both Git-shim modes must pass normal Git commands directly to the real Git
+executable, and repository-local enablement must control optimized adds. Shell
+integration must remain explicitly evaluated; never edit shell startup files or
+replace system Git globally by default.
 
 ## Architecture invariants
 

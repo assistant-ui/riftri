@@ -82,11 +82,11 @@ prompt or skill.
 
 Initial add-only slice complete: repository-local `riftri enable` and
 `riftri disable`, `riftri exec -- <command>`, exact real-Git delegation,
-supported `worktree add` routing, and `RIFTRI_BYPASS=1` are implemented. The
-milestone remains incomplete until removal and the full lifecycle use the safe
-journaled paths required below.
+an explicitly evaluated sh/bash/zsh hook, supported `worktree add` routing, and
+`RIFTRI_BYPASS=1` are implemented. The milestone remains incomplete until
+removal and the full lifecycle use the safe journaled paths required below.
 
-- Add `riftri exec -- <command>` and `riftri shell`.
+- Add `riftri exec -- <command>` and explicit shell activation.
 - Add a small Git shim scoped to the child process environment.
 - Immediately delegate non-worktree Git commands to real Git.
 - Route add, remove, move, prune, and repair through tested lifecycle behavior.
@@ -95,8 +95,8 @@ journaled paths required below.
 
 Acceptance criteria:
 
-- Git outside the enabled process is untouched.
-- Normal Git commands behave identically inside the enabled process.
+- Git outside an explicitly activated process or shell is untouched.
+- Normal Git commands behave identically inside an activated process or shell.
 - Claude, Codex, and a plain shell can create optimized worktrees without
   Riftri-specific prompts.
 

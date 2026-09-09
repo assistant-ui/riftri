@@ -1,7 +1,11 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
+#[cfg(unix)]
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use riftri_git::SHIM_ACTIVE_ENV;
 use riftri_git::{Git, GitError};
@@ -12,6 +16,7 @@ use crate::{AddWorktreeRequest, AddWorktreeResult, WorktreeError, WorktreeMode, 
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
+pub const CACHE_DIR_ENV: &str = "RIFTRI_CACHE_DIR";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepositoryActivation {
@@ -48,6 +53,9 @@ pub enum ActivationError {
 
     #[error("process-scoped activation failed: {0}")]
     Process(String),
+
+    #[error("shell activation failed: {0}")]
+    Shell(String),
 }
 
 pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, ActivationError> {
@@ -163,6 +171,134 @@ pub fn execute_scoped_command(command: &[OsString]) -> Result<i32, ActivationErr
             ))
         })?;
     Ok(exit_status_code(status))
+}
+
+/// Prepare a durable Git shim and render Bourne-compatible shell code that
+/// activates it for the current shell and every child process.
+pub fn prepare_posix_shell_hook() -> Result<String, ActivationError> {
+    prepare_posix_shell_hook_inner()
+}
+
+#[cfg(unix)]
+fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
+    let real_git = locate_real_git()?;
+    let current_executable = env::current_exe()
+        .map_err(|error| shell_error(format!("locate the Riftri executable: {error}")))?;
+    let shim_directory = shell_shim_directory()?;
+    fs::create_dir_all(&shim_directory).map_err(|error| {
+        shell_error(format!(
+            "create shell shim directory {}: {error}",
+            shim_directory.display()
+        ))
+    })?;
+    set_private_directory_permissions(&shim_directory)?;
+    install_durable_git_shim(&shim_directory, &current_executable)?;
+
+    let shim_directory = posix_quote_path(&shim_directory)?;
+    let real_git = posix_quote_path(&real_git)?;
+    Ok(format!(
+        "export {real_git_env}={real_git}\nexport {shim_active_env}='1'\ncase \":${{PATH-}}:\" in\n  *:{shim_directory}:*) ;;\n  *) export PATH={shim_directory}${{PATH:+\":$PATH\"}} ;;\nesac\n",
+        real_git_env = riftri_git::REAL_GIT_ENV,
+        shim_active_env = SHIM_ACTIVE_ENV,
+    ))
+}
+
+#[cfg(not(unix))]
+fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
+    Err(shell_error(
+        "the sh/bash/zsh hook is currently available only on Unix-like systems",
+    ))
+}
+
+#[cfg(unix)]
+fn shell_shim_directory() -> Result<PathBuf, ActivationError> {
+    let cache_root = env::var_os(CACHE_DIR_ENV)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(default_cache_directory)?;
+    let cache_root = if cache_root.is_absolute() {
+        cache_root
+    } else {
+        env::current_dir()
+            .map_err(|error| shell_error(format!("resolve current directory: {error}")))?
+            .join(cache_root)
+    };
+    Ok(cache_root.join("shims/v1"))
+}
+
+#[cfg(target_os = "macos")]
+fn default_cache_directory() -> Result<PathBuf, ActivationError> {
+    let home = env::var_os("HOME")
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| shell_error("HOME is not set; cannot choose a shell shim directory"))?;
+    Ok(PathBuf::from(home).join("Library/Caches/riftri"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn default_cache_directory() -> Result<PathBuf, ActivationError> {
+    if let Some(cache) = env::var_os("XDG_CACHE_HOME").filter(|path| !path.is_empty()) {
+        return Ok(PathBuf::from(cache).join("riftri"));
+    }
+    let home = env::var_os("HOME")
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            shell_error("HOME and XDG_CACHE_HOME are not set; cannot choose a shell shim directory")
+        })?;
+    Ok(PathBuf::from(home).join(".cache/riftri"))
+}
+
+#[cfg(unix)]
+fn set_private_directory_permissions(directory: &Path) -> Result<(), ActivationError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        shell_error(format!(
+            "secure shell shim directory {}: {error}",
+            directory.display()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn install_durable_git_shim(
+    directory: &Path,
+    current_executable: &Path,
+) -> Result<PathBuf, ActivationError> {
+    let destination = directory.join("git");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| shell_error(format!("system clock error: {error}")))?
+        .as_nanos();
+    let temporary = directory.join(format!(".git-{}-{nonce}.tmp", std::process::id()));
+    std::os::unix::fs::symlink(current_executable, &temporary).map_err(|error| {
+        shell_error(format!(
+            "create shell Git shim {}: {error}",
+            temporary.display()
+        ))
+    })?;
+    if let Err(error) = fs::rename(&temporary, &destination) {
+        let _ = fs::remove_file(&temporary);
+        return Err(shell_error(format!(
+            "activate shell Git shim {}: {error}",
+            destination.display()
+        )));
+    }
+    Ok(destination)
+}
+
+#[cfg(unix)]
+fn posix_quote_path(path: &Path) -> Result<String, ActivationError> {
+    let value = path
+        .to_str()
+        .ok_or_else(|| shell_error(format!("shell path is not valid UTF-8: {}", path.display())))?;
+    if value.contains(':') {
+        return Err(shell_error(format!(
+            "shell shim path cannot contain a colon: {}",
+            path.display()
+        )));
+    }
+    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
 }
 
 fn activation_with_git(git: &Git, path: &Path) -> Result<RepositoryActivation, ActivationError> {
@@ -425,6 +561,10 @@ fn exit_status_code(status: ExitStatus) -> i32 {
 
 fn process_error(message: impl Into<String>) -> ActivationError {
     ActivationError::Process(message.into())
+}
+
+fn shell_error(message: impl Into<String>) -> ActivationError {
+    ActivationError::Shell(message.into())
 }
 
 #[cfg(test)]

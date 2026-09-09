@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -167,6 +169,95 @@ fn exec_leaves_worktree_add_untouched_for_a_disabled_repository() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn shell_hook_places_a_durable_riftri_git_shim_first_on_path() {
+    let cache = tempdir().expect("shell hook cache");
+    let cache_root = cache.path().join("cache with ' quote");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["shell", "hook", "sh"])
+        .env("RIFTRI_CACHE_DIR", &cache_root)
+        .output()
+        .expect("render shell hook");
+
+    assert!(
+        output.status.success(),
+        "shell hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let hook = String::from_utf8(output.stdout).expect("UTF-8 shell hook");
+    let repeated = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["shell", "hook", "sh"])
+        .env("RIFTRI_CACHE_DIR", &cache_root)
+        .output()
+        .expect("render shell hook again");
+    assert!(
+        repeated.status.success(),
+        "repeated shell hook failed: {}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    let shell = Command::new("sh")
+        .args(["-c", &format!("{hook}\ncommand -v git")])
+        .output()
+        .expect("evaluate shell hook");
+    assert!(
+        shell.status.success(),
+        "shell hook evaluation failed: {}",
+        String::from_utf8_lossy(&shell.stderr)
+    );
+    let shim = cache_root.join("shims/v1/git");
+    assert_eq!(
+        PathBuf::from(String::from_utf8(shell.stdout).unwrap().trim()),
+        shim
+    );
+    assert!(
+        fs::symlink_metadata(shim)
+            .expect("installed Git shim")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::metadata(cache_root.join("shims/v1"))
+            .expect("private shim directory")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell hook cache");
+    let destination = fixture.directory.path().join("ordinary-shell-view");
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
+             git worktree add -b feature/ordinary-shell \"$RIFTRI_TEST_DESTINATION\" HEAD",
+        ])
+        .current_dir(&fixture.repository)
+        .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+        .env("RIFTRI_TEST_DESTINATION", &destination)
+        .env("RIFTRI_CACHE_DIR", cache.path())
+        .output()
+        .expect("run normal Git through shell hook");
+
+    assert!(
+        output.status.success(),
+        "ordinary add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fixture.repository.join(".git/riftri").exists());
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+}
+
 #[test]
 fn enabled_unsupported_add_fails_without_falling_back() {
     let fixture = RepositoryFixture::new();
@@ -214,6 +305,46 @@ fn exec_routes_enabled_git_worktree_add_through_apfs() {
         output.status.success(),
         "enabled add failed: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("optimized APFS worktree"));
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+    assert!(fixture.repository.join(".git/riftri/operations").is_dir());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn shell_hook_routes_normal_git_adds_in_enabled_repositories_through_apfs() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell hook cache");
+    let destination = fixture.directory.path().join("optimized-shell-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
+             git rev-parse --show-toplevel\n\
+             git worktree add -b feature/enabled-shell \"$RIFTRI_TEST_DESTINATION\" HEAD",
+        ])
+        .current_dir(&fixture.repository)
+        .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+        .env("RIFTRI_TEST_DESTINATION", &destination)
+        .env("RIFTRI_CACHE_DIR", cache.path())
+        .output()
+        .expect("run enabled Git through shell hook");
+
+    assert!(
+        output.status.success(),
+        "enabled shell add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()),
+        fs::canonicalize(&fixture.repository).expect("canonical repository path")
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("optimized APFS worktree"));
     assert!(
