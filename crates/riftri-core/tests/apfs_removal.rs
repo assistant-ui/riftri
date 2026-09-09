@@ -58,6 +58,12 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
     assert_eq!(before.bases[0].reference_count, 1);
     assert!(before.bases[0].logical_bytes > 0);
     assert!(before.bases[0].allocated_bytes > 0);
+    assert_eq!(before.coordination_locks, 1);
+    assert!(
+        before.diagnostic_issues.is_empty(),
+        "unexpected state issues: {:?}",
+        before.diagnostic_issues
+    );
 
     fs::write(worktree.join("tracked.txt"), "dirty\n").expect("make worktree dirty");
     let error = remove_worktree(RemoveWorktreeRequest {
@@ -101,6 +107,12 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
     assert_eq!(after.bases.len(), 1);
     assert_eq!(after.bases[0].reference_count, 0);
     assert_eq!(after.bases[0].path, removed.base_path);
+    assert_eq!(after.coordination_locks, 1);
+    assert!(
+        after.diagnostic_issues.is_empty(),
+        "unexpected state issues: {:?}",
+        after.diagnostic_issues
+    );
 }
 
 #[test]

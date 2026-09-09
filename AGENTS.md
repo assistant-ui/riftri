@@ -25,7 +25,8 @@ worktree root. Clean managed removals now use a separate recoverable journal,
 and status reports retained-base references and disk usage with repository-aware
 repair for incomplete journals. Explicit garbage collection uses its own
 recoverable journal and revalidates references under the immutable-base lock.
-It still has no move, prune, orphan-state repair, filesystem mounts,
+Status reports unexplained or inconsistent state paths but never deletes them.
+It still has no move, prune, automatic orphan-state repair, filesystem mounts,
 Linux/Windows mutation backend, or daemon.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety

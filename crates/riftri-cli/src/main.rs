@@ -452,6 +452,10 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     println!("Riftri storage status");
     println!("State: {}", state_directory.display());
     println!("Active views: {}", report.active_views);
+    println!("Pending adds: {}", report.pending_adds);
+    if report.pending_adds > 0 {
+        println!("Attention: run `riftri repair` to roll back pending adds");
+    }
     println!("Completed removals: {}", report.completed_removals);
     println!("Pending removals: {}", report.pending_removals);
     if report.pending_removals > 0 {
@@ -463,6 +467,10 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     if report.pending_collections > 0 {
         println!("Attention: run `riftri repair` to resume pending collections");
     }
+    println!(
+        "Coordination locks: {} (safe persistent metadata)",
+        report.coordination_locks
+    );
     println!("Retained bases: {}", report.bases.len());
     for base in &report.bases {
         let state = if base.reference_count == 0 {
@@ -488,6 +496,13 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
             view.allocated_bytes,
             view.base_path.display()
         );
+    }
+    println!("State issues: {}", report.diagnostic_issues.len());
+    for issue in &report.diagnostic_issues {
+        println!("- {}: {}", issue.path.display(), issue.reason);
+    }
+    if !report.diagnostic_issues.is_empty() {
+        println!("Attention: Riftri preserves unexplained state; inspect it before manual cleanup");
     }
     println!("Total logical: {} bytes", report.total_logical_bytes);
     println!("Total allocated: {} bytes", report.total_allocated_bytes);

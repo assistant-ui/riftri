@@ -109,8 +109,10 @@ fn status_and_repair_explain_an_empty_lifecycle() {
     );
     let status_output = String::from_utf8_lossy(&status.stdout);
     assert!(status_output.contains("Active views: 0"));
+    assert!(status_output.contains("Pending adds: 0"));
     assert!(status_output.contains("Pending removals: 0"));
     assert!(status_output.contains("Retained bases: 0"));
+    assert!(status_output.contains("State issues: 0"));
 
     let repair = riftri(&fixture.repository, &["repair"]);
     assert!(
