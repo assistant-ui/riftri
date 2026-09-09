@@ -84,8 +84,10 @@ remain explicitly enabled. Never replace system Git globally by default.
 - `riftri-git`: communication with the real Git executable.
 - `riftri-storage`: storage capability and backend contracts.
 
-The root npm package and `npm/` directory are distribution-only. Product policy,
-Git semantics, and filesystem behavior remain in Rust.
+The root `package.json` defines the public `riftri` npm package. Its launcher,
+platform manifests, release tooling, and tests live under `packaging/`; that
+directory is distribution-only. Product policy, Git semantics, and filesystem
+behavior remain in Rust.
 
 Platform implementations should remain behind the storage boundary. Do not put
 macOS, Linux, or Windows system calls in the CLI crate.

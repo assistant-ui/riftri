@@ -92,7 +92,7 @@ jobs:
         run: npm run check:packages
 
       - name: Stage npm packages and GitHub assets
-        run: node npm/scripts/prepare-release.mjs "${GITHUB_REF_NAME}" artifacts
+        run: node packaging/scripts/prepare-release.mjs "${GITHUB_REF_NAME}" artifacts
 
       - name: Verify GitHub release checksums
         working-directory: dist/release
@@ -102,7 +102,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/npm
-          for package_directory in npm/platforms/*; do
+          for package_directory in packaging/platforms/*; do
             npm pack "${package_directory}" --pack-destination dist/npm
           done
           npm pack ./dist/npm-root --pack-destination dist/npm
@@ -119,7 +119,7 @@ jobs:
           fi
 
       - name: Publish npm packages
-        run: node npm/scripts/publish-packages.mjs
+        run: node packaging/scripts/publish-packages.mjs
 
       - name: Create or update GitHub release
         env:

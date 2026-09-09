@@ -1,8 +1,10 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { access, mkdtemp, readFile, rm } = require("node:fs/promises");
 const { test } = require("node:test");
 
 const {
@@ -35,11 +37,29 @@ test("detects GNU libc without treating musl as compatible", () => {
   assert.equal(platformKey("linux", "arm64", muslReport), "linux-arm64-musl");
 });
 
+test("stages the public package with conventional root directories", async (t) => {
+  const destination = await mkdtemp(path.join(os.tmpdir(), "riftri-package-"));
+  t.after(() => rm(destination, { recursive: true, force: true }));
+  const { stageRootPackage } = await import("../scripts/stage-root-package.mjs");
+
+  await stageRootPackage(destination);
+
+  const manifest = JSON.parse(
+    await readFile(path.join(destination, "package.json"), "utf8"),
+  );
+  assert.equal(manifest.name, "riftri");
+  assert.equal(manifest.bin.riftri, "bin/riftri.js");
+  assert.deepEqual(manifest.files, ["bin", "lib", "README.md", "LICENSE"]);
+  await access(path.join(destination, "bin", "riftri.js"));
+  await access(path.join(destination, "lib", "platform.js"));
+  await assert.rejects(access(path.join(destination, "packaging")));
+});
+
 test("launcher delegates to the locally built Rust executable", () => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
   const binary = path.join(repositoryRoot, "target", "debug", executable);
-  const launcher = path.join(repositoryRoot, "npm", "bin", "riftri.js");
+  const launcher = path.join(repositoryRoot, "packaging", "bin", "riftri.js");
   const result = spawnSync(process.execPath, [launcher, "--version"], {
     cwd: repositoryRoot,
     encoding: "utf8",
@@ -54,7 +74,7 @@ test("launcher preserves process-scoped Rust Git execution", () => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
   const binary = path.join(repositoryRoot, "target", "debug", executable);
-  const launcher = path.join(repositoryRoot, "npm", "bin", "riftri.js");
+  const launcher = path.join(repositoryRoot, "packaging", "bin", "riftri.js");
   const result = spawnSync(
     process.execPath,
     [launcher, "exec", "--", "git", "--version"],
@@ -73,7 +93,7 @@ test("launcher preserves Rust CLI failures", () => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
   const binary = path.join(repositoryRoot, "target", "debug", executable);
-  const launcher = path.join(repositoryRoot, "npm", "bin", "riftri.js");
+  const launcher = path.join(repositoryRoot, "packaging", "bin", "riftri.js");
   const result = spawnSync(process.execPath, [launcher, "not-a-command"], {
     cwd: repositoryRoot,
     encoding: "utf8",

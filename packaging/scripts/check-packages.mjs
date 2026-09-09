@@ -18,7 +18,7 @@ const cargoManifest = await readFile(
 const cargoVersion = cargoManifest.match(
   /\[workspace\.package\][\s\S]*?\nversion\s*=\s*"([^"]+)"/,
 )?.[1];
-const platformsDirectory = path.join(repositoryRoot, "npm", "platforms");
+const platformsDirectory = path.join(repositoryRoot, "packaging", "platforms");
 const platformDirectories = (
   await readdir(platformsDirectory, { withFileTypes: true })
 )
@@ -60,7 +60,7 @@ for (const packageName of platformDirectories) {
   );
   assert.equal(
     rootPackage.optionalDependencies[packageName],
-    `file:npm/platforms/${packageName}`,
+    `file:packaging/platforms/${packageName}`,
     `${packageName} source dependency must point to its local package`,
   );
 }
