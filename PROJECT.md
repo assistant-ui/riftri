@@ -72,10 +72,11 @@ $ riftri enable
 $ riftri exec -- claude
 ```
 
-The repository marker is implemented. The follow-up process-scoped shim will
-route supported `git worktree add` commands through Riftri only when their
-repository has been explicitly enabled. All other Git commands and commands in
-repositories that are not enabled will go directly to the real Git executable.
+Within that process tree, supported `git worktree add` commands are routed
+through Riftri when their repository has been explicitly enabled. All other Git
+commands and commands in repositories that are not enabled go directly to the
+real Git executable. An explicit bypass environment variable is available for
+ordinary-Git operations.
 
 ### Repository-scoped mode
 
@@ -185,8 +186,8 @@ prototype exist. On a writable APFS volume, `riftri worktree add` builds or
 reuses an exact-tree immutable base, creates real linked-worktree metadata with
 checkout suppressed, activates a native COW clone, synchronizes the index, and
 requires a clean Git status before success. Add operations are journaled and
-recoverable. Repository-local enable/disable state now records consent for the
-follow-up process-scoped Git shim. Transparent command routing, removal and full
-lifecycle interception, Linux/Windows mutation backends, mounts, and a daemon
-are not implemented. The next storage-lifecycle work remains Milestone 3 in
-`ROADMAP.md`.
+recoverable. Repository-local enable/disable state and an initial process-scoped
+Git shim now route supported adds through that same transaction. Removal and
+full lifecycle interception, Linux/Windows mutation backends, mounts, and a
+daemon are not implemented. The next storage-lifecycle work remains Milestone 3
+in `ROADMAP.md`.

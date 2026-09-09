@@ -18,12 +18,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Strict APFS COW cloning for regular files with symlink and executable-mode support.
 - Atomic native-path add journals and `riftri recover` for interrupted operations.
 - Repository-local activation through `riftri enable` and `riftri disable`.
+- Process-scoped `riftri exec` Git interception for supported adds in enabled repositories.
 
 ### Changed
 
 - Milestone 2 now permits only explicit APFS worktree creation. Unsupported
   checkout configurations fail before mutation, and full-copy fallback remains
   disabled.
+- Ordinary Git commands and disabled repositories pass directly to real Git
+  inside `riftri exec`; unsupported enabled add forms fail without fallback.
 
 ### Safety
 
