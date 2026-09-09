@@ -451,21 +451,23 @@ fn add_worktree_inner(
     );
     let journal_path = store.persist(&journal)?;
 
-    let operation = perform_add(
-        &git,
-        &store,
-        &mut journal,
-        &repository_root,
-        &destination,
-        &scratch,
-        &base_path,
-        &base_staging,
-        &temporary_index,
-        &request.revision,
-        &request.mode,
-        &resolved.tree,
-        fail_after,
-    );
+    let operation = fail_add_if_requested(journal.phase, fail_after).and_then(|()| {
+        perform_add(
+            &git,
+            &store,
+            &mut journal,
+            &repository_root,
+            &destination,
+            &scratch,
+            &base_path,
+            &base_staging,
+            &temporary_index,
+            &request.revision,
+            &request.mode,
+            &resolved.tree,
+            fail_after,
+        )
+    });
 
     match operation {
         Ok(reused_base) => Ok(AddWorktreeResult {
@@ -602,6 +604,14 @@ fn advance(
 ) -> Result<(), WorktreeError> {
     journal.transition(phase)?;
     store.persist(journal)?;
+    fail_add_if_requested(phase, fail_after)
+}
+
+#[cfg(target_os = "macos")]
+fn fail_add_if_requested(
+    phase: AddWorktreePhase,
+    fail_after: Option<AddWorktreePhase>,
+) -> Result<(), WorktreeError> {
     if fail_after == Some(phase) {
         return Err(WorktreeError::InjectedFailure(phase));
     }
@@ -1779,6 +1789,74 @@ mod tests {
             .status()
             .expect("check branch");
         assert!(!branch.success());
+    }
+
+    #[test]
+    fn recovery_is_idempotent_after_every_add_transition() {
+        let phases = [
+            AddWorktreePhase::IntentRecorded,
+            AddWorktreePhase::GitMetadataCreated,
+            AddWorktreePhase::BaseReady,
+            AddWorktreePhase::ViewCreated,
+            AddWorktreePhase::GitPointerRestored,
+            AddWorktreePhase::IndexSynchronized,
+            AddWorktreePhase::CleanVerified,
+        ];
+
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            let branch_name = format!("feature/recover-phase-{index}");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+            let error = add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(&branch_name)),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+                false,
+            )
+            .expect_err("simulate process termination");
+            assert!(
+                error.to_string().contains("injected failure"),
+                "unexpected failure after {phase:?}: {error}"
+            );
+
+            let recovered = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("recover after {phase:?}: {error}"));
+            assert_eq!(recovered.recovered, 1, "phase {phase:?}");
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert!(!destination.exists(), "phase {phase:?}");
+
+            let branch = Command::new("git")
+                .args(["show-ref", "--verify", "--quiet"])
+                .arg(format!("refs/heads/{branch_name}"))
+                .current_dir(&repository)
+                .status()
+                .expect("check branch");
+            assert!(!branch.success(), "phase {phase:?}");
+
+            let repeated = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("repeat recovery after {phase:?}: {error}"));
+            assert_eq!(repeated.recovered, 0, "phase {phase:?}");
+            assert!(repeated.errors.is_empty(), "phase {phase:?}");
+        }
     }
 
     #[test]
