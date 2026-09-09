@@ -17,7 +17,8 @@ Riftri is never a global Git replacement by default.
 1. Explicit operation: `riftri worktree add ...`
 2. Repository opt-in plus process-scoped activation: `riftri enable`, then
    `riftri exec -- claude`
-3. Optional repository-scoped shell integration
+3. Repository opt-in plus explicit shell activation: evaluate
+   `riftri shell hook zsh`, then use normal `git` commands
 
 The process-scoped mode places a small Git shim at the front of `PATH` only for
 the selected process and its children. Repository consent is stored in local Git
@@ -26,6 +27,14 @@ repositories without that marker are immediately delegated to the exact real
 Git executable resolved before the shim is installed. Supported worktree adds
 in enabled repositories are routed through Riftri. `RIFTRI_BYPASS=1` provides an
 explicit escape hatch to ordinary Git without disabling the repository.
+
+The shell hook installs a versioned shim link in the user's cache and prints
+Bourne-compatible environment assignments. Evaluating those assignments puts
+the shim first on `PATH` for that shell and its descendants. The hook is never
+evaluated automatically and Riftri never edits shell startup files. Once it is
+active, `riftri enable` and `riftri disable` are the repository-specific switch;
+disabled repositories and commands outside repositories still delegate to the
+real Git executable captured before `PATH` changes.
 
 The initial shim accepts optimized `worktree add` with `-b <new-branch>` or
 `--detach`. Unsupported add forms fail before mutation instead of silently
@@ -38,7 +47,8 @@ implemented.
 ### CLI and Git shim
 
 The CLI exposes diagnostics and explicit operations. The optional shim preserves
-the `git worktree` user experience inside an enabled process.
+the `git worktree` user experience inside an activated process or shell while
+repository-local configuration controls whether an add is optimized.
 
 The npm distribution layer does not implement product behavior. Its launcher
 selects an exact platform package, executes the Rust CLI, and preserves the

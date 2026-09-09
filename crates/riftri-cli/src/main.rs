@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,6 +37,12 @@ enum Command {
         /// Command and arguments to run.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<OsString>,
+    },
+
+    /// Configure shell-scoped interception for normal Git commands.
+    Shell {
+        #[command(subcommand)]
+        command: ShellCommand,
     },
 
     /// Inspect Git and show the planned storage path without changing anything.
@@ -113,6 +119,23 @@ enum WorktreeCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ShellCommand {
+    /// Print initialization code to evaluate in a shell.
+    Hook {
+        /// Bourne-compatible shell whose initialization code should be emitted.
+        #[arg(value_enum)]
+        shell: PosixShell,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PosixShell {
+    Sh,
+    Bash,
+    Zsh,
+}
+
 fn main() -> Result<()> {
     if invoked_as_git_shim() {
         std::process::exit(run_git_shim()?);
@@ -125,9 +148,16 @@ fn main() -> Result<()> {
             let activation = riftri_core::enable_repository(&path)?;
             println!("Enabled Riftri for {}", activation.repository.display());
             println!("Git config: riftri.enabled=true");
-            println!(
-                "Activate transparent Git for an agent or shell with: riftri exec -- <command>"
-            );
+            if env::var_os(riftri_core::SHIM_ACTIVE_ENV).is_some() {
+                println!("Normal Git interception is active in this shell");
+            } else {
+                #[cfg(unix)]
+                println!(
+                    "Activate this shell with: eval \"$(riftri shell hook {})\"",
+                    detected_posix_shell()
+                );
+                println!("Or activate one process with: riftri exec -- <command>");
+            }
         }
         Command::Disable { path } => {
             let activation = riftri_core::disable_repository(&path)?;
@@ -135,6 +165,11 @@ fn main() -> Result<()> {
         }
         Command::Exec { command } => {
             std::process::exit(riftri_core::execute_scoped_command(&command)?);
+        }
+        Command::Shell {
+            command: ShellCommand::Hook { shell: _ },
+        } => {
+            print!("{}", riftri_core::prepare_posix_shell_hook()?);
         }
         Command::Doctor {
             path,
@@ -224,6 +259,19 @@ fn invoked_as_git_shim() -> bool {
             .as_deref()
             .and_then(|argument| Path::new(argument).file_name())
             .is_some_and(|name| name == OsStr::new("git") || name == OsStr::new("git.exe"))
+}
+
+#[cfg(unix)]
+fn detected_posix_shell() -> &'static str {
+    let shell = env::var_os("SHELL");
+    match shell
+        .as_deref()
+        .and_then(|path| Path::new(path).file_name())
+    {
+        Some(name) if name == OsStr::new("bash") => "bash",
+        Some(name) if name == OsStr::new("zsh") => "zsh",
+        _ => "sh",
+    }
 }
 
 fn run_git_shim() -> Result<i32> {
@@ -346,7 +394,7 @@ mod tests {
     use clap::Parser;
     use clap::error::ErrorKind;
 
-    use super::{Cli, Command, WorktreeCommand};
+    use super::{Cli, Command, PosixShell, ShellCommand, WorktreeCommand};
 
     #[test]
     fn parses_repository_activation_commands() {
@@ -373,6 +421,19 @@ mod tests {
             panic!("unexpected exec command");
         };
         assert_eq!(command, [OsStr::new("agent"), OsStr::new("--flag")]);
+    }
+
+    #[test]
+    fn parses_shell_hook_activation_command() {
+        let cli = Cli::try_parse_from(["riftri", "shell", "hook", "zsh"])
+            .expect("parse shell hook command");
+        let Command::Shell {
+            command: ShellCommand::Hook { shell },
+        } = cli.command
+        else {
+            panic!("unexpected shell command");
+        };
+        assert_eq!(shell, PosixShell::Zsh);
     }
 
     #[test]

@@ -80,9 +80,19 @@ ordinary-Git operations.
 
 ### Repository-scoped mode
 
-A future optional shell integration may optimize worktree operations only in
-repositories explicitly enabled by the user. Global interception is never the
-default.
+Users may explicitly activate a shell hook, then use normal Git commands:
+
+```console
+$ eval "$(riftri shell hook zsh)"
+$ riftri enable
+$ git worktree add -b feature/auth ../app-auth main
+```
+
+The hook is shell-scoped and inherited by child processes. It routes supported
+adds through Riftri only in repositories explicitly enabled by the user and
+delegates everything else to the exact real Git executable. Riftri prints the
+hook but never edits shell startup files automatically. Global interception is
+never the default.
 
 ## System outline
 
@@ -126,7 +136,8 @@ journals. State is coordination metadata, not source control.
 
 ### Optional Git shim
 
-Recognizes worktree lifecycle commands inside an enabled process. Normal Git
+Recognizes worktree lifecycle commands inside an explicitly activated process
+or shell. Repository-local enablement controls optimized adds. Normal Git
 commands should immediately execute real Git without opening Riftri state.
 
 ### Distribution
@@ -186,8 +197,8 @@ prototype exist. On a writable APFS volume, `riftri worktree add` builds or
 reuses an exact-tree immutable base, creates real linked-worktree metadata with
 checkout suppressed, activates a native COW clone, synchronizes the index, and
 requires a clean Git status before success. Add operations are journaled and
-recoverable. Repository-local enable/disable state and an initial process-scoped
-Git shim now route supported adds through that same transaction. Removal and
-full lifecycle interception, Linux/Windows mutation backends, mounts, and a
-daemon are not implemented. The next storage-lifecycle work remains Milestone 3
-in `ROADMAP.md`.
+recoverable. Repository-local enable/disable state, process-scoped execution,
+and an explicitly activated sh/bash/zsh hook now route supported normal Git
+adds through that same transaction. Removal and full lifecycle interception,
+Linux/Windows mutation backends, mounts, and a daemon are not implemented. The
+next storage-lifecycle work remains Milestone 3 in `ROADMAP.md`.

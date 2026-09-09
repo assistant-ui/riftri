@@ -8,18 +8,35 @@ only changes how linked worktree files are materialized and stored.
 
 ## Current macOS experience
 
+Activate Riftri's Git shim in the current shell once:
+
+```console
+$ eval "$(riftri shell hook zsh)"
+```
+
+You may add that line to your shell profile yourself if you want it in every new
+shell. Riftri never edits shell startup files automatically. After shell
+activation, repository enablement is the interception switch:
+
 ```console
 $ git clone git@github.com:acme/app.git
 $ cd app
 $ riftri enable
-$ riftri exec -- claude
 $ git worktree add -b feature/auth ../app-auth main
 ```
 
-`riftri enable` records repository-local consent in `riftri.enabled`. Inside the
-process started by `riftri exec`, supported `git worktree add` commands in that
-repository are routed through Riftri. Other Git commands and worktree adds in
-repositories that have not been enabled execute the real Git binary directly.
+`riftri enable` records repository-local consent in `riftri.enabled`. With the
+shell hook active, supported `git worktree add` commands in that repository are
+routed through Riftri. Other Git commands and worktree adds in repositories that
+have not been enabled execute the real Git binary directly.
+
+For one agent or command tree without shell setup, process-scoped activation
+remains available:
+
+```console
+$ riftri enable
+$ riftri exec -- claude
+```
 
 The resulting path is a real Git linked worktree. Unchanged data is shared with
 an immutable base while writes remain private to that worktree. Riftri does not
@@ -51,6 +68,8 @@ provides:
 - Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
 - Repository-local `riftri enable`/`riftri disable` activation.
 - Process-scoped `riftri exec` interception for supported worktree adds.
+- Explicit sh/bash/zsh activation for normal `git` commands through
+  `riftri shell hook`.
 
 Try the safe diagnostic commands:
 
@@ -60,6 +79,7 @@ $ cargo run -p riftri-cli -- doctor --destination ../proposed-worktree
 $ cargo run -p riftri-cli -- doctor --json
 $ cargo run -p riftri-cli -- backends ../proposed-worktree
 $ cargo run -p riftri-cli -- enable
+$ eval "$(cargo run --quiet -p riftri-cli -- shell hook zsh)"
 $ cargo run -p riftri-cli -- exec -- $SHELL
 $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
 ```
