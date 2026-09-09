@@ -206,6 +206,20 @@ enum ShellCommand {
         #[arg(value_enum)]
         shell: PosixShell,
     },
+
+    /// Print code to evaluate to deactivate Riftri in the current shell.
+    Deactivate {
+        /// Bourne-compatible shell whose deactivation code should be emitted.
+        #[arg(value_enum)]
+        shell: PosixShell,
+    },
+
+    /// Show shell interception and repository opt-in status.
+    Status {
+        /// Repository to inspect for local Riftri enablement.
+        #[arg(default_value = ".")]
+        repository: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -251,11 +265,15 @@ fn main() -> Result<()> {
             };
             std::process::exit(status);
         }
-        Command::Shell {
-            command: ShellCommand::Hook { shell: _ },
-        } => {
-            print!("{}", riftri_core::prepare_posix_shell_hook()?);
-        }
+        Command::Shell { command } => match command {
+            ShellCommand::Hook { shell: _ } => {
+                print!("{}", riftri_core::prepare_posix_shell_hook()?);
+            }
+            ShellCommand::Deactivate { shell: _ } => {
+                print!("{}", riftri_core::prepare_posix_shell_deactivation()?);
+            }
+            ShellCommand::Status { repository } => print_shell_status(&repository)?,
+        },
         Command::Doctor {
             path,
             destination,
@@ -402,6 +420,59 @@ fn resolve_state_directory(repository: &Path, state_directory: Option<PathBuf>) 
             Ok(activation.common_git_dir.join("riftri"))
         }
     }
+}
+
+fn print_shell_status(repository: &Path) -> Result<()> {
+    let shell = riftri_core::shell_activation_status()?;
+    println!(
+        "Shell interception: {}",
+        if shell.active {
+            "active"
+        } else if shell.marker_set || shell.shim_first_on_path || shell.real_git.is_some() {
+            "incomplete"
+        } else {
+            "inactive"
+        }
+    );
+    println!("Shim directory: {}", shell.shim_directory.display());
+    if let Some(real_git) = &shell.real_git {
+        println!("Real Git: {}", real_git.display());
+    }
+    println!(
+        "Global shell scope: {}",
+        if shell.active {
+            "this shell and its children; every new shell too only if you added the hook to your profile"
+        } else {
+            "not active in this shell"
+        }
+    );
+    match riftri_core::repository_activation(repository) {
+        Ok(activation) => {
+            println!("Repository: {}", activation.repository.display());
+            println!(
+                "Repository optimization: {}",
+                if activation.enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+            println!(
+                "Effective optimized interception: {}",
+                if shell.active && activation.enabled {
+                    "active"
+                } else {
+                    "inactive"
+                }
+            );
+        }
+        Err(_) => {
+            println!("Repository: none at {}", repository.display());
+            println!("Repository optimization: not applicable");
+            println!("Effective optimized interception: inactive");
+        }
+    }
+    Ok(())
 }
 
 fn print_recovery_report(
@@ -761,6 +832,26 @@ mod tests {
             panic!("unexpected shell command");
         };
         assert_eq!(shell, PosixShell::Zsh);
+
+        let deactivate = Cli::try_parse_from(["riftri", "shell", "deactivate", "bash"])
+            .expect("parse shell deactivation command");
+        let Command::Shell {
+            command: ShellCommand::Deactivate { shell },
+        } = deactivate.command
+        else {
+            panic!("unexpected shell deactivation command");
+        };
+        assert_eq!(shell, PosixShell::Bash);
+
+        let status = Cli::try_parse_from(["riftri", "shell", "status", "../app"])
+            .expect("parse shell status command");
+        let Command::Shell {
+            command: ShellCommand::Status { repository },
+        } = status.command
+        else {
+            panic!("unexpected shell status command");
+        };
+        assert_eq!(repository, Path::new("../app"));
     }
 
     #[test]
