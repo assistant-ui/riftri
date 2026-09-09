@@ -81,6 +81,7 @@ provides:
 - Journaled clean-worktree removal with resumable recovery.
 - Retained-base reference counts plus logical and allocated-byte reporting.
 - Repository-aware `riftri repair` and actionable lifecycle status explanations.
+- Explicit, journaled `riftri gc --apply` for zero-reference immutable bases.
 - Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
 - Repository-local `riftri enable`/`riftri disable` activation.
 - Process-scoped `riftri exec` interception for supported worktree adds.
@@ -103,6 +104,8 @@ $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
 $ cargo run -p riftri-cli -- worktree remove ../app-auth
 $ cargo run -p riftri-cli -- status
 $ cargo run -p riftri-cli -- repair
+$ cargo run -p riftri-cli -- gc
+$ cargo run -p riftri-cli -- gc --apply
 ```
 
 The add command currently requires macOS and a writable APFS volume. Its first
@@ -111,8 +114,9 @@ sparse checkout, submodules, and checkout-changing non-default configuration.
 Transparent optimized adds currently require either `-b <new-branch>` or
 `--detach`. Clean managed removes using the ordinary no-option
 `git worktree remove <path>` form are also routed through Riftri. Dirty views are
-preserved, and zero-reference bases remain cached for reuse. These operations
-never fall back to a full copy. Set `RIFTRI_BYPASS=1` only when you intentionally
+preserved, and zero-reference bases remain cached for reuse until an explicit
+`riftri gc --apply`. A plain `riftri gc` only prints the collection plan. These
+operations never fall back to a full copy. Set `RIFTRI_BYPASS=1` only when you intentionally
 want an enabled command to use ordinary Git. If an operation is interrupted,
 run the repository-aware repair command:
 

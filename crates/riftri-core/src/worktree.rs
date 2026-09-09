@@ -22,14 +22,18 @@ use riftri_storage::{BackendKind, CapabilityStatus, DestinationVolume, probe_bac
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::journal::{
-    DecodedJournal, DecodedRemovalJournal, JournalError, JournalStore, RemovalJournalRecord,
-    RemovalJournalStore,
-};
 #[cfg(target_os = "macos")]
-use crate::journal::{JournalPaths, JournalRecord, RemovalJournalPaths};
+use crate::journal::{
+    CollectionJournalPaths, CollectionJournalRecord, DecodedCollectionJournal, JournalPaths,
+    JournalRecord, RemovalJournalPaths,
+};
+use crate::journal::{
+    CollectionJournalStore, DecodedJournal, DecodedRemovalJournal, JournalError, JournalStore,
+    RemovalJournalRecord, RemovalJournalStore,
+};
 use crate::{
-    AddWorktreePhase, JournalTransitionError, RemoveJournalTransitionError, RemoveWorktreePhase,
+    AddWorktreePhase, GarbageCollectionPhase, JournalTransitionError, RemoveJournalTransitionError,
+    RemoveWorktreePhase,
 };
 
 #[cfg(target_os = "macos")]
@@ -93,11 +97,32 @@ pub struct ViewStorageAccounting {
     pub allocated_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GarbageCollectionCandidate {
+    pub base_path: PathBuf,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GarbageCollectionReport {
+    pub applied: bool,
+    pub candidates: Vec<GarbageCollectionCandidate>,
+    pub collected: Vec<PathBuf>,
+    pub skipped_in_use: Vec<PathBuf>,
+    pub resumed_collections: usize,
+    pub removed_logical_bytes: u64,
+    pub removed_allocated_bytes: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StorageAccountingReport {
     pub active_views: usize,
     pub completed_removals: usize,
     pub pending_removals: usize,
+    pub completed_collections: usize,
+    pub cancelled_collections: usize,
+    pub pending_collections: usize,
     pub bases: Vec<BaseStorageAccounting>,
     pub views: Vec<ViewStorageAccounting>,
     pub total_logical_bytes: u64,
@@ -111,6 +136,8 @@ pub struct RecoveryReport {
     pub active: usize,
     pub completed_removals: usize,
     pub recovered_removals: usize,
+    pub completed_collections: usize,
+    pub recovered_collections: usize,
     pub errors: Vec<String>,
 }
 
@@ -153,6 +180,9 @@ pub enum WorktreeError {
 
     #[error("injected removal failure after {0:?}")]
     InjectedRemovalFailure(RemoveWorktreePhase),
+
+    #[error("injected garbage-collection failure after {0:?}")]
+    InjectedCollectionFailure(GarbageCollectionPhase),
 }
 
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
@@ -163,6 +193,14 @@ pub fn remove_worktree(
     request: RemoveWorktreeRequest,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
     remove_worktree_inner(request, None)
+}
+
+/// Plan or apply collection of immutable bases with no journaled references.
+pub fn garbage_collect(
+    state_directory: &Path,
+    apply: bool,
+) -> Result<GarbageCollectionReport, WorktreeError> {
+    garbage_collect_inner(state_directory, apply, None)
 }
 
 /// Return whether `destination` is an active Riftri-managed worktree in the
@@ -192,6 +230,7 @@ pub fn storage_accounting(
     };
     let add_journals = JournalStore::open(&state_directory).load_all()?;
     let removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
+    let collection_journals = CollectionJournalStore::open(&state_directory).load_all()?;
     let completed = removal_journals
         .iter()
         .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
@@ -255,11 +294,407 @@ pub fn storage_accounting(
             .iter()
             .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
             .count(),
+        completed_collections: collection_journals
+            .iter()
+            .filter(|journal| journal.phase == GarbageCollectionPhase::Complete)
+            .count(),
+        cancelled_collections: collection_journals
+            .iter()
+            .filter(|journal| journal.phase == GarbageCollectionPhase::Cancelled)
+            .count(),
+        pending_collections: collection_journals
+            .iter()
+            .filter(|journal| {
+                !matches!(
+                    journal.phase,
+                    GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
+                )
+            })
+            .count(),
         bases,
         views,
         total_logical_bytes,
         total_allocated_bytes,
     })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn garbage_collect_inner(
+    _state_directory: &Path,
+    _apply: bool,
+    _fail_after: Option<GarbageCollectionPhase>,
+) -> Result<GarbageCollectionReport, WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "immutable-base garbage collection currently requires macOS".to_owned(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn garbage_collect_inner(
+    state_directory: &Path,
+    apply: bool,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<GarbageCollectionReport, WorktreeError> {
+    let state_directory = absolute_path(state_directory)?;
+    if !state_directory.exists() {
+        return Ok(GarbageCollectionReport {
+            applied: apply,
+            ..GarbageCollectionReport::default()
+        });
+    }
+    let state_directory = fs::canonicalize(&state_directory)
+        .map_err(|source| io("resolve state directory", &state_directory, source))?;
+
+    let resumed_collections = if apply {
+        recover_collection_journals(&state_directory)?
+    } else {
+        0
+    };
+    let candidates = garbage_collection_candidates(&state_directory)?;
+    let mut report = GarbageCollectionReport {
+        applied: apply,
+        candidates: candidates.clone(),
+        resumed_collections,
+        ..GarbageCollectionReport::default()
+    };
+    if !apply {
+        return Ok(report);
+    }
+
+    let store = CollectionJournalStore::create(&state_directory)?;
+    for candidate in candidates {
+        let operation_id = format!("gc-{}", next_operation_id(current_timestamp()?));
+        let parent = candidate.base_path.expect_parent()?.to_path_buf();
+        let quarantine_path = parent.join(format!(".riftri-gc-{operation_id}"));
+        let marker_path = candidate.base_path.with_extension("complete");
+        let mut journal = CollectionJournalRecord::new(
+            operation_id,
+            CollectionJournalPaths {
+                base_path: &candidate.base_path,
+                quarantine_path: &quarantine_path,
+                marker_path: &marker_path,
+            },
+        );
+        let journal_path = store.persist(&journal)?;
+        fail_collection_if_requested(journal.phase, fail_after)?;
+        let decoded = journal.clone().decode(journal_path)?;
+        if resume_collection(&state_directory, &store, &mut journal, &decoded, fail_after)? {
+            report.removed_logical_bytes = report
+                .removed_logical_bytes
+                .saturating_add(candidate.logical_bytes);
+            report.removed_allocated_bytes = report
+                .removed_allocated_bytes
+                .saturating_add(candidate.allocated_bytes);
+            report.collected.push(candidate.base_path);
+        } else {
+            report.skipped_in_use.push(candidate.base_path);
+        }
+    }
+    Ok(report)
+}
+
+#[cfg(target_os = "macos")]
+fn current_timestamp() -> Result<u128, WorktreeError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|error| WorktreeError::InvalidRequest(format!("system clock error: {error}")))
+}
+
+#[cfg(target_os = "macos")]
+fn garbage_collection_candidates(
+    state_directory: &Path,
+) -> Result<Vec<GarbageCollectionCandidate>, WorktreeError> {
+    let protected = protected_base_paths(state_directory)?;
+    let pending = CollectionJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| {
+            !matches!(
+                journal.phase,
+                GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
+            )
+        })
+        .map(|journal| journal.base_path)
+        .collect::<HashSet<_>>();
+    let mut candidates = Vec::new();
+    for base_path in retained_base_paths(state_directory)? {
+        if protected.contains(&base_path) || pending.contains(&base_path) {
+            continue;
+        }
+        let (logical_bytes, allocated_bytes) = if base_path.is_dir() {
+            tree_usage(&base_path)?
+        } else {
+            (0, 0)
+        };
+        candidates.push(GarbageCollectionCandidate {
+            base_path,
+            logical_bytes,
+            allocated_bytes,
+        });
+    }
+    Ok(candidates)
+}
+
+#[cfg(target_os = "macos")]
+fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, WorktreeError> {
+    let removals = RemovalJournalStore::open(state_directory).load_all()?;
+    let completed = removals
+        .iter()
+        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
+    Ok(JournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| {
+            journal.phase != AddWorktreePhase::RolledBack
+                && !completed.contains(journal.operation_id.as_str())
+        })
+        .map(|journal| journal.base_path)
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+fn recover_collection_journals(state_directory: &Path) -> Result<usize, WorktreeError> {
+    let store = CollectionJournalStore::open(state_directory);
+    let journals = store.load_all()?;
+    let mut recovered = 0;
+    for journal in journals.into_iter().filter(|journal| {
+        !matches!(
+            journal.phase,
+            GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
+        )
+    }) {
+        resume_decoded_collection(state_directory, &store, &journal, None)?;
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
+#[cfg(target_os = "macos")]
+fn resume_decoded_collection(
+    state_directory: &Path,
+    store: &CollectionJournalStore,
+    journal: &DecodedCollectionJournal,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<bool, WorktreeError> {
+    let file = File::open(&journal.journal_path)
+        .map_err(|source| io("open collection journal", &journal.journal_path, source))?;
+    let mut record: CollectionJournalRecord =
+        serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            path: journal.journal_path.clone(),
+            source,
+        })?;
+    resume_collection(state_directory, store, &mut record, journal, fail_after)
+}
+
+#[cfg(target_os = "macos")]
+fn resume_collection(
+    state_directory: &Path,
+    store: &CollectionJournalStore,
+    record: &mut CollectionJournalRecord,
+    journal: &DecodedCollectionJournal,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<bool, WorktreeError> {
+    validate_collection_paths(state_directory, journal)?;
+    let lock_path = journal.base_path.with_extension("lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| io("open immutable-base lock", &lock_path, source))?;
+    lock.lock_exclusive()
+        .map_err(|source| io("lock immutable base", &lock_path, source))?;
+
+    if record.phase == GarbageCollectionPhase::IntentRecorded {
+        if journal.quarantine_path.exists() {
+            if !journal.base_path.exists() {
+                validate_collection_marker(journal)?;
+                remove_file_if_present(&journal.marker_path)?;
+                sync_parent(&journal.marker_path)?;
+            }
+            advance_collection(
+                store,
+                record,
+                GarbageCollectionPhase::MarkerRemoved,
+                fail_after,
+            )?;
+        } else if protected_base_paths(state_directory)?.contains(&journal.base_path) {
+            advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
+            return Ok(false);
+        } else {
+            validate_collectible_base(journal)?;
+            remove_file_if_present(&journal.marker_path)?;
+            sync_parent(&journal.marker_path)?;
+            advance_collection(
+                store,
+                record,
+                GarbageCollectionPhase::MarkerRemoved,
+                fail_after,
+            )?;
+        }
+    }
+
+    if record.phase == GarbageCollectionPhase::MarkerRemoved {
+        if journal.quarantine_path.exists() {
+            advance_collection(
+                store,
+                record,
+                GarbageCollectionPhase::BaseQuarantined,
+                fail_after,
+            )?;
+        } else if protected_base_paths(state_directory)?.contains(&journal.base_path)
+            || journal.marker_path.exists()
+        {
+            advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
+            return Ok(false);
+        } else {
+            validate_collectible_base(journal)?;
+            if journal.base_path.exists() {
+                make_directory_owner_writable(&journal.base_path)?;
+                fs::rename(&journal.base_path, &journal.quarantine_path).map_err(|source| {
+                    io(
+                        "quarantine immutable base",
+                        &journal.quarantine_path,
+                        source,
+                    )
+                })?;
+                sync_parent(&journal.base_path)?;
+            }
+            advance_collection(
+                store,
+                record,
+                GarbageCollectionPhase::BaseQuarantined,
+                fail_after,
+            )?;
+        }
+    }
+
+    if record.phase == GarbageCollectionPhase::BaseQuarantined {
+        remove_tree_if_present(&journal.quarantine_path)?;
+        sync_parent(&journal.quarantine_path)?;
+        advance_collection(store, record, GarbageCollectionPhase::Complete, fail_after)?;
+    }
+    Ok(record.phase == GarbageCollectionPhase::Complete)
+}
+
+#[cfg(target_os = "macos")]
+fn validate_collection_paths(
+    state_directory: &Path,
+    journal: &DecodedCollectionJournal,
+) -> Result<(), WorktreeError> {
+    let base_root = state_directory.join("bases/v1");
+    let Some(repository_directory) = journal.base_path.parent() else {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "collection journal {} has no base parent",
+            journal.journal_path.display()
+        )));
+    };
+    if !journal.base_path.is_absolute()
+        || repository_directory.parent() != Some(base_root.as_path())
+        || journal.marker_path != journal.base_path.with_extension("complete")
+        || journal.quarantine_path.parent() != Some(repository_directory)
+        || journal.quarantine_path.file_name()
+            != Some(OsStr::new(&format!(".riftri-gc-{}", journal.operation_id)))
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "collection journal {} contains paths outside its operation scope",
+            journal.journal_path.display()
+        )));
+    }
+    for directory in [&base_root, repository_directory] {
+        let metadata = fs::symlink_metadata(directory)
+            .map_err(|source| io("inspect collection parent", directory, source))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "collection journal {} has a non-directory or symlinked parent {}",
+                journal.journal_path.display(),
+                directory.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_collectible_base(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
+    if journal.base_path.exists() {
+        let metadata = fs::symlink_metadata(&journal.base_path)
+            .map_err(|source| io("inspect collectible base", &journal.base_path, source))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "collectible base {} is not a real directory",
+                journal.base_path.display()
+            )));
+        }
+    }
+    validate_collection_marker(journal)
+}
+
+#[cfg(target_os = "macos")]
+fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
+    if journal.marker_path.exists() {
+        let metadata = fs::symlink_metadata(&journal.marker_path).map_err(|source| {
+            io(
+                "inspect collectible base marker",
+                &journal.marker_path,
+                source,
+            )
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "collectible base marker {} is not a real file",
+                journal.marker_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect collectible base directory", path, source))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "collectible base {} is not a real directory",
+            path.display()
+        )));
+    }
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(metadata.permissions().mode() | 0o700),
+    )
+    .map_err(|source| io("prepare collectible base directory", path, source))
+}
+
+#[cfg(target_os = "macos")]
+fn advance_collection(
+    store: &CollectionJournalStore,
+    journal: &mut CollectionJournalRecord,
+    phase: GarbageCollectionPhase,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<(), WorktreeError> {
+    journal.transition(phase)?;
+    store.persist(journal)?;
+    fail_collection_if_requested(phase, fail_after)
+}
+
+#[cfg(target_os = "macos")]
+fn fail_collection_if_requested(
+    phase: GarbageCollectionPhase,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<(), WorktreeError> {
+    if fail_after == Some(phase) {
+        Err(WorktreeError::InjectedCollectionFailure(phase))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1103,13 +1538,18 @@ pub fn recover_incomplete_operations(
     let journals = store.load_all()?;
     let removal_store = RemovalJournalStore::open(&state_directory);
     let removal_journals = removal_store.load_all()?;
+    let collection_store = CollectionJournalStore::open(&state_directory);
+    let collection_journals = collection_store.load_all()?;
     let completed_adds = removal_journals
         .iter()
         .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
     let mut report = RecoveryReport {
-        scanned: journals.len().saturating_add(removal_journals.len()),
+        scanned: journals
+            .len()
+            .saturating_add(removal_journals.len())
+            .saturating_add(collection_journals.len()),
         ..RecoveryReport::default()
     };
     let git = Git::default();
@@ -1158,6 +1598,28 @@ pub fn recover_incomplete_operations(
             report.recovered_removals += 1;
             report.completed_removals += 1;
             report.active = report.active.saturating_sub(1);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for journal in collection_journals {
+        match journal.phase {
+            GarbageCollectionPhase::Complete => report.completed_collections += 1,
+            GarbageCollectionPhase::Cancelled => {}
+            _ => {
+                match resume_decoded_collection(&state_directory, &collection_store, &journal, None)
+                {
+                    Ok(true) => {
+                        report.recovered_collections += 1;
+                        report.completed_collections += 1;
+                    }
+                    Ok(false) => {}
+                    Err(error) => report.errors.push(format!(
+                        "garbage-collection operation {}: {error}",
+                        journal.operation_id
+                    )),
+                }
+            }
         }
     }
     Ok(report)
@@ -1650,10 +2112,10 @@ mod tests {
 
     use super::{
         AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
-        next_operation_id, recover_incomplete_operations, remove_worktree_inner,
-        storage_accounting,
+        garbage_collect_inner, next_operation_id, recover_incomplete_operations,
+        remove_worktree_inner, storage_accounting,
     };
-    use crate::{AddWorktreePhase, RemoveWorktreePhase};
+    use crate::{AddWorktreePhase, GarbageCollectionPhase, RemoveWorktreePhase};
 
     fn git(path: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -2149,6 +2611,189 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved change"),
             "changed after intent\n"
+        );
+    }
+
+    #[test]
+    fn recovery_is_idempotent_after_every_collection_transition() {
+        let phases = [
+            GarbageCollectionPhase::IntentRecorded,
+            GarbageCollectionPhase::BaseQuarantined,
+            GarbageCollectionPhase::MarkerRemoved,
+            GarbageCollectionPhase::Complete,
+        ];
+
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            let added = add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(format!(
+                        "feature/gc-phase-{index}"
+                    ))),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination,
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("remove worktree");
+
+            let error = garbage_collect_inner(&state, true, Some(phase))
+                .expect_err("simulate collection interruption");
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected garbage-collection failure"),
+                "unexpected {phase:?} error: {error}"
+            );
+
+            let recovered = recover_incomplete_operations(&state).expect("recover collection");
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert_eq!(
+                recovered.recovered_collections,
+                usize::from(phase != GarbageCollectionPhase::Complete),
+                "phase {phase:?}"
+            );
+            assert_eq!(recovered.completed_collections, 1, "phase {phase:?}");
+            assert!(!added.base_path.exists(), "phase {phase:?}");
+            assert!(
+                !added.base_path.with_extension("complete").exists(),
+                "phase {phase:?}"
+            );
+
+            let accounting = storage_accounting(&state).expect("account collection");
+            assert!(accounting.bases.is_empty(), "phase {phase:?}");
+            assert_eq!(accounting.pending_collections, 0, "phase {phase:?}");
+            assert_eq!(accounting.completed_collections, 1, "phase {phase:?}");
+
+            let repeated = recover_incomplete_operations(&state).expect("repeat recovery");
+            assert_eq!(repeated.recovered_collections, 0, "phase {phase:?}");
+            assert_eq!(repeated.completed_collections, 1, "phase {phase:?}");
+            assert!(repeated.errors.is_empty(), "phase {phase:?}");
+        }
+    }
+
+    #[test]
+    fn garbage_collection_preserves_a_base_referenced_by_an_incomplete_add() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository,
+                destination,
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/gc-incomplete")),
+                state_dir: Some(state.clone()),
+            },
+            Some(AddWorktreePhase::BaseReady),
+            false,
+        )
+        .expect_err("leave an incomplete add after base creation");
+
+        let plan = garbage_collect_inner(&state, false, None).expect("plan collection");
+        assert!(plan.candidates.is_empty());
+        let accounting = storage_accounting(&state).expect("account incomplete add");
+        assert_eq!(accounting.bases.len(), 1);
+
+        let recovery = recover_incomplete_operations(&state).expect("recover incomplete add");
+        assert_eq!(recovery.recovered, 1);
+        assert!(recovery.errors.is_empty());
+        let after = garbage_collect_inner(&state, false, None).expect("plan recovered collection");
+        assert_eq!(after.candidates.len(), 1);
+    }
+
+    #[test]
+    fn garbage_collection_rejects_a_symlinked_completion_marker() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        let protected_file = fixture.path().join("do-not-delete");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        fs::write(&protected_file, "preserve\n").expect("write protected file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/gc-marker")),
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove worktree");
+        let marker = added.base_path.with_extension("complete");
+        fs::remove_file(&marker).expect("remove real marker");
+        symlink(&protected_file, &marker).expect("replace marker with symlink");
+
+        let error = garbage_collect_inner(&state, true, None)
+            .expect_err("symlinked marker must stop collection");
+        assert!(error.to_string().contains("not a real file"));
+        assert!(added.base_path.is_dir());
+        assert_eq!(
+            fs::read_to_string(&protected_file).expect("read protected file"),
+            "preserve\n"
         );
     }
 }

@@ -171,6 +171,26 @@ without `--force`, so a concurrent dirtying write is also rejected. A missing
 view plus missing Git registration is treated as an idempotently completed
 removal step. Inconsistent or changed paths are preserved for manual attention.
 
+## Base-collection journal state machine
+
+Garbage collection is read-only unless the user passes `--apply`. Each selected
+zero-reference base then uses a separate journal under `collections/`:
+
+```text
+intent-recorded
+  -> marker-removed
+  -> base-quarantined
+  -> complete
+```
+
+An operation may instead become `cancelled` if reference revalidation finds a
+live or incomplete add. Collection takes the same per-base lock as construction,
+reloads add and removal journals under that lock, and treats every non-rolled-back
+add without a completed removal as a reference. The completion marker is removed
+before the base is made writable for atomic quarantine, preventing another add
+from reusing a base once collection starts. Recovery deletes only the exact
+journaled quarantine path and leaves a newly rebuilt base untouched.
+
 Before Milestone 2 performs its first mutation, journal persistence must write
 the intent first and replace each state atomically using a temporary file,
 `fsync`, rename, and parent-directory `fsync` where the platform supports them.
@@ -202,7 +222,9 @@ It reports active views, retained bases, per-base reference counts, logical
 bytes, and filesystem-allocated bytes. Allocated bytes can include shared APFS
 blocks and are not an exclusive-space measurement; the volume-delta benchmark
 remains the authoritative sharing check. Bases reaching zero references remain
-cached until a later explicit garbage collector can prove deletion is safe.
+cached until the explicit garbage collector independently proves deletion is
+safe and records its intent. The collector is never part of normal worktree file
+access or Git command passthrough.
 `riftri repair` resolves the repository's state directory and applies the same
 conservative journal recovery as the explicit-state `riftri recover` command;
 it does not infer or delete unjournaled paths.

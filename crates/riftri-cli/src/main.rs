@@ -97,6 +97,21 @@ enum Command {
         state_dir: Option<PathBuf>,
     },
 
+    /// Plan or apply collection of immutable bases with no journaled references.
+    Gc {
+        /// Repository whose default Riftri state should be collected.
+        #[arg(default_value = ".")]
+        repository: PathBuf,
+
+        /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+
+        /// Apply the collection plan. Without this flag, nothing is deleted.
+        #[arg(long)]
+        apply: bool,
+    },
+
     /// Create or recover Riftri-backed real Git worktrees.
     Worktree {
         #[command(subcommand)]
@@ -269,6 +284,15 @@ fn main() -> Result<()> {
             let report = riftri_core::recover_incomplete_operations(&state_directory)?;
             print_recovery_report(&state_directory, &report)?;
         }
+        Command::Gc {
+            repository,
+            state_dir,
+            apply,
+        } => {
+            let state_directory = resolve_state_directory(&repository, state_dir)?;
+            let report = riftri_core::garbage_collect(&state_directory, apply)?;
+            print_garbage_collection_report(&state_directory, &report);
+        }
         Command::Worktree { command } => match command {
             WorktreeCommand::Add {
                 path,
@@ -338,6 +362,8 @@ fn print_recovery_report(
     println!("Recovered add operations: {}", report.recovered);
     println!("Completed removals: {}", report.completed_removals);
     println!("Recovered removals: {}", report.recovered_removals);
+    println!("Completed collections: {}", report.completed_collections);
+    println!("Recovered collections: {}", report.recovered_collections);
     if !report.errors.is_empty() {
         println!("Operations needing attention:");
         for error in &report.errors {
@@ -431,6 +457,12 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     if report.pending_removals > 0 {
         println!("Attention: run `riftri repair` to resume pending removals");
     }
+    println!("Completed collections: {}", report.completed_collections);
+    println!("Cancelled collections: {}", report.cancelled_collections);
+    println!("Pending collections: {}", report.pending_collections);
+    if report.pending_collections > 0 {
+        println!("Attention: run `riftri repair` to resume pending collections");
+    }
     println!("Retained bases: {}", report.bases.len());
     for base in &report.bases {
         let state = if base.reference_count == 0 {
@@ -459,6 +491,45 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     }
     println!("Total logical: {} bytes", report.total_logical_bytes);
     println!("Total allocated: {} bytes", report.total_allocated_bytes);
+}
+
+fn print_garbage_collection_report(
+    state_directory: &Path,
+    report: &riftri_core::GarbageCollectionReport,
+) {
+    println!("Riftri garbage collection");
+    println!("State: {}", state_directory.display());
+    println!(
+        "Mode: {}",
+        if report.applied {
+            "applied"
+        } else {
+            "plan only"
+        }
+    );
+    println!("Eligible bases: {}", report.candidates.len());
+    for candidate in &report.candidates {
+        println!(
+            "- {}: logical={} bytes, allocated={} bytes",
+            candidate.base_path.display(),
+            candidate.logical_bytes,
+            candidate.allocated_bytes
+        );
+    }
+    println!("Collected bases: {}", report.collected.len());
+    println!("Resumed prior collections: {}", report.resumed_collections);
+    println!(
+        "Skipped because now in use: {}",
+        report.skipped_in_use.len()
+    );
+    println!("Removed logical bytes: {}", report.removed_logical_bytes);
+    println!(
+        "Removed allocated-byte accounting: {}",
+        report.removed_allocated_bytes
+    );
+    if !report.applied && !report.candidates.is_empty() {
+        println!("Nothing was deleted; rerun with `riftri gc --apply` to collect this plan");
+    }
 }
 
 fn print_doctor(report: &riftri_core::DoctorReport) {
@@ -648,6 +719,20 @@ mod tests {
         };
         assert_eq!(repository, Path::new("../app"));
         assert_eq!(state_dir.as_deref(), Some(Path::new("../state")));
+
+        let gc = Cli::try_parse_from(["riftri", "gc", "../app", "--apply"])
+            .expect("parse garbage collection");
+        let Command::Gc {
+            repository,
+            state_dir,
+            apply,
+        } = gc.command
+        else {
+            panic!("unexpected garbage-collection command");
+        };
+        assert_eq!(repository, Path::new("../app"));
+        assert!(state_dir.is_none());
+        assert!(apply);
     }
 
     #[test]
