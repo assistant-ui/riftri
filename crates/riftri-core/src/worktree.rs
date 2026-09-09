@@ -1939,6 +1939,90 @@ mod tests {
     }
 
     #[test]
+    fn recovery_is_safe_and_idempotent_after_every_removal_transition() {
+        let phases = [
+            RemoveWorktreePhase::IntentRecorded,
+            RemoveWorktreePhase::CleanVerified,
+            RemoveWorktreePhase::WorktreeRemoved,
+            RemoveWorktreePhase::BaseReleased,
+            RemoveWorktreePhase::Complete,
+        ];
+
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(format!(
+                        "feature/remove-phase-{index}"
+                    ))),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+
+            let error = remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("simulate interruption after removal transition");
+            assert!(
+                error.to_string().contains("injected removal failure"),
+                "unexpected {phase:?} error: {error}"
+            );
+            assert_eq!(
+                destination.exists(),
+                phase <= RemoveWorktreePhase::CleanVerified,
+                "unexpected destination state after {phase:?}"
+            );
+
+            let recovered = recover_incomplete_operations(&state).expect("recover removal");
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert_eq!(
+                recovered.recovered_removals,
+                usize::from(phase != RemoveWorktreePhase::Complete),
+                "phase {phase:?}"
+            );
+            assert_eq!(recovered.completed_removals, 1, "phase {phase:?}");
+            assert!(!destination.exists(), "phase {phase:?}");
+
+            let accounting = storage_accounting(&state).expect("account after recovery");
+            assert_eq!(accounting.active_views, 0, "phase {phase:?}");
+            assert_eq!(accounting.pending_removals, 0, "phase {phase:?}");
+            assert_eq!(accounting.completed_removals, 1, "phase {phase:?}");
+            assert_eq!(accounting.bases.len(), 1, "phase {phase:?}");
+            assert_eq!(accounting.bases[0].reference_count, 0, "phase {phase:?}");
+
+            let repeated = recover_incomplete_operations(&state).expect("repeat recovery");
+            assert_eq!(repeated.recovered_removals, 0, "phase {phase:?}");
+            assert_eq!(repeated.completed_removals, 1, "phase {phase:?}");
+            assert!(repeated.errors.is_empty(), "phase {phase:?}");
+        }
+    }
+
+    #[test]
     fn recovery_preserves_a_worktree_changed_after_removal_intent() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
