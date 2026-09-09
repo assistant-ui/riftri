@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -19,10 +20,15 @@ use riftri_storage::{BackendKind, CapabilityStatus, DestinationVolume, probe_bac
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::journal::{DecodedJournal, JournalError, JournalStore};
+use crate::journal::{
+    DecodedJournal, DecodedRemovalJournal, JournalError, JournalStore, RemovalJournalRecord,
+    RemovalJournalStore,
+};
 #[cfg(target_os = "macos")]
-use crate::journal::{JournalPaths, JournalRecord};
-use crate::{AddWorktreePhase, JournalTransitionError};
+use crate::journal::{JournalPaths, JournalRecord, RemovalJournalPaths};
+use crate::{
+    AddWorktreePhase, JournalTransitionError, RemoveJournalTransitionError, RemoveWorktreePhase,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeMode {
@@ -51,11 +57,55 @@ pub struct AddWorktreeResult {
     pub reused_base: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RemoveWorktreeRequest {
+    pub repository: PathBuf,
+    pub destination: PathBuf,
+    /// Defaults to `<common-git-dir>/riftri`.
+    pub state_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveWorktreeResult {
+    pub destination: PathBuf,
+    pub base_path: PathBuf,
+    pub journal_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseStorageAccounting {
+    pub path: PathBuf,
+    pub reference_count: usize,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewStorageAccounting {
+    pub destination: PathBuf,
+    pub base_path: PathBuf,
+    pub logical_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StorageAccountingReport {
+    pub active_views: usize,
+    pub completed_removals: usize,
+    pub pending_removals: usize,
+    pub bases: Vec<BaseStorageAccounting>,
+    pub views: Vec<ViewStorageAccounting>,
+    pub total_logical_bytes: u64,
+    pub total_allocated_bytes: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryReport {
     pub scanned: usize,
     pub recovered: usize,
     pub active: usize,
+    pub completed_removals: usize,
+    pub recovered_removals: usize,
     pub errors: Vec<String>,
 }
 
@@ -72,6 +122,9 @@ pub enum WorktreeError {
 
     #[error(transparent)]
     JournalTransition(#[from] JournalTransitionError),
+
+    #[error(transparent)]
+    RemoveJournalTransition(#[from] RemoveJournalTransitionError),
 
     #[error("unsupported optimized checkout: {0}")]
     Unsupported(String),
@@ -92,10 +145,219 @@ pub enum WorktreeError {
 
     #[error("injected failure after {0:?}")]
     InjectedFailure(AddWorktreePhase),
+
+    #[error("injected removal failure after {0:?}")]
+    InjectedRemovalFailure(RemoveWorktreePhase),
 }
 
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
     add_worktree_inner(request, None, true)
+}
+
+pub fn remove_worktree(
+    request: RemoveWorktreeRequest,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    remove_worktree_inner(request, None)
+}
+
+/// Return whether `destination` is an active Riftri-managed worktree in the
+/// repository's default state directory.
+pub fn is_managed_worktree(repository: &Path, destination: &Path) -> Result<bool, WorktreeError> {
+    let git = Git::default();
+    let repository_info = git.inspect_repository(repository)?;
+    let state_directory = repository_info.identity.common_git_dir.join("riftri");
+    if !state_directory.exists() || !destination.exists() {
+        return Ok(false);
+    }
+    let destination = fs::canonicalize(destination)
+        .map_err(|source| io("resolve worktree destination", destination, source))?;
+    Ok(find_managed_add_journal(&state_directory, &destination)?.is_some())
+}
+
+/// Inventory retained immutable bases and active views from durable journals.
+pub fn storage_accounting(
+    state_directory: &Path,
+) -> Result<StorageAccountingReport, WorktreeError> {
+    let state_directory = absolute_path(state_directory)?;
+    let state_directory = if state_directory.exists() {
+        fs::canonicalize(&state_directory)
+            .map_err(|source| io("resolve state directory", &state_directory, source))?
+    } else {
+        state_directory
+    };
+    let add_journals = JournalStore::open(&state_directory).load_all()?;
+    let removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
+    let completed = removal_journals
+        .iter()
+        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut references = BTreeMap::<PathBuf, usize>::new();
+    let mut views = Vec::new();
+    for journal in add_journals.iter().filter(|journal| {
+        journal.phase == AddWorktreePhase::Active
+            && !completed.contains(&journal.operation_id)
+            && journal.destination.is_dir()
+    }) {
+        let (logical_bytes, allocated_bytes) = tree_usage(&journal.destination)?;
+        *references.entry(journal.base_path.clone()).or_default() += 1;
+        views.push(ViewStorageAccounting {
+            destination: journal.destination.clone(),
+            base_path: journal.base_path.clone(),
+            logical_bytes,
+            allocated_bytes,
+        });
+    }
+    views.sort_unstable_by(|left, right| left.destination.cmp(&right.destination));
+
+    for base_path in retained_base_paths(&state_directory)? {
+        references.entry(base_path).or_default();
+    }
+    let mut bases = Vec::with_capacity(references.len());
+    for (path, reference_count) in references {
+        let (logical_bytes, allocated_bytes) = if path.is_dir() {
+            tree_usage(&path)?
+        } else {
+            (0, 0)
+        };
+        bases.push(BaseStorageAccounting {
+            path,
+            reference_count,
+            logical_bytes,
+            allocated_bytes,
+        });
+    }
+
+    let total_logical_bytes = bases
+        .iter()
+        .map(|base| base.logical_bytes)
+        .chain(views.iter().map(|view| view.logical_bytes))
+        .fold(0_u64, u64::saturating_add);
+    let total_allocated_bytes = bases
+        .iter()
+        .map(|base| base.allocated_bytes)
+        .chain(views.iter().map(|view| view.allocated_bytes))
+        .fold(0_u64, u64::saturating_add);
+
+    Ok(StorageAccountingReport {
+        active_views: views.len(),
+        completed_removals: removal_journals
+            .iter()
+            .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+            .count(),
+        pending_removals: removal_journals
+            .iter()
+            .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
+            .count(),
+        bases,
+        views,
+        total_logical_bytes,
+        total_allocated_bytes,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn remove_worktree_inner(
+    _request: RemoveWorktreeRequest,
+    _fail_after: Option<RemoveWorktreePhase>,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "journaled Riftri removal currently requires macOS".to_owned(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn remove_worktree_inner(
+    request: RemoveWorktreeRequest,
+    fail_after: Option<RemoveWorktreePhase>,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    let git = Git::default();
+    let repository = git.inspect_repository(&request.repository)?;
+    if repository.is_bare {
+        return Err(WorktreeError::Unsupported(
+            "bare repositories do not have removable linked worktree views".to_owned(),
+        ));
+    }
+    let repository_root = repository.root.ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+    })?;
+    let destination = normalize_existing_destination(&request.destination)?;
+    let requested_state = request
+        .state_dir
+        .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
+    let state_directory = fs::canonicalize(absolute_path(&requested_state)?)
+        .map_err(|source| io("resolve state directory", &requested_state, source))?;
+    let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "{} is not an active Riftri-managed worktree in {}",
+            destination.display(),
+            state_directory.display()
+        ))
+    })?;
+    validate_recovery_paths(&state_directory, &managed)?;
+    if !git
+        .list_worktrees(&repository_root)?
+        .into_iter()
+        .any(|worktree| worktree.path == destination)
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} is not registered as a Git linked worktree",
+            destination.display()
+        )));
+    }
+    if !git.worktree_is_clean(&destination)? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} has changes; commit, stash, or remove them before retrying",
+            destination.display()
+        )));
+    }
+
+    let store = RemovalJournalStore::create(&state_directory)?;
+    let operation_id = allocate_removal_operation_id(&store)?;
+    let mut journal = RemovalJournalRecord::new(
+        operation_id,
+        RemovalJournalPaths {
+            repository: &repository_root,
+            destination: &destination,
+            base_path: &managed.base_path,
+        },
+        managed.operation_id,
+    );
+    let journal_path = store.persist(&journal)?;
+    fail_removal_if_requested(journal.phase, fail_after)?;
+    advance_removal(
+        &store,
+        &mut journal,
+        RemoveWorktreePhase::CleanVerified,
+        fail_after,
+    )?;
+
+    git.remove_worktree(&repository_root, &destination)?;
+    advance_removal(
+        &store,
+        &mut journal,
+        RemoveWorktreePhase::WorktreeRemoved,
+        fail_after,
+    )?;
+    advance_removal(
+        &store,
+        &mut journal,
+        RemoveWorktreePhase::BaseReleased,
+        fail_after,
+    )?;
+    advance_removal(
+        &store,
+        &mut journal,
+        RemoveWorktreePhase::Complete,
+        fail_after,
+    )?;
+
+    Ok(RemoveWorktreeResult {
+        destination,
+        base_path: managed.base_path,
+        journal_path,
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -642,6 +904,170 @@ fn repository_cache_id(common_git_directory: &Path, checkout_profile: &[u8]) -> 
     encoded
 }
 
+#[cfg(target_os = "macos")]
+fn normalize_existing_destination(destination: &Path) -> Result<PathBuf, WorktreeError> {
+    if destination.as_os_str().is_empty() {
+        return Err(WorktreeError::InvalidRequest(
+            "destination cannot be empty".to_owned(),
+        ));
+    }
+    fs::canonicalize(destination)
+        .map_err(|source| io("resolve worktree destination", destination, source))
+}
+
+fn find_managed_add_journal(
+    state_directory: &Path,
+    destination: &Path,
+) -> Result<Option<DecodedJournal>, WorktreeError> {
+    let removals = RemovalJournalStore::open(state_directory).load_all()?;
+    let completed = removals
+        .iter()
+        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
+    let pending = removals
+        .iter()
+        .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut matches = JournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| {
+            journal.phase == AddWorktreePhase::Active
+                && journal.destination == destination
+                && !completed.contains(journal.operation_id.as_str())
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "multiple active Riftri journals reference {}",
+            destination.display()
+        )));
+    }
+    let managed = matches.pop();
+    if managed
+        .as_ref()
+        .is_some_and(|journal| pending.contains(journal.operation_id.as_str()))
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "a removal of {} is already pending; run `riftri recover --state-dir {}`",
+            destination.display(),
+            state_directory.display()
+        )));
+    }
+    Ok(managed)
+}
+
+#[cfg(target_os = "macos")]
+fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, WorktreeError> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| WorktreeError::InvalidRequest(format!("system clock error: {error}")))?
+        .as_nanos();
+    for nonce in 0..1000_u16 {
+        let operation_id = format!("remove-{timestamp:x}-{:x}-{nonce:x}", std::process::id());
+        if !store.path_for(&operation_id).exists() {
+            return Ok(operation_id);
+        }
+    }
+    Err(WorktreeError::InvalidRequest(
+        "could not allocate a unique removal operation ID".to_owned(),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn advance_removal(
+    store: &RemovalJournalStore,
+    journal: &mut RemovalJournalRecord,
+    phase: RemoveWorktreePhase,
+    fail_after: Option<RemoveWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    journal.transition(phase)?;
+    store.persist(journal)?;
+    fail_removal_if_requested(phase, fail_after)
+}
+
+#[cfg(target_os = "macos")]
+fn fail_removal_if_requested(
+    phase: RemoveWorktreePhase,
+    fail_after: Option<RemoveWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    if fail_after == Some(phase) {
+        return Err(WorktreeError::InjectedRemovalFailure(phase));
+    }
+    Ok(())
+}
+
+fn retained_base_paths(state_directory: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
+    let root = state_directory.join("bases/v1");
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut bases = Vec::new();
+    for repository_entry in
+        fs::read_dir(&root).map_err(|source| io("read immutable-base root", &root, source))?
+    {
+        let repository_entry =
+            repository_entry.map_err(|source| io("read immutable-base entry", &root, source))?;
+        let repository_path = repository_entry.path();
+        let metadata = fs::symlink_metadata(&repository_path).map_err(|source| {
+            io(
+                "inspect immutable-base repository",
+                &repository_path,
+                source,
+            )
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        for entry in fs::read_dir(&repository_path)
+            .map_err(|source| io("read immutable-base repository", &repository_path, source))?
+        {
+            let entry = entry
+                .map_err(|source| io("read immutable-base marker", &repository_path, source))?;
+            let marker = entry.path();
+            if marker.extension() == Some(OsStr::new("complete")) && marker.is_file() {
+                bases.push(marker.with_extension(""));
+            }
+        }
+    }
+    bases.sort_unstable();
+    bases.dedup();
+    Ok(bases)
+}
+
+fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect storage accounting path", path, source))?;
+    let mut logical_bytes = if metadata.is_dir() { 0 } else { metadata.len() };
+    let mut allocated_bytes = allocated_bytes(&metadata);
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        for entry in fs::read_dir(path)
+            .map_err(|source| io("read storage accounting directory", path, source))?
+        {
+            let entry =
+                entry.map_err(|source| io("read storage accounting entry", path, source))?;
+            let (entry_logical, entry_allocated) = tree_usage(&entry.path())?;
+            logical_bytes = logical_bytes.saturating_add(entry_logical);
+            allocated_bytes = allocated_bytes.saturating_add(entry_allocated);
+        }
+    }
+    Ok((logical_bytes, allocated_bytes))
+}
+
+#[cfg(unix)]
+fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+
+    metadata.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
+    metadata.len()
+}
+
 pub fn recover_incomplete_operations(
     state_directory: &Path,
 ) -> Result<RecoveryReport, WorktreeError> {
@@ -654,8 +1080,15 @@ pub fn recover_incomplete_operations(
     };
     let store = JournalStore::open(&state_directory);
     let journals = store.load_all()?;
+    let removal_store = RemovalJournalStore::open(&state_directory);
+    let removal_journals = removal_store.load_all()?;
+    let completed_adds = removal_journals
+        .iter()
+        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
     let mut report = RecoveryReport {
-        scanned: journals.len(),
+        scanned: journals.len().saturating_add(removal_journals.len()),
         ..RecoveryReport::default()
     };
     let git = Git::default();
@@ -663,7 +1096,9 @@ pub fn recover_incomplete_operations(
     for journal in journals {
         match journal.phase {
             AddWorktreePhase::Active => {
-                report.active += 1;
+                if !completed_adds.contains(journal.operation_id.as_str()) {
+                    report.active += 1;
+                }
             }
             AddWorktreePhase::RolledBack => {}
             _ => {
@@ -687,7 +1122,167 @@ pub fn recover_incomplete_operations(
             }
         }
     }
+
+    for journal in removal_journals {
+        if journal.phase == RemoveWorktreePhase::Complete {
+            report.completed_removals += 1;
+            continue;
+        }
+        if let Err(error) = resume_removal(&git, &removal_store, journal.clone()) {
+            report.errors.push(format!(
+                "removal operation {}: {error}",
+                journal.operation_id
+            ));
+        } else {
+            report.recovered_removals += 1;
+            report.completed_removals += 1;
+            report.active = report.active.saturating_sub(1);
+        }
+    }
     Ok(report)
+}
+
+fn validate_removal_paths(
+    state_directory: &Path,
+    journal: &DecodedRemovalJournal,
+) -> Result<(), WorktreeError> {
+    let bases = state_directory.join("bases/v1");
+    if !journal.repository.is_absolute()
+        || !journal.destination.is_absolute()
+        || !journal.base_path.is_absolute()
+        || journal.base_path.parent().and_then(Path::parent) != Some(bases.as_path())
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "removal journal {} contains paths outside its operation scope",
+            journal.journal_path.display()
+        )));
+    }
+    let source = JournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "removal journal {} does not reference a known add operation",
+                journal.journal_path.display()
+            ))
+        })?;
+    if source.phase != AddWorktreePhase::Active
+        || source.repository != journal.repository
+        || source.destination != journal.destination
+        || source.base_path != journal.base_path
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "removal journal {} does not match its active add operation",
+            journal.journal_path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn resume_removal(
+    git: &Git,
+    store: &RemovalJournalStore,
+    journal: DecodedRemovalJournal,
+) -> Result<(), WorktreeError> {
+    let state_directory = store
+        .path_for(&journal.operation_id)
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "removal journal has no state directory: {}",
+                journal.journal_path.display()
+            ))
+        })?
+        .to_path_buf();
+    validate_removal_paths(&state_directory, &journal)?;
+    let file = File::open(&journal.journal_path)
+        .map_err(|source| io("open removal journal", &journal.journal_path, source))?;
+    let mut record: RemovalJournalRecord = serde_json::from_reader(file).map_err(|source| {
+        WorktreeError::InvalidRequest(format!(
+            "read removal journal {}: {source}",
+            journal.journal_path.display()
+        ))
+    })?;
+
+    if record.phase == RemoveWorktreePhase::IntentRecorded {
+        verify_recoverable_removal(git, &journal)?;
+        record.transition(RemoveWorktreePhase::CleanVerified)?;
+        store.persist(&record)?;
+    }
+
+    if record.phase == RemoveWorktreePhase::CleanVerified {
+        let (registered, destination_exists) = removal_presence(git, &journal)?;
+        if registered {
+            if destination_exists && !git.worktree_is_clean(&journal.destination)? {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "worktree {} has changes; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+            git.remove_worktree(&journal.repository, &journal.destination)?;
+        } else if destination_exists {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "destination {} exists but is not registered by Git; recovery preserved it",
+                journal.destination.display()
+            )));
+        }
+        record.transition(RemoveWorktreePhase::WorktreeRemoved)?;
+        store.persist(&record)?;
+    }
+
+    if record.phase >= RemoveWorktreePhase::WorktreeRemoved {
+        let (registered, destination_exists) = removal_presence(git, &journal)?;
+        if registered || destination_exists {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "removal journal {} says the worktree was removed, but {} is still present or registered",
+                journal.journal_path.display(),
+                journal.destination.display()
+            )));
+        }
+    }
+
+    if record.phase == RemoveWorktreePhase::WorktreeRemoved {
+        record.transition(RemoveWorktreePhase::BaseReleased)?;
+        store.persist(&record)?;
+    }
+    if record.phase == RemoveWorktreePhase::BaseReleased {
+        record.transition(RemoveWorktreePhase::Complete)?;
+        store.persist(&record)?;
+    }
+    Ok(())
+}
+
+fn verify_recoverable_removal(
+    git: &Git,
+    journal: &DecodedRemovalJournal,
+) -> Result<(), WorktreeError> {
+    let (registered, destination_exists) = removal_presence(git, journal)?;
+    if registered && destination_exists && !git.worktree_is_clean(&journal.destination)? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} has changes; recovery preserved it",
+            journal.destination.display()
+        )));
+    }
+    if !registered && destination_exists {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "destination {} exists but is not registered by Git; recovery preserved it",
+            journal.destination.display()
+        )));
+    }
+    Ok(())
+}
+
+fn removal_presence(
+    git: &Git,
+    journal: &DecodedRemovalJournal,
+) -> Result<(bool, bool), WorktreeError> {
+    let registered = git
+        .list_worktrees(&journal.repository)?
+        .into_iter()
+        .any(|worktree| worktree.path == journal.destination);
+    Ok((registered, journal.destination.exists()))
 }
 
 fn validate_recovery_paths(
@@ -1030,9 +1625,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        AddWorktreeRequest, WorktreeMode, add_worktree_inner, recover_incomplete_operations,
+        AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
+        recover_incomplete_operations, remove_worktree_inner, storage_accounting,
     };
-    use crate::AddWorktreePhase;
+    use crate::{AddWorktreePhase, RemoveWorktreePhase};
 
     fn git(path: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -1233,6 +1829,126 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved file"),
             "committed change\n"
+        );
+    }
+
+    #[test]
+    fn recovery_completes_an_interrupted_clean_removal_idempotently() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/remove-recover")),
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+
+        let error = remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(RemoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("simulate interruption after removal intent");
+        assert!(error.to_string().contains("injected removal failure"));
+        assert!(destination.is_dir());
+
+        let retry = remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect_err("a pending removal must be recovered instead of duplicated");
+        assert!(retry.to_string().contains("already pending"));
+
+        let recovered = recover_incomplete_operations(&state).expect("recover removal");
+        assert_eq!(recovered.recovered_removals, 1);
+        assert_eq!(recovered.completed_removals, 1);
+        assert!(recovered.errors.is_empty());
+        assert!(!destination.exists());
+        let accounting = storage_accounting(&state).expect("account after recovery");
+        assert_eq!(accounting.active_views, 0);
+        assert_eq!(accounting.bases[0].reference_count, 0);
+
+        let repeated = recover_incomplete_operations(&state).expect("repeat recovery");
+        assert_eq!(repeated.recovered_removals, 0);
+        assert_eq!(repeated.completed_removals, 1);
+        assert!(repeated.errors.is_empty());
+    }
+
+    #[test]
+    fn recovery_preserves_a_worktree_changed_after_removal_intent() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/remove-preserve")),
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(RemoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("simulate interruption after removal intent");
+        fs::write(destination.join("tracked.txt"), "changed after intent\n")
+            .expect("change worktree");
+
+        let report = recover_incomplete_operations(&state).expect("attempt removal recovery");
+        assert_eq!(report.recovered_removals, 0);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("changes"));
+        assert!(destination.is_dir());
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).expect("read preserved change"),
+            "changed after intent\n"
         );
     }
 }

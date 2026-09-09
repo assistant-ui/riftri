@@ -43,11 +43,11 @@ active, `riftri enable` and `riftri disable` are the repository-specific switch;
 disabled repositories and commands outside repositories still delegate to the
 real Git executable captured before `PATH` changes.
 
-The initial shim accepts optimized `worktree add` with `-b <new-branch>` or
-`--detach`. Unsupported add forms fail before mutation instead of silently
-falling back to a full checkout. Worktree removal and the remaining lifecycle
-commands continue to be owned by Git until Riftri's journaled removal path is
-implemented.
+The shim accepts optimized `worktree add` with `-b <new-branch>` or `--detach`
+and routes the ordinary no-option `worktree remove <path>` form through Riftri
+when the target has an active Riftri add journal. Unsupported add forms fail
+before mutation instead of silently falling back to a full checkout. Other
+remove forms and the remaining lifecycle commands continue to be owned by Git.
 
 ## Components
 
@@ -151,8 +151,25 @@ intent-recorded
 ```
 
 Every incomplete forward state may transition to `rollback-pending`, followed
-by `rolled-back`. `active` and `rolled-back` are terminal for an add operation;
-removal will use a separate transaction.
+by `rolled-back`. `active` and `rolled-back` are terminal for an add operation.
+
+## Removal-operation journal state machine
+
+Removal uses separate journals under `removals/`:
+
+```text
+intent-recorded
+  -> clean-verified
+  -> worktree-removed
+  -> base-released
+  -> complete
+```
+
+Riftri validates cleanliness before recording intent and rechecks cleanliness
+when resuming before Git removes a still-registered view. Git performs removal
+without `--force`, so a concurrent dirtying write is also rejected. A missing
+view plus missing Git registration is treated as an idempotently completed
+removal step. Inconsistent or changed paths are preserved for manual attention.
 
 Before Milestone 2 performs its first mutation, journal persistence must write
 the intent first and replace each state atomically using a temporary file,
@@ -179,6 +196,13 @@ Recovery validates every recorded cleanup path. It removes a visible incomplete
 view only when Git reports it clean or a byte/mode/symlink comparison proves it
 still equals the immutable base. Otherwise it retains the view and journal for
 manual attention.
+
+Storage accounting is derived from add/removal journals and completion markers.
+It reports active views, retained bases, per-base reference counts, logical
+bytes, and filesystem-allocated bytes. Allocated bytes can include shared APFS
+blocks and are not an exclusive-space measurement; the volume-delta benchmark
+remains the authoritative sharing check. Bases reaching zero references remain
+cached until a later explicit garbage collector can prove deletion is safe.
 
 ## Fast path
 
@@ -212,8 +236,8 @@ concurrent worktree requests.
 
 1. Read-only diagnostics and storage capability model. (complete)
 2. Explicit APFS worktree creation on macOS. (complete)
-3. Removal, recovery inventory, and disk accounting.
-4. Process-scoped Git shim.
+3. Removal, recovery inventory, and disk accounting. (initial slice complete)
+4. Process-scoped Git shim. (add/clean-remove slice complete)
 5. Linux reflink and OverlayFS backends.
 6. Compaction and compatibility expansion.
 7. Windows native backends.

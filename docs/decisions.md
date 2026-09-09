@@ -91,9 +91,10 @@ must refuse optimized creation rather than guess that two profiles match.
 
 An add journal records intent before mutation, advances atomically after each
 recoverable step, and has an explicit rollback path from every incomplete
-state. Active adds and completed rollbacks are terminal. Removal will have its
-own state machine so a cleanup cannot be confused with reversal of an
-incomplete add. Journal path encoding must preserve platform-native paths.
+state. Active adds and completed rollbacks are terminal. Removal has its own
+forward state machine under `removals/` so cleanup cannot be confused with
+reversal of an incomplete add. Journal path encoding preserves platform-native
+paths.
 
 ### D015: npm is a distribution layer for native Rust binaries
 
@@ -128,6 +129,18 @@ the hook or edits a shell profile itself. In either scope, the shim delegates
 commands outside enabled repositories and non-worktree Git commands unchanged.
 Unsupported optimized add forms fail visibly; `RIFTRI_BYPASS=1` is the explicit
 ordinary-Git escape hatch.
+
+### D018: removal moves forward and accounting is journal-derived
+
+Riftri removal records intent only after an initial clean check, invokes Git
+without `--force`, and moves forward to completion rather than trying to
+reconstruct a deleted writable view. Recovery rechecks a still-present view and
+preserves it if it changed. Active reference counts are derived from terminal
+add and removal journals instead of maintained as a second mutable counter.
+Zero-reference bases remain cached; a future garbage collector must be explicit,
+journaled, and independently validate that no active view references the base.
+Filesystem-allocated byte totals are diagnostic and may count shared blocks;
+volume-delta tests remain the proof of physical sharing.
 
 ## Open design questions
 

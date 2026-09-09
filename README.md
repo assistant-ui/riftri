@@ -23,6 +23,8 @@ $ git clone git@github.com:acme/app.git
 $ cd app
 $ riftri enable
 $ git worktree add -b feature/auth ../app-auth main
+$ git worktree remove ../app-auth
+$ riftri status
 ```
 
 `riftri enable` records repository-local consent in `riftri.enabled`. With the
@@ -76,6 +78,8 @@ provides:
 - Reusable read-only bases and strict native APFS COW clones with no copy fallback.
 - Real `git worktree add --no-checkout` metadata and clean index synchronization.
 - Durable, atomic add-operation journals and conservative recovery.
+- Journaled clean-worktree removal with resumable recovery.
+- Retained-base reference counts plus logical and allocated-byte reporting.
 - Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
 - Repository-local `riftri enable`/`riftri disable` activation.
 - Process-scoped `riftri exec` interception for supported worktree adds.
@@ -95,22 +99,27 @@ $ eval "$(cargo run --quiet -p riftri-cli -- shell hook zsh)"
 $ cargo run -p riftri-cli -- exec -- $SHELL
 $ cargo run -p riftri-cli -- exec --worktree ../app-auth -- codex
 $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
+$ cargo run -p riftri-cli -- worktree remove ../app-auth
+$ cargo run -p riftri-cli -- status
 ```
 
 The add command currently requires macOS and a writable APFS volume. Its first
 compatibility envelope deliberately rejects attributes, filters/Git LFS,
 sparse checkout, submodules, and checkout-changing non-default configuration.
 Transparent optimized adds currently require either `-b <new-branch>` or
-`--detach`. They never fall back to a full copy. Set `RIFTRI_BYPASS=1` only when
-you intentionally want an enabled command to use ordinary Git. If an add is
-interrupted, run:
+`--detach`. Clean managed removes using the ordinary no-option
+`git worktree remove <path>` form are also routed through Riftri. Dirty views are
+preserved, and zero-reference bases remain cached for reuse. These operations
+never fall back to a full copy. Set `RIFTRI_BYPASS=1` only when you intentionally
+want an enabled command to use ordinary Git. If an operation is interrupted,
+run:
 
 ```console
 $ cargo run -p riftri-cli -- recover --state-dir "$(git rev-parse --git-common-dir)/riftri"
 ```
 
-Recovery deletes only an unchanged incomplete view. A changed view is preserved
-and reported for manual attention.
+Recovery deletes only an unchanged incomplete add or a clean removal target. A
+changed view is preserved and reported for manual attention.
 
 ## Installation
 

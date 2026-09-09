@@ -25,6 +25,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   enabled repositories without wrapping each command.
 - A concurrent APFS integration fixture that proves parallel adds serialize
   immutable-base construction and preserve independent Git commits and files.
+- Journaled clean-worktree removal through the explicit CLI and enabled Git
+  shim, with conservative interrupted-removal recovery.
+- `riftri status` reporting for retained bases, active views, reference counts,
+  logical bytes, and filesystem-allocated bytes.
 
 ### Changed
 

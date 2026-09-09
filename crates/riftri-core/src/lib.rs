@@ -19,8 +19,10 @@ pub use activation::{
 };
 pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{
-    AddWorktreeRequest, AddWorktreeResult, RecoveryReport, WorktreeError, WorktreeMode,
-    add_worktree, recover_incomplete_operations,
+    AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, RecoveryReport,
+    RemoveWorktreeRequest, RemoveWorktreeResult, StorageAccountingReport, ViewStorageAccounting,
+    WorktreeError, WorktreeMode, add_worktree, is_managed_worktree, recover_incomplete_operations,
+    remove_worktree, storage_accounting,
 };
 
 /// A diagnostic check and its optional failure explanation.
@@ -127,6 +129,34 @@ pub enum AddWorktreePhase {
     RolledBack,
 }
 
+/// Durable phases of an explicit worktree-removal transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum RemoveWorktreePhase {
+    IntentRecorded,
+    CleanVerified,
+    WorktreeRemoved,
+    BaseReleased,
+    Complete,
+}
+
+impl RemoveWorktreePhase {
+    /// Return whether a removal journal may atomically advance to `next`.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        use RemoveWorktreePhase::{
+            BaseReleased, CleanVerified, Complete, IntentRecorded, WorktreeRemoved,
+        };
+
+        matches!(
+            (self, next),
+            (IntentRecorded, CleanVerified)
+                | (CleanVerified, WorktreeRemoved)
+                | (WorktreeRemoved, BaseReleased)
+                | (BaseReleased, Complete)
+        )
+    }
+}
+
 impl AddWorktreePhase {
     /// Return whether a journal may atomically advance to `next`.
     pub fn can_transition_to(self, next: Self) -> bool {
@@ -192,6 +222,13 @@ pub struct JournalTransitionError {
     pub requested: AddWorktreePhase,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid remove-worktree journal transition from {current:?} to {requested:?}")]
+pub struct RemoveJournalTransitionError {
+    pub current: RemoveWorktreePhase,
+    pub requested: RemoveWorktreePhase,
+}
+
 /// Inspect a repository and the volume containing `path` without changing
 /// Git or filesystem state.
 pub fn doctor(path: &Path) -> DoctorReport {
@@ -247,6 +284,7 @@ mod tests {
 
     use super::{
         AddWorktreeJournal, AddWorktreePhase, BaseKey, CheckoutProfile, CheckoutProfileInput,
+        RemoveWorktreePhase,
     };
 
     #[test]
@@ -317,5 +355,25 @@ mod tests {
             assert!(phase.can_transition_to(AddWorktreePhase::RollbackPending));
         }
         assert!(!AddWorktreePhase::Active.can_transition_to(AddWorktreePhase::RollbackPending));
+    }
+
+    #[test]
+    fn removal_journal_accepts_only_the_forward_transaction() {
+        assert!(
+            RemoveWorktreePhase::IntentRecorded
+                .can_transition_to(RemoveWorktreePhase::CleanVerified)
+        );
+        assert!(
+            RemoveWorktreePhase::CleanVerified
+                .can_transition_to(RemoveWorktreePhase::WorktreeRemoved)
+        );
+        assert!(
+            RemoveWorktreePhase::WorktreeRemoved
+                .can_transition_to(RemoveWorktreePhase::BaseReleased)
+        );
+        assert!(RemoveWorktreePhase::BaseReleased.can_transition_to(RemoveWorktreePhase::Complete));
+        assert!(
+            !RemoveWorktreePhase::Complete.can_transition_to(RemoveWorktreePhase::IntentRecorded)
+        );
     }
 }

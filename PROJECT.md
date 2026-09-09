@@ -207,7 +207,9 @@ requires a clean Git status before success. Add operations are journaled and
 recoverable. Repository-local enable/disable state, process-scoped execution,
 and an explicitly activated sh/bash/zsh hook now route supported normal Git
 adds through that same transaction. Process-scoped commands can also be bound
-to a validated existing worktree without agent-specific behavior. Removal and
-full lifecycle interception, Linux/Windows mutation backends, mounts, and a
-daemon are not implemented. The next storage-lifecycle work remains Milestone 3
-in `ROADMAP.md`.
+to a validated existing worktree without agent-specific behavior. Clean managed
+removals use a separate, recoverable journal, and retained bases now expose
+derived reference counts plus logical and allocated-byte accounting. Move,
+prune, repair, garbage collection, Linux/Windows mutation backends, mounts, and
+a daemon are not implemented. The remaining storage-lifecycle work stays in
+Milestone 3 of `ROADMAP.md`.
