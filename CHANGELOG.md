@@ -21,6 +21,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Process-scoped `riftri exec` Git interception for supported adds in enabled repositories.
 - Explicit `riftri shell hook` activation so normal Git adds are intercepted in
   enabled repositories without wrapping each command.
+- A concurrent APFS integration fixture that proves parallel adds serialize
+  immutable-base construction and preserve independent Git commits and files.
 
 ### Changed
 
