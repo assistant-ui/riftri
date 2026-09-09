@@ -42,6 +42,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Ordinary Git commands and disabled repositories pass directly to real Git
   inside `riftri exec`; unsupported enabled add forms fail without fallback.
 
+### Fixed
+
+- Concurrent worktree operations in one Riftri process now receive distinct
+  journal and scratch identifiers even when the system clock returns the same
+  timestamp to multiple threads.
+
 ### Safety
 
 - Failed adds roll back real Git metadata and their newly created branch when it
