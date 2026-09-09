@@ -1,10 +1,10 @@
-# Riftri project outline
+# Riftri: space-efficient Git worktrees for parallel coding agents
 
 ## One-sentence definition
 
-Riftri transparently makes real Git worktrees copy-on-write so multiple coding
-agents can work in isolated directories without duplicating every unchanged
-project file.
+Riftri uses native copy-on-write storage to give parallel coding agents real,
+isolated Git worktrees without storing another full physical copy of every
+unchanged project file for each task.
 
 ## Problem
 

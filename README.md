@@ -1,6 +1,7 @@
-# Riftri
+# Riftri — Space-efficient Git worktrees for parallel coding agents
 
-> One tree. Many instances.
+Run agents in isolated, real Git worktrees without storing another full copy of
+every unchanged project file for every task.
 
 [![CI](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml/badge.svg)](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml)
 
@@ -12,11 +13,33 @@
 > unsupported-backend errors while their native mutation backends remain on the
 > roadmap.
 
-Riftri is an opt-in copy-on-write storage accelerator for real Git worktrees.
-Git continues to own cloning, branches, commits, merges, and remotes. Riftri
-only changes how linked worktree files are materialized and stored.
+Riftri uses native copy-on-write storage to make real Git linked worktrees
+space-efficient. Unchanged file data is shared from an immutable base, while
+every worktree keeps its own private changes. Git continues to own cloning,
+branches, commits, merges, and remotes.
 
-## Current macOS experience
+## Why Riftri
+
+One-worktree-per-task is a natural way to run coding agents in parallel. Git
+shares repository objects between linked worktrees, but it normally checks out
+another fully materialized working directory for each one. On large
+repositories, those copies consume disk space and make disposable agent
+workspaces slower to create and clean up.
+
+Riftri keeps the workflow developers and agents already understand:
+
+- **Real Git worktrees.** Ordinary paths, files, branches, and Git commands
+  continue to work.
+- **Shared unchanged data.** Native copy-on-write clones avoid eagerly
+  duplicating the physical contents of the whole checkout.
+- **Private edits.** A write in one worktree cannot modify another worktree or
+  the immutable shared base.
+- **No filesystem middleman.** Editors, compilers, and agents use the native
+  filesystem directly; Riftri is not a daemon or a file-access proxy.
+- **Explicit and recoverable.** Optimization is opt-in per repository, and
+  lifecycle mutations use durable journals instead of silent copy fallback.
+
+## Quick start on macOS
 
 Activate Riftri's Git shim in the current shell once:
 
