@@ -1,7 +1,7 @@
 {
   "name": "riftri",
   "version": "0.1.0",
-  "description": "Copy-on-write acceleration for real Git worktrees",
+  "description": "Experimental copy-on-write acceleration for real Git worktrees",
   "license": "MIT",
   "author": "Assistant UI contributors",
   "type": "commonjs",

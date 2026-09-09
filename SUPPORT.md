@@ -1,8 +1,8 @@
 # Support
 
-Riftri is pre-release software. The optimized mutation backend currently
-supports macOS on writable APFS volumes; Linux and Windows mutation backends are
-not implemented yet.
+Riftri is experimental, pre-release software. The optimized mutation backend
+currently supports macOS on writable APFS volumes; Linux and Windows mutation
+backends are not implemented yet.
 
 - For a reproducible bug, open a [bug report](https://github.com/assistant-ui/riftri/issues/new?template=bug_report.yml).
 - For a scoped capability proposal, open a [feature request](https://github.com/assistant-ui/riftri/issues/new?template=feature_request.yml).

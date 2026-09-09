@@ -4,11 +4,13 @@
 
 [![CI](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml/badge.svg)](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml)
 
-> [!IMPORTANT]
-> Riftri is pre-release software. Optimized worktree creation and lifecycle
-> mutation currently require macOS on a writable APFS volume. Linux and Windows
-> builds provide diagnostics and explicit unsupported-backend errors while their
-> native mutation backends remain on the roadmap.
+> [!WARNING]
+> Riftri is experimental, pre-release software. Keep important changes committed
+> or backed up before using its worktree mutation commands. Optimized worktree
+> creation and lifecycle mutation currently require macOS on a writable APFS
+> volume. Linux and Windows builds provide diagnostics and explicit
+> unsupported-backend errors while their native mutation backends remain on the
+> roadmap.
 
 Riftri is an opt-in copy-on-write storage accelerator for real Git worktrees.
 Git continues to own cloning, branches, commits, merges, and remotes. Riftri

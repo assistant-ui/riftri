@@ -45,6 +45,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   published package names or tarball layout.
 - Public contribution, support, security, and release guidance now follows the
   Assistant UI organization ownership model.
+- Public documentation and npm metadata identify Riftri as experimental,
+  pre-release software.
 - CI runs once for pull-request branches and again on `main` after merge instead
   of duplicating every pull-request run with an unrestricted push run.
 - Milestone 2 now permits only explicit APFS worktree creation. Unsupported
