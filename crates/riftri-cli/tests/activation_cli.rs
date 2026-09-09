@@ -100,6 +100,7 @@ fn exec_delegates_normal_git_to_the_real_executable() {
     let fixture = RepositoryFixture::new();
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
 
+    let direct = git(&fixture.repository, &["rev-parse", "--show-toplevel"]);
     let output = riftri(
         &fixture.repository,
         &["exec", "--", "git", "rev-parse", "--show-toplevel"],
@@ -109,13 +110,8 @@ fn exec_delegates_normal_git_to_the_real_executable() {
         "scoped Git failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(
-        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()),
-        fixture
-            .repository
-            .canonicalize()
-            .expect("canonical repository")
-    );
+    assert_eq!(output.stdout, direct.stdout);
+    assert_eq!(output.stderr, direct.stderr);
 
     let direct_failure = git(
         &fixture.repository,
