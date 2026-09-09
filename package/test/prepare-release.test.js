@@ -58,7 +58,7 @@ test("stages all six native release packages and checksums offline", async (t) =
   assert.equal(result.releaseDirectory, releaseDirectory);
   assert.equal(result.rootPackageDirectory, rootPackageDirectory);
   assert.deepEqual(
-    await readdir(releaseDirectory),
+    (await readdir(releaseDirectory)).sort(),
     [
       "SHA256SUMS",
       ...packageNames.map(
