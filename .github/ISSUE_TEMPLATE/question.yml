@@ -1,0 +1,29 @@
+name: Support question
+description: Ask about Riftri setup, capabilities, or usage
+title: "question: "
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: Do not disclose vulnerabilities or sensitive repository data here; use GitHub private vulnerability reporting.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: Describe the desired workflow and where you are blocked.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the Riftri version, OS, filesystem, Git version, and redacted `riftri doctor --json` output when relevant.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials and other sensitive data from this report.
+          required: true

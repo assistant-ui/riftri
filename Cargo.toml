@@ -12,6 +12,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
+authors = ["Assistant UI contributors"]
+repository = "https://github.com/assistant-ui/riftri"
+homepage = "https://github.com/assistant-ui/riftri"
 
 [workspace.dependencies]
 anyhow = "1.0"

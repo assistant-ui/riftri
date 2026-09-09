@@ -1,6 +1,14 @@
 # Riftri
 
-> One tree. Many realities.
+> One tree. Many instances.
+
+[![CI](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml/badge.svg)](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml)
+
+> [!IMPORTANT]
+> Riftri is pre-release software. Optimized worktree creation and lifecycle
+> mutation currently require macOS on a writable APFS volume. Linux and Windows
+> builds provide diagnostics and explicit unsupported-backend errors while their
+> native mutation backends remain on the roadmap.
 
 Riftri is an opt-in copy-on-write storage accelerator for real Git worktrees.
 Git continues to own cloning, branches, commits, merges, and remotes. Riftri
@@ -143,10 +151,11 @@ $ riftri doctor
 
 The npm package is a small launcher. It installs the matching prebuilt Rust
 binary as an optional platform package and forwards arguments, standard I/O,
-signals, and exit status. Supported prebuilt targets are macOS ARM64/x64, glibc
-Linux ARM64/x64, and Windows ARM64/x64. Linux musl builds are not published yet;
-unsupported systems receive a clear error and can build the Cargo workspace
-from source.
+signals, and exit status. Prebuilt CLI targets are macOS ARM64/x64, glibc Linux
+ARM64/x64, and Windows ARM64/x64. Shipping a CLI binary does not imply that a
+mutation backend exists on that platform: APFS is currently the only mutation
+backend. Linux musl builds are not published yet; unsupported systems receive a
+clear error and can build the Cargo workspace from source.
 
 ## Product boundary
 
@@ -171,6 +180,11 @@ Continue with:
 - [Architecture overview](docs/architecture.md)
 - [APFS allocation evidence](docs/allocation-evidence.md)
 - [Settled decisions and open questions](docs/decisions.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Support](SUPPORT.md)
+- [Security policy](SECURITY.md)
+- [Code of Conduct](CODE_OF_CONDUCT.md)
 - [Agent instructions](AGENTS.md)
 
 ## Development
