@@ -1,4 +1,4 @@
-//! Read-only interaction with the user's installed Git executable.
+//! Interaction with the user's installed Git executable.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -272,6 +272,88 @@ impl Git {
         } else {
             Err(command_failed(&arguments, &output))
         }
+    }
+
+    /// Read one value from this repository's local configuration only.
+    pub fn local_config_value(&self, path: &Path, key: &str) -> Result<Option<Vec<u8>>, GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--null"),
+            OsString::from("--get"),
+            OsString::from(key),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            Ok(Some(
+                output
+                    .stdout
+                    .strip_suffix(&[0])
+                    .unwrap_or(&output.stdout)
+                    .to_vec(),
+            ))
+        } else if output.status.code() == Some(1) {
+            Ok(None)
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
+    }
+
+    /// Read a repository-local boolean using Git's own boolean parser.
+    pub fn local_config_bool(&self, path: &Path, key: &str) -> Result<Option<bool>, GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--bool"),
+            OsString::from("--get"),
+            OsString::from(key),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            match trim_line_endings(&output.stdout) {
+                b"true" => Ok(Some(true)),
+                b"false" => Ok(Some(false)),
+                value => Err(GitError::InvalidOutput {
+                    context: "repository-local boolean configuration",
+                    detail: format!(
+                        "Git normalized {key} to unexpected value {:?}",
+                        String::from_utf8_lossy(value)
+                    ),
+                }),
+            }
+        } else if output.status.code() == Some(1) {
+            Ok(None)
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
+    }
+
+    /// Atomically replace one repository-local configuration value through Git.
+    pub fn set_local_config(&self, path: &Path, key: &str, value: &OsStr) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--replace-all"),
+            OsString::from(key),
+            value.to_os_string(),
+        ];
+        self.run_os(Some(path), &arguments)?;
+        Ok(())
+    }
+
+    /// Remove a repository-local configuration key. Missing keys are accepted.
+    pub fn unset_local_config(&self, path: &Path, key: &str) -> Result<(), GitError> {
+        if self.local_config_value(path, key)?.is_none() {
+            return Ok(());
+        }
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--unset-all"),
+            OsString::from(key),
+        ];
+        self.run_os(Some(path), &arguments)?;
+        Ok(())
     }
 
     /// Return whether Git resolves any attribute for the supplied tree paths.
@@ -988,6 +1070,33 @@ mod tests {
         assert_eq!(
             git.config_value(fixture.path(), "filter.missing.clean")
                 .expect("read missing config"),
+            None
+        );
+    }
+
+    #[test]
+    fn writes_and_removes_repository_local_configuration() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+
+        git.set_local_config(fixture.path(), "riftri.enabled", OsStr::new("true"))
+            .expect("enable repository");
+        assert_eq!(
+            git.local_config_value(fixture.path(), "riftri.enabled")
+                .expect("read local configuration"),
+            Some(b"true".to_vec())
+        );
+        assert_eq!(
+            git.local_config_bool(fixture.path(), "riftri.enabled")
+                .expect("read local boolean"),
+            Some(true)
+        );
+
+        git.unset_local_config(fixture.path(), "riftri.enabled")
+            .expect("disable repository");
+        assert_eq!(
+            git.local_config_value(fixture.path(), "riftri.enabled")
+                .expect("read removed local configuration"),
             None
         );
     }

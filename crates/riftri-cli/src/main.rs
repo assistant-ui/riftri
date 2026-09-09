@@ -17,6 +17,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Enable optimized worktree creation for one repository.
+    Enable {
+        /// Repository to enable.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
+    /// Disable optimized worktree creation for one repository.
+    Disable {
+        /// Repository to disable.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
     /// Inspect Git and show the planned storage path without changing anything.
     Doctor {
         /// Repository path to inspect.
@@ -95,6 +109,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Enable { path } => {
+            let activation = riftri_core::enable_repository(&path)?;
+            println!("Enabled Riftri for {}", activation.repository.display());
+            println!("Git config: riftri.enabled=true");
+            println!("Create an optimized worktree with: riftri worktree add <path> [options]");
+        }
+        Command::Disable { path } => {
+            let activation = riftri_core::disable_repository(&path)?;
+            println!("Disabled Riftri for {}", activation.repository.display());
+        }
         Command::Doctor {
             path,
             destination,
@@ -152,20 +176,7 @@ fn main() -> Result<()> {
                     mode,
                     state_dir,
                 })?;
-                println!("Created APFS-backed Git worktree");
-                println!("Destination: {}", result.destination.display());
-                println!("Commit: {}", result.commit.as_str());
-                println!("Tree: {}", result.tree.as_str());
-                println!("Immutable base: {}", result.base_path.display());
-                println!(
-                    "Base: {}",
-                    if result.reused_base {
-                        "reused"
-                    } else {
-                        "created"
-                    }
-                );
-                println!("Journal: {}", result.journal_path.display());
+                print_add_result(&result);
             }
         },
         Command::Recover { state_dir } => {
@@ -189,6 +200,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn print_add_result(result: &riftri_core::AddWorktreeResult) {
+    println!("Created APFS-backed Git worktree");
+    println!("Destination: {}", result.destination.display());
+    println!("Commit: {}", result.commit.as_str());
+    println!("Tree: {}", result.tree.as_str());
+    println!("Immutable base: {}", result.base_path.display());
+    println!(
+        "Base: {}",
+        if result.reused_base {
+            "reused"
+        } else {
+            "created"
+        }
+    );
+    println!("Journal: {}", result.journal_path.display());
+}
+
 fn print_doctor(report: &riftri_core::DoctorReport) {
     println!("Riftri doctor");
     println!("Project stage: {}", report.project_stage);
@@ -196,8 +224,12 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
         "Platform: {} / {}",
         report.operating_system, report.architecture
     );
-    println!("Copy-on-write backend active: no");
-
+    println!(
+        "Repository enabled: {}",
+        report
+            .repository_enabled
+            .map_or("unknown", |enabled| if enabled { "yes" } else { "no" })
+    );
     match &report.git.value {
         Some(git) => println!("Git: {} ({})", git.version, git.command.display()),
         None => println!(
@@ -256,6 +288,23 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::{Cli, Command, WorktreeCommand};
+
+    #[test]
+    fn parses_repository_activation_commands() {
+        let enable = Cli::try_parse_from(["riftri", "enable", "../repository"])
+            .expect("parse repository enable command");
+        let Command::Enable { path } = enable.command else {
+            panic!("unexpected enable command");
+        };
+        assert_eq!(path, Path::new("../repository"));
+
+        let disable =
+            Cli::try_parse_from(["riftri", "disable"]).expect("parse repository disable command");
+        let Command::Disable { path } = disable.command else {
+            panic!("unexpected disable command");
+        };
+        assert_eq!(path, Path::new("."));
+    }
 
     #[test]
     fn parses_the_documented_explicit_worktree_command() {

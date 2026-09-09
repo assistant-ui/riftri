@@ -80,6 +80,11 @@ Acceptance criteria:
 Outcome: let agents use ordinary `git worktree` commands without relying on a
 prompt or skill.
 
+Repository opt-in groundwork complete: `riftri enable` and `riftri disable`
+persist repository-local consent. Process-scoped interception remains a
+follow-up change, and the milestone remains incomplete until the full lifecycle
+uses the safe journaled paths required below.
+
 - Add `riftri exec -- <command>` and `riftri shell`.
 - Add a small Git shim scoped to the child process environment.
 - Immediately delegate non-worktree Git commands to real Git.

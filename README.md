@@ -11,13 +11,28 @@ only changes how linked worktree files are materialized and stored.
 ```console
 $ git clone git@github.com:acme/app.git
 $ cd app
+$ riftri enable
 $ riftri worktree add ../app-auth -b feature/auth main
 ```
 
-The resulting path is a real Git linked worktree. Unchanged data is shared with
-an immutable base while writes remain private to that worktree.
+`riftri enable` records repository-local consent in `riftri.enabled`. The
+process-scoped Git interception that consumes this marker is delivered in the
+follow-up transparent-activation change. The explicit command above already
+creates the optimized worktree.
 
-Process-scoped transparent Git via `riftri exec` remains a later milestone.
+The resulting path is a real Git linked worktree. Unchanged data is shared with
+an immutable base while writes remain private to that worktree. Riftri does not
+modify the parent shell, shell startup files, or system Git. To stop opting in:
+
+```console
+$ riftri disable
+```
+
+The explicit interface remains available without process activation:
+
+```console
+$ riftri worktree add ../app-auth -b feature/auth main
+```
 
 ## Project status
 
@@ -33,6 +48,7 @@ provides:
 - Real `git worktree add --no-checkout` metadata and clean index synchronization.
 - Durable, atomic add-operation journals and conservative recovery.
 - Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
+- Repository-local `riftri enable`/`riftri disable` activation.
 
 Try the safe diagnostic commands:
 
@@ -41,6 +57,7 @@ $ cargo run -p riftri-cli -- doctor
 $ cargo run -p riftri-cli -- doctor --destination ../proposed-worktree
 $ cargo run -p riftri-cli -- doctor --json
 $ cargo run -p riftri-cli -- backends ../proposed-worktree
+$ cargo run -p riftri-cli -- enable
 $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
 ```
 
