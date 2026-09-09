@@ -98,9 +98,9 @@ Initial add/remove slice complete: repository-local `riftri enable` and
 `riftri disable`, `riftri exec -- <command>`, optional exact-worktree process
 binding, exact real-Git delegation, an explicitly evaluated sh/bash/zsh hook,
 supported `worktree add` and clean managed `worktree remove` routing, and
-`RIFTRI_BYPASS=1` are implemented. The
-milestone remains incomplete until the remaining lifecycle commands use safe
-journaled paths.
+`RIFTRI_BYPASS=1` are implemented. Managed forced/configured removals, moves,
+and prunes are guarded from unjournaled passthrough. The milestone remains
+incomplete until the remaining lifecycle commands use safe journaled paths.
 
 - Add `riftri exec -- <command>` and explicit shell activation.
 - Add a small Git shim scoped to the child process environment.
