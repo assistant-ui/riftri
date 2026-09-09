@@ -1,5 +1,6 @@
-use std::ffi::OsString;
-use std::path::PathBuf;
+use std::env;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -29,6 +30,13 @@ enum Command {
         /// Repository to disable.
         #[arg(default_value = ".")]
         path: PathBuf,
+    },
+
+    /// Run a command with process-scoped Git worktree interception.
+    Exec {
+        /// Command and arguments to run.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<OsString>,
     },
 
     /// Inspect Git and show the planned storage path without changing anything.
@@ -106,6 +114,10 @@ enum WorktreeCommand {
 }
 
 fn main() -> Result<()> {
+    if invoked_as_git_shim() {
+        std::process::exit(run_git_shim()?);
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -113,11 +125,16 @@ fn main() -> Result<()> {
             let activation = riftri_core::enable_repository(&path)?;
             println!("Enabled Riftri for {}", activation.repository.display());
             println!("Git config: riftri.enabled=true");
-            println!("Create an optimized worktree with: riftri worktree add <path> [options]");
+            println!(
+                "Activate transparent Git for an agent or shell with: riftri exec -- <command>"
+            );
         }
         Command::Disable { path } => {
             let activation = riftri_core::disable_repository(&path)?;
             println!("Disabled Riftri for {}", activation.repository.display());
+        }
+        Command::Exec { command } => {
+            std::process::exit(riftri_core::execute_scoped_command(&command)?);
         }
         Command::Doctor {
             path,
@@ -200,6 +217,39 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+fn invoked_as_git_shim() -> bool {
+    env::var_os(riftri_core::SHIM_ACTIVE_ENV).is_some()
+        && env::args_os()
+            .next()
+            .as_deref()
+            .and_then(|argument| Path::new(argument).file_name())
+            .is_some_and(|name| name == OsStr::new("git") || name == OsStr::new("git.exe"))
+}
+
+fn run_git_shim() -> Result<i32> {
+    env::var_os(riftri_core::REAL_GIT_ENV)
+        .filter(|path| !path.is_empty())
+        .context("Riftri Git shim is missing the real Git executable path")?;
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    let current_directory = env::current_dir().context("resolve Git working directory")?;
+
+    match riftri_core::proxy_git_command(&current_directory, &arguments)? {
+        riftri_core::GitProxyOutcome::Passthrough(status) => Ok(status),
+        riftri_core::GitProxyOutcome::OptimizedAdd(result) => {
+            eprintln!(
+                "Riftri created an optimized APFS worktree at {} ({})",
+                result.destination.display(),
+                if result.reused_base {
+                    "reused base"
+                } else {
+                    "new base"
+                }
+            );
+            Ok(0)
+        }
+    }
+}
+
 fn print_add_result(result: &riftri_core::AddWorktreeResult) {
     println!("Created APFS-backed Git worktree");
     println!("Destination: {}", result.destination.display());
@@ -230,6 +280,15 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
             .repository_enabled
             .map_or("unknown", |enabled| if enabled { "yes" } else { "no" })
     );
+    println!(
+        "Process-scoped Git interception: {}",
+        if report.git_shim_active {
+            "active"
+        } else {
+            "inactive"
+        }
+    );
+
     match &report.git.value {
         Some(git) => println!("Git: {} ({})", git.version, git.command.display()),
         None => println!(
@@ -304,6 +363,16 @@ mod tests {
             panic!("unexpected disable command");
         };
         assert_eq!(path, Path::new("."));
+    }
+
+    #[test]
+    fn parses_process_scoped_activation_command() {
+        let cli = Cli::try_parse_from(["riftri", "exec", "--", "agent", "--flag"])
+            .expect("parse exec command");
+        let Command::Exec { command } = cli.command else {
+            panic!("unexpected exec command");
+        };
+        assert_eq!(command, [OsStr::new("agent"), OsStr::new("--flag")]);
     }
 
     #[test]

@@ -113,12 +113,15 @@ plus a durable completion marker. The initial checkout profile is intentionally
 narrow: attributes, filters/Git LFS, sparse checkout, submodules, and ambiguous
 checkout-changing configuration are rejected rather than approximated.
 
-### D017: repository activation uses local Git configuration
+### D017: repository activation is local Git configuration plus process scope
 
 `riftri enable` writes `riftri.enabled=true` to the repository's local Git
 configuration, which is shared by its linked worktrees. It does not edit shell
-startup files or replace Git globally. Process-scoped interception consumes this
-marker in a follow-up change.
+startup files or replace Git globally. `riftri exec` prepends a temporary Git
+shim only to the selected child process tree and records the exact real Git
+executable before changing `PATH`. The shim delegates commands outside enabled
+repositories and non-worktree Git commands unchanged. Unsupported optimized add
+forms fail visibly; `RIFTRI_BYPASS=1` is the explicit ordinary-Git escape hatch.
 
 ## Open design questions
 

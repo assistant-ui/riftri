@@ -2,10 +2,15 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Output};
 
 use serde::Serialize;
 use thiserror::Error;
+
+/// Absolute real-Git path supplied to a process-scoped Riftri shim.
+pub const REAL_GIT_ENV: &str = "RIFTRI_REAL_GIT";
+/// Marker proving that `REAL_GIT_ENV` belongs to a Riftri process scope.
+pub const SHIM_ACTIVE_ENV: &str = "RIFTRI_SHIM_ACTIVE";
 
 /// Information about the Git executable used by Riftri.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -127,7 +132,10 @@ pub struct Git {
 
 impl Default for Git {
     fn default() -> Self {
-        Self::new("git")
+        let scoped_command = std::env::var_os(SHIM_ACTIVE_ENV)
+            .and_then(|_| std::env::var_os(REAL_GIT_ENV))
+            .filter(|command| !command.is_empty());
+        Self::new(scoped_command.unwrap_or_else(|| OsString::from("git")))
     }
 }
 
@@ -146,6 +154,18 @@ impl Git {
             command: self.command.clone(),
             version,
         })
+    }
+
+    /// Run the real Git executable with inherited process I/O and return its
+    /// status without interpreting a non-zero Git exit as a Riftri error.
+    pub fn passthrough(&self, arguments: &[OsString]) -> Result<ExitStatus, GitError> {
+        Command::new(&self.command)
+            .args(arguments)
+            .status()
+            .map_err(|source| GitError::Start {
+                command: self.command.clone(),
+                source,
+            })
     }
 
     /// Inspect a normal, linked, unborn, detached, or bare repository.

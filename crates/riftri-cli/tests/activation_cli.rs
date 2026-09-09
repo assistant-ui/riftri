@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 use tempfile::{TempDir, tempdir};
 
 struct RepositoryFixture {
-    _directory: TempDir,
+    directory: TempDir,
     repository: PathBuf,
 }
 
@@ -34,7 +34,7 @@ impl RepositoryFixture {
                 .success()
         );
         Self {
-            _directory: directory,
+            directory,
             repository,
         }
     }
@@ -93,4 +93,133 @@ fn enable_and_disable_change_only_repository_local_config() {
         .code(),
         Some(1)
     );
+}
+
+#[test]
+fn exec_delegates_normal_git_to_the_real_executable() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let direct = git(&fixture.repository, &["rev-parse", "--show-toplevel"]);
+    let output = riftri(
+        &fixture.repository,
+        &["exec", "--", "git", "rev-parse", "--show-toplevel"],
+    );
+    assert!(
+        output.status.success(),
+        "scoped Git failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, direct.stdout);
+    assert_eq!(output.stderr, direct.stderr);
+
+    let direct_failure = git(
+        &fixture.repository,
+        &["rev-parse", "--verify", "refs/heads/does-not-exist"],
+    );
+    let scoped_failure = riftri(
+        &fixture.repository,
+        &[
+            "exec",
+            "--",
+            "git",
+            "rev-parse",
+            "--verify",
+            "refs/heads/does-not-exist",
+        ],
+    );
+    assert_eq!(scoped_failure.status.code(), direct_failure.status.code());
+    assert_eq!(scoped_failure.stdout, direct_failure.stdout);
+    assert_eq!(scoped_failure.stderr, direct_failure.stderr);
+}
+
+#[test]
+fn exec_leaves_worktree_add_untouched_for_a_disabled_repository() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("ordinary-view");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/ordinary",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run ordinary Git worktree add");
+
+    assert!(
+        output.status.success(),
+        "ordinary add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fixture.repository.join(".git/riftri").exists());
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+}
+
+#[test]
+fn enabled_unsupported_add_fails_without_falling_back() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("unsupported-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "add"])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run unsupported enabled add");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires `-b <branch>`"));
+    assert!(!destination.exists());
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_routes_enabled_git_worktree_add_through_apfs() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("optimized-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/enabled",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run enabled Git worktree add");
+
+    assert!(
+        output.status.success(),
+        "enabled add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("optimized APFS worktree"));
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+    assert!(fixture.repository.join(".git/riftri/operations").is_dir());
 }
