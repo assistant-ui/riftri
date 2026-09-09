@@ -43,6 +43,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 - npm distribution sources now live under `package/` without changing
   published package names or tarball layout.
+- Public contribution, support, security, and release guidance now follows the
+  Assistant UI organization ownership model.
 - Milestone 2 now permits only explicit APFS worktree creation. Unsupported
   checkout configurations fail before mutation, and full-copy fallback remains
   disabled.

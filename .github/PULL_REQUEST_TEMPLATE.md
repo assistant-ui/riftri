@@ -15,3 +15,4 @@ Describe the behavior or documentation changed by this pull request.
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - [ ] `cargo test --workspace`
 - [ ] `npm test`
+- [ ] `npm run pack:check`

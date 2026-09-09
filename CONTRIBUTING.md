@@ -4,6 +4,12 @@ Thank you for helping build Riftri. Start with `PROJECT.md`, `ROADMAP.md`,
 `AGENTS.md`, and `docs/architecture.md`; safety and ordinary Git compatibility
 take priority over reaching a filesystem demo quickly.
 
+Participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). Report
+vulnerabilities and unsafe data-loss behavior through the private process in
+[SECURITY.md](SECURITY.md), not a public issue. Please open an issue before a
+large architectural or product-boundary change so maintainers and contributors
+can agree on the direction first.
+
 ## Development setup
 
 Install stable Rust with Rustfmt and Clippy, Git, and Node.js 18.18 or newer.
@@ -15,10 +21,13 @@ $ cargo fmt --all --check
 $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo test --workspace
 $ npm test
+$ npm run pack:check
 ```
 
-The npm package is only a distribution launcher. Product behavior belongs in
-the Rust crates, following their documented responsibilities.
+The root `package.json` defines the public npm package. The `package/` directory
+contains only its launcher, platform manifests, release scripts, and tests.
+Product behavior belongs in the Rust crates, following their documented
+responsibilities.
 
 ## Changes
 

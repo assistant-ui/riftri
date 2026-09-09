@@ -135,6 +135,22 @@ Chooses the fastest safe native backend available at the destination:
 | Windows | ReFS block cloning, then evaluated native alternatives |
 | Unsupported | Explicit ordinary-Git fallback only |
 
+### Hosted and managed environments
+
+A virtual machine or container does not imply that a particular storage
+backend is available. Riftri must probe the destination volume and the runtime
+capabilities before selecting one:
+
+- Linux hosts may use Btrfs or XFS reflinks, or kernel OverlayFS when the host
+  permits the required mounts and namespaces.
+- Windows hosts may use ReFS block cloning, followed only by native alternatives
+  that pass the same correctness and recovery requirements.
+
+Windows and restricted container environments need additional lifecycle and
+capability work because they do not expose the same primitives as local APFS.
+Hosted and managed integration is therefore a later roadmap milestone, and it
+must never silently fall back to duplicating a full worktree.
+
 ### State and recovery
 
 Tracks bases, worktree views, reference counts, mounts, and incomplete
