@@ -1,6 +1,5 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
@@ -53,6 +52,9 @@ pub enum ActivationError {
 
     #[error("process-scoped activation failed: {0}")]
     Process(String),
+
+    #[error("invalid worktree binding: {0}")]
+    WorktreeBinding(String),
 
     #[error("shell activation failed: {0}")]
     Shell(String),
@@ -140,6 +142,23 @@ pub fn proxy_git_command(
 }
 
 pub fn execute_scoped_command(command: &[OsString]) -> Result<i32, ActivationError> {
+    execute_scoped_command_from(command, None)
+}
+
+/// Run any command from an exact, live Git worktree root while keeping Git
+/// interception scoped to that child process and its descendants.
+pub fn execute_scoped_command_in_worktree(
+    worktree: &Path,
+    command: &[OsString],
+) -> Result<i32, ActivationError> {
+    let worktree = resolve_worktree_binding(worktree)?;
+    execute_scoped_command_from(command, Some(&worktree))
+}
+
+fn execute_scoped_command_from(
+    command: &[OsString],
+    working_directory: Option<&Path>,
+) -> Result<i32, ActivationError> {
     let (program, arguments) = command
         .split_first()
         .ok_or_else(|| process_error("no process-scoped command was supplied"))?;
@@ -158,19 +177,69 @@ pub fn execute_scoped_command(command: &[OsString]) -> Result<i32, ActivationErr
             .chain(env::split_paths(&existing_path)),
     )
     .map_err(|error| process_error(format!("construct process-scoped PATH: {error}")))?;
-    let status = Command::new(program)
+    let mut child = Command::new(program);
+    child
         .args(arguments)
         .env("PATH", scoped_path)
         .env(riftri_git::REAL_GIT_ENV, real_git)
-        .env(SHIM_ACTIVE_ENV, "1")
-        .status()
-        .map_err(|error| {
-            process_error(format!(
-                "start process-scoped command {}: {error}",
-                Path::new(program).display()
-            ))
-        })?;
+        .env(SHIM_ACTIVE_ENV, "1");
+    if let Some(working_directory) = working_directory {
+        child.current_dir(working_directory);
+    }
+    let status = child.status().map_err(|error| {
+        process_error(format!(
+            "start process-scoped command {}: {error}",
+            Path::new(program).display()
+        ))
+    })?;
     Ok(exit_status_code(status))
+}
+
+fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError> {
+    if requested.as_os_str().is_empty() {
+        return Err(worktree_binding_error("path cannot be empty"));
+    }
+    let canonical = fs::canonicalize(requested).map_err(|error| {
+        worktree_binding_error(format!("resolve {}: {error}", requested.display()))
+    })?;
+    if !canonical.is_dir() {
+        return Err(worktree_binding_error(format!(
+            "{} is not a directory",
+            canonical.display()
+        )));
+    }
+
+    let git = Git::default();
+    let repository = git.inspect_repository(&canonical).map_err(|error| {
+        worktree_binding_error(format!("inspect {}: {error}", canonical.display()))
+    })?;
+    let root = repository.root.ok_or_else(|| {
+        worktree_binding_error(format!("{} is a bare repository", canonical.display()))
+    })?;
+    let root = fs::canonicalize(&root).map_err(|error| {
+        worktree_binding_error(format!(
+            "resolve Git worktree root {}: {error}",
+            root.display()
+        ))
+    })?;
+    if root != canonical {
+        return Err(worktree_binding_error(format!(
+            "{} is inside {}, but --worktree must name the exact Git worktree root",
+            canonical.display(),
+            root.display()
+        )));
+    }
+
+    let registered = git.list_worktrees(&root)?.into_iter().any(|worktree| {
+        !worktree.bare && fs::canonicalize(&worktree.path).is_ok_and(|path| path == canonical)
+    });
+    if !registered {
+        return Err(worktree_binding_error(format!(
+            "{} is not a live entry in Git's worktree inventory",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
 }
 
 /// Prepare a durable Git shim and render Bourne-compatible shell code that
@@ -561,6 +630,10 @@ fn exit_status_code(status: ExitStatus) -> i32 {
 
 fn process_error(message: impl Into<String>) -> ActivationError {
     ActivationError::Process(message.into())
+}
+
+fn worktree_binding_error(message: impl Into<String>) -> ActivationError {
+    ActivationError::WorktreeBinding(message.into())
 }
 
 fn shell_error(message: impl Into<String>) -> ActivationError {

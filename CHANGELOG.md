@@ -19,6 +19,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Atomic native-path add journals and `riftri recover` for interrupted operations.
 - Repository-local activation through `riftri enable` and `riftri disable`.
 - Process-scoped `riftri exec` Git interception for supported adds in enabled repositories.
+- Optional validated worktree binding for any process-scoped command through
+  `riftri exec --worktree <path> -- <command>`.
 - Explicit `riftri shell hook` activation so normal Git adds are intercepted in
   enabled repositories without wrapping each command.
 

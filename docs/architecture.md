@@ -16,7 +16,7 @@ Riftri is never a global Git replacement by default.
 
 1. Explicit operation: `riftri worktree add ...`
 2. Repository opt-in plus process-scoped activation: `riftri enable`, then
-   `riftri exec -- claude`
+   `riftri exec -- claude`, optionally with `--worktree <path>`
 3. Repository opt-in plus explicit shell activation: evaluate
    `riftri shell hook zsh`, then use normal `git` commands
 
@@ -27,6 +27,13 @@ repositories without that marker are immediately delegated to the exact real
 Git executable resolved before the shim is installed. Supported worktree adds
 in enabled repositories are routed through Riftri. `RIFTRI_BYPASS=1` provides an
 explicit escape hatch to ordinary Git without disabling the repository.
+
+`riftri exec --worktree <path> -- <command>` is an agent-neutral convenience
+for binding the child process to an existing worktree. Riftri canonicalizes the
+path, requires it to equal the repository root, and confirms that root is a live
+entry in Git's structured worktree inventory before launching the command. The
+binding does not imply repository enablement and does not create a new workspace
+abstraction.
 
 The shell hook installs a versioned shim link in the user's cache and prints
 Bourne-compatible environment assignments. Evaluating those assignments puts

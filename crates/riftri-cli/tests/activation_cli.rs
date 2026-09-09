@@ -136,6 +136,116 @@ fn exec_delegates_normal_git_to_the_real_executable() {
 }
 
 #[test]
+fn exec_binds_any_command_to_an_exact_git_worktree() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("bound-view");
+    assert!(
+        git(
+            &fixture.repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/bound-command",
+                destination.to_str().expect("UTF-8 fixture path"),
+                "HEAD",
+            ],
+        )
+        .status
+        .success()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--worktree"])
+        .arg(&destination)
+        .args(["--", "git", "rev-parse", "--show-toplevel"])
+        .current_dir(fixture.directory.path())
+        .output()
+        .expect("run a generic command in a bound worktree");
+
+    assert!(
+        output.status.success(),
+        "worktree-bound command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reported = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    assert_eq!(
+        reported.canonicalize().expect("canonical reported root"),
+        destination
+            .canonicalize()
+            .expect("canonical bound worktree")
+    );
+}
+
+#[test]
+fn exec_rejects_a_binding_below_the_worktree_root() {
+    let fixture = RepositoryFixture::new();
+    let nested = fixture.repository.join("nested");
+    fs::create_dir(&nested).expect("create nested directory");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--worktree"])
+        .arg(&nested)
+        .args(["--", "git", "rev-parse", "--show-toplevel"])
+        .current_dir(fixture.directory.path())
+        .output()
+        .expect("reject an inexact worktree binding");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("--worktree must name the exact Git worktree root")
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn bound_exec_keeps_optimized_git_interception_active() {
+    let fixture = RepositoryFixture::new();
+    let bound = fixture.directory.path().join("bound-agent");
+    let optimized = fixture.directory.path().join("bound-created-view");
+    assert!(
+        git(
+            &fixture.repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/bound-agent",
+                bound.to_str().expect("UTF-8 fixture path"),
+                "HEAD",
+            ],
+        )
+        .status
+        .success()
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--worktree"])
+        .arg(&bound)
+        .args(["--", "git", "worktree", "add", "-b", "feature/from-bound"])
+        .arg(&optimized)
+        .arg("HEAD")
+        .current_dir(fixture.directory.path())
+        .output()
+        .expect("create optimized worktree from a bound process");
+
+    assert!(
+        output.status.success(),
+        "bound optimized add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("optimized APFS worktree"));
+    assert!(
+        git(&optimized, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+    assert!(fixture.repository.join(".git/riftri/operations").is_dir());
+}
+
+#[test]
 fn exec_leaves_worktree_add_untouched_for_a_disabled_repository() {
     let fixture = RepositoryFixture::new();
     let destination = fixture.directory.path().join("ordinary-view");

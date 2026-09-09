@@ -119,7 +119,9 @@ checkout-changing configuration are rejected rather than approximated.
 configuration, which is shared by its linked worktrees. It does not edit shell
 startup files or replace Git globally. `riftri exec` prepends a temporary Git
 shim only to the selected child process tree and records the exact real Git
-executable before changing `PATH`. As an explicit alternative,
+executable before changing `PATH`. Its optional `--worktree` binding accepts an
+exact live root from Git's worktree inventory, changes only the child working
+directory, and remains independent of any agent brand. As an explicit alternative,
 `riftri shell hook <sh|bash|zsh>` prepares a versioned shim in the user's cache
 and prints environment changes for the user to evaluate. Riftri never evaluates
 the hook or edits a shell profile itself. In either scope, the shim delegates

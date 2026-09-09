@@ -38,6 +38,17 @@ $ riftri enable
 $ riftri exec -- claude
 ```
 
+To start any command in an existing worktree without first changing directory,
+bind the process explicitly:
+
+```console
+$ riftri exec --worktree ../app-auth -- codex
+```
+
+The binding must name the exact root of a live worktree reported by Git. It only
+selects the child process's working directory; repository-local enablement still
+controls whether that process's supported Git operations are optimized.
+
 The resulting path is a real Git linked worktree. Unchanged data is shared with
 an immutable base while writes remain private to that worktree. Riftri does not
 modify the parent shell, shell startup files, or system Git. To stop opting in:
@@ -68,6 +79,7 @@ provides:
 - Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
 - Repository-local `riftri enable`/`riftri disable` activation.
 - Process-scoped `riftri exec` interception for supported worktree adds.
+- Agent-neutral `riftri exec --worktree <path> -- <command>` process binding.
 - Explicit sh/bash/zsh activation for normal `git` commands through
   `riftri shell hook`.
 
@@ -81,6 +93,7 @@ $ cargo run -p riftri-cli -- backends ../proposed-worktree
 $ cargo run -p riftri-cli -- enable
 $ eval "$(cargo run --quiet -p riftri-cli -- shell hook zsh)"
 $ cargo run -p riftri-cli -- exec -- $SHELL
+$ cargo run -p riftri-cli -- exec --worktree ../app-auth -- codex
 $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
 ```
 
