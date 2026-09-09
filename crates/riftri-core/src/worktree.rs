@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::fs::OpenOptions;
 #[cfg(target_os = "macos")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(target_os = "macos")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
@@ -29,6 +31,9 @@ use crate::journal::{JournalPaths, JournalRecord, RemovalJournalPaths};
 use crate::{
     AddWorktreePhase, JournalTransitionError, RemoveJournalTransitionError, RemoveWorktreePhase,
 };
+
+#[cfg(target_os = "macos")]
+static OPERATION_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeMode {
@@ -861,8 +866,8 @@ fn allocate_operation_id(
         .duration_since(UNIX_EPOCH)
         .map_err(|error| WorktreeError::InvalidRequest(format!("system clock error: {error}")))?
         .as_nanos();
-    for nonce in 0..1000_u16 {
-        let operation_id = format!("{timestamp:x}-{:x}-{nonce:x}", std::process::id());
+    for _ in 0..1000_u16 {
+        let operation_id = next_operation_id(timestamp);
         let scratch = destination
             .parent()
             .expect("normalized destination has a parent")
@@ -965,8 +970,8 @@ fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, 
         .duration_since(UNIX_EPOCH)
         .map_err(|error| WorktreeError::InvalidRequest(format!("system clock error: {error}")))?
         .as_nanos();
-    for nonce in 0..1000_u16 {
-        let operation_id = format!("remove-{timestamp:x}-{:x}-{nonce:x}", std::process::id());
+    for _ in 0..1000_u16 {
+        let operation_id = format!("remove-{}", next_operation_id(timestamp));
         if !store.path_for(&operation_id).exists() {
             return Ok(operation_id);
         }
@@ -974,6 +979,12 @@ fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, 
     Err(WorktreeError::InvalidRequest(
         "could not allocate a unique removal operation ID".to_owned(),
     ))
+}
+
+#[cfg(target_os = "macos")]
+fn next_operation_id(timestamp: u128) -> String {
+    let nonce = OPERATION_NONCE.fetch_add(1, Ordering::Relaxed);
+    format!("{timestamp:x}-{:x}-{nonce:x}", std::process::id())
 }
 
 #[cfg(target_os = "macos")]
@@ -1617,16 +1628,20 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    use std::collections::HashSet;
     use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
     use std::process::Command;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     use tempfile::tempdir;
 
     use super::{
         AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
-        recover_incomplete_operations, remove_worktree_inner, storage_accounting,
+        next_operation_id, recover_incomplete_operations, remove_worktree_inner,
+        storage_accounting,
     };
     use crate::{AddWorktreePhase, RemoveWorktreePhase};
 
@@ -1641,6 +1656,29 @@ mod tests {
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn concurrent_operation_ids_are_unique_at_the_same_timestamp() {
+        const WORKERS: usize = 64;
+        let start = Arc::new(Barrier::new(WORKERS + 1));
+        let handles = (0..WORKERS)
+            .map(|_| {
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    next_operation_id(0)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        start.wait();
+        let ids = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("operation ID thread"))
+            .collect::<HashSet<_>>();
+
+        assert_eq!(ids.len(), WORKERS);
     }
 
     #[test]
