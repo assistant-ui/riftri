@@ -14,19 +14,21 @@ export async function stageRootPackage(
   for (const packageName of Object.keys(manifest.optionalDependencies)) {
     manifest.optionalDependencies[packageName] = manifest.version;
   }
+  manifest.bin.riftri = "bin/riftri.js";
+  manifest.files = ["bin", "lib", "README.md", "LICENSE"];
   delete manifest.scripts;
 
   await rm(destination, { recursive: true, force: true });
-  await mkdir(path.join(destination, "npm"), { recursive: true });
+  await mkdir(destination, { recursive: true });
   await Promise.all([
     cp(
-      path.join(repositoryRoot, "npm", "bin"),
-      path.join(destination, "npm", "bin"),
+      path.join(repositoryRoot, "packaging", "bin"),
+      path.join(destination, "bin"),
       { recursive: true },
     ),
     cp(
-      path.join(repositoryRoot, "npm", "lib"),
-      path.join(destination, "npm", "lib"),
+      path.join(repositoryRoot, "packaging", "lib"),
+      path.join(destination, "lib"),
       { recursive: true },
     ),
     cp(path.join(repositoryRoot, "README.md"), path.join(destination, "README.md")),

@@ -1,16 +1,15 @@
 {
-  "name": "riftri-linux-x64-gnu",
+  "name": "riftri-darwin-x64",
   "version": "0.1.0",
-  "description": "Riftri native binary for Linux x64 (glibc)",
+  "description": "Riftri native binary for macOS x64",
   "license": "MIT",
-  "os": ["linux"],
+  "os": ["darwin"],
   "cpu": ["x64"],
-  "libc": ["glibc"],
   "files": ["bin/riftri"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/assistant-ui/riftri.git",
-    "directory": "npm/platforms/riftri-linux-x64-gnu"
+    "directory": "packaging/platforms/riftri-darwin-x64"
   },
   "publishConfig": { "access": "public", "provenance": true }
 }

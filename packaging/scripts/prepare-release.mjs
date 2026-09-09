@@ -32,7 +32,7 @@ const checksums = [];
 for (const packageName of Object.keys(rootPackage.optionalDependencies).sort()) {
   const platformDirectory = path.join(
     repositoryRoot,
-    "npm",
+    "packaging",
     "platforms",
     packageName,
   );

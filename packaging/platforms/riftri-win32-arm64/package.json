@@ -9,7 +9,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/assistant-ui/riftri.git",
-    "directory": "npm/platforms/riftri-win32-arm64"
+    "directory": "packaging/platforms/riftri-win32-arm64"
   },
   "publishConfig": { "access": "public", "provenance": true }
 }

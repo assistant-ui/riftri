@@ -1,15 +1,15 @@
 {
-  "name": "riftri-darwin-arm64",
+  "name": "riftri-win32-x64",
   "version": "0.1.0",
-  "description": "Riftri native binary for macOS ARM64",
+  "description": "Riftri native binary for Windows x64",
   "license": "MIT",
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "files": ["bin/riftri"],
+  "os": ["win32"],
+  "cpu": ["x64"],
+  "files": ["bin/riftri.exe"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/assistant-ui/riftri.git",
-    "directory": "npm/platforms/riftri-darwin-arm64"
+    "directory": "packaging/platforms/riftri-win32-x64"
   },
   "publishConfig": { "access": "public", "provenance": true }
 }
