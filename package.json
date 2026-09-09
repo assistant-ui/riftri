@@ -6,30 +6,30 @@
   "author": "Riftri contributors",
   "type": "commonjs",
   "bin": {
-    "riftri": "packaging/bin/riftri.js"
+    "riftri": "package/bin/riftri.js"
   },
   "files": [
-    "packaging/bin",
-    "packaging/lib",
+    "package/bin",
+    "package/lib",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "build:native": "cargo build --locked -p riftri-cli",
-    "check:packages": "node packaging/scripts/check-packages.mjs",
-    "test": "npm run build:native && node --test packaging/test/*.test.js",
-    "pack:check": "npm run check:packages && node packaging/scripts/stage-root-package.mjs && npm pack ./dist/npm-root --dry-run"
+    "check:packages": "node package/scripts/check-packages.mjs",
+    "test": "npm run build:native && node --test package/test/*.test.js",
+    "pack:check": "npm run check:packages && node package/scripts/stage-root-package.mjs && npm pack ./dist/npm-root --dry-run"
   },
   "engines": {
     "node": ">=18.18"
   },
   "optionalDependencies": {
-    "riftri-darwin-arm64": "file:packaging/platforms/riftri-darwin-arm64",
-    "riftri-darwin-x64": "file:packaging/platforms/riftri-darwin-x64",
-    "riftri-linux-arm64-gnu": "file:packaging/platforms/riftri-linux-arm64-gnu",
-    "riftri-linux-x64-gnu": "file:packaging/platforms/riftri-linux-x64-gnu",
-    "riftri-win32-arm64": "file:packaging/platforms/riftri-win32-arm64",
-    "riftri-win32-x64": "file:packaging/platforms/riftri-win32-x64"
+    "riftri-darwin-arm64": "file:package/platforms/riftri-darwin-arm64",
+    "riftri-darwin-x64": "file:package/platforms/riftri-darwin-x64",
+    "riftri-linux-arm64-gnu": "file:package/platforms/riftri-linux-arm64-gnu",
+    "riftri-linux-x64-gnu": "file:package/platforms/riftri-linux-x64-gnu",
+    "riftri-win32-arm64": "file:package/platforms/riftri-win32-arm64",
+    "riftri-win32-x64": "file:package/platforms/riftri-win32-x64"
   },
   "repository": {
     "type": "git",

@@ -22,12 +22,12 @@ export async function stageRootPackage(
   await mkdir(destination, { recursive: true });
   await Promise.all([
     cp(
-      path.join(repositoryRoot, "packaging", "bin"),
+      path.join(repositoryRoot, "package", "bin"),
       path.join(destination, "bin"),
       { recursive: true },
     ),
     cp(
-      path.join(repositoryRoot, "packaging", "lib"),
+      path.join(repositoryRoot, "package", "lib"),
       path.join(destination, "lib"),
       { recursive: true },
     ),

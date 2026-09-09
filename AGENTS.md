@@ -94,7 +94,7 @@ replace system Git globally by default.
 - `riftri-storage`: storage capability and backend contracts.
 
 The root `package.json` defines the public `riftri` npm package. Its launcher,
-platform manifests, release tooling, and tests live under `packaging/`; that
+platform manifests, release tooling, and tests live under `package/`; that
 directory is distribution-only. Product policy, Git semantics, and filesystem
 behavior remain in Rust.
 

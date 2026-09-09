@@ -8,10 +8,10 @@ packages before the launcher, and creates a GitHub release with SHA-256 sums.
 ## Package layout
 
 The root `package.json` is the source manifest for the public `riftri` package.
-The `packaging/` directory groups the Node launcher, platform-specific package
-manifests, release scripts, and package tests; it is not a package named
-`packaging`. Release staging places the public launcher's `bin/` and `lib/`
-directories at the root of the npm tarball.
+The `package/` source directory groups the Node launcher, platform-specific
+package manifests, release scripts, and package tests. The published package is
+still named `riftri`; release staging places its `bin/` and `lib/` directories
+at the root of the npm tarball.
 
 ## One-time repository setup
 
@@ -45,7 +45,7 @@ restartable: package versions already present in npm are detected and skipped.
 ## Cutting a release
 
 1. Update the version in the root `Cargo.toml`, root `package.json`,
-   `package-lock.json`, and every `packaging/platforms/*/package.json`. Source
+   `package-lock.json`, and every `package/platforms/*/package.json`. Source
    optional dependencies remain local `file:` references; release staging
    converts them to exact registry versions in the published manifest.
 2. Move relevant entries from `Unreleased` in `CHANGELOG.md` to a dated version.
