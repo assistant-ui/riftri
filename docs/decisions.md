@@ -113,6 +113,13 @@ plus a durable completion marker. The initial checkout profile is intentionally
 narrow: attributes, filters/Git LFS, sparse checkout, submodules, and ambiguous
 checkout-changing configuration are rejected rather than approximated.
 
+### D017: repository activation uses local Git configuration
+
+`riftri enable` writes `riftri.enabled=true` to the repository's local Git
+configuration, which is shared by its linked worktrees. It does not edit shell
+startup files or replace Git globally. Process-scoped interception consumes this
+marker in a follow-up change.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

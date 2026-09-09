@@ -17,6 +17,7 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Exact-tree immutable-base creation and reuse with serialized construction.
 - Strict APFS COW cloning for regular files with symlink and executable-mode support.
 - Atomic native-path add journals and `riftri recover` for interrupted operations.
+- Repository-local activation through `riftri enable` and `riftri disable`.
 
 ### Changed
 

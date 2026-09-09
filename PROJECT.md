@@ -68,11 +68,14 @@ implement.
 ### Process-scoped transparent mode
 
 ```console
+$ riftri enable
 $ riftri exec -- claude
 ```
 
-Within that process tree, ordinary `git worktree` lifecycle commands are routed
-through Riftri. All other Git commands go directly to the real Git executable.
+The repository marker is implemented. The follow-up process-scoped shim will
+route supported `git worktree add` commands through Riftri only when their
+repository has been explicitly enabled. All other Git commands and commands in
+repositories that are not enabled will go directly to the real Git executable.
 
 ### Repository-scoped mode
 
@@ -182,5 +185,8 @@ prototype exist. On a writable APFS volume, `riftri worktree add` builds or
 reuses an exact-tree immutable base, creates real linked-worktree metadata with
 checkout suppressed, activates a native COW clone, synchronizes the index, and
 requires a clean Git status before success. Add operations are journaled and
-recoverable. No transparent Git shim, Linux/Windows mutation backend, mount, or
-daemon is active yet. The next work should follow Milestone 3 in `ROADMAP.md`.
+recoverable. Repository-local enable/disable state now records consent for the
+follow-up process-scoped Git shim. Transparent command routing, removal and full
+lifecycle interception, Linux/Windows mutation backends, mounts, and a daemon
+are not implemented. The next storage-lifecycle work remains Milestone 3 in
+`ROADMAP.md`.
