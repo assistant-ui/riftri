@@ -64,9 +64,10 @@ Outcome: make the APFS prototype safe for repeated local use.
 Initial removal/accounting slice complete: clean managed worktrees can be
 removed explicitly or through the enabled Git shim, removal intent and progress
 are journaled separately from adds, interrupted removals resume conservatively,
-and `riftri status` derives base reference counts plus logical and allocated
-bytes. Zero-reference bases are retained until explicit garbage collection is
-implemented.
+`riftri repair` provides repository-aware conservative recovery, and `riftri
+status` derives base reference counts plus logical and allocated bytes with
+actionable lifecycle explanations. Zero-reference bases are retained until
+explicit garbage collection is implemented.
 
 - Implement explicit worktree removal while preserving Git dirty-state checks.
 - Extend local state and operation journals to removal and base lifecycle.

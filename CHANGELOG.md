@@ -29,6 +29,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   shim, with conservative interrupted-removal recovery.
 - `riftri status` reporting for retained bases, active views, reference counts,
   logical bytes, and filesystem-allocated bytes.
+- Repository-aware `riftri repair` for conservative add/removal journal recovery,
+  plus actionable status explanations for pending removals and retained bases.
 - Offline release-staging coverage for all six native npm packages, GitHub
   archives, executable names, and SHA-256 checksums.
 

@@ -22,8 +22,9 @@ changed view. Repository-local activation, the process-scoped Git shim, and an
 explicitly evaluated sh/bash/zsh hook can route supported adds through the same
 transaction. Process-scoped commands can optionally start from a validated Git
 worktree root. Clean managed removals now use a separate recoverable journal,
-and status reports retained-base references and disk usage. It still has no
-move, prune, repair, or garbage-collection transaction, filesystem mounts,
+and status reports retained-base references and disk usage with repository-aware
+repair for incomplete journals. It still has no move, prune, or
+garbage-collection transaction, filesystem mounts,
 Linux/Windows mutation backend, or daemon.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety
