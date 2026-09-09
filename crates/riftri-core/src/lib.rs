@@ -21,9 +21,9 @@ pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, GarbageCollectionCandidate,
     GarbageCollectionReport, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
-    StorageAccountingReport, ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree,
-    garbage_collect, is_managed_worktree, recover_incomplete_operations, remove_worktree,
-    storage_accounting,
+    StateDiagnosticIssue, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
+    WorktreeMode, add_worktree, garbage_collect, is_managed_worktree,
+    recover_incomplete_operations, remove_worktree, storage_accounting,
 };
 
 /// A diagnostic check and its optional failure explanation.

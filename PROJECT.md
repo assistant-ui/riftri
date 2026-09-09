@@ -212,6 +212,8 @@ removals use a separate, recoverable journal, and retained bases now expose
 derived reference counts plus logical and allocated-byte accounting.
 Repository-aware repair resumes incomplete journals, and explicit journaled
 garbage collection can remove independently revalidated zero-reference bases.
-Move, prune, orphan-state repair, Linux/Windows mutation backends, mounts, and a
+Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
+missing paths referenced by active journals without deleting them. Move, prune,
+automatic orphan-state repair, Linux/Windows mutation backends, mounts, and a
 daemon are not implemented. The remaining storage-lifecycle work stays in
 Milestone 3 of `ROADMAP.md`.

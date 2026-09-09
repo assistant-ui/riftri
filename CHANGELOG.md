@@ -34,6 +34,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Explicit `riftri gc` planning and `--apply` collection for zero-reference
   immutable bases, with per-base locking, reference revalidation, and durable
   collection journals.
+- Read-only status diagnostics for unjournaled files, empty base buckets,
+  structurally unsafe state entries, and missing active journal paths.
 - Offline release-staging coverage for all six native npm packages, GitHub
   archives, executable names, and SHA-256 checksums.
 

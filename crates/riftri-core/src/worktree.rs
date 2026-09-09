@@ -24,12 +24,12 @@ use thiserror::Error;
 
 #[cfg(target_os = "macos")]
 use crate::journal::{
-    CollectionJournalPaths, CollectionJournalRecord, DecodedCollectionJournal, JournalPaths,
-    JournalRecord, RemovalJournalPaths,
+    CollectionJournalPaths, CollectionJournalRecord, JournalPaths, JournalRecord,
+    RemovalJournalPaths,
 };
 use crate::journal::{
-    CollectionJournalStore, DecodedJournal, DecodedRemovalJournal, JournalError, JournalStore,
-    RemovalJournalRecord, RemovalJournalStore,
+    CollectionJournalStore, DecodedCollectionJournal, DecodedJournal, DecodedRemovalJournal,
+    JournalError, JournalStore, RemovalJournalRecord, RemovalJournalStore,
 };
 use crate::{
     AddWorktreePhase, GarbageCollectionPhase, JournalTransitionError, RemoveJournalTransitionError,
@@ -98,6 +98,18 @@ pub struct ViewStorageAccounting {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDiagnosticIssue {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug, Default)]
+struct StatePathDiagnosis {
+    issues: Vec<StateDiagnosticIssue>,
+    coordination_locks: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GarbageCollectionCandidate {
     pub base_path: PathBuf,
     pub logical_bytes: u64,
@@ -118,13 +130,16 @@ pub struct GarbageCollectionReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StorageAccountingReport {
     pub active_views: usize,
+    pub pending_adds: usize,
     pub completed_removals: usize,
     pub pending_removals: usize,
     pub completed_collections: usize,
     pub cancelled_collections: usize,
     pub pending_collections: usize,
+    pub coordination_locks: usize,
     pub bases: Vec<BaseStorageAccounting>,
     pub views: Vec<ViewStorageAccounting>,
+    pub diagnostic_issues: Vec<StateDiagnosticIssue>,
     pub total_logical_bytes: u64,
     pub total_allocated_bytes: u64,
 }
@@ -283,9 +298,24 @@ pub fn storage_accounting(
         .map(|base| base.allocated_bytes)
         .chain(views.iter().map(|view| view.allocated_bytes))
         .fold(0_u64, u64::saturating_add);
+    let state_diagnosis = diagnose_state_paths(
+        &state_directory,
+        &add_journals,
+        &removal_journals,
+        &collection_journals,
+    )?;
 
     Ok(StorageAccountingReport {
         active_views: views.len(),
+        pending_adds: add_journals
+            .iter()
+            .filter(|journal| {
+                !matches!(
+                    journal.phase,
+                    AddWorktreePhase::Active | AddWorktreePhase::RolledBack
+                )
+            })
+            .count(),
         completed_removals: removal_journals
             .iter()
             .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
@@ -311,8 +341,10 @@ pub fn storage_accounting(
                 )
             })
             .count(),
+        coordination_locks: state_diagnosis.coordination_locks,
         bases,
         views,
+        diagnostic_issues: state_diagnosis.issues,
         total_logical_bytes,
         total_allocated_bytes,
     })
@@ -1455,6 +1487,357 @@ fn fail_removal_if_requested(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn diagnose_state_paths(
+    state_directory: &Path,
+    add_journals: &[DecodedJournal],
+    removal_journals: &[DecodedRemovalJournal],
+    collection_journals: &[DecodedCollectionJournal],
+) -> Result<StatePathDiagnosis, WorktreeError> {
+    if !state_directory.exists() {
+        return Ok(StatePathDiagnosis::default());
+    }
+
+    let mut issues = Vec::new();
+    let expected_roots = ["bases", "operations", "removals", "collections", "tmp"];
+    for path in child_paths(state_directory, "read Riftri state directory")? {
+        let expected = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .is_some_and(|name| expected_roots.contains(&name));
+        if !expected {
+            add_state_issue(
+                &mut issues,
+                path,
+                "not part of the versioned Riftri state layout",
+            );
+        } else if !is_real_directory(&path)? {
+            add_state_issue(
+                &mut issues,
+                path,
+                "expected a real Riftri state directory, not a file or symlink",
+            );
+        }
+    }
+
+    diagnose_journal_directory(
+        &state_directory.join("operations"),
+        add_journals
+            .iter()
+            .map(|journal| journal.journal_path.clone())
+            .collect(),
+        &mut issues,
+    )?;
+    diagnose_journal_directory(
+        &state_directory.join("removals"),
+        removal_journals
+            .iter()
+            .map(|journal| journal.journal_path.clone())
+            .collect(),
+        &mut issues,
+    )?;
+    diagnose_journal_directory(
+        &state_directory.join("collections"),
+        collection_journals
+            .iter()
+            .map(|journal| journal.journal_path.clone())
+            .collect(),
+        &mut issues,
+    )?;
+
+    let pending_adds = add_journals
+        .iter()
+        .filter(|journal| {
+            !matches!(
+                journal.phase,
+                AddWorktreePhase::Active | AddWorktreePhase::RolledBack
+            )
+        })
+        .collect::<Vec<_>>();
+    let pending_base_builds = pending_adds
+        .iter()
+        .copied()
+        .filter(|journal| journal.last_forward_phase < AddWorktreePhase::BaseReady)
+        .collect::<Vec<_>>();
+    diagnose_temporary_directory(
+        &state_directory.join("tmp"),
+        pending_base_builds
+            .iter()
+            .map(|journal| journal.temporary_index.clone())
+            .collect(),
+        &mut issues,
+    )?;
+    let mut coordination_locks = 0;
+    diagnose_base_directories(
+        state_directory,
+        collection_journals,
+        &pending_base_builds,
+        &mut issues,
+        &mut coordination_locks,
+    )?;
+
+    let completed_removals = removal_journals
+        .iter()
+        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
+    for journal in add_journals.iter().filter(|journal| {
+        journal.phase == AddWorktreePhase::Active
+            && !completed_removals.contains(journal.operation_id.as_str())
+    }) {
+        if !is_real_directory_if_present(&journal.destination)? {
+            add_state_issue(
+                &mut issues,
+                journal.destination.clone(),
+                "an active add journal references a missing worktree",
+            );
+        }
+        if !is_real_directory_if_present(&journal.base_path)? {
+            add_state_issue(
+                &mut issues,
+                journal.base_path.clone(),
+                "an active add journal references a missing or unsafe immutable base",
+            );
+        } else if !is_regular_file_if_present(&journal.base_path.with_extension("complete"))? {
+            add_state_issue(
+                &mut issues,
+                journal.base_path.with_extension("complete"),
+                "an active add journal's immutable base has no safe completion marker",
+            );
+        }
+    }
+
+    issues.sort_unstable_by(|left, right| left.path.cmp(&right.path));
+    issues.dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
+    Ok(StatePathDiagnosis {
+        issues,
+        coordination_locks,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn diagnose_state_paths(
+    _state_directory: &Path,
+    _add_journals: &[DecodedJournal],
+    _removal_journals: &[DecodedRemovalJournal],
+    _collection_journals: &[DecodedCollectionJournal],
+) -> Result<StatePathDiagnosis, WorktreeError> {
+    Ok(StatePathDiagnosis::default())
+}
+
+#[cfg(target_os = "macos")]
+fn diagnose_journal_directory(
+    directory: &Path,
+    expected: HashSet<PathBuf>,
+    issues: &mut Vec<StateDiagnosticIssue>,
+) -> Result<(), WorktreeError> {
+    if !is_real_directory_if_present(directory)? {
+        return Ok(());
+    }
+    for path in child_paths(directory, "read Riftri journal directory")? {
+        if !expected.contains(&path) {
+            add_state_issue(
+                issues,
+                path,
+                "not a recognized durable operation journal; Riftri will preserve it",
+            );
+        } else if !is_regular_file(&path)? {
+            add_state_issue(
+                issues,
+                path,
+                "a durable operation journal must be a regular file",
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn diagnose_temporary_directory(
+    directory: &Path,
+    expected: HashSet<PathBuf>,
+    issues: &mut Vec<StateDiagnosticIssue>,
+) -> Result<(), WorktreeError> {
+    if !is_real_directory_if_present(directory)? {
+        return Ok(());
+    }
+    for path in child_paths(directory, "read Riftri temporary directory")? {
+        if !expected.contains(&path) {
+            add_state_issue(
+                issues,
+                path,
+                "temporary artifact is not referenced by a pending add journal",
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn diagnose_base_directories(
+    state_directory: &Path,
+    collection_journals: &[DecodedCollectionJournal],
+    pending_base_builds: &[&DecodedJournal],
+    issues: &mut Vec<StateDiagnosticIssue>,
+    coordination_locks: &mut usize,
+) -> Result<(), WorktreeError> {
+    let bases = state_directory.join("bases");
+    if is_real_directory_if_present(&bases)? {
+        for path in child_paths(&bases, "read immutable-base layout")? {
+            if path != bases.join("v1") {
+                add_state_issue(
+                    issues,
+                    path,
+                    "not part of the supported immutable-base layout version",
+                );
+            }
+        }
+    }
+
+    let root = bases.join("v1");
+    if !is_real_directory_if_present(&root)? {
+        return Ok(());
+    }
+    let pending_staging = pending_base_builds
+        .iter()
+        .map(|journal| journal.base_staging.clone())
+        .collect::<HashSet<_>>();
+    let pending_quarantines = collection_journals
+        .iter()
+        .filter(|journal| {
+            !matches!(
+                journal.phase,
+                GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
+            )
+        })
+        .map(|journal| journal.quarantine_path.clone())
+        .collect::<HashSet<_>>();
+
+    for repository_path in child_paths(&root, "read immutable-base root")? {
+        if !is_real_directory(&repository_path)? {
+            add_state_issue(
+                issues,
+                repository_path,
+                "immutable-base repository bucket must be a real directory",
+            );
+            continue;
+        }
+        let entries = child_paths(&repository_path, "read immutable-base repository bucket")?;
+        if entries.is_empty() {
+            add_state_issue(
+                issues,
+                repository_path,
+                "empty immutable-base repository bucket has no journaled owner",
+            );
+            continue;
+        }
+        for path in entries {
+            let expected_base = is_regular_file_if_present(&path.with_extension("complete"))?
+                || collection_journals.iter().any(|journal| {
+                    journal.phase == GarbageCollectionPhase::MarkerRemoved
+                        && journal.base_path == path
+                });
+            let expected_staging = pending_staging.contains(&path);
+            let expected_quarantine = pending_quarantines.contains(&path);
+            let is_complete_marker = path.extension() == Some(OsStr::new("complete"))
+                && is_regular_file(&path)?
+                && is_real_directory_if_present(&path.with_extension(""))?;
+            let is_lock = path.extension() == Some(OsStr::new("lock"))
+                && is_regular_file(&path)?
+                && path
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(looks_like_object_id);
+
+            if is_complete_marker || is_lock {
+                if is_lock {
+                    *coordination_locks = (*coordination_locks).saturating_add(1);
+                }
+                continue;
+            }
+            if expected_base || expected_staging || expected_quarantine {
+                if !is_real_directory(&path)? {
+                    add_state_issue(
+                        issues,
+                        path,
+                        "journaled immutable-base artifact must be a real directory",
+                    );
+                }
+            } else {
+                add_state_issue(
+                    issues,
+                    path,
+                    "immutable-base artifact is not explained by a completion marker or journal",
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn child_paths(directory: &Path, operation: &'static str) -> Result<Vec<PathBuf>, WorktreeError> {
+    let mut paths = fs::read_dir(directory)
+        .map_err(|source| io(operation, directory, source))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|source| io(operation, directory, source))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort_unstable();
+    Ok(paths)
+}
+
+#[cfg(target_os = "macos")]
+fn add_state_issue(
+    issues: &mut Vec<StateDiagnosticIssue>,
+    path: PathBuf,
+    reason: impl Into<String>,
+) {
+    issues.push(StateDiagnosticIssue {
+        path,
+        reason: reason.into(),
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn is_real_directory(path: &Path) -> Result<bool, WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect Riftri state path", path, source))?;
+    Ok(metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
+#[cfg(target_os = "macos")]
+fn is_real_directory_if_present(path: &Path) -> Result<bool, WorktreeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_dir() && !metadata.file_type().is_symlink()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io("inspect Riftri state path", path, source)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn is_regular_file(path: &Path) -> Result<bool, WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect Riftri state path", path, source))?;
+    Ok(metadata.is_file() && !metadata.file_type().is_symlink())
+}
+
+#[cfg(target_os = "macos")]
+fn is_regular_file_if_present(path: &Path) -> Result<bool, WorktreeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(io("inspect Riftri state path", path, source)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn looks_like_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn retained_base_paths(state_directory: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
     let root = state_directory.join("bases/v1");
     if !root.exists() {
@@ -2151,6 +2534,45 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(ids.len(), WORKERS);
+    }
+
+    #[test]
+    fn status_reports_unexplained_state_without_removing_it() {
+        let fixture = tempdir().expect("fixture");
+        let state = fixture.path().join("state");
+        let empty_bucket = state.join("bases/v1/empty-bucket");
+        let stray_journal = state.join("operations/stray.tmp");
+        let stray_temporary = state.join("tmp/orphan-index");
+        let unknown_root = state.join("unknown-root");
+        fs::create_dir_all(&empty_bucket).expect("create empty base bucket");
+        fs::create_dir_all(state.join("operations")).expect("create journal directory");
+        fs::create_dir_all(state.join("tmp")).expect("create temporary directory");
+        fs::write(&stray_journal, "unfinished\n").expect("write stray journal");
+        fs::write(&stray_temporary, "temporary\n").expect("write stray temporary file");
+        fs::create_dir(&unknown_root).expect("create unknown state directory");
+        let empty_bucket = empty_bucket.canonicalize().expect("resolve empty bucket");
+        let stray_journal = stray_journal.canonicalize().expect("resolve stray journal");
+        let stray_temporary = stray_temporary
+            .canonicalize()
+            .expect("resolve stray temporary file");
+        let unknown_root = unknown_root.canonicalize().expect("resolve unknown root");
+
+        let report = storage_accounting(&state).expect("diagnose state");
+        let paths = report
+            .diagnostic_issues
+            .iter()
+            .map(|issue| issue.path.as_path())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(report.diagnostic_issues.len(), 4);
+        assert!(paths.contains(empty_bucket.as_path()));
+        assert!(paths.contains(stray_journal.as_path()));
+        assert!(paths.contains(stray_temporary.as_path()));
+        assert!(paths.contains(unknown_root.as_path()));
+        assert!(empty_bucket.is_dir());
+        assert!(stray_journal.is_file());
+        assert!(stray_temporary.is_file());
+        assert!(unknown_root.is_dir());
     }
 
     #[test]

@@ -154,6 +154,15 @@ marker before making the base directory writable and atomically quarantining it;
 recovery then removes only the exact journaled quarantine path. A reference that
 appears before mutation cancels collection rather than risking a live base.
 
+### D020: unexplained state is diagnosed but not inferred safe
+
+`riftri status` compares on-disk state with versioned layout roots, decoded
+journals, immutable-base completion markers, and object-ID coordination locks.
+It reports unmatched paths and missing active-journal targets with an actionable
+reason. Diagnostics do not turn an unjournaled artifact into a cleanup target;
+automatic repair and garbage collection remain limited to paths authorized by a
+validated durable journal.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

@@ -229,6 +229,14 @@ access or Git command passthrough.
 conservative journal recovery as the explicit-state `riftri recover` command;
 it does not infer or delete unjournaled paths.
 
+Status also inventories the state layout itself. Valid journals explain their
+temporary, staging, and quarantine paths; completion markers explain retained
+immutable bases; object-ID lock files explain coordination metadata. Anything
+else is reported as a state issue, as are active journals whose worktree, base,
+or completion marker is missing or unsafe. This diagnostic pass is read-only:
+neither repair nor garbage collection guesses that an unexplained path is safe
+to delete.
+
 ## Fast path
 
 Once a worktree is ready, Riftri is absent from ordinary file operations:

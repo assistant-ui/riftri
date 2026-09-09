@@ -82,6 +82,7 @@ provides:
 - Retained-base reference counts plus logical and allocated-byte reporting.
 - Repository-aware `riftri repair` and actionable lifecycle status explanations.
 - Explicit, journaled `riftri gc --apply` for zero-reference immutable bases.
+- Read-only orphan and inconsistent-state diagnostics that never guess at cleanup.
 - Isolation, Git cleanliness, crash recovery, symlink/mode, and physical-allocation tests.
 - Repository-local `riftri enable`/`riftri disable` activation.
 - Process-scoped `riftri exec` interception for supported worktree adds.
@@ -127,7 +128,9 @@ $ cargo run -p riftri-cli -- repair
 The lower-level `recover --state-dir <path>` spelling remains available for an
 explicit state directory. Repair deletes only an unchanged incomplete add or a
 clean removal target. A changed view is preserved and reported for manual
-attention.
+attention. `riftri status` also lists state paths that no valid journal,
+completion marker, or supported layout explains. Riftri preserves those paths;
+inspect them before any manual cleanup.
 
 ## Installation
 
