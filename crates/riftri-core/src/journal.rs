@@ -9,7 +9,12 @@ use thiserror::Error;
 #[cfg(target_os = "macos")]
 use crate::JournalTransitionError;
 use crate::RemoveJournalTransitionError;
-use crate::{AddWorktreePhase, GarbageCollectionPhase, RemoveWorktreePhase};
+use crate::{
+    AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
+    RemoveWorktreePhase,
+};
+#[cfg(target_os = "macos")]
+use crate::{MoveJournalTransitionError, PruneJournalTransitionError};
 
 #[derive(Debug, Error)]
 pub enum JournalError {
@@ -46,6 +51,9 @@ pub enum JournalError {
         current: GarbageCollectionPhase,
         requested: GarbageCollectionPhase,
     },
+
+    #[error("invalid operation journal {path}: {detail}")]
+    InvalidRecord { path: PathBuf, detail: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +159,25 @@ pub(crate) struct RemovalJournalRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MoveJournalRecord {
+    pub format_version: u16,
+    pub operation_id: String,
+    repository: NativeOsString,
+    source: NativeOsString,
+    destination: NativeOsString,
+    pub source_add_operation_id: String,
+    pub phase: MoveWorktreePhase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PruneJournalRecord {
+    pub format_version: u16,
+    pub operation_id: String,
+    repository: NativeOsString,
+    pub phase: PruneWorktreesPhase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CollectionJournalRecord {
     pub format_version: u16,
     pub operation_id: String,
@@ -165,6 +192,13 @@ pub(crate) struct RemovalJournalPaths<'a> {
     pub repository: &'a Path,
     pub destination: &'a Path,
     pub base_path: &'a Path,
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) struct MoveJournalPaths<'a> {
+    pub repository: &'a Path,
+    pub source: &'a Path,
+    pub destination: &'a Path,
 }
 
 #[cfg(target_os = "macos")]
@@ -183,6 +217,27 @@ pub(crate) struct DecodedRemovalJournal {
     pub base_path: PathBuf,
     pub source_add_operation_id: String,
     pub phase: RemoveWorktreePhase,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct DecodedMoveJournal {
+    pub journal_path: PathBuf,
+    pub operation_id: String,
+    pub repository: PathBuf,
+    pub source: PathBuf,
+    pub destination: PathBuf,
+    pub source_add_operation_id: String,
+    pub phase: MoveWorktreePhase,
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct DecodedPruneJournal {
+    pub journal_path: PathBuf,
+    pub operation_id: String,
+    pub repository: PathBuf,
+    pub phase: PruneWorktreesPhase,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +368,104 @@ impl RemovalJournalRecord {
             destination: PathBuf::from(self.destination.decode(&journal_path)?),
             base_path: PathBuf::from(self.base_path.decode(&journal_path)?),
             source_add_operation_id: self.source_add_operation_id,
+            phase: self.phase,
+            journal_path,
+        })
+    }
+}
+
+impl MoveJournalRecord {
+    pub const FORMAT_VERSION: u16 = 1;
+
+    #[cfg(target_os = "macos")]
+    pub fn new(
+        operation_id: String,
+        paths: MoveJournalPaths<'_>,
+        source_add_operation_id: String,
+    ) -> Self {
+        Self {
+            format_version: Self::FORMAT_VERSION,
+            operation_id,
+            repository: NativeOsString::encode(paths.repository.as_os_str()),
+            source: NativeOsString::encode(paths.source.as_os_str()),
+            destination: NativeOsString::encode(paths.destination.as_os_str()),
+            source_add_operation_id,
+            phase: MoveWorktreePhase::IntentRecorded,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn transition(
+        &mut self,
+        next: MoveWorktreePhase,
+    ) -> Result<(), MoveJournalTransitionError> {
+        if !self.phase.can_transition_to(next) {
+            return Err(MoveJournalTransitionError {
+                current: self.phase,
+                requested: next,
+            });
+        }
+        self.phase = next;
+        Ok(())
+    }
+
+    pub fn decode(self, journal_path: PathBuf) -> Result<DecodedMoveJournal, JournalError> {
+        if self.format_version != Self::FORMAT_VERSION {
+            return Err(JournalError::UnsupportedVersion {
+                path: journal_path,
+                version: self.format_version,
+            });
+        }
+        Ok(DecodedMoveJournal {
+            operation_id: self.operation_id,
+            repository: PathBuf::from(self.repository.decode(&journal_path)?),
+            source: PathBuf::from(self.source.decode(&journal_path)?),
+            destination: PathBuf::from(self.destination.decode(&journal_path)?),
+            source_add_operation_id: self.source_add_operation_id,
+            phase: self.phase,
+            journal_path,
+        })
+    }
+}
+
+impl PruneJournalRecord {
+    pub const FORMAT_VERSION: u16 = 1;
+
+    #[cfg(target_os = "macos")]
+    pub fn new(operation_id: String, repository: &Path) -> Self {
+        Self {
+            format_version: Self::FORMAT_VERSION,
+            operation_id,
+            repository: NativeOsString::encode(repository.as_os_str()),
+            phase: PruneWorktreesPhase::IntentRecorded,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn transition(
+        &mut self,
+        next: PruneWorktreesPhase,
+    ) -> Result<(), PruneJournalTransitionError> {
+        if !self.phase.can_transition_to(next) {
+            return Err(PruneJournalTransitionError {
+                current: self.phase,
+                requested: next,
+            });
+        }
+        self.phase = next;
+        Ok(())
+    }
+
+    pub fn decode(self, journal_path: PathBuf) -> Result<DecodedPruneJournal, JournalError> {
+        if self.format_version != Self::FORMAT_VERSION {
+            return Err(JournalError::UnsupportedVersion {
+                path: journal_path,
+                version: self.format_version,
+            });
+        }
+        Ok(DecodedPruneJournal {
+            operation_id: self.operation_id,
+            repository: PathBuf::from(self.repository.decode(&journal_path)?),
             phase: self.phase,
             journal_path,
         })
@@ -491,6 +644,51 @@ impl JournalStore {
         self.persist(&record)?;
         Ok(())
     }
+
+    #[cfg(target_os = "macos")]
+    pub fn update_active_destination(
+        &self,
+        journal_path: &Path,
+        expected_source: &Path,
+        destination: &Path,
+    ) -> Result<(), JournalError> {
+        let file = File::open(journal_path)
+            .map_err(|source| io("open operation journal", journal_path, source))?;
+        let mut record: JournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: journal_path.to_path_buf(),
+                source,
+            })?;
+        if self.path_for(&record.operation_id) != journal_path {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "operation ID does not match the journal filename".to_owned(),
+            });
+        }
+        let decoded = record.clone().decode(journal_path.to_path_buf())?;
+        if decoded.phase != AddWorktreePhase::Active {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "only an active add journal can be relocated".to_owned(),
+            });
+        }
+        if decoded.destination == destination {
+            return Ok(());
+        }
+        if decoded.destination != expected_source {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: format!(
+                    "expected source {}, found {}",
+                    expected_source.display(),
+                    decoded.destination.display()
+                ),
+            });
+        }
+        record.destination = NativeOsString::encode(destination.as_os_str());
+        self.persist(&record)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -579,6 +777,202 @@ impl RemovalJournalStore {
                 let file = File::open(&path)
                     .map_err(|source| io("open removal journal", &path, source))?;
                 let record: RemovalJournalRecord =
+                    serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                        path: path.clone(),
+                        source,
+                    })?;
+                record.decode(path)
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MoveJournalStore {
+    directory: PathBuf,
+}
+
+impl MoveJournalStore {
+    #[cfg(target_os = "macos")]
+    pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
+        let directory = state_directory.join("moves");
+        fs::create_dir_all(&directory)
+            .map_err(|source| io("create move journal directory", &directory, source))?;
+        sync_parent(&directory)?;
+        Ok(Self { directory })
+    }
+
+    pub fn open(state_directory: &Path) -> Self {
+        Self {
+            directory: state_directory.join("moves"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn path_for(&self, operation_id: &str) -> PathBuf {
+        self.directory.join(format!("{operation_id}.json"))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn persist(&self, record: &MoveJournalRecord) -> Result<PathBuf, JournalError> {
+        let path = self.path_for(&record.operation_id);
+        let temporary = self.directory.join(format!(
+            ".{}.{}.tmp",
+            record.operation_id,
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|source| io("create temporary move journal", &temporary, source))?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
+            JournalError::Serialize {
+                path: temporary.clone(),
+                source,
+            }
+        })?;
+        writer
+            .write_all(b"\n")
+            .map_err(|source| io("write move journal", &temporary, source))?;
+        writer
+            .flush()
+            .map_err(|source| io("flush move journal", &temporary, source))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|source| io("sync move journal", &temporary, source))?;
+        fs::rename(&temporary, &path)
+            .map_err(|source| io("replace move journal", &path, source))?;
+        sync_parent(&path)?;
+        Ok(path)
+    }
+
+    pub fn load_all(&self) -> Result<Vec<DecodedMoveJournal>, JournalError> {
+        if !self
+            .directory
+            .try_exists()
+            .map_err(|source| io("inspect move journal directory", &self.directory, source))?
+        {
+            return Ok(Vec::new());
+        }
+        let mut paths = fs::read_dir(&self.directory)
+            .map_err(|source| io("read move journal directory", &self.directory, source))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|source| io("read move journal entry", &self.directory, source))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        paths.retain(|path| path.extension() == Some(OsStr::new("json")));
+        paths.sort_unstable();
+
+        paths
+            .into_iter()
+            .map(|path| {
+                let file =
+                    File::open(&path).map_err(|source| io("open move journal", &path, source))?;
+                let record: MoveJournalRecord =
+                    serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                        path: path.clone(),
+                        source,
+                    })?;
+                record.decode(path)
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PruneJournalStore {
+    directory: PathBuf,
+}
+
+impl PruneJournalStore {
+    #[cfg(target_os = "macos")]
+    pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
+        let directory = state_directory.join("prunes");
+        fs::create_dir_all(&directory)
+            .map_err(|source| io("create prune journal directory", &directory, source))?;
+        sync_parent(&directory)?;
+        Ok(Self { directory })
+    }
+
+    pub fn open(state_directory: &Path) -> Self {
+        Self {
+            directory: state_directory.join("prunes"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn path_for(&self, operation_id: &str) -> PathBuf {
+        self.directory.join(format!("{operation_id}.json"))
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn persist(&self, record: &PruneJournalRecord) -> Result<PathBuf, JournalError> {
+        let path = self.path_for(&record.operation_id);
+        let temporary = self.directory.join(format!(
+            ".{}.{}.tmp",
+            record.operation_id,
+            std::process::id()
+        ));
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)
+            .map_err(|source| io("create temporary prune journal", &temporary, source))?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
+            JournalError::Serialize {
+                path: temporary.clone(),
+                source,
+            }
+        })?;
+        writer
+            .write_all(b"\n")
+            .map_err(|source| io("write prune journal", &temporary, source))?;
+        writer
+            .flush()
+            .map_err(|source| io("flush prune journal", &temporary, source))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|source| io("sync prune journal", &temporary, source))?;
+        fs::rename(&temporary, &path)
+            .map_err(|source| io("replace prune journal", &path, source))?;
+        sync_parent(&path)?;
+        Ok(path)
+    }
+
+    pub fn load_all(&self) -> Result<Vec<DecodedPruneJournal>, JournalError> {
+        if !self
+            .directory
+            .try_exists()
+            .map_err(|source| io("inspect prune journal directory", &self.directory, source))?
+        {
+            return Ok(Vec::new());
+        }
+        let mut paths = fs::read_dir(&self.directory)
+            .map_err(|source| io("read prune journal directory", &self.directory, source))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|source| io("read prune journal entry", &self.directory, source))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        paths.retain(|path| path.extension() == Some(OsStr::new("json")));
+        paths.sort_unstable();
+
+        paths
+            .into_iter()
+            .map(|path| {
+                let file =
+                    File::open(&path).map_err(|source| io("open prune journal", &path, source))?;
+                let record: PruneJournalRecord =
                     serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                         path: path.clone(),
                         source,
@@ -718,10 +1112,11 @@ mod tests {
 
     use super::{
         CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore, JournalPaths,
-        JournalRecord, JournalStore, RemovalJournalPaths, RemovalJournalRecord,
+        JournalRecord, JournalStore, MoveJournalPaths, MoveJournalRecord, MoveJournalStore,
+        PruneJournalRecord, PruneJournalStore, RemovalJournalPaths, RemovalJournalRecord,
         RemovalJournalStore,
     };
-    use crate::GarbageCollectionPhase;
+    use crate::{GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase};
 
     #[cfg(unix)]
     #[test]
@@ -828,5 +1223,61 @@ mod tests {
             base_path.as_os_str().as_bytes()
         );
         assert_eq!(loaded[0].phase, GarbageCollectionPhase::MarkerRemoved);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_and_prune_journals_round_trip_native_paths_and_phases() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let directory = tempdir().expect("journal fixture");
+        let source = directory
+            .path()
+            .join(OsString::from_vec(b"source-\xff".to_vec()));
+        let destination = directory
+            .path()
+            .join(OsString::from_vec(b"destination-\xfe".to_vec()));
+        let move_store = MoveJournalStore::create(directory.path()).expect("create move store");
+        let mut move_record = MoveJournalRecord::new(
+            "move-operation".to_owned(),
+            MoveJournalPaths {
+                repository: Path::new("/repository"),
+                source: &source,
+                destination: &destination,
+            },
+            "add-operation".to_owned(),
+        );
+        move_record
+            .transition(MoveWorktreePhase::WorktreeMoved)
+            .expect("advance move journal");
+        move_store
+            .persist(&move_record)
+            .expect("persist move journal");
+        let moves = move_store.load_all().expect("load move journal");
+        assert_eq!(moves.len(), 1);
+        assert_eq!(
+            moves[0].source.as_os_str().as_bytes(),
+            source.as_os_str().as_bytes()
+        );
+        assert_eq!(
+            moves[0].destination.as_os_str().as_bytes(),
+            destination.as_os_str().as_bytes()
+        );
+        assert_eq!(moves[0].phase, MoveWorktreePhase::WorktreeMoved);
+
+        let prune_store = PruneJournalStore::create(directory.path()).expect("create prune store");
+        let mut prune_record =
+            PruneJournalRecord::new("prune-operation".to_owned(), Path::new("/repository"));
+        prune_record
+            .transition(PruneWorktreesPhase::GitMetadataPruned)
+            .expect("advance prune journal");
+        prune_store
+            .persist(&prune_record)
+            .expect("persist prune journal");
+        let prunes = prune_store.load_all().expect("load prune journal");
+        assert_eq!(prunes.len(), 1);
+        assert_eq!(prunes[0].repository, Path::new("/repository"));
+        assert_eq!(prunes[0].phase, PruneWorktreesPhase::GitMetadataPruned);
     }
 }

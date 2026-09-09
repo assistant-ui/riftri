@@ -172,6 +172,30 @@ enum WorktreeCommand {
         #[arg(long)]
         state_dir: Option<PathBuf>,
     },
+
+    /// Move a Riftri-managed linked worktree with recoverable metadata updates.
+    Move {
+        /// Existing Riftri-managed worktree directory.
+        source: PathBuf,
+        /// New worktree directory on the same APFS volume.
+        destination: PathBuf,
+        /// Repository owning the linked worktree.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        /// Riftri state directory; defaults to <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+
+    /// Prune stale unmanaged Git metadata without risking managed worktrees.
+    Prune {
+        /// Repository owning the linked worktrees.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        /// Riftri state directory; defaults to <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -331,6 +355,35 @@ fn main() -> Result<()> {
                 println!("Retained immutable base: {}", result.base_path.display());
                 println!("Journal: {}", result.journal_path.display());
             }
+            WorktreeCommand::Move {
+                source,
+                destination,
+                repository,
+                state_dir,
+            } => {
+                let result = riftri_core::move_worktree(riftri_core::MoveWorktreeRequest {
+                    repository,
+                    source,
+                    destination,
+                    state_dir,
+                })?;
+                println!("Moved Riftri-backed Git worktree");
+                println!("Source: {}", result.source.display());
+                println!("Destination: {}", result.destination.display());
+                println!("Retained immutable base: {}", result.base_path.display());
+                println!("Journal: {}", result.journal_path.display());
+            }
+            WorktreeCommand::Prune {
+                repository,
+                state_dir,
+            } => {
+                let result = riftri_core::prune_worktrees(riftri_core::PruneWorktreesRequest {
+                    repository,
+                    state_dir,
+                })?;
+                println!("Pruned stale Git worktree metadata");
+                println!("Journal: {}", result.journal_path.display());
+            }
         },
         Command::Recover { state_dir } => {
             let report = riftri_core::recover_incomplete_operations(&state_dir)?;
@@ -362,6 +415,10 @@ fn print_recovery_report(
     println!("Recovered add operations: {}", report.recovered);
     println!("Completed removals: {}", report.completed_removals);
     println!("Recovered removals: {}", report.recovered_removals);
+    println!("Completed moves: {}", report.completed_moves);
+    println!("Recovered moves: {}", report.recovered_moves);
+    println!("Completed prunes: {}", report.completed_prunes);
+    println!("Recovered prunes: {}", report.recovered_prunes);
     println!("Completed collections: {}", report.completed_collections);
     println!("Recovered collections: {}", report.recovered_collections);
     if !report.errors.is_empty() {
@@ -428,6 +485,17 @@ fn run_git_shim() -> Result<i32> {
             );
             Ok(0)
         }
+        riftri_core::GitProxyOutcome::OptimizedMove(result) => {
+            eprintln!(
+                "Riftri moved managed Riftri worktree to {}",
+                result.destination.display()
+            );
+            Ok(0)
+        }
+        riftri_core::GitProxyOutcome::OptimizedPrune(_) => {
+            eprintln!("Riftri pruned stale Git worktree metadata");
+            Ok(0)
+        }
     }
 }
 
@@ -460,6 +528,16 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     println!("Pending removals: {}", report.pending_removals);
     if report.pending_removals > 0 {
         println!("Attention: run `riftri repair` to resume pending removals");
+    }
+    println!("Completed moves: {}", report.completed_moves);
+    println!("Pending moves: {}", report.pending_moves);
+    if report.pending_moves > 0 {
+        println!("Attention: run `riftri repair` to resume pending moves");
+    }
+    println!("Completed prunes: {}", report.completed_prunes);
+    println!("Pending prunes: {}", report.pending_prunes);
+    if report.pending_prunes > 0 {
+        println!("Attention: run `riftri repair` to resume pending prunes");
     }
     println!("Completed collections: {}", report.completed_collections);
     println!("Cancelled collections: {}", report.cancelled_collections);

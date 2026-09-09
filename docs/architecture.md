@@ -41,14 +41,20 @@ the shim first on `PATH` for that shell and its descendants. The hook is never
 evaluated automatically and Riftri never edits shell startup files. Once it is
 active, `riftri enable` and `riftri disable` are the repository-specific switch;
 disabled repositories and commands outside repositories still delegate to the
-real Git executable captured before `PATH` changes.
+real Git executable captured before `PATH` changes. A user may deliberately put
+the hook evaluation in a shell profile, which globally activates the shim for
+that user's new shells, but this does not globally enable optimization:
+repository-local consent is still required.
 
 The shim accepts optimized `worktree add` with `-b <new-branch>` or `--detach`
-and routes the ordinary no-option `worktree remove <path>` form through Riftri
-when the target has an active Riftri add journal. Unsupported add forms fail
-before mutation instead of silently falling back to a full checkout. Removal
-options and move/prune commands continue to use Git for unmanaged worktrees but
-fail closed when they could mutate managed Riftri state outside a journal.
+and routes the ordinary no-option `worktree remove <path>` and `worktree move
+<source> <destination>` forms through Riftri when the target has an active
+Riftri add journal. A no-option `worktree prune` first verifies that every
+managed view is present and registered. Move and prune progress is durable and
+recoverable. Unsupported add forms fail before mutation instead of silently
+falling back to a full checkout. Lifecycle options continue to use Git for
+unmanaged worktrees but fail closed when they could mutate managed Riftri state
+outside a supported journal.
 
 ## Components
 
@@ -171,6 +177,37 @@ when resuming before Git removes a still-registered view. Git performs removal
 without `--force`, so a concurrent dirtying write is also rejected. A missing
 view plus missing Git registration is treated as an idempotently completed
 removal step. Inconsistent or changed paths are preserved for manual attention.
+
+## Move-operation journal state machine
+
+Managed moves use separate journals under `moves/`:
+
+```text
+intent-recorded
+  -> worktree-moved
+  -> add-journal-updated
+  -> complete
+```
+
+Git performs the directory and administrative-metadata move. Recovery accepts
+only an intact registered source or an intact registered destination, preserves
+all inconsistent states, and atomically relocates the active add-journal
+reference. The source and destination must be on the same APFS volume.
+
+## Prune-operation journal state machine
+
+Managed-state pruning uses separate journals under `prunes/`:
+
+```text
+intent-recorded
+  -> git-metadata-pruned
+  -> complete
+```
+
+Before invoking Git, Riftri verifies that every active managed view exists and
+is registered and that no add, removal, or move is incomplete. Repeating Git's
+prune after an interruption is safe because managed registrations are
+revalidated first.
 
 ## Base-collection journal state machine
 

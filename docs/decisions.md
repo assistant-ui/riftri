@@ -163,6 +163,18 @@ reason. Diagnostics do not turn an unjournaled artifact into a cleanup target;
 automatic repair and garbage collection remain limited to paths authorized by a
 validated durable journal.
 
+### D021: managed move and prune use forward-only journals
+
+A managed `worktree move` records its source, destination, repository, and
+source add operation before asking Git to move the linked worktree. Recovery
+reconciles the two safe observable states, then atomically updates the active add
+journal and completes the move journal. Cross-volume moves are rejected because
+their storage semantics are not an APFS rename. Before `worktree prune`, Riftri
+requires every active managed view to exist and remain in Git's structured
+inventory and refuses to proceed while another lifecycle journal is pending.
+Prune can then be repeated safely during recovery. Unsupported configured or
+forced forms fail closed for managed state.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

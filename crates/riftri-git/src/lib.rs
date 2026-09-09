@@ -497,6 +497,32 @@ impl Git {
         Ok(())
     }
 
+    /// Move a linked worktree through Git so its administrative metadata and
+    /// worktree-local `.git` pointer are updated together.
+    pub fn move_worktree(
+        &self,
+        repository: &Path,
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("worktree"),
+            OsString::from("move"),
+            OsString::from("--"),
+            source.as_os_str().to_os_string(),
+            destination.as_os_str().to_os_string(),
+        ];
+        self.run_os(Some(repository), &arguments)?;
+        Ok(())
+    }
+
+    /// Prune stale linked-worktree administrative metadata. Callers must first
+    /// prove that every Riftri-managed view is still present and registered.
+    pub fn prune_worktrees(&self, repository: &Path) -> Result<(), GitError> {
+        self.run(Some(repository), &["worktree", "prune"])?;
+        Ok(())
+    }
+
     /// Resolve a local branch only when that exact ref exists.
     pub fn local_branch_target(
         &self,

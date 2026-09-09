@@ -12,9 +12,10 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    AddWorktreeRequest, AddWorktreeResult, RemoveWorktreeRequest, RemoveWorktreeResult,
-    WorktreeError, WorktreeMode, add_worktree, is_managed_worktree, remove_worktree,
-    storage_accounting,
+    AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
+    PruneWorktreesRequest, PruneWorktreesResult, RemoveWorktreeRequest, RemoveWorktreeResult,
+    WorktreeError, WorktreeMode, add_worktree, is_managed_worktree, move_worktree, prune_worktrees,
+    remove_worktree, storage_accounting,
 };
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
@@ -33,6 +34,8 @@ pub enum GitProxyPlan {
     Passthrough,
     OptimizedAdd(AddWorktreeRequest),
     OptimizedRemove(RemoveWorktreeRequest),
+    OptimizedMove(MoveWorktreeRequest),
+    OptimizedPrune(PruneWorktreesRequest),
 }
 
 #[derive(Debug)]
@@ -40,6 +43,8 @@ pub enum GitProxyOutcome {
     Passthrough(i32),
     OptimizedAdd(AddWorktreeResult),
     OptimizedRemove(RemoveWorktreeResult),
+    OptimizedMove(MoveWorktreeResult),
+    OptimizedPrune(PruneWorktreesResult),
 }
 
 #[derive(Debug, Error)]
@@ -134,18 +139,17 @@ pub fn plan_git_command(
             &arguments[context.command_index + 2..],
             context.optimization_compatible,
         ),
-        "move" => {
-            guard_managed_path_lifecycle(
-                &context.repository,
-                &arguments[context.command_index + 2..],
-                "move",
-            )?;
-            Ok(GitProxyPlan::Passthrough)
-        }
-        "prune" => {
-            guard_managed_prune(&activation)?;
-            Ok(GitProxyPlan::Passthrough)
-        }
+        "move" => plan_enabled_move(
+            &context.repository,
+            &arguments[context.command_index + 2..],
+            context.optimization_compatible,
+        ),
+        "prune" => plan_enabled_prune(
+            &context.repository,
+            &activation,
+            &arguments[context.command_index + 2..],
+            context.optimization_compatible,
+        ),
         _ => Ok(GitProxyPlan::Passthrough),
     }
 }
@@ -163,6 +167,12 @@ pub fn proxy_git_command(
         }
         GitProxyPlan::OptimizedRemove(request) => {
             Ok(GitProxyOutcome::OptimizedRemove(remove_worktree(request)?))
+        }
+        GitProxyPlan::OptimizedMove(request) => {
+            Ok(GitProxyOutcome::OptimizedMove(move_worktree(request)?))
+        }
+        GitProxyPlan::OptimizedPrune(request) => {
+            Ok(GitProxyOutcome::OptimizedPrune(prune_worktrees(request)?))
         }
     }
 }
@@ -588,6 +598,79 @@ fn plan_enabled_remove(
     Ok(GitProxyPlan::Passthrough)
 }
 
+fn parse_enabled_move(
+    repository: &Path,
+    arguments: &[OsString],
+) -> Result<Option<MoveWorktreeRequest>, ActivationError> {
+    let (source, destination) = match arguments {
+        [source, destination] => (source, destination),
+        [separator, source, destination] if separator == "--" => (source, destination),
+        _ => return Ok(None),
+    };
+    let resolve = |path: &OsString| {
+        let path = PathBuf::from(path);
+        if path.is_absolute() {
+            path
+        } else {
+            repository.join(path)
+        }
+    };
+    let source = resolve(source);
+    if !is_managed_worktree(repository, &source)? {
+        return Ok(None);
+    }
+    Ok(Some(MoveWorktreeRequest {
+        repository: repository.to_path_buf(),
+        source,
+        destination: resolve(destination),
+        state_dir: None,
+    }))
+}
+
+fn plan_enabled_move(
+    repository: &Path,
+    arguments: &[OsString],
+    optimization_compatible: bool,
+) -> Result<GitProxyPlan, ActivationError> {
+    if optimization_compatible {
+        if let Some(request) = parse_enabled_move(repository, arguments)? {
+            return Ok(GitProxyPlan::OptimizedMove(request));
+        }
+    }
+    guard_managed_path_lifecycle(repository, arguments, "move")?;
+    Ok(GitProxyPlan::Passthrough)
+}
+
+fn plan_enabled_prune(
+    repository: &Path,
+    activation: &RepositoryActivation,
+    arguments: &[OsString],
+    optimization_compatible: bool,
+) -> Result<GitProxyPlan, ActivationError> {
+    let state_directory = activation.common_git_dir.join("riftri");
+    if !state_directory.exists() {
+        return Ok(GitProxyPlan::Passthrough);
+    }
+    let status = storage_accounting(&state_directory)?;
+    let managed_state = status.active_views > 0
+        || status.pending_adds > 0
+        || status.pending_removals > 0
+        || status.pending_moves > 0
+        || status.pending_prunes > 0
+        || !status.diagnostic_issues.is_empty();
+    if !managed_state {
+        return Ok(GitProxyPlan::Passthrough);
+    }
+    if optimization_compatible && arguments.is_empty() {
+        return Ok(GitProxyPlan::OptimizedPrune(PruneWorktreesRequest {
+            repository: repository.to_path_buf(),
+            state_dir: None,
+        }));
+    }
+    guard_managed_prune(activation)?;
+    Ok(GitProxyPlan::Passthrough)
+}
+
 fn guard_managed_path_lifecycle(
     repository: &Path,
     arguments: &[OsString],
@@ -617,7 +700,13 @@ fn guard_managed_prune(activation: &RepositoryActivation) -> Result<(), Activati
         return Ok(());
     }
     let status = storage_accounting(&state_directory)?;
-    if status.active_views > 0 || status.pending_adds > 0 || status.pending_removals > 0 {
+    if status.active_views > 0
+        || status.pending_adds > 0
+        || status.pending_removals > 0
+        || status.pending_moves > 0
+        || status.pending_prunes > 0
+        || !status.diagnostic_issues.is_empty()
+    {
         return Err(unsupported(
             "refusing `git worktree prune` while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal",
         ));
