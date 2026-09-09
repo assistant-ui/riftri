@@ -50,6 +50,25 @@ test("launcher delegates to the locally built Rust executable", () => {
   assert.match(result.stdout, /^riftri 0\.1\.0\s*$/);
 });
 
+test("launcher preserves process-scoped Rust Git execution", () => {
+  const repositoryRoot = path.resolve(__dirname, "..", "..");
+  const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
+  const binary = path.join(repositoryRoot, "target", "debug", executable);
+  const launcher = path.join(repositoryRoot, "npm", "bin", "riftri.js");
+  const result = spawnSync(
+    process.execPath,
+    [launcher, "exec", "--", "git", "--version"],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: { ...process.env, RIFTRI_BINARY: binary },
+    },
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^git version /);
+});
+
 test("launcher preserves Rust CLI failures", () => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
