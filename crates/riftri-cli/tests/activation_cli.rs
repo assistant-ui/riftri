@@ -168,8 +168,9 @@ fn exec_binds_any_command_to_an_exact_git_worktree() {
         "worktree-bound command failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let reported = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
     assert_eq!(
-        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim()),
+        reported.canonicalize().expect("canonical reported root"),
         destination
             .canonicalize()
             .expect("canonical bound worktree")
