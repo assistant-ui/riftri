@@ -93,6 +93,10 @@ that line yourself to keep Riftri inactive in future shells. Disabling one
 repository does not deactivate the shell shim, and deactivating the shim does
 not erase any repository's local consent setting.
 
+See [Global shell activation](docs/global-activation.md) for the compatibility
+matrix, performance probe, and known boundaries involving aliases, wrappers,
+IDEs, containers, and tools that do not spawn Git through `PATH`.
+
 The explicit interface remains available without process activation:
 
 ```console

@@ -236,6 +236,6 @@ Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
 missing paths referenced by active journals without deleting them. Managed
 move and guarded prune now use recoverable forward-only journals. Automatic
 orphan-state repair, Linux/Windows mutation backends, mounts, and a daemon are
-not implemented. The APFS storage-lifecycle safety work through
-Milestone 3 is complete; subsequent roadmap milestones extend transparent Git
-compatibility and add native Linux and Windows backends.
+not implemented. The APFS storage-lifecycle safety work through Milestone 3 and
+the transparent Git compatibility work in Milestone 4 are complete; subsequent
+roadmap milestones add native Linux and Windows backends.

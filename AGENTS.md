@@ -14,8 +14,9 @@ commands. Riftri changes only how worktree files are materialized and stored.
 
 ## Current stage
 
-The repository has completed Milestones 1 through 3: the capability/Git-semantics
-foundation, explicit APFS prototype, and recoverable storage lifecycle. On macOS
+The repository has completed Milestones 1 through 4: the capability/Git-semantics
+foundation, explicit APFS prototype, recoverable storage lifecycle, and
+process-scoped transparent Git compatibility. On macOS
 it can create real linked worktrees from
 strict native APFS clones, reuse exact-tree immutable bases, persist atomic add
 journals, roll back failures, and recover interrupted adds without deleting a
@@ -32,6 +33,11 @@ Status reports unexplained or inconsistent state paths but never deletes them.
 Managed move and prune now use separate recoverable journals. It still has no
 forced move/removal lifecycle path, automatic orphan-state repair, filesystem
 mounts, Linux/Windows mutation backend, or daemon.
+
+Milestone 4's transparent-Git compatibility matrix lives in
+`crates/riftri-cli/tests/global_activation.rs`. Global per-user shell activation
+never replaces repository-local consent; preserve that distinction in UX and
+tests.
 
 Check `ROADMAP.md` before starting implementation. Do not skip milestone safety
 or compatibility gates merely to reach a working demo faster.

@@ -89,7 +89,7 @@ Acceptance criteria:
 - Cleanup is idempotent after a crash.
 - Diagnostics explain every retained directory.
 
-## Milestone 4: process-scoped transparent Git
+## Milestone 4: process-scoped transparent Git — complete
 
 Outcome: let agents use ordinary `git worktree` commands without relying on a
 prompt or skill.
@@ -103,9 +103,12 @@ are implemented. Move and prune have forward-only durable journals and
 idempotent recovery. Shell status distinguishes hook activation from
 repository consent, and explicitly evaluated deactivation restores the current
 shell without editing a user's profile. Unsupported forced/configured lifecycle
-forms remain fail-closed for managed state. The milestone remains incomplete
-until the full agent/shell compatibility and process-behavior acceptance matrix
-passes.
+forms remain fail-closed for managed state. The compatibility matrix covers
+installed sh/bash/zsh shells, disabled repositories, brand-neutral child
+process inheritance, Claude/Codex-named harnesses, passthrough standard I/O and
+exit status, repeated activation, deactivation, base reuse, and clean real Git
+worktrees. A manual, non-gating latency probe reports the global shim's
+per-command cost without imposing a host-load-sensitive threshold.
 
 - Add `riftri exec -- <command>` and explicit shell activation.
 - Add a small Git shim scoped to the child process environment.
@@ -120,6 +123,9 @@ Acceptance criteria:
 - Normal Git commands behave identically inside an activated process or shell.
 - Claude, Codex, and a plain shell can create optimized worktrees without
   Riftri-specific prompts.
+
+The repeatable matrix and global-activation boundaries are documented in
+[`docs/global-activation.md`](docs/global-activation.md).
 
 ## Milestone 5: Linux native backends
 
