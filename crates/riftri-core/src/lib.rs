@@ -19,10 +19,11 @@ pub use activation::{
 };
 pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{
-    AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, RecoveryReport,
-    RemoveWorktreeRequest, RemoveWorktreeResult, StorageAccountingReport, ViewStorageAccounting,
-    WorktreeError, WorktreeMode, add_worktree, is_managed_worktree, recover_incomplete_operations,
-    remove_worktree, storage_accounting,
+    AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, GarbageCollectionCandidate,
+    GarbageCollectionReport, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
+    StorageAccountingReport, ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree,
+    garbage_collect, is_managed_worktree, recover_incomplete_operations, remove_worktree,
+    storage_accounting,
 };
 
 /// A diagnostic check and its optional failure explanation.
@@ -138,6 +139,17 @@ pub enum RemoveWorktreePhase {
     WorktreeRemoved,
     BaseReleased,
     Complete,
+}
+
+/// Durable phases of an immutable-base garbage-collection transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum GarbageCollectionPhase {
+    IntentRecorded,
+    MarkerRemoved,
+    BaseQuarantined,
+    Complete,
+    Cancelled,
 }
 
 impl RemoveWorktreePhase {

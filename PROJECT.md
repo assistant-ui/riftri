@@ -209,7 +209,9 @@ and an explicitly activated sh/bash/zsh hook now route supported normal Git
 adds through that same transaction. Process-scoped commands can also be bound
 to a validated existing worktree without agent-specific behavior. Clean managed
 removals use a separate, recoverable journal, and retained bases now expose
-derived reference counts plus logical and allocated-byte accounting. Move,
-prune, repair, garbage collection, Linux/Windows mutation backends, mounts, and
-a daemon are not implemented. The remaining storage-lifecycle work stays in
+derived reference counts plus logical and allocated-byte accounting.
+Repository-aware repair resumes incomplete journals, and explicit journaled
+garbage collection can remove independently revalidated zero-reference bases.
+Move, prune, orphan-state repair, Linux/Windows mutation backends, mounts, and a
+daemon are not implemented. The remaining storage-lifecycle work stays in
 Milestone 3 of `ROADMAP.md`.

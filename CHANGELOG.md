@@ -31,6 +31,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   logical bytes, and filesystem-allocated bytes.
 - Repository-aware `riftri repair` for conservative add/removal journal recovery,
   plus actionable status explanations for pending removals and retained bases.
+- Explicit `riftri gc` planning and `--apply` collection for zero-reference
+  immutable bases, with per-base locking, reference revalidation, and durable
+  collection journals.
 - Offline release-staging coverage for all six native npm packages, GitHub
   archives, executable names, and SHA-256 checksums.
 

@@ -66,8 +66,11 @@ removed explicitly or through the enabled Git shim, removal intent and progress
 are journaled separately from adds, interrupted removals resume conservatively,
 `riftri repair` provides repository-aware conservative recovery, and `riftri
 status` derives base reference counts plus logical and allocated bytes with
-actionable lifecycle explanations. Zero-reference bases are retained until
-explicit garbage collection is implemented.
+actionable lifecycle explanations. `riftri gc` plans zero-reference cleanup,
+while `riftri gc --apply` revalidates references under the per-base lock and
+uses a recoverable collection journal before deleting an immutable base.
+The milestone remains incomplete until orphaned state is diagnosed explicitly
+and the creation transaction has failure coverage at every persisted phase.
 
 - Implement explicit worktree removal while preserving Git dirty-state checks.
 - Extend local state and operation journals to removal and base lifecycle.

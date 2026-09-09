@@ -137,10 +137,22 @@ without `--force`, and moves forward to completion rather than trying to
 reconstruct a deleted writable view. Recovery rechecks a still-present view and
 preserves it if it changed. Active reference counts are derived from terminal
 add and removal journals instead of maintained as a second mutable counter.
-Zero-reference bases remain cached; a future garbage collector must be explicit,
-journaled, and independently validate that no active view references the base.
+Zero-reference bases remain cached until the explicit garbage collector is
+applied; collection is journaled and independently validates that no active or
+incomplete operation references the base.
 Filesystem-allocated byte totals are diagnostic and may count shared blocks;
 volume-delta tests remain the proof of physical sharing.
+
+### D019: garbage collection is explicit, locked, and recoverable
+
+`riftri gc` is a read-only plan unless the user supplies `--apply`. Applied
+collection records intent before mutation, takes the same per-base lock as base
+construction, and reloads durable add/removal journals before removing a base.
+Every non-rolled-back add without a completed removal protects its base,
+including interrupted adds and removals. The collector removes the completion
+marker before making the base directory writable and atomically quarantining it;
+recovery then removes only the exact journaled quarantine path. A reference that
+appears before mutation cancels collection rather than risking a live base.
 
 ## Open design questions
 
