@@ -18,6 +18,7 @@
     "build:native": "cargo build --locked -p riftri-cli",
     "check:packages": "node package/scripts/check-packages.mjs",
     "test": "npm run build:native && node --test package/test/*.test.js",
+    "test:release": "node --test package/test/prepare-release.test.js",
     "pack:check": "npm run check:packages && node package/scripts/stage-root-package.mjs && npm pack ./dist/npm-root --dry-run"
   },
   "engines": {
