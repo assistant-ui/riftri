@@ -46,6 +46,14 @@ the hook evaluation in a shell profile, which globally activates the shim for
 that user's new shells, but this does not globally enable optimization:
 repository-local consent is still required.
 
+`riftri shell status` reports the two independent activation layers and whether
+they combine into effective optimized interception for a selected repository.
+`riftri shell deactivate <sh|bash|zsh>` prints code that removes every cached
+shim-directory occurrence from `PATH` and unsets Riftri's shim environment in
+the current shell when explicitly evaluated. It does not change repository
+configuration or edit a shell profile, so persistent global activation remains
+under the user's direct control.
+
 The shim accepts optimized `worktree add` with `-b <new-branch>` or `--detach`
 and routes the ordinary no-option `worktree remove <path>` and `worktree move
 <source> <destination>` forms through Riftri when the target has an active

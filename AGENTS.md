@@ -21,8 +21,10 @@ strict native APFS clones, reuse exact-tree immutable bases, persist atomic add
 journals, roll back failures, and recover interrupted adds without deleting a
 changed view. Repository-local activation, the process-scoped Git shim, and an
 explicitly evaluated sh/bash/zsh hook can route supported adds through the same
-transaction. Process-scoped commands can optionally start from a validated Git
-worktree root. Clean managed removals now use a separate recoverable journal,
+transaction. Shell status and explicitly evaluated deactivation keep global
+per-user hook setup visible and reversible without editing shell profiles.
+Process-scoped commands can optionally start from a validated Git worktree root.
+Clean managed removals now use a separate recoverable journal,
 and status reports retained-base references and disk usage with repository-aware
 repair for incomplete journals. Explicit garbage collection uses its own
 recoverable journal and revalidates references under the immutable-base lock.

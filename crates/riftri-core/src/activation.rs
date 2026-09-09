@@ -29,6 +29,15 @@ pub struct RepositoryActivation {
     pub enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShellActivationStatus {
+    pub active: bool,
+    pub marker_set: bool,
+    pub shim_first_on_path: bool,
+    pub shim_directory: PathBuf,
+    pub real_git: Option<PathBuf>,
+}
+
 #[derive(Debug, Clone)]
 pub enum GitProxyPlan {
     Passthrough,
@@ -284,6 +293,17 @@ pub fn prepare_posix_shell_hook() -> Result<String, ActivationError> {
     prepare_posix_shell_hook_inner()
 }
 
+/// Render Bourne-compatible code that removes Riftri from the current shell.
+/// The caller must explicitly evaluate the returned code in that shell.
+pub fn prepare_posix_shell_deactivation() -> Result<String, ActivationError> {
+    prepare_posix_shell_deactivation_inner()
+}
+
+/// Report whether the current process inherited a complete, usable shell hook.
+pub fn shell_activation_status() -> Result<ShellActivationStatus, ActivationError> {
+    shell_activation_status_inner()
+}
+
 #[cfg(unix)]
 fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     let real_git = locate_real_git()?;
@@ -302,7 +322,7 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     let shim_directory = posix_quote_path(&shim_directory)?;
     let real_git = posix_quote_path(&real_git)?;
     Ok(format!(
-        "export {real_git_env}={real_git}\nexport {shim_active_env}='1'\ncase \":${{PATH-}}:\" in\n  *:{shim_directory}:*) ;;\n  *) export PATH={shim_directory}${{PATH:+\":$PATH\"}} ;;\nesac\n",
+        "export {real_git_env}={real_git}\nexport {shim_active_env}='1'\ncase \"${{PATH-}}\" in\n  {shim_directory}|{shim_directory}:*) ;;\n  *) export PATH={shim_directory}${{PATH:+\":$PATH\"}} ;;\nesac\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
     ))
@@ -313,6 +333,60 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     Err(shell_error(
         "the sh/bash/zsh hook is currently available only on Unix-like systems",
     ))
+}
+
+#[cfg(unix)]
+fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
+    let shim_directory = posix_quote_path(&shell_shim_directory()?)?;
+    Ok(format!(
+        "_riftri_shim={shim_directory}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  if [ \"$_riftri_entry\" != \"$_riftri_shim\" ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env}\nunset _riftri_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more\n",
+        real_git_env = riftri_git::REAL_GIT_ENV,
+        shim_active_env = SHIM_ACTIVE_ENV,
+    ))
+}
+
+#[cfg(not(unix))]
+fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
+    Err(shell_error(
+        "shell deactivation for sh/bash/zsh is currently available only on Unix-like systems",
+    ))
+}
+
+#[cfg(unix)]
+fn shell_activation_status_inner() -> Result<ShellActivationStatus, ActivationError> {
+    let shim_directory = shell_shim_directory()?;
+    let marker_set = environment_truthy(SHIM_ACTIVE_ENV);
+    let shim_first_on_path = env::var_os("PATH")
+        .and_then(|path| env::split_paths(&path).next())
+        .is_some_and(|path| path == shim_directory);
+    let real_git = env::var_os(riftri_git::REAL_GIT_ENV)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
+    let active = marker_set
+        && shim_first_on_path
+        && shim_executable_paths(&shim_directory)
+            .iter()
+            .any(|path| is_executable_file(path))
+        && real_git.as_deref().is_some_and(is_executable_file);
+    Ok(ShellActivationStatus {
+        active,
+        marker_set,
+        shim_first_on_path,
+        shim_directory,
+        real_git,
+    })
+}
+
+#[cfg(not(unix))]
+fn shell_activation_status_inner() -> Result<ShellActivationStatus, ActivationError> {
+    Err(shell_error(
+        "shell status for sh/bash/zsh is currently available only on Unix-like systems",
+    ))
+}
+
+#[cfg(unix)]
+fn shim_executable_paths(directory: &Path) -> Vec<PathBuf> {
+    vec![directory.join("git")]
 }
 
 #[cfg(unix)]

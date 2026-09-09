@@ -130,6 +130,13 @@ commands outside enabled repositories and non-worktree Git commands unchanged.
 Unsupported optimized add forms fail visibly; `RIFTRI_BYPASS=1` is the explicit
 ordinary-Git escape hatch.
 
+Shell activation and repository consent remain deliberately independent.
+Status reports both. Deactivation is emitted as shell code because a child
+process cannot modify its parent environment; Riftri never claims that running
+the command without `eval` changes the current shell. If a user added the hook
+to a profile for global per-user activation, only that user removes the profile
+line.
+
 ### D018: removal moves forward and accounting is journal-derived
 
 Riftri removal records intent only after an initial clean check, invokes Git

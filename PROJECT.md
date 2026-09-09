@@ -101,6 +101,10 @@ delegates everything else to the exact real Git executable. Riftri prints the
 hook but never edits shell startup files automatically. Global interception is
 never the default.
 
+Shell status reports whether interception is active and whether the selected
+repository has opted in. Deactivation is explicitly evaluated, affects only the
+current shell, and never removes a profile line or repository consent.
+
 ## System outline
 
 ### Git coordinator

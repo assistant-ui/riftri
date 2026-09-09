@@ -100,9 +100,12 @@ binding, exact real-Git delegation, an explicitly evaluated sh/bash/zsh hook,
 supported `worktree add`, clean managed `worktree remove`, managed
 `worktree move`, and guarded `worktree prune` routing, and `RIFTRI_BYPASS=1`
 are implemented. Move and prune have forward-only durable journals and
-idempotent recovery. Unsupported forced/configured lifecycle forms remain
-fail-closed for managed state. The milestone remains incomplete until the full
-agent/shell compatibility and process-behavior acceptance matrix passes.
+idempotent recovery. Shell status distinguishes hook activation from
+repository consent, and explicitly evaluated deactivation restores the current
+shell without editing a user's profile. Unsupported forced/configured lifecycle
+forms remain fail-closed for managed state. The milestone remains incomplete
+until the full agent/shell compatibility and process-behavior acceptance matrix
+passes.
 
 - Add `riftri exec -- <command>` and explicit shell activation.
 - Add a small Git shim scoped to the child process environment.

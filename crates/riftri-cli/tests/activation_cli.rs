@@ -366,6 +366,46 @@ fn shell_hook_places_a_durable_riftri_git_shim_first_on_path() {
 
 #[cfg(unix)]
 #[test]
+fn shell_status_explains_global_scope_and_deactivation_restores_git() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell hook cache");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let binary = env!("CARGO_BIN_EXE_riftri");
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
+             \"$RIFTRI_TEST_BIN\" shell status \"$RIFTRI_TEST_REPOSITORY\"\n\
+             PATH=$PATH:$RIFTRI_CACHE_DIR/shims/v1; export PATH\n\
+             eval \"$(\"$RIFTRI_TEST_BIN\" shell deactivate sh)\"\n\
+             case :$PATH: in *:$RIFTRI_CACHE_DIR/shims/v1:*) exit 43 ;; esac\n\
+             printf 'marker=%s\\n' \"${RIFTRI_SHIM_ACTIVE-unset}\"\n\
+             printf 'real_git=%s\\n' \"${RIFTRI_REAL_GIT-unset}\"\n\
+             command -v git",
+        ])
+        .env("RIFTRI_TEST_BIN", binary)
+        .env("RIFTRI_TEST_REPOSITORY", &fixture.repository)
+        .env("RIFTRI_CACHE_DIR", cache.path())
+        .output()
+        .expect("activate, inspect, and deactivate shell hook");
+
+    assert!(
+        output.status.success(),
+        "shell lifecycle failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+    assert!(stdout.contains("Shell interception: active"));
+    assert!(stdout.contains("every new shell too only if you added the hook to your profile"));
+    assert!(stdout.contains("Repository optimization: enabled"));
+    assert!(stdout.contains("Effective optimized interception: active"));
+    assert!(stdout.contains("marker=unset"));
+    assert!(stdout.contains("real_git=unset"));
+    assert!(!stdout.lines().last().expect("git path").contains("riftri"));
+}
+
+#[cfg(unix)]
+#[test]
 fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
     let fixture = RepositoryFixture::new();
     let cache = tempdir().expect("shell hook cache");

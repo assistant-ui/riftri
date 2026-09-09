@@ -75,6 +75,24 @@ modify the parent shell, shell startup files, or system Git. To stop opting in:
 $ riftri disable
 ```
 
+Inspect both activation layers at any time:
+
+```console
+$ riftri shell status
+```
+
+To remove the shim from the current shell and restore its prior Git resolution:
+
+```console
+$ eval "$(riftri shell deactivate zsh)"
+```
+
+Deactivation cannot edit the parent shell unless its output is evaluated. It
+also cannot remove a hook line that you chose to put in a shell profile; remove
+that line yourself to keep Riftri inactive in future shells. Disabling one
+repository does not deactivate the shell shim, and deactivating the shim does
+not erase any repository's local consent setting.
+
 The explicit interface remains available without process activation:
 
 ```console
@@ -106,6 +124,7 @@ storage-lifecycle milestones on macOS. The repository currently provides:
 - Agent-neutral `riftri exec --worktree <path> -- <command>` process binding.
 - Explicit sh/bash/zsh activation for normal `git` commands through
   `riftri shell hook`.
+- Shell activation status plus explicitly evaluated sh/bash/zsh deactivation.
 
 Try the safe diagnostic commands:
 
@@ -116,6 +135,8 @@ $ cargo run -p riftri-cli -- doctor --json
 $ cargo run -p riftri-cli -- backends ../proposed-worktree
 $ cargo run -p riftri-cli -- enable
 $ eval "$(cargo run --quiet -p riftri-cli -- shell hook zsh)"
+$ cargo run -p riftri-cli -- shell status
+$ eval "$(cargo run --quiet -p riftri-cli -- shell deactivate zsh)"
 $ cargo run -p riftri-cli -- exec -- $SHELL
 $ cargo run -p riftri-cli -- exec --worktree ../app-auth -- codex
 $ cargo run -p riftri-cli -- worktree add ../app-auth -b feature/auth main
