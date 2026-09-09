@@ -86,13 +86,24 @@ enum Command {
         state_dir: Option<PathBuf>,
     },
 
+    /// Safely resume or roll back interrupted journaled operations.
+    Repair {
+        /// Repository whose default Riftri state should be repaired.
+        #[arg(default_value = ".")]
+        repository: PathBuf,
+
+        /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+
     /// Create or recover Riftri-backed real Git worktrees.
     Worktree {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
 
-    /// Roll back incomplete add operations recorded in a Riftri state directory.
+    /// Repair operations in an explicitly selected Riftri state directory.
     Recover {
         /// Riftri state directory containing operation journals.
         #[arg(long)]
@@ -246,15 +257,17 @@ fn main() -> Result<()> {
             repository,
             state_dir,
         } => {
-            let state_directory = match state_dir {
-                Some(state_directory) => state_directory,
-                None => {
-                    let activation = riftri_core::repository_activation(&repository)?;
-                    activation.common_git_dir.join("riftri")
-                }
-            };
+            let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::storage_accounting(&state_directory)?;
             print_storage_accounting(&state_directory, &report);
+        }
+        Command::Repair {
+            repository,
+            state_dir,
+        } => {
+            let state_directory = resolve_state_directory(&repository, state_dir)?;
+            let report = riftri_core::recover_incomplete_operations(&state_directory)?;
+            print_recovery_report(&state_directory, &report)?;
         }
         Command::Worktree { command } => match command {
             WorktreeCommand::Add {
@@ -297,24 +310,45 @@ fn main() -> Result<()> {
         },
         Command::Recover { state_dir } => {
             let report = riftri_core::recover_incomplete_operations(&state_dir)?;
-            println!("Scanned operations: {}", report.scanned);
-            println!("Active worktrees: {}", report.active);
-            println!("Recovered operations: {}", report.recovered);
-            println!("Completed removals: {}", report.completed_removals);
-            println!("Recovered removals: {}", report.recovered_removals);
-            if !report.errors.is_empty() {
-                println!("Operations needing attention:");
-                for error in &report.errors {
-                    println!("- {error}");
-                }
-                anyhow::bail!(
-                    "{} operation(s) need manual attention; no changed worktree was deleted",
-                    report.errors.len()
-                );
-            }
+            print_recovery_report(&state_dir, &report)?;
         }
     }
 
+    Ok(())
+}
+
+fn resolve_state_directory(repository: &Path, state_directory: Option<PathBuf>) -> Result<PathBuf> {
+    match state_directory {
+        Some(state_directory) => Ok(state_directory),
+        None => {
+            let activation = riftri_core::repository_activation(repository)?;
+            Ok(activation.common_git_dir.join("riftri"))
+        }
+    }
+}
+
+fn print_recovery_report(
+    state_directory: &Path,
+    report: &riftri_core::RecoveryReport,
+) -> Result<()> {
+    println!("Riftri repair");
+    println!("State: {}", state_directory.display());
+    println!("Scanned operations: {}", report.scanned);
+    println!("Active worktrees: {}", report.active);
+    println!("Recovered add operations: {}", report.recovered);
+    println!("Completed removals: {}", report.completed_removals);
+    println!("Recovered removals: {}", report.recovered_removals);
+    if !report.errors.is_empty() {
+        println!("Operations needing attention:");
+        for error in &report.errors {
+            println!("- {error}");
+        }
+        anyhow::bail!(
+            "{} operation(s) need manual attention; no changed worktree was deleted",
+            report.errors.len()
+        );
+    }
+    println!("No journaled operation needs manual attention");
     Ok(())
 }
 
@@ -394,14 +428,23 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     println!("Active views: {}", report.active_views);
     println!("Completed removals: {}", report.completed_removals);
     println!("Pending removals: {}", report.pending_removals);
+    if report.pending_removals > 0 {
+        println!("Attention: run `riftri repair` to resume pending removals");
+    }
     println!("Retained bases: {}", report.bases.len());
     for base in &report.bases {
+        let state = if base.reference_count == 0 {
+            "retained cache; no active views"
+        } else {
+            "in use"
+        };
         println!(
-            "- {}: refs={}, logical={} bytes, allocated={} bytes",
+            "- {}: refs={}, logical={} bytes, allocated={} bytes, state={}",
             base.path.display(),
             base.reference_count,
             base.logical_bytes,
-            base.allocated_bytes
+            base.allocated_bytes,
+            state
         );
     }
     println!("Active view storage:");
@@ -593,6 +636,18 @@ mod tests {
         };
         assert_eq!(repository, Path::new("../app"));
         assert!(state_dir.is_none());
+
+        let repair = Cli::try_parse_from(["riftri", "repair", "../app", "--state-dir", "../state"])
+            .expect("parse lifecycle repair");
+        let Command::Repair {
+            repository,
+            state_dir,
+        } = repair.command
+        else {
+            panic!("unexpected repair command");
+        };
+        assert_eq!(repository, Path::new("../app"));
+        assert_eq!(state_dir.as_deref(), Some(Path::new("../state")));
     }
 
     #[test]

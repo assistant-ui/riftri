@@ -203,6 +203,9 @@ bytes, and filesystem-allocated bytes. Allocated bytes can include shared APFS
 blocks and are not an exclusive-space measurement; the volume-delta benchmark
 remains the authoritative sharing check. Bases reaching zero references remain
 cached until a later explicit garbage collector can prove deletion is safe.
+`riftri repair` resolves the repository's state directory and applies the same
+conservative journal recovery as the explicit-state `riftri recover` command;
+it does not infer or delete unjournaled paths.
 
 ## Fast path
 

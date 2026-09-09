@@ -98,6 +98,32 @@ fn enable_and_disable_change_only_repository_local_config() {
 }
 
 #[test]
+fn status_and_repair_explain_an_empty_lifecycle() {
+    let fixture = RepositoryFixture::new();
+
+    let status = riftri(&fixture.repository, &["status"]);
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let status_output = String::from_utf8_lossy(&status.stdout);
+    assert!(status_output.contains("Active views: 0"));
+    assert!(status_output.contains("Pending removals: 0"));
+    assert!(status_output.contains("Retained bases: 0"));
+
+    let repair = riftri(&fixture.repository, &["repair"]);
+    assert!(
+        repair.status.success(),
+        "repair failed: {}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    let repair_output = String::from_utf8_lossy(&repair.stdout);
+    assert!(repair_output.contains("Scanned operations: 0"));
+    assert!(repair_output.contains("No journaled operation needs manual attention"));
+}
+
+#[test]
 fn exec_delegates_normal_git_to_the_real_executable() {
     let fixture = RepositoryFixture::new();
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
