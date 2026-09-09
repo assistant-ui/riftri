@@ -1,7 +1,7 @@
 /target/
 /node_modules/
 /dist/
-/packaging/platforms/*/bin/
+/package/platforms/*/bin/
 *.tgz
 .DS_Store
 *.swp

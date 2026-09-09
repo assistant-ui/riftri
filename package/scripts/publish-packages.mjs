@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "..", "..");
-const platformsDirectory = path.join(repositoryRoot, "packaging", "platforms");
+const platformsDirectory = path.join(repositoryRoot, "package", "platforms");
 const platformPackages = (await readdir(platformsDirectory, { withFileTypes: true }))
   .filter((entry) => entry.isDirectory())
   .map((entry) => path.join(platformsDirectory, entry.name))

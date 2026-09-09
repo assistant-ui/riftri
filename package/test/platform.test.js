@@ -52,14 +52,14 @@ test("stages the public package with conventional root directories", async (t) =
   assert.deepEqual(manifest.files, ["bin", "lib", "README.md", "LICENSE"]);
   await access(path.join(destination, "bin", "riftri.js"));
   await access(path.join(destination, "lib", "platform.js"));
-  await assert.rejects(access(path.join(destination, "packaging")));
+  await assert.rejects(access(path.join(destination, "package")));
 });
 
 test("launcher delegates to the locally built Rust executable", () => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
   const binary = path.join(repositoryRoot, "target", "debug", executable);
-  const launcher = path.join(repositoryRoot, "packaging", "bin", "riftri.js");
+  const launcher = path.join(repositoryRoot, "package", "bin", "riftri.js");
   const result = spawnSync(process.execPath, [launcher, "--version"], {
     cwd: repositoryRoot,
     encoding: "utf8",
@@ -74,7 +74,7 @@ test("launcher preserves process-scoped Rust Git execution", () => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
   const binary = path.join(repositoryRoot, "target", "debug", executable);
-  const launcher = path.join(repositoryRoot, "packaging", "bin", "riftri.js");
+  const launcher = path.join(repositoryRoot, "package", "bin", "riftri.js");
   const result = spawnSync(
     process.execPath,
     [launcher, "exec", "--", "git", "--version"],
@@ -93,7 +93,7 @@ test("launcher preserves Rust CLI failures", () => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const executable = process.platform === "win32" ? "riftri.exe" : "riftri";
   const binary = path.join(repositoryRoot, "target", "debug", executable);
-  const launcher = path.join(repositoryRoot, "packaging", "bin", "riftri.js");
+  const launcher = path.join(repositoryRoot, "package", "bin", "riftri.js");
   const result = spawnSync(process.execPath, [launcher, "not-a-command"], {
     cwd: repositoryRoot,
     encoding: "utf8",

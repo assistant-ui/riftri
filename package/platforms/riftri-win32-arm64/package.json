@@ -1,15 +1,15 @@
 {
-  "name": "riftri-win32-x64",
+  "name": "riftri-win32-arm64",
   "version": "0.1.0",
-  "description": "Riftri native binary for Windows x64",
+  "description": "Riftri native binary for Windows ARM64",
   "license": "MIT",
   "os": ["win32"],
-  "cpu": ["x64"],
+  "cpu": ["arm64"],
   "files": ["bin/riftri.exe"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/assistant-ui/riftri.git",
-    "directory": "packaging/platforms/riftri-win32-x64"
+    "directory": "package/platforms/riftri-win32-arm64"
   },
   "publishConfig": { "access": "public", "provenance": true }
 }
