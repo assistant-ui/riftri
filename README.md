@@ -134,8 +134,9 @@ storage-lifecycle milestones on macOS. The repository currently provides:
 
 - A Rust workspace with separate CLI, core, Git, and storage boundaries.
 - Destination-volume-specific `doctor` and `backends` diagnostics.
-- Read-only `doctor` preflight for HEAD attributes, Git LFS/filter rules,
-  sparse checkout, submodules, and checkout-changing configuration.
+- Read-only `doctor` preflight for deterministic in-tree attributes, Git
+  LFS/filter rules, external attributes, sparse checkout, submodules, and
+  checkout-changing configuration.
 - Git discovery for normal, linked, unborn, detached, and bare repositories.
 - Native-path, NUL-delimited Git worktree parsing.
 - Exact-tree materialization through an isolated temporary Git index.
@@ -183,9 +184,12 @@ $ cargo run -p riftri-cli -- gc --apply
 compatibility rules used by an optimized add. A blocked result lists every
 detected reason before Riftri creates Git metadata, state, or a destination.
 
-The add command currently requires macOS and a writable APFS volume. Its first
-compatibility envelope deliberately rejects attributes, filters/Git LFS,
-sparse checkout, submodules, and checkout-changing non-default configuration.
+The add command currently requires macOS and a writable APFS volume. Its
+compatibility envelope accepts only deterministic built-in `text`, `eol`, and
+`binary` in-tree attribute semantics. It deliberately rejects external
+attributes, filters/Git LFS, encodings, ident substitution, legacy or unknown
+attributes, sparse checkout, submodules, and checkout-changing non-default
+configuration.
 Transparent optimized adds currently require either `-b <new-branch>` or
 `--detach`. The ordinary no-option `git worktree remove <path>`, `git worktree
 move <source> <destination>`, and `git worktree prune` forms are also routed

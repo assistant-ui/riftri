@@ -11,7 +11,5 @@ publish = false
 
 [dependencies]
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+thiserror.workspace = true

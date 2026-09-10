@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 #[cfg(target_os = "macos")]
 use riftri_git::WorktreeHead;
-use riftri_git::{Git, GitError, ObjectId};
+use riftri_git::{Git, GitAttribute, GitError, ObjectId};
 use riftri_storage::{ApfsCloner, StorageError};
 #[cfg(target_os = "macos")]
 use riftri_storage::{BackendKind, CapabilityStatus, DestinationVolume, probe_backends};
@@ -1429,22 +1429,11 @@ fn analyze_repository_compatibility(
         .map(|entry| entry.path.clone())
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
-    let mut has_in_tree_attributes = false;
     let mut has_submodules = false;
     for entry in &entries {
-        if entry.path.file_name() == Some(OsStr::new(".gitattributes")) {
-            has_in_tree_attributes = true;
-        }
         if entry.path == Path::new(".gitmodules") || entry.object_kind == b"commit" {
             has_submodules = true;
         }
-    }
-    if has_in_tree_attributes {
-        blockers.push(RepositoryCompatibilityBlocker {
-            kind: RepositoryCompatibilityBlockerKind::InTreeAttributes,
-            explanation: "tree contains .gitattributes; in-tree attributes, including Git LFS and filter rules, are not supported yet"
-                .to_owned(),
-        });
     }
     if has_submodules {
         blockers.push(RepositoryCompatibilityBlocker {
@@ -1453,12 +1442,60 @@ fn analyze_repository_compatibility(
                 .to_owned(),
         });
     }
-    if !has_in_tree_attributes && git.paths_have_effective_attributes(repository, &paths)? {
-        blockers.push(RepositoryCompatibilityBlocker {
-            kind: RepositoryCompatibilityBlockerKind::EffectiveAttributes,
-            explanation: "Git attributes resolve for at least one tracked path; external or system attributes and active Git LFS/filter rules are not supported yet"
-                .to_owned(),
-        });
+
+    let info_attributes_path = git.info_attributes_path(repository)?;
+    let info_attributes_safe = match fs::read(&info_attributes_path) {
+        Ok(contents) if contents.is_empty() => true,
+        Ok(_) => {
+            blockers.push(RepositoryCompatibilityBlocker {
+                kind: RepositoryCompatibilityBlockerKind::EffectiveAttributes,
+                explanation: format!(
+                    "repository attributes file {} is not empty; external attributes are not part of the immutable tree and are not supported yet",
+                    info_attributes_path.display()
+                ),
+            });
+            false
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            blockers.push(RepositoryCompatibilityBlocker {
+                kind: RepositoryCompatibilityBlockerKind::EffectiveAttributes,
+                explanation: format!(
+                    "repository attributes file {} could not be inspected safely: {error}",
+                    info_attributes_path.display()
+                ),
+            });
+            false
+        }
+    };
+    if info_attributes_safe {
+        let mut in_tree = git.in_tree_attributes_for_paths(repository, &resolved.tree, &paths)?;
+        if let Some(attribute) = in_tree
+            .iter()
+            .find(|attribute| !is_supported_in_tree_attribute(attribute))
+        {
+            blockers.push(RepositoryCompatibilityBlocker {
+                kind: RepositoryCompatibilityBlockerKind::InTreeAttributes,
+                explanation: format!(
+                    "tree attribute {}={} for {} is outside Riftri's deterministic checkout allowlist; Git LFS, filters, encodings, ident substitution, legacy, and unknown attributes are not supported yet",
+                    String::from_utf8_lossy(&attribute.name),
+                    String::from_utf8_lossy(&attribute.value),
+                    attribute.path.display(),
+                ),
+            });
+        }
+
+        let mut effective =
+            git.effective_attributes_for_tree_paths(repository, &resolved.tree, &paths)?;
+        in_tree.sort_unstable();
+        effective.sort_unstable();
+        if effective != in_tree {
+            blockers.push(RepositoryCompatibilityBlocker {
+                kind: RepositoryCompatibilityBlockerKind::EffectiveAttributes,
+                explanation: "global or system attributes change at least one tracked path; external attributes are not part of the immutable tree and are not supported yet"
+                    .to_owned(),
+            });
+        }
     }
     #[cfg(target_os = "macos")]
     let mut profile = {
@@ -1541,6 +1578,16 @@ fn analyze_repository_compatibility(
         #[cfg(target_os = "macos")]
         checkout_profile: profile.finalize().to_vec(),
     })
+}
+
+fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
+    match attribute.name.as_slice() {
+        b"text" => matches!(attribute.value.as_slice(), b"set" | b"unset" | b"auto"),
+        b"eol" => matches!(attribute.value.as_slice(), b"lf" | b"crlf"),
+        b"binary" => attribute.value == b"set",
+        b"diff" | b"merge" => attribute.value == b"unset",
+        _ => false,
+    }
 }
 
 #[cfg(target_os = "macos")]

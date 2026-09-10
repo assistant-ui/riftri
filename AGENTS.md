@@ -33,6 +33,10 @@ Status reports unexplained or inconsistent state paths but never deletes them.
 Managed move and prune now use separate recoverable journals. It still has no
 forced move/removal lifecycle path, automatic orphan-state repair, filesystem
 mounts, Linux/Windows mutation backend, or daemon.
+The APFS checkout path accepts only an allowlisted deterministic subset of
+in-tree attributes (`text`, `eol`, and `binary` semantics). External attributes,
+Git LFS, custom filters, encodings, ident substitution, legacy attributes, and
+unknown attribute names remain fail-closed.
 
 Milestone 4's transparent-Git compatibility matrix lives in
 `crates/riftri-cli/tests/global_activation.rs`. Global per-user shell activation

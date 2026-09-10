@@ -182,6 +182,20 @@ inventory and refuses to proceed while another lifecycle journal is pending.
 Prune can then be repeated safely during recovery. Unsupported configured or
 forced forms fail closed for managed state.
 
+### D022: deterministic in-tree attributes are resolved by Git
+
+Riftri asks the installed Git executable to resolve attributes from the exact
+requested tree through an isolated temporary index; it does not parse attribute
+patterns itself. The APFS backend accepts only the built-in `text`, `eol`, and
+`binary` checkout semantics, including the checkout-neutral `diff` and `merge`
+records emitted by `binary`. The tree ID already makes these rules part of the
+immutable-base identity. Git LFS, custom filters, working-tree encodings, ident
+substitution, legacy or unknown attributes, and any effective repository-local,
+global, or system attribute source remain fail-closed. This deliberately
+narrows D016's initial blanket rejection without changing its exact-tree or
+external-input safety requirements; existing bases need no migration because
+an attributed tree was previously rejected before base creation.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

@@ -115,6 +115,47 @@ fn doctor_reports_checkout_compatibility_before_mutation() {
 }
 
 #[test]
+fn doctor_accepts_deterministic_in_tree_attributes() {
+    let fixture = RepositoryFixture::new();
+    fs::write(
+        fixture.repository.join(".gitattributes"),
+        "* text=auto\n*.txt text eol=lf\n*.bin binary\n",
+    )
+    .expect("write deterministic attributes");
+    fs::write(fixture.repository.join("payload.bin"), b"binary\0payload\n")
+        .expect("write binary fixture");
+    assert!(
+        git(
+            &fixture.repository,
+            &["add", "--", ".gitattributes", "payload.bin"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(
+            &fixture.repository,
+            &["commit", "--quiet", "-m", "add deterministic attributes"]
+        )
+        .status
+        .success()
+    );
+
+    let doctor = riftri(&fixture.repository, &["doctor", "--json"]);
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    let compatibility = &report["repository_compatibility"]["value"];
+    assert_eq!(compatibility["compatible"], true);
+    assert_eq!(compatibility["blockers"], serde_json::json!([]));
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
+#[test]
 fn doctor_json_lists_every_detected_checkout_blocker() {
     let fixture = RepositoryFixture::new();
     fs::write(
