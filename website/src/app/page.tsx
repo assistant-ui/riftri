@@ -27,15 +27,12 @@ function Hero() {
   return (
     <section className="hero" id="top">
       <div className="hero-copy">
-        <GraphLabel index="00">RIFTRI / LIGHTWEIGHT GIT WORKSPACES</GraphLabel>
-        <h1>
-          Parallel work,
-          <br />
-          without parallel copies.
-        </h1>
+        <GraphLabel index="00">OPEN SOURCE / BUILT FOR PARALLEL WORK</GraphLabel>
+        <h1>Riftri</h1>
+        <p className="hero-kicker">LIGHTWEIGHT GIT WORKSPACES FOR PARALLEL DEVELOPMENT_</p>
         <p className="hero-lede">
-          Create real, isolated Git worktrees while unchanged files share physical storage.
-          Your tools keep using normal files and normal Git.
+          Real, isolated Git worktrees that share the unchanged parts of your project.
+          Keep using normal files, normal Git, and the tools you already have.
         </p>
         <div className="hero-actions">
           <SectionLink className="button button-primary" href="#start">
@@ -77,7 +74,7 @@ function Overview() {
     <section className="content-section" id="overview">
       <div className="section-heading">
         <GraphLabel index="01">WHAT RIFTRI CHANGES</GraphLabel>
-        <h2>One exact tree. Many private workspaces.</h2>
+        <h2>One tree. Many workspaces.</h2>
         <p>
           Riftri changes how worktree files are created and stored. It does not replace Git,
           manage branches, or sit between your tools and the filesystem.
@@ -124,7 +121,7 @@ function GetStarted() {
       <div className="section-heading split-heading">
         <div>
           <GraphLabel index="02">GET STARTED</GraphLabel>
-          <h2>Check first. Create second.</h2>
+          <h2>Three commands. Then work.</h2>
         </div>
         <p>
           Run these commands from a Git repository on macOS. Riftri will stop with an explanation
