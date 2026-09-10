@@ -2,10 +2,9 @@
 @import "@fontsource-variable/geist-mono/wght.css";
 
 :root {
-  --canvas: #0d0e0c;
-  --canvas-deep: #090a08;
-  --surface: #12130f;
-  --surface-raised: #171812;
+  --canvas: #0a0a0a;
+  --canvas-deep: #050505;
+  --surface: #101010;
   --ink: #f1eee5;
   --ink-muted: #aaa89e;
   --ink-faint: #6e7067;
@@ -48,10 +47,7 @@ code, pre { font-family: var(--font-mono); }
 .site-shell {
   min-height: 100vh;
   overflow: hidden;
-  background:
-    linear-gradient(90deg, transparent calc(50% - 641px), var(--line) 0, var(--line) calc(50% - 640px), transparent 0),
-    linear-gradient(90deg, transparent calc(50% + 640px), var(--line) 0, var(--line) calc(50% + 641px), transparent 0),
-    var(--canvas-deep);
+  background: var(--canvas-deep);
 }
 
 .announcement {
@@ -133,10 +129,7 @@ code, pre { font-family: var(--font-mono); }
   min-height: 560px;
   grid-template-columns: minmax(0, 1.05fr) minmax(27rem, 0.95fr);
   border-bottom: 1px solid var(--line);
-  background-image:
-    linear-gradient(var(--line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--line) 1px, transparent 1px);
-  background-size: 48px 48px;
+  background: var(--canvas);
 }
 
 .hero-copy {
@@ -145,7 +138,7 @@ code, pre { font-family: var(--font-mono); }
   flex-direction: column;
   justify-content: center;
   padding: clamp(2.5rem, 4vw, 4rem);
-  background: linear-gradient(90deg, rgb(13 14 12 / 0.97), rgb(13 14 12 / 0.84));
+  background: var(--canvas);
 }
 
 .graph-label {
@@ -228,7 +221,7 @@ code, pre { font-family: var(--font-mono); }
   align-items: center;
   padding: clamp(2.25rem, 4vw, 3.5rem);
   border-left: 1px solid var(--line);
-  background: rgb(9 10 8 / 0.84);
+  background: var(--canvas-deep);
 }
 
 .graph-frame {
@@ -344,9 +337,7 @@ code, pre { font-family: var(--font-mono); }
 
 .materialization-map {
   margin: 3rem 0 0;
-  background:
-    linear-gradient(90deg, transparent 49.9%, rgb(241 238 229 / 0.025) 50%, transparent 50.1%),
-    var(--canvas-deep);
+  background: var(--canvas-deep);
 }
 
 .materialization-track {
@@ -428,9 +419,7 @@ code, pre { font-family: var(--font-mono); }
 }
 
 .start-section {
-  background:
-    linear-gradient(90deg, transparent 49.9%, rgb(241 238 229 / 0.025) 50%, transparent 50.1%),
-    repeating-linear-gradient(135deg, transparent 0 11px, rgb(241 238 229 / 0.022) 11px 12px);
+  background: var(--canvas);
 }
 
 .start-list {
@@ -598,7 +587,7 @@ code, pre { font-family: var(--font-mono); }
   .wordmark { padding-inline: 1rem; border-right: 0; }
   .site-nav a { display: none; min-width: auto; padding-inline: 1rem; }
   .site-nav a:last-child { display: grid; }
-  .hero { min-height: auto; background-size: 40px 40px; }
+  .hero { min-height: auto; }
   .hero-copy { padding: 4.25rem 1.4rem 3.25rem; }
   .hero h1 { font-size: clamp(2.3rem, 10vw, 3rem); }
   .hero-lede { font-size: 0.84rem; }
