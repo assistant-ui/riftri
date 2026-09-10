@@ -84,6 +84,11 @@ restartable: package versions already present in npm are detected and skipped.
    $ npm run pack:check
    ```
 
+   `npm test` includes an installed-package smoke check using locally generated
+   npm tarballs and no registry access. On macOS it also runs the complete
+   managed APFS lifecycle against a disposable real Git repository. Run it
+   separately with `npm run smoke:installed` when diagnosing release packaging.
+
 4. Open and squash-merge a conventional release pull request such as
    `chore: release v0.1.0`. The pull request title becomes the release commit
    subject on `main`.
