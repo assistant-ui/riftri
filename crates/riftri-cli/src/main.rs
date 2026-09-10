@@ -758,6 +758,30 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
         ),
     }
 
+    match &report.repository_compatibility.value {
+        Some(compatibility) => {
+            println!(
+                "Repository checkout compatibility (HEAD): {}",
+                if compatibility.compatible {
+                    "supported"
+                } else {
+                    "blocked"
+                }
+            );
+            for blocker in &compatibility.blockers {
+                println!("- {}: {}", blocker.kind.as_str(), blocker.explanation);
+            }
+        }
+        None => println!(
+            "Repository checkout compatibility (HEAD): unavailable ({})",
+            report
+                .repository_compatibility
+                .error
+                .as_deref()
+                .unwrap_or("unknown error")
+        ),
+    }
+
     println!("Destination storage capabilities:");
     for backend in &report.storage_capabilities {
         println!(

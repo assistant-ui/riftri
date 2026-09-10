@@ -35,11 +35,18 @@ use crate::journal::{
 use crate::{
     AddWorktreePhase, GarbageCollectionPhase, JournalTransitionError, MoveJournalTransitionError,
     MoveWorktreePhase, PruneJournalTransitionError, PruneWorktreesPhase,
-    RemoveJournalTransitionError, RemoveWorktreePhase,
+    RemoveJournalTransitionError, RemoveWorktreePhase, RepositoryCompatibilityBlocker,
+    RepositoryCompatibilityBlockerKind, RepositoryCompatibilityReport,
 };
 
 #[cfg(target_os = "macos")]
 static OPERATION_NONCE: AtomicU64 = AtomicU64::new(0);
+
+struct CompatibilityAnalysis {
+    report: RepositoryCompatibilityReport,
+    #[cfg(target_os = "macos")]
+    checkout_profile: Vec<u8>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeMode {
@@ -1395,80 +1402,145 @@ fn validate_compatibility(
     repository: &Path,
     revision: &OsStr,
 ) -> Result<Vec<u8>, WorktreeError> {
+    let analysis = analyze_repository_compatibility(git, repository, revision)?;
+    if let Some(blocker) = analysis.report.blockers.first() {
+        return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
+    }
+    Ok(analysis.checkout_profile)
+}
+
+pub(crate) fn inspect_repository_compatibility(
+    git: &Git,
+    repository: &Path,
+    revision: &OsStr,
+) -> Result<RepositoryCompatibilityReport, WorktreeError> {
+    Ok(analyze_repository_compatibility(git, repository, revision)?.report)
+}
+
+fn analyze_repository_compatibility(
+    git: &Git,
+    repository: &Path,
+    revision: &OsStr,
+) -> Result<CompatibilityAnalysis, WorktreeError> {
     let resolved = git.resolve_revision(repository, revision)?;
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
         .iter()
         .map(|entry| entry.path.clone())
         .collect::<Vec<_>>();
+    let mut blockers = Vec::new();
+    let mut has_in_tree_attributes = false;
+    let mut has_submodules = false;
     for entry in &entries {
         if entry.path.file_name() == Some(OsStr::new(".gitattributes")) {
-            return Err(WorktreeError::Unsupported(format!(
-                "tree contains {}; in-tree attributes are deferred until Riftri can prove checkout equivalence",
-                entry.path.display()
-            )));
+            has_in_tree_attributes = true;
         }
         if entry.path == Path::new(".gitmodules") || entry.object_kind == b"commit" {
-            return Err(WorktreeError::Unsupported(
-                "submodules are deferred to the compatibility milestone".to_owned(),
-            ));
+            has_submodules = true;
         }
     }
-    if git.paths_have_effective_attributes(repository, &paths)? {
-        return Err(WorktreeError::Unsupported(
-            "Git attributes resolve for at least one tracked path; external and system attributes are not supported yet"
+    if has_in_tree_attributes {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::InTreeAttributes,
+            explanation: "tree contains .gitattributes; in-tree attributes, including Git LFS and filter rules, are not supported yet"
                 .to_owned(),
-        ));
+        });
     }
-    let mut profile = Sha256::new();
-    profile.update(b"riftri-checkout-profile-v1\0");
-    let git_version = git.detect()?.version;
-    hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
+    if has_submodules {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::Submodules,
+            explanation: "tree contains submodule metadata or gitlink entries; submodules are not supported yet"
+                .to_owned(),
+        });
+    }
+    if !has_in_tree_attributes && git.paths_have_effective_attributes(repository, &paths)? {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::EffectiveAttributes,
+            explanation: "Git attributes resolve for at least one tracked path; external or system attributes and active Git LFS/filter rules are not supported yet"
+                .to_owned(),
+        });
+    }
+    #[cfg(target_os = "macos")]
+    let mut profile = {
+        let mut profile = Sha256::new();
+        profile.update(b"riftri-checkout-profile-v1\0");
+        let git_version = git.detect()?.version;
+        hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
+        profile
+    };
 
-    for (key, accepted) in [
-        ("core.attributesfile", &[][..]),
-        ("core.sparsecheckout", &[b"false".as_slice()][..]),
-        ("core.sparsecheckoutcone", &[b"false".as_slice()][..]),
-        ("core.autocrlf", &[b"false".as_slice()][..]),
-        ("core.eol", &[b"native".as_slice(), b"lf".as_slice()][..]),
-        ("core.symlinks", &[b"true".as_slice()][..]),
-    ] {
-        let value = checked_config_value(git, repository, key, accepted)?;
-        hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
-    }
-    for key in [
-        "core.filemode",
-        "core.ignorecase",
-        "core.precomposeunicode",
-        "core.protecthfs",
-        "core.protectntfs",
+    for (key, accepted, kind) in [
+        (
+            "core.attributesfile",
+            &[][..],
+            RepositoryCompatibilityBlockerKind::EffectiveAttributes,
+        ),
+        (
+            "core.sparsecheckout",
+            &[b"false".as_slice()][..],
+            RepositoryCompatibilityBlockerKind::SparseCheckout,
+        ),
+        (
+            "core.sparsecheckoutcone",
+            &[b"false".as_slice()][..],
+            RepositoryCompatibilityBlockerKind::SparseCheckout,
+        ),
+        (
+            "core.autocrlf",
+            &[b"false".as_slice()][..],
+            RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+        ),
+        (
+            "core.eol",
+            &[b"native".as_slice(), b"lf".as_slice()][..],
+            RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+        ),
+        (
+            "core.symlinks",
+            &[b"true".as_slice()][..],
+            RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+        ),
     ] {
         let value = git.config_value(repository, key)?;
+        #[cfg(target_os = "macos")]
         hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+        if let Some(value) = value
+            && !accepted
+                .iter()
+                .any(|accepted| value.eq_ignore_ascii_case(accepted))
+        {
+            blockers.push(RepositoryCompatibilityBlocker {
+                kind,
+                explanation: format!(
+                    "Git configuration {key}={} can change checkout bytes and is not supported yet",
+                    String::from_utf8_lossy(&value)
+                ),
+            });
+        }
     }
-    Ok(profile.finalize().to_vec())
-}
-
-#[cfg(target_os = "macos")]
-fn checked_config_value(
-    git: &Git,
-    repository: &Path,
-    key: &str,
-    accepted: &[&[u8]],
-) -> Result<Option<Vec<u8>>, WorktreeError> {
-    let Some(value) = git.config_value(repository, key)? else {
-        return Ok(None);
-    };
-    if accepted
-        .iter()
-        .any(|accepted| value.eq_ignore_ascii_case(accepted))
+    #[cfg(target_os = "macos")]
     {
-        return Ok(Some(value));
+        for key in [
+            "core.filemode",
+            "core.ignorecase",
+            "core.precomposeunicode",
+            "core.protecthfs",
+            "core.protectntfs",
+        ] {
+            let value = git.config_value(repository, key)?;
+            hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+        }
     }
-    Err(WorktreeError::Unsupported(format!(
-        "Git configuration {key}={} can change checkout bytes and is not supported by the APFS prototype",
-        String::from_utf8_lossy(&value)
-    )))
+    Ok(CompatibilityAnalysis {
+        report: RepositoryCompatibilityReport {
+            commit: resolved.commit,
+            tree: resolved.tree,
+            compatible: blockers.is_empty(),
+            blockers,
+        },
+        #[cfg(target_os = "macos")]
+        checkout_profile: profile.finalize().to_vec(),
+    })
 }
 
 #[cfg(target_os = "macos")]
