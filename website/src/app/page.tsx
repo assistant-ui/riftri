@@ -23,28 +23,11 @@ function GraphLabel({ index, children }: { index: string; children: React.ReactN
   );
 }
 
-function Header() {
-  return (
-    <header className="site-header">
-      <SectionLink className="wordmark" href="#top" aria-label="Riftri home">
-        <span className="wordmark-mark" aria-hidden="true">r/</span>
-        <span>riftri</span>
-      </SectionLink>
-      <nav className="site-nav" aria-label="Primary navigation">
-        <SectionLink href="#overview">Overview</SectionLink>
-        <SectionLink href="#start">Get started</SectionLink>
-        <SectionLink href="#safety">Safety</SectionLink>
-        <a href={githubUrl}>GitHub ↗</a>
-      </nav>
-    </header>
-  );
-}
-
 function Hero() {
   return (
     <section className="hero" id="top">
       <div className="hero-copy">
-        <GraphLabel index="00">LIGHTWEIGHT GIT WORKSPACES</GraphLabel>
+        <GraphLabel index="00">RIFTRI / LIGHTWEIGHT GIT WORKSPACES</GraphLabel>
         <h1>
           Parallel work,
           <br />
@@ -173,53 +156,11 @@ function GetStarted() {
         </p>
         <a href={`${githubUrl}#quick-start-on-macos`}>Read activation setup →</a>
       </div>
-    </section>
-  );
-}
 
-const readyNow = [
-  "Real linked worktrees on writable APFS volumes",
-  "Journaled add, move, remove, prune, repair, and garbage collection",
-  "Changed or ambiguous workspaces are preserved for review",
-] as const;
-
-const boundaries = [
-  "Optimized mutations are not available on Linux or Windows yet",
-  "Git LFS, custom filters, sparse checkout, and submodules are blocked",
-  "Riftri is storage optimization, not a security sandbox",
-] as const;
-
-function Safety() {
-  return (
-    <section className="content-section" id="safety">
-      <div className="section-heading">
-        <GraphLabel index="03">CURRENT BOUNDARY</GraphLabel>
-        <h2>Experimental, explicit, and recoverable.</h2>
-        <p>
-          Riftri fails before mutation when it cannot reproduce Git&apos;s checkout exactly. It never
-          silently falls back to a full worktree copy.
-        </p>
-      </div>
-
-      <div className="boundary-grid">
-        <article>
-          <span className="boundary-label ready">● READY TO TEST</span>
-          <ul>
-            {readyNow.map((item) => <li key={item}>{item}</li>)}
-          </ul>
-        </article>
-        <article>
-          <span className="boundary-label">○ KNOW BEFORE USE</span>
-          <ul>
-            {boundaries.map((item) => <li key={item}>{item}</li>)}
-          </ul>
-        </article>
-      </div>
-
-      <div className="warning-note">
+      <div className="release-note">
         <span>EXPERIMENTAL</span>
-        <p>Keep important work committed or backed up before using mutation commands.</p>
-        <a href={githubUrl}>View source and full documentation ↗</a>
+        <p>Optimized operations currently require macOS and APFS. Unsupported checkouts stop before mutation.</p>
+        <a href={githubUrl}>Full support notes ↗</a>
       </div>
     </section>
   );
@@ -228,8 +169,7 @@ function Safety() {
 function Footer() {
   return (
     <footer className="site-footer">
-      <span>RIFTRI / EXPERIMENTAL OPEN SOURCE</span>
-      <span>LIGHTWEIGHT GIT WORKSPACES</span>
+      <span>RIFTRI / EXPERIMENTAL</span>
       <a href={githubUrl}>ASSISTANT-UI/RIFTRI ↗</a>
     </footer>
   );
@@ -238,18 +178,11 @@ function Footer() {
 export default function HomePage() {
   return (
     <div className="site-shell">
-      <div className="announcement">
-        <span>Experimental</span>
-        <p>APFS-backed worktrees are ready for real-world testing.</p>
-        <SectionLink href="#safety">Current support →</SectionLink>
-      </div>
       <div className="page-frame">
-        <Header />
         <main>
           <Hero />
           <Overview />
           <GetStarted />
-          <Safety />
         </main>
         <Footer />
       </div>
