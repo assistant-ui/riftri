@@ -134,6 +134,8 @@ storage-lifecycle milestones on macOS. The repository currently provides:
 
 - A Rust workspace with separate CLI, core, Git, and storage boundaries.
 - Destination-volume-specific `doctor` and `backends` diagnostics.
+- Read-only `doctor` preflight for HEAD attributes, Git LFS/filter rules,
+  sparse checkout, submodules, and checkout-changing configuration.
 - Git discovery for normal, linked, unborn, detached, and bare repositories.
 - Native-path, NUL-delimited Git worktree parsing.
 - Exact-tree materialization through an isolated temporary Git index.
@@ -176,6 +178,10 @@ $ cargo run -p riftri-cli -- repair
 $ cargo run -p riftri-cli -- gc
 $ cargo run -p riftri-cli -- gc --apply
 ```
+
+`riftri doctor` checks the repository's current `HEAD` with the same checkout
+compatibility rules used by an optimized add. A blocked result lists every
+detected reason before Riftri creates Git metadata, state, or a destination.
 
 The add command currently requires macOS and a writable APFS volume. Its first
 compatibility envelope deliberately rejects attributes, filters/Git LFS,

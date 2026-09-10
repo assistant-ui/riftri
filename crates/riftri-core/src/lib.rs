@@ -1,5 +1,6 @@
 //! High-level, non-destructive orchestration and product policy.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use riftri_git::{Git, GitInfo, ObjectId, RepositoryIdentity, RepositoryInfo};
@@ -67,7 +68,47 @@ pub struct DoctorReport {
     pub git_shim_active: bool,
     pub git: Diagnostic<GitInfo>,
     pub repository: Diagnostic<RepositoryInfo>,
+    pub repository_compatibility: Diagnostic<RepositoryCompatibilityReport>,
     pub storage_capabilities: Vec<BackendCapability>,
+}
+
+/// One reason an exact Git tree cannot use the current optimized checkout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RepositoryCompatibilityBlockerKind {
+    InTreeAttributes,
+    EffectiveAttributes,
+    Submodules,
+    SparseCheckout,
+    CheckoutConfiguration,
+}
+
+impl RepositoryCompatibilityBlockerKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InTreeAttributes => "in-tree-attributes",
+            Self::EffectiveAttributes => "effective-attributes",
+            Self::Submodules => "submodules",
+            Self::SparseCheckout => "sparse-checkout",
+            Self::CheckoutConfiguration => "checkout-configuration",
+        }
+    }
+}
+
+/// A specific checkout input that the current compatibility envelope rejects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepositoryCompatibilityBlocker {
+    pub kind: RepositoryCompatibilityBlockerKind,
+    pub explanation: String,
+}
+
+/// Read-only compatibility result for one exact revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RepositoryCompatibilityReport {
+    pub commit: ObjectId,
+    pub tree: ObjectId,
+    pub compatible: bool,
+    pub blockers: Vec<RepositoryCompatibilityBlocker>,
 }
 
 /// One canonical input to checkout-byte semantics.
@@ -329,6 +370,22 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
                 .flatten()
                 .unwrap_or(false)
         });
+    let repository_compatibility = match repository_check.value.as_ref() {
+        Some(repository) if repository.is_bare => {
+            Diagnostic::failure("bare repositories are not supported by optimized checkout")
+        }
+        Some(repository) => match repository.root.as_deref() {
+            Some(root) if repository.head_commit.is_some() => {
+                match worktree::inspect_repository_compatibility(&git, root, OsStr::new("HEAD")) {
+                    Ok(report) => Diagnostic::success(report),
+                    Err(error) => Diagnostic::failure(error.to_string()),
+                }
+            }
+            Some(_) => Diagnostic::failure("repository HEAD is unborn; commit a tree first"),
+            None => Diagnostic::failure("Git did not report a working-tree root"),
+        },
+        None => Diagnostic::failure("repository inspection did not succeed"),
+    };
 
     DoctorReport {
         project_stage: "apfs-prototype-with-repository-activation",
@@ -339,6 +396,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
         git_shim_active: std::env::var_os(SHIM_ACTIVE_ENV).is_some(),
         git: git_check,
         repository: repository_check,
+        repository_compatibility,
         storage_capabilities: probe_backends(destination),
     }
 }

@@ -98,6 +98,83 @@ fn enable_and_disable_change_only_repository_local_config() {
 }
 
 #[test]
+fn doctor_reports_checkout_compatibility_before_mutation() {
+    let fixture = RepositoryFixture::new();
+
+    let doctor = riftri(&fixture.repository, &["doctor"]);
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&doctor.stdout)
+            .contains("Repository checkout compatibility (HEAD): supported")
+    );
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
+#[test]
+fn doctor_json_lists_every_detected_checkout_blocker() {
+    let fixture = RepositoryFixture::new();
+    fs::write(
+        fixture.repository.join(".gitattributes"),
+        "*.txt filter=lfs\n",
+    )
+    .expect("write attributes");
+    fs::write(
+        fixture.repository.join(".gitmodules"),
+        "[submodule \"dependency\"]\n\tpath = dependency\n\turl = ../dependency\n",
+    )
+    .expect("write submodule metadata");
+    assert!(
+        git(
+            &fixture.repository,
+            &["add", "--", ".gitattributes", ".gitmodules"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(
+            &fixture.repository,
+            &["commit", "--quiet", "-m", "add checkout inputs"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(
+            &fixture.repository,
+            &["config", "core.sparseCheckout", "true"]
+        )
+        .status
+        .success()
+    );
+
+    let doctor = riftri(&fixture.repository, &["doctor", "--json"]);
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    let compatibility = &report["repository_compatibility"]["value"];
+    assert_eq!(compatibility["compatible"], false);
+    let blocker_kinds = compatibility["blockers"]
+        .as_array()
+        .expect("compatibility blockers")
+        .iter()
+        .map(|blocker| blocker["kind"].as_str().expect("blocker kind"))
+        .collect::<Vec<_>>();
+    assert!(blocker_kinds.contains(&"in-tree-attributes"));
+    assert!(blocker_kinds.contains(&"submodules"));
+    assert!(blocker_kinds.contains(&"sparse-checkout"));
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
+#[test]
 fn status_and_repair_explain_an_empty_lifecycle() {
     let fixture = RepositoryFixture::new();
 
