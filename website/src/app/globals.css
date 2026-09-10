@@ -84,8 +84,21 @@ code, pre { font-family: var(--font-mono); }
   letter-spacing: 0.07em;
 }
 
-.graph-label span:first-child { color: var(--accent); }
-.graph-label span:last-child { color: var(--ink-muted); }
+.graph-label > span:first-child { color: var(--accent); }
+.graph-label > span:last-child { color: var(--ink-muted); }
+
+.graph-label-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.github-icon {
+  width: 1em;
+  height: 1em;
+  flex: none;
+  fill: currentColor;
+}
 
 .hero h1 {
   max-width: 640px;
@@ -139,6 +152,8 @@ code, pre { font-family: var(--font-mono); }
   font-size: 0.7rem;
   transition: transform 140ms var(--ease-out);
 }
+
+.button .github-icon { font-size: 1rem; }
 
 .button:active { transform: translateY(1px) scale(0.98); }
 .button-primary { border-color: var(--ink); background: var(--ink); color: var(--canvas-deep); }
@@ -449,7 +464,8 @@ code, pre { font-family: var(--font-mono); }
 
 .site-footer > * { display: flex; height: 100%; align-items: center; padding: 1.5rem; }
 .site-footer > * + * { border-left: 1px solid var(--line); }
-.site-footer a { justify-content: flex-end; color: var(--ink-muted); }
+.site-footer a { justify-content: flex-end; gap: 0.55rem; color: var(--ink-muted); }
+.site-footer .github-icon { font-size: 0.8rem; }
 
 @media (hover: hover) and (pointer: fine) {
   .copy-button:hover { background: var(--ink); color: var(--canvas-deep); }
