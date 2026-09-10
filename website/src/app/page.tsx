@@ -146,16 +146,16 @@ function Model() {
 }
 
 const flowSteps = [
-  ["01", "Resolve", "Git commit + exact tree"],
-  ["02", "Check", "Checkout profile + APFS"],
-  ["03", "Reuse", "Locked immutable base"],
-  ["04", "Clone", "Private native view"],
-  ["05", "Verify", "Clean Git worktree"],
+  { index: "01", title: "Resolve Git intent", detail: "main → tree a4d2c19", state: "exact tree" },
+  { index: "02", title: "Preflight", detail: "profile + APFS capability", state: "validated" },
+  { index: "03", title: "Lock base", detail: "repo / tree / profile / volume", state: "reuse or create" },
+  { index: "04", title: "Clone private view", detail: "immutable base → app-auth", state: "shared blocks" },
+  { index: "05", title: "Link + verify", detail: ".git metadata + clean status", state: "committed" },
 ] as const;
 
 function ProcessFlow() {
   return (
-    <section className="content-section process-section">
+    <section className="content-section process-section" id="transaction">
       <div className="section-heading split-heading">
         <div>
           <GraphLabel index="02">CREATION TRANSACTION</GraphLabel>
@@ -169,15 +169,24 @@ function ProcessFlow() {
       <div className="graph-frame flow-frame">
         <CornerMarks />
         <span className="frame-title">[ WORKTREE ADD / HAPPY PATH ]</span>
-        <div className="flow-track">
-          {flowSteps.map(([index, title, description], stepIndex) => (
-            <div className="flow-step" key={index}>
-              <span className="flow-index">{index}</span>
+        <div className="transaction-head">
+          <code><span aria-hidden="true">$</span> riftri worktree add ../app-auth -b feature/auth main</code>
+          <span className="transaction-state"><i aria-hidden="true" /> JOURNAL / ADD</span>
+        </div>
+        <ol className="flow-track" aria-label="Riftri worktree creation transaction">
+          {flowSteps.map(({ index, title, detail, state }) => (
+            <li className="flow-step" key={index}>
+              <span className="flow-index">STEP {index}</span>
+              <span className="flow-node" aria-hidden="true"><i /></span>
               <strong>{title}</strong>
-              <small>{description}</small>
-              {stepIndex < flowSteps.length - 1 ? <span className="flow-arrow" aria-hidden="true">────→</span> : null}
-            </div>
+              <small>{detail}</small>
+              <span className="flow-state">{state}</span>
+            </li>
           ))}
+        </ol>
+        <div className="transaction-foot">
+          <span><b>ON FAILURE</b> rollback known steps · retain ambiguous views</span>
+          <strong><i aria-hidden="true" /> RESULT / CLEAN LINKED WORKTREE</strong>
         </div>
       </div>
     </section>

@@ -30,7 +30,7 @@ export function CopyCommand({ command, label = "COPY", compact = false }: CopyCo
     <div className={`command ${compact ? "command-compact" : ""}`} aria-label={`Command: ${command}`}>
       <span className="command-prompt" aria-hidden="true">$</span>
       <code>{command}</code>
-      <button className="copy-button" type="button" onClick={copy} aria-live="polite">
+      <button className={`copy-button${copied ? " is-copied" : ""}`} type="button" onClick={copy} aria-live="polite">
         {copied ? "COPIED" : label}
       </button>
     </div>
