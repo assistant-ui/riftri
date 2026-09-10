@@ -127,6 +127,8 @@ macOS, Linux, or Windows system calls in the CLI crate.
 - Avoid parsing human-oriented Git output.
 - Use atomic rename and operation journals for multi-step mutations.
 - Do not introduce an always-on daemon unless a backend requires mount recovery.
+- Squash-merge every pull request. Do not create merge commits or rebase-merge
+  pull requests, and keep the pull request title in Conventional Commit form.
 - Update `docs/decisions.md` when a foundational choice changes.
 - Update `ROADMAP.md` when a milestone's acceptance criteria are completed.
 

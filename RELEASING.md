@@ -84,8 +84,9 @@ restartable: package versions already present in npm are detected and skipped.
    $ npm run pack:check
    ```
 
-4. Open and merge a conventional release pull request such as
-   `chore: release v0.1.0`.
+4. Open and squash-merge a conventional release pull request such as
+   `chore: release v0.1.0`. The pull request title becomes the release commit
+   subject on `main`.
 5. From the updated `main`, create and push the matching signed tag:
 
    ```console

@@ -47,4 +47,6 @@ paths.
 Use Conventional Commit subjects for commits and pull requests, including
 `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `perf:`, `build:`, `ci:`, and
 `chore:`. A focused scope such as `feat(storage):` is encouraged when it makes
-the history clearer.
+the history clearer. Every pull request is squash-merged, so keep the pull
+request focused and make its title a valid Conventional Commit subject; that
+title becomes the commit subject on `main`.
