@@ -65,13 +65,10 @@ jobs:
           if-no-files-found: error
           retention-days: 2
 
-  publish:
-    name: Stage release and publish tags
+  stage:
+    name: Stage and inspect release
     needs: build
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      id-token: write
 
     steps:
       - name: Check out source and tags
@@ -123,8 +120,50 @@ jobs:
           done
           npm pack ./dist/npm-root --pack-destination dist/npm
 
+      - name: Confirm non-publishing rehearsal
+        if: github.event_name == 'workflow_dispatch'
+        run: echo "Release rehearsal completed without publishing npm packages or a GitHub release."
+
+  publish:
+    name: Publish tagged release
+    if: github.event_name == 'push'
+    needs: stage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+      - name: Check out source and tags
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Download native binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: riftri-*
+          path: artifacts
+
+      - name: Install npm metadata only
+        run: npm ci --ignore-scripts --omit=optional
+
+      - name: Validate package versions
+        run: npm run check:packages
+
+      - name: Stage npm packages and GitHub assets
+        run: node package/scripts/prepare-release.mjs "${GITHUB_REF_NAME}" artifacts
+
+      - name: Verify GitHub release checksums
+        working-directory: dist/release
+        run: sha256sum --check SHA256SUMS
+
       - name: Configure bootstrap npm token when present
-        if: github.event_name == 'push'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         shell: bash
@@ -136,11 +175,9 @@ jobs:
           fi
 
       - name: Publish npm packages
-        if: github.event_name == 'push'
         run: node package/scripts/publish-packages.mjs
 
       - name: Create or update GitHub release
-        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -154,7 +191,3 @@ jobs:
             fi
             gh release create "${GITHUB_REF_NAME}" dist/release/* "${release_options[@]}"
           fi
-
-      - name: Confirm non-publishing rehearsal
-        if: github.event_name == 'workflow_dispatch'
-        run: echo "Release rehearsal completed without publishing npm packages or a GitHub release."
