@@ -42,7 +42,6 @@ function Hero() {
             View GitHub <span aria-hidden="true">↗</span>
           </a>
         </div>
-        <p className="micro-note">EXPERIMENTAL / OPTIMIZED OPERATIONS CURRENTLY REQUIRE MACOS + APFS</p>
       </div>
       <div className="hero-graph">
         <StorageMap />

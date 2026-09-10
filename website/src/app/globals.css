@@ -144,13 +144,6 @@ code, pre { font-family: var(--font-mono); }
 .button-primary { border-color: var(--ink); background: var(--ink); color: var(--canvas-deep); }
 .button-secondary { border-color: transparent; padding-inline: 0; color: var(--ink-muted); }
 
-.micro-note {
-  margin: 1rem 0 0;
-  color: var(--ink-faint);
-  font-size: 0.56rem;
-  letter-spacing: 0.04em;
-}
-
 .hero-graph {
   display: flex;
   align-items: center;
