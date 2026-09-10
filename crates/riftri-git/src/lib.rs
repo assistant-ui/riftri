@@ -88,7 +88,7 @@ pub struct TreeEntry {
 }
 
 /// One effective path attribute reported by `git check-attr -z`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GitAttribute {
     pub path: PathBuf,
     pub name: Vec<u8>,
@@ -144,6 +144,12 @@ pub enum GitError {
     #[error("could not wait for Git command {command:?}: {source}")]
     Wait {
         command: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("could not create temporary Git state: {source}")]
+    TemporaryState {
         #[source]
         source: std::io::Error,
     },
@@ -401,6 +407,21 @@ impl Git {
         Ok(())
     }
 
+    /// Resolve the repository-specific attributes file through Git so linked
+    /// worktrees use the correct common Git directory.
+    pub fn info_attributes_path(&self, path: &Path) -> Result<PathBuf, GitError> {
+        self.run_path(
+            Some(path),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "info/attributes",
+            ],
+            "repository attributes path",
+        )
+    }
+
     /// Return every attribute Git resolves for the supplied tree paths.
     /// `--cached` prevents a mutable working-tree attributes file from being
     /// treated as the requested tree; repository, global, and system attribute
@@ -410,6 +431,79 @@ impl Git {
         path: &Path,
         paths: &[PathBuf],
     ) -> Result<Vec<GitAttribute>, GitError> {
+        self.attributes_for_paths_with_environment(path, paths, &[], &[])
+    }
+
+    /// Return attributes for an exact tree using Git's normal external
+    /// attribute precedence.
+    pub fn effective_attributes_for_tree_paths(
+        &self,
+        path: &Path,
+        tree: &ObjectId,
+        paths: &[PathBuf],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        self.attributes_for_tree_paths(path, tree, paths, false)
+    }
+
+    /// Return attributes from an exact tree while disabling global and system
+    /// attribute files. Callers must separately reject `.git/info/attributes`,
+    /// which Git intentionally gives highest precedence and cannot disable.
+    pub fn in_tree_attributes_for_paths(
+        &self,
+        path: &Path,
+        tree: &ObjectId,
+        paths: &[PathBuf],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        self.attributes_for_tree_paths(path, tree, paths, true)
+    }
+
+    fn attributes_for_tree_paths(
+        &self,
+        path: &Path,
+        tree: &ObjectId,
+        paths: &[PathBuf],
+        isolate_external: bool,
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let temporary = tempfile::Builder::new()
+            .prefix("riftri-attributes-")
+            .tempdir()
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let temporary_index = temporary.path().join("index");
+        let index_environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
+        let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
+        self.run_os_with_env(Some(path), &read_tree, &index_environment)?;
+
+        if isolate_external {
+            #[cfg(unix)]
+            let null_device = OsStr::new("/dev/null");
+            #[cfg(not(unix))]
+            let null_device = OsStr::new("NUL");
+            let mut attributes_override = OsString::from("core.attributesFile=");
+            attributes_override.push(null_device);
+            let arguments = [OsString::from("-c"), attributes_override];
+            let environment = [
+                (OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str()),
+                (OsStr::new("GIT_ATTR_NOSYSTEM"), OsStr::new("1")),
+                (OsStr::new("GIT_CONFIG_NOSYSTEM"), OsStr::new("1")),
+                (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
+                (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
+            ];
+            self.attributes_for_paths_with_environment(path, paths, &arguments, &environment)
+        } else {
+            self.attributes_for_paths_with_environment(path, paths, &[], &index_environment)
+        }
+    }
+
+    fn attributes_for_paths_with_environment(
+        &self,
+        path: &Path,
+        paths: &[PathBuf],
+        argument_prefix: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<Vec<GitAttribute>, GitError> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
@@ -418,19 +512,20 @@ impl Git {
         {
             use std::os::unix::ffi::OsStrExt;
 
-            let arguments = [
+            let mut arguments = argument_prefix.to_vec();
+            arguments.extend([
                 OsString::from("check-attr"),
                 OsString::from("--cached"),
                 OsString::from("--all"),
                 OsString::from("-z"),
                 OsString::from("--stdin"),
-            ];
+            ]);
             let mut input = Vec::new();
             for entry in paths {
                 input.extend_from_slice(entry.as_os_str().as_bytes());
                 input.push(0);
             }
-            let output = self.run_os_with_input(Some(path), &arguments, input)?;
+            let output = self.run_os_with_input(Some(path), &arguments, environment, input)?;
             parse_attribute_records(&output.stdout)
         }
 
@@ -438,15 +533,16 @@ impl Git {
         {
             let mut attributes = Vec::new();
             for chunk in paths.chunks(128) {
-                let mut arguments = vec![
+                let mut arguments = argument_prefix.to_vec();
+                arguments.extend([
                     OsString::from("check-attr"),
                     OsString::from("--cached"),
                     OsString::from("--all"),
                     OsString::from("-z"),
                     OsString::from("--"),
-                ];
+                ]);
                 arguments.extend(chunk.iter().map(|entry| entry.as_os_str().to_os_string()));
-                let output = self.run_os(Some(path), &arguments)?;
+                let output = self.run_os_with_env(Some(path), &arguments, environment)?;
                 attributes.extend(parse_attribute_records(&output.stdout)?);
             }
             Ok(attributes)
@@ -757,6 +853,7 @@ impl Git {
         &self,
         path: Option<&Path>,
         arguments: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
         input: Vec<u8>,
     ) -> Result<Output, GitError> {
         use std::io::Write;
@@ -764,6 +861,7 @@ impl Git {
         let mut command = Command::new(&self.command);
         command
             .args(arguments)
+            .envs(environment.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -1313,8 +1411,18 @@ mod tests {
     fn detects_external_attributes_for_tree_paths() {
         let fixture = RepositoryFixture::committed();
         let attributes = fixture.path().join(".git/info/attributes");
-        fs::write(attributes, "*.txt riftri-test\n").expect("write info attributes");
+        fs::write(&attributes, "*.txt riftri-test\n").expect("write info attributes");
         let git = Git::default();
+
+        assert_eq!(
+            git.info_attributes_path(fixture.path())
+                .expect("resolve info attributes")
+                .canonicalize()
+                .expect("canonical Git attributes path"),
+            attributes
+                .canonicalize()
+                .expect("canonical fixture attributes path"),
+        );
 
         let attributes = git
             .effective_attributes_for_paths(
@@ -1340,6 +1448,78 @@ mod tests {
             )
             .expect("check unmatched attributes")
         );
+    }
+
+    #[test]
+    fn reads_attributes_from_the_requested_exact_tree() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text eol=lf\n")
+            .expect("write tree attributes");
+        git(fixture.path(), &["add", "--", ".gitattributes"]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "attributes tree"],
+        );
+        let git_handle = Git::default();
+        let attributed_tree = git_handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve attributed tree")
+            .tree;
+        git(fixture.path(), &["reset", "--hard", "--quiet", "HEAD^"]);
+
+        let attributes = git_handle
+            .in_tree_attributes_for_paths(
+                fixture.path(),
+                &attributed_tree,
+                &[Path::new("tracked.txt").to_path_buf()],
+            )
+            .expect("read exact-tree attributes");
+
+        assert!(
+            attributes
+                .iter()
+                .any(|attribute| attribute.name == b"text" && attribute.value == b"set")
+        );
+        assert!(
+            attributes
+                .iter()
+                .any(|attribute| attribute.name == b"eol" && attribute.value == b"lf")
+        );
+    }
+
+    #[test]
+    fn isolates_in_tree_attributes_from_configured_external_attributes() {
+        let fixture = RepositoryFixture::committed();
+        let external = fixture.path().join("external-attributes");
+        fs::write(&external, "*.txt filter=external\n").expect("write external attributes");
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "core.attributesFile",
+                external.to_str().expect("UTF-8 temporary path"),
+            ],
+        );
+        let git_handle = Git::default();
+        let tree = git_handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve tree")
+            .tree;
+        let paths = [Path::new("tracked.txt").to_path_buf()];
+
+        let effective = git_handle
+            .effective_attributes_for_tree_paths(fixture.path(), &tree, &paths)
+            .expect("read effective attributes");
+        let in_tree = git_handle
+            .in_tree_attributes_for_paths(fixture.path(), &tree, &paths)
+            .expect("read isolated attributes");
+
+        assert!(
+            effective
+                .iter()
+                .any(|attribute| { attribute.name == b"filter" && attribute.value == b"external" })
+        );
+        assert!(in_tree.is_empty());
     }
 
     #[cfg(unix)]

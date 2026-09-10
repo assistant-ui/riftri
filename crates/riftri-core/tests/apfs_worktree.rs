@@ -101,6 +101,58 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
 }
 
 #[test]
+fn creates_a_clean_worktree_with_deterministic_in_tree_attributes() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let destination = fixture.path().join("worktree");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(
+        repository.join(".gitattributes"),
+        "* text=auto\n*.txt text eol=crlf\n*.bin binary\n",
+    )
+    .expect("write deterministic attributes");
+    fs::write(repository.join("tracked.txt"), "first\nsecond\n").expect("write text fixture");
+    fs::write(repository.join("payload.bin"), b"binary\0payload\n").expect("write binary fixture");
+    git(
+        &repository,
+        &["add", "--", ".gitattributes", "tracked.txt", "payload.bin"],
+    );
+    git(&repository, &["commit", "--quiet", "-m", "attributes"]);
+
+    let result = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/attributes")),
+        state_dir: Some(state),
+    })
+    .expect("create attributed Riftri worktree");
+
+    assert!(git(&destination, &["status", "--porcelain=v1"]).is_empty());
+    assert_eq!(
+        fs::read(destination.join("tracked.txt")).expect("read attributed text"),
+        b"first\r\nsecond\r\n",
+    );
+    assert_eq!(
+        fs::read(destination.join("payload.bin")).expect("read binary file"),
+        b"binary\0payload\n",
+    );
+    fs::write(destination.join("tracked.txt"), b"changed\r\n").expect("edit worktree");
+    assert_eq!(
+        fs::read(result.base_path.join("tracked.txt")).expect("read immutable base"),
+        b"first\r\nsecond\r\n",
+    );
+}
+
+#[test]
 fn rejects_effective_attributes_before_creating_state_or_git_metadata() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");

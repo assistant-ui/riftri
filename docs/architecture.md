@@ -102,6 +102,13 @@ already covered by the exact tree ID. If Riftri cannot account for an active
 external input, it must reject optimized creation rather than reuse an
 ambiguous base.
 
+The current APFS policy asks Git to resolve attributes from the exact requested
+tree through an isolated temporary index. Only built-in `text`, `eol`, and
+`binary` checkout semantics are allowlisted; `diff` and `merge` records emitted
+by the built-in binary macro are checkout-neutral. Repository-local, global,
+and system attribute sources remain unsupported because they are mutable
+outside the tree identity.
+
 ### Storage engine
 
 The storage engine selects the fastest supported native primitive:
