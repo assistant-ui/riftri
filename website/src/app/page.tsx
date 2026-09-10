@@ -1,5 +1,6 @@
 import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
+import { SectionLink } from "../components/section-link";
 import { StorageMap } from "../components/storage-map";
 
 const githubUrl = "https://github.com/assistant-ui/riftri";
@@ -10,26 +11,39 @@ export const metadata: Metadata = {
     "Create real, isolated Git worktrees without eagerly storing a full physical copy of every unchanged project file.",
 };
 
-function Wordmark() {
+export const dynamic = "force-static";
+
+function GraphLabel({ index, children }: { index: string; children: React.ReactNode }) {
   return (
-    <span className="wordmark" aria-label="Riftri">
-      <span aria-hidden="true" className="wordmark-mark">
-        r/
-      </span>
-      <span>riftri</span>
-    </span>
+    <div className="graph-label">
+      <span>{index}</span>
+      <span>[ {children} ]</span>
+    </div>
+  );
+}
+
+function CornerMarks() {
+  return (
+    <>
+      <span className="corner corner-tl" aria-hidden="true">+</span>
+      <span className="corner corner-tr" aria-hidden="true">+</span>
+      <span className="corner corner-bl" aria-hidden="true">+</span>
+      <span className="corner corner-br" aria-hidden="true">+</span>
+    </>
   );
 }
 
 function Header() {
   return (
     <header className="site-header">
-      <a className="brand-link" href="/" aria-label="Riftri home">
-        <Wordmark />
-      </a>
+      <SectionLink className="wordmark" href="#top" aria-label="Riftri home">
+        <span className="wordmark-mark" aria-hidden="true">r/</span>
+        <span>riftri</span>
+      </SectionLink>
       <nav className="site-nav" aria-label="Primary navigation">
-        <a href="#how-it-works">How it works</a>
-        <a href="/docs">Docs</a>
+        <SectionLink href="#model">Model</SectionLink>
+        <SectionLink href="#workflow">Workflow</SectionLink>
+        <SectionLink href="#safety">Safety</SectionLink>
         <a href={githubUrl}>GitHub ↗</a>
       </nav>
     </header>
@@ -38,12 +52,9 @@ function Header() {
 
 function Hero() {
   return (
-    <section className="hero">
+    <section className="hero" id="top">
       <div className="hero-copy">
-        <div className="section-label">
-          <span>00</span>
-          <span>Parallel development / less duplication</span>
-        </div>
+        <GraphLabel index="00">LIGHTWEIGHT GIT WORKSPACES</GraphLabel>
         <h1>
           Parallel work,
           <br />
@@ -54,67 +65,120 @@ function Hero() {
           files share physical storage.
         </p>
         <div className="hero-actions">
-          <a className="button button-primary" href="/docs/getting-started">
-            Get started <span aria-hidden="true">→</span>
-          </a>
+          <SectionLink className="button button-primary" href="#workflow">
+            Try the workflow <span aria-hidden="true">→</span>
+          </SectionLink>
           <a className="button button-secondary" href={githubUrl}>
             View source <span aria-hidden="true">↗</span>
           </a>
         </div>
-        <CopyCommand command="npm install --global riftri" />
-        <p className="pre-release-note">Experimental v0.1 · optimized operations require macOS + APFS</p>
+        <CopyCommand command="npm install --global riftri" label="INSTALL" />
+        <p className="micro-note">EXPERIMENTAL V0.1 / OPTIMIZED OPERATIONS REQUIRE MACOS + APFS</p>
       </div>
-      <div className="hero-visual">
+      <div className="hero-graph">
         <StorageMap />
       </div>
     </section>
   );
 }
 
-const steps = [
-  {
-    index: "01",
-    title: "Resolve the tree",
-    text: "Git remains the source of truth. Riftri resolves the exact commit, tree, and checkout profile.",
-    code: "git rev-parse main^{tree}",
-  },
-  {
-    index: "02",
-    title: "Reuse one base",
-    text: "A read-only base is materialized once and reused only when repository, tree, profile, and volume match.",
-    code: "base / exact-tree / APFS",
-  },
-  {
-    index: "03",
-    title: "Clone private views",
-    text: "Native APFS clones share existing blocks. Each worktree allocates private blocks as files change.",
-    code: "clonefile(base, worktree)",
-  },
+const metrics = [
+  { value: "01", label: "immutable base", meter: "████████████████" },
+  { value: "03", label: "isolated views", meter: "████████████░░░░" },
+  { value: "0.146%", label: "recorded allocation", meter: "█░░░░░░░░░░░░░░░" },
 ] as const;
 
-function HowItWorks() {
+function Metrics() {
   return (
-    <section className="section" id="how-it-works">
-      <div className="section-intro">
-        <div className="section-label">
-          <span>01</span>
-          <span>How it works</span>
-        </div>
-        <h2>Git semantics in front. Native storage underneath.</h2>
+    <section className="metric-strip" aria-label="Storage model summary">
+      {metrics.map((metric) => (
+        <article className="metric" key={metric.label}>
+          <span className="metric-value">{metric.value}</span>
+          <div>
+            <span className="metric-label">{metric.label}</span>
+            <span className="metric-meter" aria-hidden="true">{metric.meter}</span>
+          </div>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function Model() {
+  return (
+    <section className="content-section" id="model">
+      <div className="section-heading">
+        <GraphLabel index="01">THE STORAGE MODEL</GraphLabel>
+        <h2>One exact tree. Many private views.</h2>
         <p>
-          Riftri only participates when worktrees are created, moved, removed, or repaired. Editors,
-          builds, and agents read and write the native filesystem directly.
+          Ordinary Git worktrees share repository objects, but each checked-out file is materialized
+          again. Riftri adds a reusable immutable base and lets APFS share those file blocks.
         </p>
       </div>
-      <div className="step-grid">
-        {steps.map((step) => (
-          <article className="step" key={step.index}>
-            <span className="step-index">{step.index}</span>
-            <h3>{step.title}</h3>
-            <p>{step.text}</p>
-            <code>{step.code}</code>
-          </article>
-        ))}
+
+      <div className="compare-grid">
+        <article className="graph-frame compare-card">
+          <CornerMarks />
+          <span className="frame-title">[ ORDINARY WORKTREES ]</span>
+          <div className="tree-lines" aria-label="Ordinary worktree storage model">
+            <div><span>repo</span><span className="tree-meta">git objects</span></div>
+            <p>├── main/ <span>████████████████</span></p>
+            <p>├── auth/ <span>████████████████</span></p>
+            <p>└── tests/ <span>████████████████</span></p>
+          </div>
+          <p className="card-caption">Each checkout materializes another complete set of files.</p>
+        </article>
+
+        <article className="graph-frame compare-card compare-card-accent">
+          <CornerMarks />
+          <span className="frame-title">[ RIFTRI WORKSPACES ]</span>
+          <div className="tree-lines" aria-label="Riftri shared storage model">
+            <div><span>base</span><span className="tree-meta">████████████████</span></div>
+            <p>├── main/ <span>··············▓█</span></p>
+            <p>├── auth/ <span>·············▓██</span></p>
+            <p>└── tests/ <span>···············█</span></p>
+          </div>
+          <p className="card-caption">Unchanged blocks stay shared. Only edits become private.</p>
+        </article>
+      </div>
+    </section>
+  );
+}
+
+const flowSteps = [
+  ["01", "Resolve", "Git commit + exact tree"],
+  ["02", "Check", "Checkout profile + APFS"],
+  ["03", "Reuse", "Locked immutable base"],
+  ["04", "Clone", "Private native view"],
+  ["05", "Verify", "Clean Git worktree"],
+] as const;
+
+function ProcessFlow() {
+  return (
+    <section className="content-section process-section">
+      <div className="section-heading split-heading">
+        <div>
+          <GraphLabel index="02">CREATION TRANSACTION</GraphLabel>
+          <h2>Git in front. Native storage underneath.</h2>
+        </div>
+        <p>
+          Riftri participates during lifecycle operations, then gets out of the way. Editors, builds,
+          and agents read and write the normal filesystem directly.
+        </p>
+      </div>
+      <div className="graph-frame flow-frame">
+        <CornerMarks />
+        <span className="frame-title">[ WORKTREE ADD / HAPPY PATH ]</span>
+        <div className="flow-track">
+          {flowSteps.map(([index, title, description], stepIndex) => (
+            <div className="flow-step" key={index}>
+              <span className="flow-index">{index}</span>
+              <strong>{title}</strong>
+              <small>{description}</small>
+              {stepIndex < flowSteps.length - 1 ? <span className="flow-arrow" aria-hidden="true">────→</span> : null}
+            </div>
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -122,142 +186,171 @@ function HowItWorks() {
 
 function Workflow() {
   return (
-    <section className="section workflow-section">
-      <div className="workflow-copy">
-        <div className="section-label">
-          <span>02</span>
-          <span>Normal Git workflow</span>
+    <section className="content-section" id="workflow">
+      <div className="section-heading split-heading">
+        <div>
+          <GraphLabel index="03">START HERE</GraphLabel>
+          <h2>Check first. Create second.</h2>
         </div>
-        <h2>Enable once. Keep using Git.</h2>
         <p>
-          Add the shell hook when you want transparent interception. Optimization still requires
-          explicit consent inside each repository, so unrelated repositories continue to use normal
-          Git.
+          Start with the explicit command. Transparent interception is optional and still requires
+          repository-local consent.
         </p>
-        <a className="text-link" href="/docs/git-interception">
-          Understand interception <span aria-hidden="true">→</span>
-        </a>
       </div>
-      <div className="terminal" aria-label="Terminal example">
-        <div className="terminal-header">
-          <span>RIFTRI / SESSION</span>
-          <span className="terminal-status">● APFS ready</span>
+
+      <div className="workflow-grid">
+        <article className="graph-frame command-card">
+          <CornerMarks />
+          <span className="frame-title">[ 01 / DIAGNOSE ]</span>
+          <p>Read-only capability check for the repository and destination volume.</p>
+          <CopyCommand command="riftri doctor --destination ../app-auth" label="COPY" compact />
+          <div className="command-result"><span>✓</span> no files or Git metadata changed</div>
+        </article>
+
+        <article className="graph-frame command-card">
+          <CornerMarks />
+          <span className="frame-title">[ 02 / CREATE ]</span>
+          <p>Create a real linked worktree from the exact Git tree.</p>
+          <CopyCommand command="riftri worktree add ../app-auth -b feature/auth main" label="COPY" compact />
+          <div className="command-result"><span>✓</span> clean APFS-backed worktree</div>
+        </article>
+      </div>
+
+      <article className="graph-frame terminal-frame">
+        <CornerMarks />
+        <span className="frame-title">[ OPTIONAL / TRANSPARENT GIT ]</span>
+        <div className="terminal-head">
+          <span>SESSION: ZSH</span>
+          <span className="live-status">● APFS READY</span>
         </div>
-        <pre>
-          <code>
-            <span className="terminal-muted"># activate the shim in this shell</span>{"\n"}
-            <span className="terminal-prompt">$</span> eval &quot;$(riftri shell hook zsh)&quot;{"\n\n"}
-            <span className="terminal-muted"># opt this repository in</span>{"\n"}
-            <span className="terminal-prompt">$</span> riftri enable{"\n"}
-            <span className="terminal-output">Enabled for this repository</span>{"\n\n"}
-            <span className="terminal-prompt">$</span> git worktree add -b feature/auth ../app-auth main{"\n"}
-            <span className="terminal-output">Created APFS-backed Git worktree</span>
-          </code>
-        </pre>
-      </div>
+        <pre><code><span className="muted"># make interception available in this shell</span>{"\n"}<span className="prompt">$</span> eval &quot;$(riftri shell hook zsh)&quot;{"\n\n"}<span className="muted"># consent is still local to this repository</span>{"\n"}<span className="prompt">$</span> riftri enable{"\n"}<span className="output">✓ enabled for this repository</span>{"\n\n"}<span className="prompt">$</span> git worktree add -b feature/billing ../app-billing main{"\n"}<span className="output">✓ created APFS-backed Git worktree</span></code></pre>
+        <div className="terminal-foot">
+          <span>NORMAL GIT COMMANDS → REAL GIT</span>
+          <span>SUPPORTED WORKTREE OPS → RIFTRI</span>
+        </div>
+      </article>
     </section>
   );
 }
 
-const proof = [
-  ["REAL", "Git linked worktrees", "Branches, commits, hooks, and ordinary commands stay Git-owned."],
-  ["NATIVE", "No filesystem proxy", "There is no daemon in the read/write path after creation."],
-  ["SAFE", "No silent full copy", "Unsupported checkouts stop before Riftri creates managed state."],
+const guarantees = [
+  ["[x]", "Real Git linked worktrees", "Branches, commits, hooks, and status stay Git-owned."],
+  ["[x]", "No read/write proxy", "No daemon or mount sits between your tools and files."],
+  ["[x]", "No silent full copy", "Unsupported checkouts stop before managed state is created."],
+  ["[x]", "Repository-local consent", "A global shell hook never opts unrelated repositories in."],
+  ["[x]", "Recoverable lifecycle", "Add, move, remove, prune, and GC use durable journals."],
+  ["[x]", "Changed views survive", "Repair preserves ambiguous or modified worktrees for review."],
 ] as const;
 
-function Proof() {
+function Safety() {
   return (
-    <section className="section proof-section">
-      <div className="proof-metric">
-        <div className="section-label">
-          <span>03</span>
-          <span>Recorded APFS check</span>
-        </div>
-        <strong>0.146%</strong>
+    <section className="content-section" id="safety">
+      <div className="section-heading">
+        <GraphLabel index="04">SAFETY CONTRACT</GraphLabel>
+        <h2>Fail closed. Explain what remains.</h2>
         <p>
-          Volume growth for a cached view with a 32 MiB tracked payload in one recorded development
-          run. Results vary with filesystem activity and later edits.
+          Riftri treats storage changes as recoverable transactions and never guesses that a changed
+          workspace is safe to delete.
         </p>
-        <a className="text-link" href="/docs/storage-and-cleanup#measuring-disk-use">
-          See the measurement <span aria-hidden="true">→</span>
-        </a>
       </div>
-      <div className="proof-list">
-        {proof.map(([label, title, text]) => (
-          <article key={label}>
-            <span>{label}</span>
-            <h3>{title}</h3>
-            <p>{text}</p>
-          </article>
-        ))}
+
+      <div className="safety-grid">
+        <article className="graph-frame checklist-frame">
+          <CornerMarks />
+          <span className="frame-title">[ GUARANTEES ]</span>
+          <ul>
+            {guarantees.map(([mark, title, description]) => (
+              <li key={title}>
+                <span className="check-mark">{mark}</span>
+                <div><strong>{title}</strong><p>{description}</p></div>
+              </li>
+            ))}
+          </ul>
+        </article>
+
+        <article className="graph-frame status-frame">
+          <CornerMarks />
+          <span className="frame-title">[ RIFTRI STATUS ]</span>
+          <div className="status-block">
+            <div><span>repository</span><strong>assistant-ui/app</strong></div>
+            <div><span>backend</span><strong className="accent-text">apfs / available</strong></div>
+            <div><span>retained bases</span><strong>1</strong></div>
+            <div><span>active views</span><strong>3</strong></div>
+            <div><span>incomplete journals</span><strong>0</strong></div>
+            <div><span>unexplained state</span><strong>0</strong></div>
+          </div>
+          <div className="ascii-divider" aria-hidden="true">+------------------------------+</div>
+          <p className="status-note">
+            <span>INFO</span> <code>riftri status</code> reports state and disk accounting. It never deletes anything.
+          </p>
+          <div className="status-actions">
+            <code>riftri repair</code><span>recover known journals</span>
+            <code>riftri gc --apply</code><span>collect zero-reference bases</span>
+          </div>
+        </article>
       </div>
     </section>
   );
 }
+
+const platforms = [
+  ["macOS", "APFS native clones", "READY TO TEST", "ready"],
+  ["Linux", "reflink / OverlayFS", "PLANNED NEXT", "planned"],
+  ["Windows", "ReFS block cloning", "ROADMAP", "planned"],
+] as const;
 
 function Compatibility() {
   return (
-    <section className="section compatibility-section">
-      <div className="section-intro compact">
-        <div className="section-label">
-          <span>04</span>
-          <span>Compatibility</span>
+    <section className="content-section compatibility-section" id="compatibility">
+      <div className="section-heading split-heading">
+        <div>
+          <GraphLabel index="05">COMPATIBILITY</GraphLabel>
+          <h2>Experimental, with a narrow boundary.</h2>
         </div>
-        <h2>Experimental by design. Fail-closed by default.</h2>
         <p>
-          The APFS backend is ready to test on real projects. Linux and Windows CLIs provide
-          diagnostics today; their mutation backends remain on the roadmap.
+          Optimized mutations currently require macOS and a writable APFS destination. Linux and
+          Windows builds provide diagnostics and explicit unsupported-backend errors.
         </p>
       </div>
-      <div className="compat-table" role="table" aria-label="Platform compatibility">
-        <div className="compat-row compat-head" role="row">
-          <span role="columnheader">Platform</span>
-          <span role="columnheader">Backend</span>
-          <span role="columnheader">Status</span>
-        </div>
-        <div className="compat-row" role="row">
-          <strong role="cell">macOS</strong>
-          <span role="cell">APFS native clones</span>
-          <span className="status status-ready" role="cell">
-            ● Ready to test
-          </span>
-        </div>
-        <div className="compat-row" role="row">
-          <strong role="cell">Linux</strong>
-          <span role="cell">Reflink / OverlayFS</span>
-          <span className="status" role="cell">
-            ○ Planned next
-          </span>
-        </div>
-        <div className="compat-row" role="row">
-          <strong role="cell">Windows</strong>
-          <span role="cell">ReFS</span>
-          <span className="status" role="cell">
-            ○ Roadmap
-          </span>
-        </div>
+
+      <div className="graph-frame platform-frame">
+        <CornerMarks />
+        <span className="frame-title">[ BACKEND MATRIX ]</span>
+        <table>
+          <thead><tr><th>Platform</th><th>Native backend</th><th>Status</th></tr></thead>
+          <tbody>
+            {platforms.map(([platform, backend, status, kind]) => (
+              <tr key={platform}>
+                <th scope="row">{platform}</th>
+                <td>{backend}</td>
+                <td><span className={`platform-status ${kind}`}>{kind === "ready" ? "●" : "○"} {status}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="compat-note">
+        <span>[ BLOCKED CHECKOUTS ]</span>
+        <p>Git LFS · custom filters · sparse checkout · submodules · external attributes</p>
+        <p>Riftri stops before mutation when it cannot reproduce Git&apos;s checkout exactly.</p>
       </div>
     </section>
   );
 }
 
-function FinalCta() {
+function FinalCallout() {
   return (
-    <section className="final-cta">
+    <section className="final-callout">
       <div>
-        <div className="section-label">
-          <span>05</span>
-          <span>Start with a diagnostic</span>
-        </div>
-        <h2>Know before Riftri changes anything.</h2>
-        <p>
-          Run <code>riftri doctor</code> to inspect Git and the destination filesystem without
-          creating a worktree or managed state.
-        </p>
+        <GraphLabel index="06">TRY IT ON A REAL REPOSITORY</GraphLabel>
+        <h2>Start with a diagnostic.</h2>
+        <p><code>riftri doctor</code> tells you whether the repository and destination are safe before Riftri changes anything.</p>
       </div>
-      <a className="button button-primary" href="/docs/getting-started">
-        Read the guide <span aria-hidden="true">→</span>
-      </a>
+      <div className="final-actions">
+        <CopyCommand command="riftri doctor --destination ../app-next" label="COPY" compact />
+        <a className="button button-primary" href={githubUrl}>Open GitHub <span aria-hidden="true">↗</span></a>
+      </div>
     </section>
   );
 }
@@ -265,13 +358,9 @@ function FinalCta() {
 function Footer() {
   return (
     <footer className="site-footer">
-      <Wordmark />
-      <p>Lightweight Git workspaces for parallel development.</p>
-      <div>
-        <a href="/docs">Docs</a>
-        <a href={githubUrl}>GitHub ↗</a>
-        <span>Apache-2.0</span>
-      </div>
+      <span>RIFTRI / EXPERIMENTAL OPEN SOURCE</span>
+      <span>LIGHTWEIGHT GIT WORKSPACES FOR PARALLEL DEVELOPMENT</span>
+      <a href={githubUrl}>ASSISTANT-UI/RIFTRI ↗</a>
     </footer>
   );
 }
@@ -282,17 +371,19 @@ export default function HomePage() {
       <div className="announcement">
         <span>Experimental</span>
         <p>APFS-backed worktrees are ready for real-world testing.</p>
-        <a href="/docs/compatibility">Current support →</a>
+        <SectionLink href="#compatibility">Current support →</SectionLink>
       </div>
       <div className="page-frame">
         <Header />
         <main>
           <Hero />
-          <HowItWorks />
+          <Metrics />
+          <Model />
+          <ProcessFlow />
           <Workflow />
-          <Proof />
+          <Safety />
           <Compatibility />
-          <FinalCta />
+          <FinalCallout />
         </main>
         <Footer />
       </div>

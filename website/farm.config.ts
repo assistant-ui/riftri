@@ -4,9 +4,6 @@ export default defineConfig({
   theme: {
     default: "dark",
   },
-  docs: {
-    enabled: true,
-  },
   deploy: {
     target: "vercel",
   },

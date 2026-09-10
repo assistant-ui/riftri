@@ -12,36 +12,9 @@ import "@farm.js/core/css";
  * Regenerated on dev start and when routes change.
  * Set suppressLintOnLink: true in farm.config.ts to accept any string on Link href.
  */
-export type RoutePath =
-  | "/"
-  | "/docs"
-  | `/docs/${string}`
-  | "/docs/commands"
-  | "/docs/compatibility"
-  | "/docs/getting-started"
-  | "/docs/git-interception"
-  | "/docs/how-it-works"
-  | "/docs/storage-and-cleanup";
-export type RoutePattern =
-  | "/"
-  | "/docs"
-  | "/docs/[...docs]"
-  | "/docs/commands"
-  | "/docs/compatibility"
-  | "/docs/getting-started"
-  | "/docs/git-interception"
-  | "/docs/how-it-works"
-  | "/docs/storage-and-cleanup";
-export type RouteModulePattern =
-  | "/"
-  | "/docs"
-  | "/docs/[...docs]"
-  | "/docs/commands"
-  | "/docs/compatibility"
-  | "/docs/getting-started"
-  | "/docs/git-interception"
-  | "/docs/how-it-works"
-  | "/docs/storage-and-cleanup";
+export type RoutePath = "/";
+export type RoutePattern = "/";
+export type RouteModulePattern = "/";
 declare module "@farm.js/core/client" {
   interface LinkDefaultRoute {
     _: import("./farm").RoutePath;

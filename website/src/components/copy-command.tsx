@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from "react";
 
-export function CopyCommand({ command }: { command: string }) {
+type CopyCommandProps = {
+  command: string;
+  label?: string;
+  compact?: boolean;
+};
+
+export function CopyCommand({ command, label = "COPY", compact = false }: CopyCommandProps) {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -21,13 +27,11 @@ export function CopyCommand({ command }: { command: string }) {
   }
 
   return (
-    <div className="command" aria-label="Install Riftri through npm">
-      <span className="command-prompt" aria-hidden="true">
-        $
-      </span>
+    <div className={`command ${compact ? "command-compact" : ""}`} aria-label={`Command: ${command}`}>
+      <span className="command-prompt" aria-hidden="true">$</span>
       <code>{command}</code>
       <button className="copy-button" type="button" onClick={copy} aria-live="polite">
-        {copied ? "Copied" : "Copy"}
+        {copied ? "COPIED" : label}
       </button>
     </div>
   );

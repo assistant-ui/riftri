@@ -1,8 +1,7 @@
 # Riftri website
 
-The Riftri product site and documentation are built with Farm.js. The landing page lives at `/`,
-and Farm's default docs runtime serves Markdown from `src/app/docs` at `/docs` with search,
-Markdown mirrors, agent-readable output, sitemap, and robots routes.
+The Riftri product site is a single-page Farm.js application. Product concepts, installation,
+transparent Git usage, safety, storage lifecycle, and compatibility all live at `/`.
 
 ```console
 $ pnpm install
@@ -12,6 +11,7 @@ $ pnpm dev
 Quality checks:
 
 ```console
+$ pnpm exec farm generate --check
 $ pnpm type-check
 $ pnpm build
 ```
