@@ -273,6 +273,11 @@ $ npm test
 $ npm run pack:check
 ```
 
+`npm test` packs and installs the launcher plus the current host-native Rust
+package in an offline temporary project. On macOS it also exercises enablement,
+an intercepted worktree add, write isolation, removal, status, and garbage
+collection. Run that check alone with `npm run smoke:installed`.
+
 To run the opt-in APFS physical-allocation check on a quiet volume:
 
 ```console
