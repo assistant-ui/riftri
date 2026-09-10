@@ -1,7 +1,9 @@
-# Riftri — Space-efficient Git worktrees for parallel coding agents
+# Riftri
 
-Run agents in isolated, real Git worktrees without storing another full copy of
-every unchanged project file for every task.
+**Lightweight Git workspaces for parallel development.**
+
+Give every developer or coding agent an isolated workspace without storing
+another full copy of every unchanged project file for every task.
 
 [![CI](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml/badge.svg)](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml)
 
@@ -13,10 +15,9 @@ every unchanged project file for every task.
 > unsupported-backend errors while their native mutation backends remain on the
 > roadmap.
 
-Riftri uses native copy-on-write storage to make real Git linked worktrees
-space-efficient. Unchanged file data is shared from an immutable base, while
-every worktree keeps its own private changes. Git continues to own cloning,
-branches, commits, merges, and remotes.
+Every Riftri workspace is a real Git linked worktree. Unchanged file data is
+shared efficiently, while every workspace keeps its own private changes. Git
+continues to own cloning, branches, commits, merges, and remotes.
 
 ## Why Riftri
 
@@ -30,8 +31,8 @@ Riftri keeps the workflow developers and agents already understand:
 
 - **Real Git worktrees.** Ordinary paths, files, branches, and Git commands
   continue to work.
-- **Shared unchanged data.** Native copy-on-write clones avoid eagerly
-  duplicating the physical contents of the whole checkout.
+- **Shared unchanged data.** Riftri avoids eagerly duplicating the physical
+  contents of the whole checkout.
 - **Private edits.** A write in one worktree cannot modify another worktree or
   the immutable shared base.
 - **No filesystem middleman.** Editors, compilers, and agents use the native
