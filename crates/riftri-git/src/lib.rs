@@ -1060,8 +1060,11 @@ fn command_failed(arguments: &[OsString], output: &Output) -> GitError {
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
+
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     use tempfile::{TempDir, tempdir};
 
