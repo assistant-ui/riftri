@@ -166,7 +166,7 @@ function GetStarted() {
 function Footer() {
   return (
     <footer className="site-footer">
-      <span>RIFTRI / EXPERIMENTAL</span>
+      <span>RIFTRI</span>
       <a href={githubUrl}>ASSISTANT-UI/RIFTRI ↗</a>
     </footer>
   );
