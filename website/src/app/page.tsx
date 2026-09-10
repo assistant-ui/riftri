@@ -1,5 +1,6 @@
 import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
+import { MaterializationMap } from "../components/materialization-map";
 import { SectionLink } from "../components/section-link";
 import { StorageMap } from "../components/storage-map";
 
@@ -99,6 +100,7 @@ function Overview() {
           manage branches, or sit between your tools and the filesystem.
         </p>
       </div>
+      <MaterializationMap />
       <div className="essential-grid">
         {essentials.map((item) => (
           <article key={item.index}>
