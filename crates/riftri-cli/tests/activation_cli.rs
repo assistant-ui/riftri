@@ -190,6 +190,23 @@ fn status_and_repair_explain_an_empty_lifecycle() {
     assert!(status_output.contains("Pending removals: 0"));
     assert!(status_output.contains("Retained bases: 0"));
     assert!(status_output.contains("State issues: 0"));
+    assert!(status_output.contains("Total filesystem-accounted allocated: 0 bytes"));
+    assert!(status_output.contains(
+        "may count shared APFS blocks more than once; it is not exclusive physical disk use"
+    ));
+
+    #[cfg(target_os = "macos")]
+    {
+        let gc = riftri(&fixture.repository, &["gc"]);
+        assert!(
+            gc.status.success(),
+            "gc plan failed: {}",
+            String::from_utf8_lossy(&gc.stderr)
+        );
+        let gc_output = String::from_utf8_lossy(&gc.stdout);
+        assert!(gc_output.contains("Removed filesystem-accounted allocated bytes: 0"));
+        assert!(gc_output.contains("Physical-sharing proof: use the documented APFS volume-delta"));
+    }
 
     let repair = riftri(&fixture.repository, &["repair"]);
     assert!(

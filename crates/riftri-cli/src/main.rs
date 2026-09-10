@@ -628,7 +628,7 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
             "in use"
         };
         println!(
-            "- {}: refs={}, logical={} bytes, allocated={} bytes, state={}",
+            "- {}: refs={}, logical={} bytes, filesystem-accounted allocated={} bytes, state={}",
             base.path.display(),
             base.reference_count,
             base.logical_bytes,
@@ -639,7 +639,7 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     println!("Active view storage:");
     for view in &report.views {
         println!(
-            "- {}: logical={} bytes, allocated={} bytes, base={}",
+            "- {}: logical={} bytes, filesystem-accounted allocated={} bytes, base={}",
             view.destination.display(),
             view.logical_bytes,
             view.allocated_bytes,
@@ -654,7 +654,11 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
         println!("Attention: Riftri preserves unexplained state; inspect it before manual cleanup");
     }
     println!("Total logical: {} bytes", report.total_logical_bytes);
-    println!("Total allocated: {} bytes", report.total_allocated_bytes);
+    println!(
+        "Total filesystem-accounted allocated: {} bytes",
+        report.total_allocated_bytes
+    );
+    print_allocation_note();
 }
 
 fn print_garbage_collection_report(
@@ -674,7 +678,7 @@ fn print_garbage_collection_report(
     println!("Eligible bases: {}", report.candidates.len());
     for candidate in &report.candidates {
         println!(
-            "- {}: logical={} bytes, allocated={} bytes",
+            "- {}: logical={} bytes, filesystem-accounted allocated={} bytes",
             candidate.base_path.display(),
             candidate.logical_bytes,
             candidate.allocated_bytes
@@ -688,12 +692,22 @@ fn print_garbage_collection_report(
     );
     println!("Removed logical bytes: {}", report.removed_logical_bytes);
     println!(
-        "Removed allocated-byte accounting: {}",
+        "Removed filesystem-accounted allocated bytes: {}",
         report.removed_allocated_bytes
     );
+    print_allocation_note();
     if !report.applied && !report.candidates.is_empty() {
         println!("Nothing was deleted; rerun with `riftri gc --apply` to collect this plan");
     }
+}
+
+fn print_allocation_note() {
+    println!(
+        "Allocation note: filesystem-accounted allocation may count shared APFS blocks more than once; it is not exclusive physical disk use"
+    );
+    println!(
+        "Physical-sharing proof: use the documented APFS volume-delta benchmark on a quiet volume"
+    );
 }
 
 fn print_doctor(report: &riftri_core::DoctorReport) {

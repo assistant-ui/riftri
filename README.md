@@ -210,6 +210,11 @@ attention. `riftri status` also lists state paths that no valid journal,
 completion marker, or supported layout explains. Riftri preserves those paths;
 inspect them before any manual cleanup.
 
+The `status` and `gc` commands label allocation as filesystem-accounted. These
+per-path values can count shared APFS blocks more than once, so adding them does
+not measure Riftri's exclusive physical disk use. The documented APFS
+volume-delta benchmark is the physical-sharing check.
+
 ## Installation
 
 After the first public release, install the Rust-powered CLI through npm:
