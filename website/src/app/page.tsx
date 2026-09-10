@@ -120,7 +120,7 @@ function GetStarted() {
       <div className="section-heading split-heading">
         <div>
           <GraphLabel index="02">GET STARTED</GraphLabel>
-          <h2>Three commands. Then work.</h2>
+          <h2>Install. Check. Create.</h2>
         </div>
         <p>
           Run these commands from a Git repository on macOS. Riftri will stop with an explanation
