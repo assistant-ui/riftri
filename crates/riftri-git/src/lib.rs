@@ -4,6 +4,9 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
 
+#[cfg(unix)]
+use std::process::Stdio;
+
 use serde::Serialize;
 use thiserror::Error;
 
@@ -84,6 +87,14 @@ pub struct TreeEntry {
     pub path: PathBuf,
 }
 
+/// One effective path attribute reported by `git check-attr -z`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitAttribute {
+    pub path: PathBuf,
+    pub name: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
 /// Branch behavior for a new linked worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeHead<'a> {
@@ -121,6 +132,20 @@ pub enum GitError {
     InvalidOutput {
         context: &'static str,
         detail: String,
+    },
+
+    #[error("could not write input to Git command {command:?}: {source}")]
+    WriteInput {
+        command: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("could not wait for Git command {command:?}: {source}")]
+    Wait {
+        command: PathBuf,
+        #[source]
+        source: std::io::Error,
     },
 }
 
@@ -376,30 +401,65 @@ impl Git {
         Ok(())
     }
 
-    /// Return whether Git resolves any attribute for the supplied tree paths.
+    /// Return every attribute Git resolves for the supplied tree paths.
     /// `--cached` prevents a mutable working-tree attributes file from being
     /// treated as the requested tree; repository, global, and system attribute
     /// sources still participate and therefore make the prototype refuse.
+    pub fn effective_attributes_for_paths(
+        &self,
+        path: &Path,
+        paths: &[PathBuf],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            let arguments = [
+                OsString::from("check-attr"),
+                OsString::from("--cached"),
+                OsString::from("--all"),
+                OsString::from("-z"),
+                OsString::from("--stdin"),
+            ];
+            let mut input = Vec::new();
+            for entry in paths {
+                input.extend_from_slice(entry.as_os_str().as_bytes());
+                input.push(0);
+            }
+            let output = self.run_os_with_input(Some(path), &arguments, input)?;
+            parse_attribute_records(&output.stdout)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let mut attributes = Vec::new();
+            for chunk in paths.chunks(128) {
+                let mut arguments = vec![
+                    OsString::from("check-attr"),
+                    OsString::from("--cached"),
+                    OsString::from("--all"),
+                    OsString::from("-z"),
+                    OsString::from("--"),
+                ];
+                arguments.extend(chunk.iter().map(|entry| entry.as_os_str().to_os_string()));
+                let output = self.run_os(Some(path), &arguments)?;
+                attributes.extend(parse_attribute_records(&output.stdout)?);
+            }
+            Ok(attributes)
+        }
+    }
+
+    /// Return whether Git resolves any attribute for the supplied tree paths.
     pub fn paths_have_effective_attributes(
         &self,
         path: &Path,
         paths: &[PathBuf],
     ) -> Result<bool, GitError> {
-        for chunk in paths.chunks(128) {
-            let mut arguments = vec![
-                OsString::from("check-attr"),
-                OsString::from("--cached"),
-                OsString::from("--all"),
-                OsString::from("-z"),
-                OsString::from("--"),
-            ];
-            arguments.extend(chunk.iter().map(|entry| entry.as_os_str().to_os_string()));
-            let output = self.run_os(Some(path), &arguments)?;
-            if !output.stdout.is_empty() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(!self.effective_attributes_for_paths(path, paths)?.is_empty())
     }
 
     /// Materialize an exact tree with Git's checkout machinery and an isolated
@@ -691,6 +751,93 @@ impl Git {
             source,
         })
     }
+
+    #[cfg(unix)]
+    fn run_os_with_input(
+        &self,
+        path: Option<&Path>,
+        arguments: &[OsString],
+        input: Vec<u8>,
+    ) -> Result<Output, GitError> {
+        use std::io::Write;
+
+        let mut command = Command::new(&self.command);
+        command
+            .args(arguments)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(path) = path {
+            command.current_dir(path);
+        }
+
+        let mut child = command.spawn().map_err(|source| GitError::Start {
+            command: self.command.clone(),
+            source,
+        })?;
+        let mut stdin = child.stdin.take().ok_or_else(|| GitError::InvalidOutput {
+            context: "Git command input",
+            detail: "piped standard input was unavailable".to_owned(),
+        })?;
+        let writer = std::thread::spawn(move || stdin.write_all(&input));
+        let output = child.wait_with_output().map_err(|source| GitError::Wait {
+            command: self.command.clone(),
+            source,
+        })?;
+        let write_result = writer.join().map_err(|_| GitError::InvalidOutput {
+            context: "Git command input",
+            detail: "input writer thread panicked".to_owned(),
+        })?;
+
+        if !output.status.success() {
+            return Err(command_failed(arguments, &output));
+        }
+        write_result.map_err(|source| GitError::WriteInput {
+            command: self.command.clone(),
+            source,
+        })?;
+        Ok(output)
+    }
+}
+
+/// Parse NUL-delimited `git check-attr -z` path/name/value triples.
+pub fn parse_attribute_records(input: &[u8]) -> Result<Vec<GitAttribute>, GitError> {
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+    if input.last() != Some(&0) {
+        return Err(GitError::InvalidOutput {
+            context: "Git attribute records",
+            detail: "output did not end with a NUL delimiter".to_owned(),
+        });
+    }
+
+    let fields = input[..input.len() - 1]
+        .split(|byte| *byte == 0)
+        .collect::<Vec<_>>();
+    if fields.len() % 3 != 0 {
+        return Err(GitError::InvalidOutput {
+            context: "Git attribute records",
+            detail: "output did not contain path/name/value triples".to_owned(),
+        });
+    }
+
+    fields
+        .chunks_exact(3)
+        .map(|fields| {
+            if fields[0].is_empty() || fields[1].is_empty() {
+                return Err(GitError::InvalidOutput {
+                    context: "Git attribute record",
+                    detail: "path and attribute name must not be empty".to_owned(),
+                });
+            }
+            Ok(GitAttribute {
+                path: PathBuf::from(os_string_from_git(fields[0], "attribute path")?),
+                name: fields[1].to_vec(),
+                value: fields[2].to_vec(),
+            })
+        })
+        .collect()
 }
 
 /// Parse `git worktree list --porcelain -z` without decoding paths as UTF-8.
@@ -916,9 +1063,12 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    #[cfg(unix)]
+    use std::path::PathBuf;
+
     use tempfile::{TempDir, tempdir};
 
-    use super::{Git, WorktreeHead, parse_worktree_porcelain};
+    use super::{Git, WorktreeHead, parse_attribute_records, parse_worktree_porcelain};
 
     struct RepositoryFixture {
         directory: TempDir,
@@ -1166,6 +1316,16 @@ mod tests {
         fs::write(attributes, "*.txt riftri-test\n").expect("write info attributes");
         let git = Git::default();
 
+        let attributes = git
+            .effective_attributes_for_paths(
+                fixture.path(),
+                &[Path::new("tracked.txt").to_path_buf()],
+            )
+            .expect("read attributes");
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(attributes[0].path, Path::new("tracked.txt"));
+        assert_eq!(attributes[0].name, b"riftri-test");
+        assert_eq!(attributes[0].value, b"set");
         assert!(
             git.paths_have_effective_attributes(
                 fixture.path(),
@@ -1179,6 +1339,60 @@ mod tests {
                 &[Path::new("unmatched.bin").to_path_buf()]
             )
             .expect("check unmatched attributes")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attribute_parser_preserves_non_utf8_paths() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let attributes =
+            parse_attribute_records(b"invalid-\xff\0text\0auto\0").expect("parse attribute record");
+
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(attributes[0].path.as_os_str().as_bytes(), b"invalid-\xff");
+        assert_eq!(attributes[0].name, b"text");
+        assert_eq!(attributes[0].value, b"auto");
+    }
+
+    #[test]
+    fn attribute_parser_rejects_incomplete_records() {
+        assert!(parse_attribute_records(b"tracked.txt\0text\0").is_err());
+        assert!(parse_attribute_records(b"tracked.txt\0text").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checks_large_attribute_path_sets_with_one_git_process() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = RepositoryFixture::committed();
+        let wrapper_directory = tempdir().expect("wrapper directory");
+        let wrapper = wrapper_directory.path().join("git-wrapper");
+        let calls = wrapper_directory.path().join("git-wrapper.calls");
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf 'call\\n' >> \"$0.calls\"\nexec git \"$@\"\n",
+        )
+        .expect("write Git wrapper");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+        let paths = (0..300)
+            .map(|index| PathBuf::from(format!("path-{index}.txt")))
+            .collect::<Vec<_>>();
+
+        let attributes = Git::new(&wrapper)
+            .paths_have_effective_attributes(fixture.path(), &paths)
+            .expect("check attributes");
+
+        assert!(!attributes);
+        assert_eq!(
+            fs::read_to_string(calls).expect("read wrapper calls"),
+            "call\n",
         );
     }
 
