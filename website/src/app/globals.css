@@ -243,7 +243,6 @@ code, pre { font-family: var(--font-mono); }
   color: var(--ink);
   font-size: 0.65rem;
   letter-spacing: 0.03em;
-  animation: graph-count-up 7.5s steps(16, end) infinite both;
 }
 
 .branch-line {
@@ -256,20 +255,29 @@ code, pre { font-family: var(--font-mono); }
 .view-list { border-block: 1px dashed var(--line); }
 .view-row + .view-row { border-top: 1px solid var(--line); }
 .block-track {
+  position: relative;
   display: flex;
-  gap: 1px;
   font-size: 0.74rem;
   line-height: 1;
-  animation: graph-count-up 7.5s steps(16, end) infinite both;
 }
-.shared-block { color: var(--ink-faint); }
-.private-block { color: var(--accent); }
+.track-line, .track-counter { display: flex; gap: 1px; }
+.track-line { color: var(--ink-faint); }
+.track-counter {
+  position: absolute;
+  top: 0;
+  right: 0;
+  color: var(--accent);
+  animation-name: private-count-up;
+  animation-duration: 7.5s;
+  animation-iteration-count: infinite;
+  animation-fill-mode: both;
+}
 
-.view-row:nth-child(1) .block-track { animation-delay: 0.55s; }
-.view-row:nth-child(2) .block-track { animation-delay: 0.95s; }
-.view-row:nth-child(3) .block-track { animation-delay: 1.35s; }
+.view-row:nth-child(1) .track-counter { animation-delay: 0.55s; }
+.view-row:nth-child(2) .track-counter { animation-delay: 0.95s; }
+.view-row:nth-child(3) .track-counter { animation-delay: 1.35s; }
 
-@keyframes graph-count-up {
+@keyframes private-count-up {
   0%, 8% { clip-path: inset(0 100% 0 0); }
   52%, 99.9% { clip-path: inset(0 0 0 0); }
   100% { clip-path: inset(0 100% 0 0); }
@@ -579,7 +587,7 @@ code, pre { font-family: var(--font-mono); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .base-track, .block-track { clip-path: none; animation: none !important; }
+  .track-counter { clip-path: none; animation: none !important; }
   .backend-cycle-item { animation: none !important; }
   .backend-cycle-item:first-child { position: relative; opacity: 1; transform: none; }
   .backend-cycle-item:not(:first-child) { display: none; }

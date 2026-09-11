@@ -7,11 +7,12 @@ const views = [
 function BlockTrack({ changed }: { changed: number }) {
   return (
     <span className="block-track" aria-hidden="true">
-      {Array.from({ length: 16 }, (_, index) => (
-        <span className={index >= 16 - changed ? "private-block" : "shared-block"} key={index}>
-          {index >= 16 - changed ? "█" : "·"}
-        </span>
-      ))}
+      <span className="track-line">
+        {Array.from({ length: 16 }, (_, index) => <span key={index}>·</span>)}
+      </span>
+      <span className="track-counter" style={{ animationTimingFunction: `steps(${changed}, end)` }}>
+        {Array.from({ length: changed }, (_, index) => <span key={index}>█</span>)}
+      </span>
     </span>
   );
 }
