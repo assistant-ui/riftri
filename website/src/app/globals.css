@@ -314,9 +314,13 @@ code, pre { font-family: var(--font-mono); }
   transform: translateY(-50%);
 }
 
-.materialization-track li > span { color: var(--accent); font-size: 0.55rem; }
+.materialization-track li > span { color: var(--accent); font-size: 0.62rem; }
 .materialization-track strong { font-family: var(--font-sans); font-size: 0.82rem; font-weight: 500; }
-.materialization-track small { color: var(--ink-faint); font-size: 0.55rem; }
+.materialization-track small {
+  color: var(--ink-muted);
+  font-size: 0.7rem;
+  line-height: 1.35;
+}
 
 .visually-hidden {
   position: absolute;
@@ -331,7 +335,7 @@ code, pre { font-family: var(--font-mono); }
 .materialization-track li > .backend-cycle {
   position: relative;
   display: block;
-  min-height: 2.15rem;
+  min-height: 2.35rem;
   color: var(--ink);
   font-size: inherit;
 }
