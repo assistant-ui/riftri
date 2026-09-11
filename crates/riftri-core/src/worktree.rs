@@ -50,6 +50,8 @@ use crate::{
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 static OPERATION_NONCE: AtomicU64 = AtomicU64::new(0);
 
+const STATE_DIRECTORY_CONFIG_KEY: &str = "riftri.stateDirectory";
+
 struct CompatibilityAnalysis {
     report: RepositoryCompatibilityReport,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -296,31 +298,142 @@ pub fn garbage_collect(
     garbage_collect_inner(state_directory, apply, None)
 }
 
-/// Return whether `destination` is an active Riftri-managed worktree in the
-/// repository's default state directory.
+/// Return whether `destination` is an active Riftri-managed worktree in any
+/// state directory registered by the repository.
 pub fn is_managed_worktree(repository: &Path, destination: &Path) -> Result<bool, WorktreeError> {
+    Ok(managed_worktree_state_directory(repository, destination)?.is_some())
+}
+
+pub(crate) fn managed_worktree_state_directory(
+    repository: &Path,
+    destination: &Path,
+) -> Result<Option<PathBuf>, WorktreeError> {
     let git = Git::default();
     let repository_info = git.inspect_repository(repository)?;
-    let state_directory = repository_info.identity.common_git_dir.join("riftri");
-    if !state_directory.exists() {
-        return Ok(false);
-    }
-
     let destinations = managed_destination_candidates(destination)?;
-    for destination in &destinations {
-        if find_managed_add_journal(&state_directory, destination)?.is_some() {
-            return Ok(true);
+    let destination_set = destinations.iter().cloned().collect::<HashSet<_>>();
+    let mut matches = Vec::new();
+    for state_directory in repository_state_directories_with_git(&git, &repository_info)? {
+        let mut active_add = false;
+        for destination in &destinations {
+            if find_managed_add_journal(&state_directory, destination)?.is_some() {
+                active_add = true;
+                break;
+            }
+        }
+        let pending_move = MoveJournalStore::open(&state_directory)
+            .load_all()?
+            .into_iter()
+            .any(|journal| {
+                journal.phase != MoveWorktreePhase::Complete
+                    && (destination_set.contains(&journal.source)
+                        || destination_set.contains(&journal.destination))
+            });
+        if active_add || pending_move {
+            matches.push(state_directory);
         }
     }
-    let destinations = destinations.into_iter().collect::<HashSet<_>>();
-    Ok(MoveJournalStore::open(&state_directory)
-        .load_all()?
-        .into_iter()
-        .any(|journal| {
-            journal.phase != MoveWorktreePhase::Complete
-                && (destinations.contains(&journal.source)
-                    || destinations.contains(&journal.destination))
-        }))
+    if matches.len() > 1 {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "multiple registered Riftri state directories manage {}",
+            destination.display()
+        )));
+    }
+    Ok(matches.pop())
+}
+
+pub(crate) fn repository_state_directories(
+    repository: &Path,
+) -> Result<Vec<PathBuf>, WorktreeError> {
+    let git = Git::default();
+    let repository_info = git.inspect_repository(repository)?;
+    repository_state_directories_with_git(&git, &repository_info)
+}
+
+fn repository_state_directories_with_git(
+    git: &Git,
+    repository: &riftri_git::RepositoryInfo,
+) -> Result<Vec<PathBuf>, WorktreeError> {
+    let repository_root = repository.root.as_deref().ok_or_else(|| {
+        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    })?;
+    let default = repository.identity.common_git_dir.join("riftri");
+    let mut directories = Vec::new();
+    if default.exists() {
+        directories.push(
+            fs::canonicalize(&default)
+                .map_err(|source| io("resolve default state directory", &default, source))?,
+        );
+    }
+    for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
+        if !configured.is_absolute() {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "registered Riftri state directory is not absolute: {}",
+                configured.display()
+            )));
+        }
+        let canonical = fs::canonicalize(&configured).map_err(|source| {
+            io(
+                "resolve registered Riftri state directory",
+                &configured,
+                source,
+            )
+        })?;
+        let metadata = fs::symlink_metadata(&canonical).map_err(|source| {
+            io(
+                "inspect registered Riftri state directory",
+                &canonical,
+                source,
+            )
+        })?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "registered Riftri state path is not a real directory: {}",
+                canonical.display()
+            )));
+        }
+        directories.push(canonical);
+    }
+    directories.sort_unstable();
+    directories.dedup();
+    Ok(directories)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn register_state_directory(
+    git: &Git,
+    repository: &riftri_git::RepositoryInfo,
+    state_directory: &Path,
+) -> Result<(), WorktreeError> {
+    let repository_root = repository.root.as_deref().ok_or_else(|| {
+        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    })?;
+    let default = repository.identity.common_git_dir.join("riftri");
+    if fs::canonicalize(&default).is_ok_and(|path| path == state_directory) {
+        return Ok(());
+    }
+    let lock_path = repository
+        .identity
+        .common_git_dir
+        .join("riftri-state-directory.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| io("open state-directory locator lock", &lock_path, source))?;
+    lock.lock_exclusive()
+        .map_err(|source| io("lock state-directory locators", &lock_path, source))?;
+    let registered = git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?;
+    if registered.into_iter().any(|path| {
+        path == state_directory
+            || fs::canonicalize(path).is_ok_and(|canonical| canonical == state_directory)
+    }) {
+        return Ok(());
+    }
+    git.add_local_config_path(repository_root, STATE_DIRECTORY_CONFIG_KEY, state_directory)?;
+    Ok(())
 }
 
 fn managed_destination_candidates(destination: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -1117,7 +1230,7 @@ fn prune_worktrees_inner(
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let state_directory = fs::canonicalize(absolute_path(&requested_state)?)
         .map_err(|source| io("resolve state directory", &requested_state, source))?;
-    verify_prune_safe(&git, &state_directory, &repository_root, None)?;
+    verify_repository_prune_safe(&git, &state_directory, &repository_root, None)?;
 
     let store = PruneJournalStore::create(&state_directory)?;
     let operation_id = allocate_prune_operation_id(&store)?;
@@ -1157,7 +1270,7 @@ fn add_worktree_inner(
             "bare repositories are not supported by optimized checkout".to_owned(),
         ));
     }
-    let repository_root = repository.root.ok_or_else(|| {
+    let repository_root = repository.root.clone().ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
     let destination = normalize_new_destination(&request.destination)?;
@@ -1181,6 +1294,7 @@ fn add_worktree_inner(
     create_state_layout(&state_directory)?;
     let state_directory = fs::canonicalize(&state_directory)
         .map_err(|source| io("resolve state directory", &state_directory, source))?;
+    register_state_directory(&git, &repository, &state_directory)?;
     let store = JournalStore::create(&state_directory)?;
     let base_directory = state_directory.join("bases/v1").join(repository_cache_id(
         &repository.identity.common_git_dir,
@@ -2998,7 +3112,7 @@ fn resume_prune(
     if record.phase == PruneWorktreesPhase::IntentRecorded {
         let metadata_lock =
             acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
-        verify_prune_safe(
+        verify_repository_prune_safe(
             git,
             &state_directory,
             &journal.repository,
@@ -3014,7 +3128,7 @@ fn resume_prune(
         drop(metadata_lock);
     }
     if record.phase == PruneWorktreesPhase::GitMetadataPruned {
-        verify_prune_safe(
+        verify_repository_prune_safe(
             git,
             &state_directory,
             &journal.repository,
@@ -3025,6 +3139,36 @@ fn resume_prune(
             &mut record,
             PruneWorktreesPhase::Complete,
             fail_after,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn verify_repository_prune_safe(
+    git: &Git,
+    current_state_directory: &Path,
+    repository: &Path,
+    current_prune: Option<&str>,
+) -> Result<(), WorktreeError> {
+    let repository_info = git.inspect_repository(repository)?;
+    let mut state_directories = repository_state_directories_with_git(git, &repository_info)?;
+    if !state_directories
+        .iter()
+        .any(|state_directory| state_directory == current_state_directory)
+    {
+        state_directories.push(current_state_directory.to_path_buf());
+    }
+    for state_directory in state_directories {
+        verify_prune_safe(
+            git,
+            &state_directory,
+            repository,
+            if state_directory == current_state_directory {
+                current_prune
+            } else {
+                None
+            },
         )?;
     }
     Ok(())

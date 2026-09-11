@@ -885,6 +885,117 @@ fn enabled_move_of_a_managed_view_is_journaled() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn enabled_lifecycle_uses_the_registered_custom_state_directory() {
+    let fixture = RepositoryFixture::new();
+    let state = fixture.directory.path().join("custom-state");
+    let source = fixture.directory.path().join("custom-state-source");
+    let destination = fixture.directory.path().join("custom-state-destination");
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&source)
+        .args(["-b", "feature/custom-state", "HEAD", "--repository"])
+        .arg(&fixture.repository)
+        .arg("--state-dir")
+        .arg(&state)
+        .output()
+        .expect("add worktree with custom state");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "move"])
+        .arg(&source)
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("move custom-state worktree through shim");
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert!(String::from_utf8_lossy(&moved.stderr).contains("moved managed Riftri worktree"));
+    assert!(state.join("moves").is_dir());
+
+    let removed = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("remove custom-state worktree through shim");
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&removed.stderr).contains("safely removed worktree"));
+    assert!(state.join("removals").is_dir());
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_prune_checks_and_journals_registered_custom_state() {
+    let fixture = RepositoryFixture::new();
+    let state = fixture.directory.path().join("custom-prune-state");
+    let destination = fixture.directory.path().join("custom-prune-view");
+    let stale = fixture.directory.path().join("custom-prune-stale");
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&destination)
+        .args(["-b", "feature/custom-prune", "HEAD", "--repository"])
+        .arg(&fixture.repository)
+        .arg("--state-dir")
+        .arg(&state)
+        .output()
+        .expect("add worktree with custom prune state");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert!(
+        git(
+            &fixture.repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/custom-prune-stale",
+                stale.to_str().expect("UTF-8 fixture path"),
+                "HEAD",
+            ],
+        )
+        .status
+        .success()
+    );
+    fs::remove_dir_all(&stale).expect("remove ordinary stale worktree");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let pruned = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "prune"])
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("prune with registered custom state");
+
+    assert!(
+        pruned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pruned.stderr)
+    );
+    assert!(String::from_utf8_lossy(&pruned.stderr).contains("pruned stale Git worktree metadata"));
+    assert!(destination.is_dir());
+    assert!(state.join("prunes").is_dir());
+    let inventory = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
+    assert!(!String::from_utf8_lossy(&inventory.stdout).contains(stale.to_string_lossy().as_ref()));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn enabled_prune_with_managed_state_is_journaled() {
     let fixture = RepositoryFixture::new();
     let destination = fixture.directory.path().join("guarded-prune-view");

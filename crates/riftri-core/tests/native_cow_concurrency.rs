@@ -227,6 +227,16 @@ fn many_parallel_views_reuse_one_base_and_keep_edits_isolated() {
             .iter()
             .all(|result| result.base_path == results[0].base_path)
     );
+    assert_eq!(
+        git(
+            &repository,
+            &["config", "--local", "--get-all", "riftri.stateDirectory"]
+        )
+        .lines()
+        .count(),
+        1,
+        "parallel adds should register one custom state locator"
+    );
     for destination in &destinations {
         assert!(git(destination, &["status", "--porcelain=v1"]).is_empty());
     }

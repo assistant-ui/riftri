@@ -11,11 +11,12 @@ use riftri_git::{Git, GitError};
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::worktree::{managed_worktree_state_directory, repository_state_directories};
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
     PruneWorktreesRequest, PruneWorktreesResult, RemoveWorktreeRequest, RemoveWorktreeResult,
-    WorktreeError, WorktreeMode, add_worktree, is_managed_worktree, move_worktree, prune_worktrees,
-    remove_worktree, storage_accounting,
+    WorktreeError, WorktreeMode, add_worktree, move_worktree, prune_worktrees, remove_worktree,
+    storage_accounting,
 };
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
@@ -700,13 +701,13 @@ fn parse_enabled_remove(
     } else {
         repository.join(destination)
     };
-    if !is_managed_worktree(repository, &destination)? {
+    let Some(state_directory) = managed_worktree_state_directory(repository, &destination)? else {
         return Ok(None);
-    }
+    };
     Ok(Some(RemoveWorktreeRequest {
         repository: repository.to_path_buf(),
         destination,
-        state_dir: None,
+        state_dir: Some(state_directory),
     }))
 }
 
@@ -742,14 +743,14 @@ fn parse_enabled_move(
         }
     };
     let source = resolve(source);
-    if !is_managed_worktree(repository, &source)? {
+    let Some(state_directory) = managed_worktree_state_directory(repository, &source)? else {
         return Ok(None);
-    }
+    };
     Ok(Some(MoveWorktreeRequest {
         repository: repository.to_path_buf(),
         source,
         destination: resolve(destination),
-        state_dir: None,
+        state_dir: Some(state_directory),
     }))
 }
 
@@ -773,28 +774,31 @@ fn plan_enabled_prune(
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
-    let state_directory = activation.common_git_dir.join("riftri");
-    if !state_directory.exists() {
-        return Ok(GitProxyPlan::Passthrough);
+    let mut managed_states = Vec::new();
+    for state_directory in repository_state_directories(&activation.repository)? {
+        let status = storage_accounting(&state_directory)?;
+        if status.active_views > 0
+            || status.pending_adds > 0
+            || status.pending_removals > 0
+            || status.pending_moves > 0
+            || status.pending_prunes > 0
+            || !status.diagnostic_issues.is_empty()
+        {
+            managed_states.push(state_directory);
+        }
     }
-    let status = storage_accounting(&state_directory)?;
-    let managed_state = status.active_views > 0
-        || status.pending_adds > 0
-        || status.pending_removals > 0
-        || status.pending_moves > 0
-        || status.pending_prunes > 0
-        || !status.diagnostic_issues.is_empty();
-    if !managed_state {
+    if managed_states.is_empty() {
         return Ok(GitProxyPlan::Passthrough);
     }
     if optimization_compatible && arguments.is_empty() {
         return Ok(GitProxyPlan::OptimizedPrune(PruneWorktreesRequest {
             repository: repository.to_path_buf(),
-            state_dir: None,
+            state_dir: managed_states.into_iter().next(),
         }));
     }
-    guard_managed_prune(activation)?;
-    Ok(GitProxyPlan::Passthrough)
+    Err(unsupported(
+        "refusing `git worktree prune` options while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal",
+    ))
 }
 
 fn guard_managed_path_lifecycle(
@@ -811,31 +815,11 @@ fn guard_managed_path_lifecycle(
     } else {
         repository.join(path)
     };
-    if is_managed_worktree(repository, &path)? {
+    if managed_worktree_state_directory(repository, &path)?.is_some() {
         return Err(unsupported(format!(
             "refusing `git worktree {operation}` options that would bypass the journal for managed Riftri worktree {}; use a supported Riftri lifecycle command instead",
             path.display()
         )));
-    }
-    Ok(())
-}
-
-fn guard_managed_prune(activation: &RepositoryActivation) -> Result<(), ActivationError> {
-    let state_directory = activation.common_git_dir.join("riftri");
-    if !state_directory.exists() {
-        return Ok(());
-    }
-    let status = storage_accounting(&state_directory)?;
-    if status.active_views > 0
-        || status.pending_adds > 0
-        || status.pending_removals > 0
-        || status.pending_moves > 0
-        || status.pending_prunes > 0
-        || !status.diagnostic_issues.is_empty()
-    {
-        return Err(unsupported(
-            "refusing `git worktree prune` while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal",
-        ));
     }
     Ok(())
 }
