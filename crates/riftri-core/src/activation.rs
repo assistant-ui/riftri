@@ -124,7 +124,13 @@ pub fn plan_git_command(
         return Ok(GitProxyPlan::Passthrough);
     }
 
-    let Some(activation) = activation_for_proxy(&context.repository)? else {
+    let repository = match context.git_directory.as_deref() {
+        Some(git_directory) => Git::default()
+            .worktree_root_from_git_dir(git_directory)?
+            .unwrap_or(context.repository),
+        None => context.repository,
+    };
+    let Some(activation) = activation_for_proxy(&repository)? else {
         return Ok(GitProxyPlan::Passthrough);
     };
     if !activation.enabled {
@@ -141,21 +147,21 @@ pub fn plan_git_command(
                     "Git invocation-level configuration is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
                 )));
             }
-            parse_enabled_add(&context.repository, &arguments[context.command_index + 2..])
+            parse_enabled_add(&repository, &arguments[context.command_index + 2..])
                 .map(GitProxyPlan::OptimizedAdd)
         }
         "remove" => plan_enabled_remove(
-            &context.repository,
+            &repository,
             &arguments[context.command_index + 2..],
             context.optimization_compatible,
         ),
         "move" => plan_enabled_move(
-            &context.repository,
+            &repository,
             &arguments[context.command_index + 2..],
             context.optimization_compatible,
         ),
         "prune" => plan_enabled_prune(
-            &context.repository,
+            &repository,
             &activation,
             &arguments[context.command_index + 2..],
             context.optimization_compatible,
@@ -526,6 +532,7 @@ fn activation_for_proxy(path: &Path) -> Result<Option<RepositoryActivation>, Act
 
 struct CommandContext {
     repository: PathBuf,
+    git_directory: Option<PathBuf>,
     command_index: usize,
     optimization_compatible: bool,
 }
@@ -533,6 +540,7 @@ struct CommandContext {
 fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
     let mut repository = current_directory.to_path_buf();
     let mut work_tree = None;
+    let mut git_directory = None;
     let mut optimization_compatible = true;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
@@ -550,13 +558,17 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             let path = resolve_command_path(&repository, value);
             if argument == "--work-tree" {
                 work_tree = Some(path);
-            } else if path.file_name() == Some(OsStr::new(".git")) {
-                repository = path.parent()?.to_path_buf();
+            } else {
+                git_directory = Some(path.clone());
+                if path.file_name() == Some(OsStr::new(".git")) {
+                    repository = path.parent()?.to_path_buf();
+                }
             }
             optimization_compatible = false;
             index += 2;
         } else if let Some(value) = option_value(argument, "--git-dir=") {
             let path = resolve_command_path(&repository, &value);
+            git_directory = Some(path.clone());
             if path.file_name() == Some(OsStr::new(".git")) {
                 repository = path.parent()?.to_path_buf();
             }
@@ -599,8 +611,10 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
         } else if argument.to_string_lossy().starts_with('-') {
             return None;
         } else {
+            let git_directory = work_tree.is_none().then_some(git_directory).flatten();
             return Some(CommandContext {
                 repository: work_tree.unwrap_or(repository),
+                git_directory,
                 command_index: index,
                 optimization_compatible,
             });

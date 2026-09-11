@@ -270,6 +270,39 @@ impl Git {
         parse_worktree_porcelain(&output.stdout)
     }
 
+    /// Resolve an explicit Git directory to one live non-bare worktree root.
+    ///
+    /// A linked worktree's Git directory does not sit below that worktree, so
+    /// callers must use Git's own inventory instead of inferring a root from
+    /// the administrative directory path.
+    pub fn worktree_root_from_git_dir(&self, git_dir: &Path) -> Result<Option<PathBuf>, GitError> {
+        let arguments = [
+            OsString::from("--git-dir"),
+            git_path_argument(git_dir),
+            OsString::from("worktree"),
+            OsString::from("list"),
+            OsString::from("--porcelain"),
+            OsString::from("-z"),
+        ];
+        let output = self.run_os(None, &arguments)?;
+        let worktrees = parse_worktree_porcelain(&output.stdout)?;
+        if worktrees.iter().all(|worktree| worktree.bare) {
+            return Ok(None);
+        }
+        worktrees
+            .into_iter()
+            .find(|worktree| !worktree.bare && worktree.path.is_dir())
+            .map(|worktree| worktree.path)
+            .map(Some)
+            .ok_or_else(|| GitError::InvalidOutput {
+                context: "Git worktree inventory",
+                detail: format!(
+                    "{} did not identify a live non-bare worktree",
+                    git_dir.display()
+                ),
+            })
+    }
+
     /// List every entry in an exact tree without interpreting path bytes.
     pub fn list_tree(&self, path: &Path, tree: &ObjectId) -> Result<Vec<TreeEntry>, GitError> {
         let arguments = [
@@ -1768,6 +1801,43 @@ mod tests {
         assert!(worktrees.iter().any(|worktree| {
             worktree.path.canonicalize().ok().as_deref() == linked.canonicalize().ok().as_deref()
         }));
+    }
+
+    #[test]
+    fn resolves_a_linked_git_directory_through_the_worktree_inventory() {
+        let fixture = RepositoryFixture::committed();
+        let linked_parent = tempdir().expect("linked parent");
+        let linked = linked_parent.path().join("linked worktree");
+        let linked_string = linked.to_str().expect("UTF-8 fixture path");
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                linked_string,
+                "HEAD",
+            ],
+        );
+        let git = Git::default();
+        let linked_git_directory = git
+            .run_path(
+                Some(&linked),
+                &["rev-parse", "--path-format=absolute", "--git-dir"],
+                "linked Git directory",
+            )
+            .expect("resolve linked Git directory");
+
+        let root = git
+            .worktree_root_from_git_dir(&linked_git_directory)
+            .expect("resolve worktree root")
+            .expect("non-bare worktree root");
+
+        assert_eq!(
+            root.canonicalize().expect("canonical resolved root"),
+            fixture.path().canonicalize().expect("canonical main root")
+        );
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
