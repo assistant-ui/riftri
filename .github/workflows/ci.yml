@@ -105,7 +105,7 @@ jobs:
           if [ "${{ matrix.filesystem }}" = "btrfs" ]; then
             sudo mkfs.btrfs --force "$RUNNER_TEMP/riftri-reflink.img"
           else
-            sudo mkfs.xfs --force -m reflink=1 "$RUNNER_TEMP/riftri-reflink.img"
+            sudo mkfs.xfs -f -m reflink=1 "$RUNNER_TEMP/riftri-reflink.img"
           fi
           sudo mount --options loop "$RUNNER_TEMP/riftri-reflink.img" "$RUNNER_TEMP/riftri-reflink"
           sudo chown "$(id --user):$(id --group)" "$RUNNER_TEMP/riftri-reflink"
