@@ -893,6 +893,7 @@ fn remove_worktree_inner(
         ))
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
+    let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
     if !git
         .list_worktrees(&repository_root)?
         .into_iter()
@@ -937,6 +938,7 @@ fn remove_worktree_inner(
         RemoveWorktreePhase::WorktreeRemoved,
         fail_after,
     )?;
+    drop(metadata_lock);
     advance_removal(
         &store,
         &mut journal,
@@ -1205,6 +1207,7 @@ fn add_worktree_inner(
             &request.revision,
             &request.mode,
             &resolved.tree,
+            &repository.identity.common_git_dir,
             fail_after,
         )
     });
@@ -1269,12 +1272,14 @@ fn perform_add(
     revision: &OsStr,
     mode: &WorktreeMode,
     tree: &ObjectId,
+    common_git_dir: &Path,
     fail_after: Option<AddWorktreePhase>,
 ) -> Result<bool, WorktreeError> {
     let head = match mode {
         WorktreeMode::NewBranch(branch) => WorktreeHead::NewBranch(branch),
         WorktreeMode::Detached => WorktreeHead::Detached,
     };
+    let metadata_lock = acquire_git_worktree_metadata_lock(common_git_dir)?;
     git.add_worktree_no_checkout(repository, destination, revision, head)?;
     advance(
         store,
@@ -1282,6 +1287,7 @@ fn perform_add(
         AddWorktreePhase::GitMetadataCreated,
         fail_after,
     )?;
+    drop(metadata_lock);
 
     let reused_base = prepare_base(
         git,
@@ -1764,16 +1770,14 @@ fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn paths_match(left: &Path, right: &Path) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        return windows_path_key(left) == windows_path_key(right);
-    }
+    windows_path_key(left) == windows_path_key(right)
+}
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        left == right
-    }
+#[cfg(not(target_os = "windows"))]
+fn paths_match(left: &Path, right: &Path) -> bool {
+    left == right
 }
 
 #[cfg(target_os = "windows")]
@@ -1824,6 +1828,30 @@ fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
     }
     sync_parent(state_directory)?;
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn acquire_git_worktree_metadata_lock(common_git_dir: &Path) -> Result<File, WorktreeError> {
+    let lock_path = common_git_dir.join("riftri-worktree-metadata.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| io("open Git worktree metadata lock", &lock_path, source))?;
+    lock.lock_exclusive()
+        .map_err(|source| io("lock Git worktree metadata", &lock_path, source))?;
+    Ok(lock)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn acquire_git_worktree_metadata_lock_for_repository(
+    git: &Git,
+    repository: &Path,
+) -> Result<File, WorktreeError> {
+    let repository = git.inspect_repository(repository)?;
+    acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2441,7 +2469,7 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect storage accounting path", path, source))?;
     let mut logical_bytes = if metadata.is_dir() { 0 } else { metadata.len() };
-    let mut allocated_bytes = allocated_bytes(&metadata);
+    let mut allocated_bytes = allocated_bytes(path, &metadata)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         for entry in fs::read_dir(path)
             .map_err(|source| io("read storage accounting directory", path, source))?
@@ -2457,15 +2485,48 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
 }
 
 #[cfg(unix)]
-fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
+fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, WorktreeError> {
     use std::os::unix::fs::MetadataExt;
 
-    metadata.blocks().saturating_mul(512)
+    Ok(metadata.blocks().saturating_mul(512))
 }
 
-#[cfg(not(unix))]
-fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
-    metadata.len()
+#[cfg(target_os = "windows")]
+fn allocated_bytes(path: &Path, metadata: &fs::Metadata) -> Result<u64, WorktreeError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GetLastError, SetLastError};
+    use windows_sys::Win32::Storage::FileSystem::{GetCompressedFileSizeW, INVALID_FILE_SIZE};
+
+    if !metadata.is_file() {
+        return Ok(0);
+    }
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    let mut high = 0_u32;
+    // SAFETY: the path is NUL-terminated, `high` is writable, and clearing the
+    // thread-local last error disambiguates a valid low word of `u32::MAX`.
+    let low = unsafe {
+        SetLastError(ERROR_SUCCESS);
+        GetCompressedFileSizeW(wide.as_ptr(), &mut high)
+    };
+    if low == INVALID_FILE_SIZE {
+        // SAFETY: this reads the calling thread's error value immediately after
+        // `GetCompressedFileSizeW`.
+        let error = unsafe { GetLastError() };
+        if error != ERROR_SUCCESS {
+            return Err(io(
+                "measure filesystem allocation",
+                path,
+                std::io::Error::from_raw_os_error(error as i32),
+            ));
+        }
+    }
+    Ok((u64::from(high) << 32) | u64::from(low))
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, WorktreeError> {
+    Ok(metadata.len())
 }
 
 pub fn recover_incomplete_operations(
@@ -2671,6 +2732,15 @@ fn resume_removal(
         ))
     })?;
 
+    let metadata_lock = if record.phase <= RemoveWorktreePhase::CleanVerified {
+        Some(acquire_git_worktree_metadata_lock_for_repository(
+            git,
+            &journal.repository,
+        )?)
+    } else {
+        None
+    };
+
     if record.phase == RemoveWorktreePhase::IntentRecorded {
         verify_recoverable_removal(git, &journal)?;
         record.transition(RemoveWorktreePhase::CleanVerified)?;
@@ -2696,6 +2766,7 @@ fn resume_removal(
         record.transition(RemoveWorktreePhase::WorktreeRemoved)?;
         store.persist(&record)?;
     }
+    drop(metadata_lock);
 
     if record.phase >= RemoveWorktreePhase::WorktreeRemoved {
         let (registered, destination_exists) = removal_presence(git, &journal)?;
@@ -2744,6 +2815,8 @@ fn resume_move(
     })?;
 
     if record.phase == MoveWorktreePhase::IntentRecorded {
+        let metadata_lock =
+            acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
         let (source_registered, destination_registered) = move_registration(git, &journal)?;
         let source_exists = journal.source.exists();
         let destination_exists = journal.destination.exists();
@@ -2767,6 +2840,7 @@ fn resume_move(
             MoveWorktreePhase::WorktreeMoved,
             fail_after,
         )?;
+        drop(metadata_lock);
     }
 
     if record.phase >= MoveWorktreePhase::WorktreeMoved {
@@ -2895,6 +2969,8 @@ fn resume_prune(
         ))
     })?;
     if record.phase == PruneWorktreesPhase::IntentRecorded {
+        let metadata_lock =
+            acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
         verify_prune_safe(
             git,
             &state_directory,
@@ -2908,6 +2984,7 @@ fn resume_prune(
             PruneWorktreesPhase::GitMetadataPruned,
             fail_after,
         )?;
+        drop(metadata_lock);
     }
     if record.phase == PruneWorktreesPhase::GitMetadataPruned {
         verify_prune_safe(
@@ -3124,6 +3201,8 @@ fn validate_recovery_paths(
 }
 
 fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeError> {
+    let metadata_lock =
+        acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
     let expected_branch_target =
         if journal.last_forward_phase >= AddWorktreePhase::GitMetadataCreated {
             journal
@@ -3182,6 +3261,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     if let Some((branch, Some(_))) = expected_branch_target {
         git.delete_branch_force(&journal.repository, branch)?;
     }
+    drop(metadata_lock);
     Ok(())
 }
 

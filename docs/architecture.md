@@ -158,6 +158,11 @@ For an enabled `git worktree add <path> <ref>` operation, the intended sequence 
 Failures are rolled back from an operation journal. Riftri must not silently
 fall back to a full copy unless the user explicitly allows that policy.
 
+Calls that mutate Git's shared linked-worktree administration are serialized by
+a repository-local Riftri lock. Base construction and native view cloning stay
+outside that critical section, so parallel adds share immutable preparation
+without racing Git's `worktrees/` metadata.
+
 ## Add-operation journal state machine
 
 The version 1 add journal advances through these durable states:

@@ -1594,17 +1594,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn checks_large_attribute_path_sets_with_one_git_process() {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = RepositoryFixture::committed();
         let wrapper_directory = tempdir().expect("wrapper directory");
         let wrapper = wrapper_directory.path().join("git-wrapper");
         let calls = wrapper_directory.path().join("git-wrapper.calls");
-        fs::write(
-            &wrapper,
-            "#!/bin/sh\nprintf 'call\\n' >> \"$0.calls\"\nexec git \"$@\"\n",
-        )
-        .expect("write Git wrapper");
+        let mut wrapper_file = fs::File::create(&wrapper).expect("create Git wrapper");
+        wrapper_file
+            .write_all(b"#!/bin/sh\nprintf 'call\\n' >> \"$0.calls\"\nexec git \"$@\"\n")
+            .expect("write Git wrapper");
+        wrapper_file.sync_all().expect("sync Git wrapper");
+        drop(wrapper_file);
         let mut permissions = fs::metadata(&wrapper)
             .expect("wrapper metadata")
             .permissions();

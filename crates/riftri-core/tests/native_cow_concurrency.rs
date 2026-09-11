@@ -17,6 +17,7 @@ use std::thread;
 use riftri_core::{
     AddWorktreeRequest, AddWorktreeResult, WorktreeMode, add_worktree, storage_accounting,
 };
+use riftri_git::Git;
 use tempfile::tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
@@ -109,9 +110,17 @@ fn parallel_views_share_one_base_and_keep_commits_isolated() {
     assert_ne!(first_result.reused_base, second_result.reused_base);
     assert!(git(&first, &["status", "--porcelain=v1"]).is_empty());
     assert!(git(&second, &["status", "--porcelain=v1"]).is_empty());
-    let worktrees = git(&repository, &["worktree", "list", "--porcelain"]);
-    assert!(worktrees.contains(first.to_string_lossy().as_ref()));
-    assert!(worktrees.contains(second.to_string_lossy().as_ref()));
+    let worktrees = Git::default()
+        .list_worktrees(&repository)
+        .expect("list linked worktrees");
+    for expected in [&first, &second] {
+        let expected = expected.canonicalize().expect("resolve expected worktree");
+        assert!(
+            worktrees
+                .iter()
+                .any(|worktree| worktree.path.canonicalize().ok().as_ref() == Some(&expected))
+        );
+    }
 
     let commit_barrier = Arc::new(Barrier::new(3));
     let first_commit = concurrent_commit(

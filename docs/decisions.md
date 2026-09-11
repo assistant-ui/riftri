@@ -222,6 +222,16 @@ back instead of silently creating a full copy. ReFS is the only supported
 Windows mutation filesystem in this slice; alternatives for ordinary NTFS
 remain an explicit design question.
 
+### D025: Git worktree metadata mutation is repository-serialized
+
+Git's shared `worktrees/` administration is not safe to mutate through multiple
+simultaneous `git worktree add` processes on every supported Git/platform pair.
+Riftri therefore holds a repository-local lock around each Git worktree
+metadata mutation and the corresponding journal transition. Immutable-base
+preparation and native COW view creation remain independently concurrent. The
+lock lives in the common Git directory so separate Riftri state directories
+cannot race the same repository.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
