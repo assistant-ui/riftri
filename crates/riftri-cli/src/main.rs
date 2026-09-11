@@ -128,7 +128,7 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum WorktreeCommand {
-    /// Create a real linked worktree using a native APFS COW clone.
+    /// Create a real linked worktree using the platform's native COW backend.
     Add {
         /// New worktree directory.
         path: PathBuf,
@@ -177,7 +177,7 @@ enum WorktreeCommand {
     Move {
         /// Existing Riftri-managed worktree directory.
         source: PathBuf,
-        /// New worktree directory on the same APFS volume.
+        /// New worktree directory on the same filesystem volume.
         destination: PathBuf,
         /// Repository owning the linked worktree.
         #[arg(long, default_value = ".")]
@@ -539,7 +539,8 @@ fn run_git_shim() -> Result<i32> {
         riftri_core::GitProxyOutcome::Passthrough(status) => Ok(status),
         riftri_core::GitProxyOutcome::OptimizedAdd(result) => {
             eprintln!(
-                "Riftri created an optimized APFS worktree at {} ({})",
+                "Riftri created an optimized {} worktree at {} ({})",
+                result.backend.display_name(),
                 result.destination.display(),
                 if result.reused_base {
                     "reused base"
@@ -571,7 +572,10 @@ fn run_git_shim() -> Result<i32> {
 }
 
 fn print_add_result(result: &riftri_core::AddWorktreeResult) {
-    println!("Created APFS-backed Git worktree");
+    println!(
+        "Created {}-backed Git worktree",
+        result.backend.display_name()
+    );
     println!("Destination: {}", result.destination.display());
     println!("Commit: {}", result.commit.as_str());
     println!("Tree: {}", result.tree.as_str());
@@ -639,8 +643,9 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     println!("Active view storage:");
     for view in &report.views {
         println!(
-            "- {}: logical={} bytes, filesystem-accounted allocated={} bytes, base={}",
+            "- {}: backend={}, logical={} bytes, filesystem-accounted allocated={} bytes, base={}",
             view.destination.display(),
+            view.backend.display_name(),
             view.logical_bytes,
             view.allocated_bytes,
             view.base_path.display()
@@ -703,11 +708,9 @@ fn print_garbage_collection_report(
 
 fn print_allocation_note() {
     println!(
-        "Allocation note: filesystem-accounted allocation may count shared APFS blocks more than once; it is not exclusive physical disk use"
+        "Allocation note: filesystem-accounted allocation may count shared COW blocks more than once; it is not exclusive physical disk use"
     );
-    println!(
-        "Physical-sharing proof: use the documented APFS volume-delta benchmark on a quiet volume"
-    );
+    println!("Physical-sharing proof: use the platform volume-delta benchmark on a quiet volume");
 }
 
 fn print_doctor(report: &riftri_core::DoctorReport) {

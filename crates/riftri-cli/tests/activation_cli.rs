@@ -233,7 +233,7 @@ fn status_and_repair_explain_an_empty_lifecycle() {
     assert!(status_output.contains("State issues: 0"));
     assert!(status_output.contains("Total filesystem-accounted allocated: 0 bytes"));
     assert!(status_output.contains(
-        "may count shared APFS blocks more than once; it is not exclusive physical disk use"
+        "may count shared COW blocks more than once; it is not exclusive physical disk use"
     ));
 
     #[cfg(target_os = "macos")]
@@ -246,7 +246,7 @@ fn status_and_repair_explain_an_empty_lifecycle() {
         );
         let gc_output = String::from_utf8_lossy(&gc.stdout);
         assert!(gc_output.contains("Removed filesystem-accounted allocated bytes: 0"));
-        assert!(gc_output.contains("Physical-sharing proof: use the documented APFS volume-delta"));
+        assert!(gc_output.contains("Physical-sharing proof: use the platform volume-delta"));
     }
 
     let repair = riftri(&fixture.repository, &["repair"]);

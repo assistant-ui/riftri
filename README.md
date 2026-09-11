@@ -10,8 +10,9 @@ agents working on several tasks at once.
 
 > [!WARNING]
 > Riftri is experimental, pre-release software. Keep important work committed
-> or backed up. Optimized worktree operations currently require macOS and a
-> writable APFS volume. Linux and Windows support is in development.
+> or backed up. Optimized worktree operations require a writable APFS volume on
+> macOS, or Btrfs/reflink-enabled XFS on Linux. OverlayFS and Windows support
+> are still in development.
 
 ## Why Riftri?
 
@@ -22,7 +23,7 @@ developers or agents work on a large repository in parallel.
 Riftri keeps normal Git behavior while making those checkouts lightweight:
 
 - Every workspace is a real Git linked worktree.
-- Unchanged files share APFS storage blocks.
+- Unchanged files share native copy-on-write storage blocks.
 - Changes remain private to each worktree.
 - Editors, build tools, and agents use ordinary files and Git commands.
 - Interrupted creation and cleanup operations can be recovered safely.
@@ -48,7 +49,7 @@ $ ./target/release/riftri doctor
 
 The npm package is a small launcher for a prebuilt Rust binary. Builds are
 provided for macOS, Linux, and Windows, but optimized worktree creation is
-currently available only on APFS.
+currently available on APFS and supported Linux reflink volumes.
 
 ## Quick start
 
@@ -67,8 +68,8 @@ $ git status
 ```
 
 The new directory behaves like any other Git worktree. Riftri shares unchanged
-data through an immutable APFS base; files allocate private storage as they are
-changed.
+data through an immutable native base; files allocate private storage as they
+are changed.
 
 ## Use normal `git worktree` commands
 
@@ -108,7 +109,7 @@ Git wrappers.
 
 ## Supported today
 
-On macOS with APFS, Riftri supports:
+On macOS with APFS and Linux with Btrfs or reflink-enabled XFS, Riftri supports:
 
 - Optimized creation of real linked worktrees.
 - Repository-scoped and process-scoped Git interception.
@@ -135,20 +136,21 @@ $ riftri gc --apply
 ## How disk sharing works
 
 Riftri prepares one immutable base for an exact Git tree and creates native APFS
-clones from it. Those clones initially share physical blocks. Editing a file
-allocates new blocks only for that worktree, so worktrees are lightweight—not
-free—and their disk use grows as they diverge.
+clones or Linux reflinks from it. Those views initially share physical blocks.
+Editing a file allocates new blocks only for that worktree, so worktrees are
+lightweight—not free—and their disk use grows as they diverge.
 
 `riftri status` reports managed views and filesystem-accounted allocation. For
 details on measuring physical sharing, see
-[APFS allocation evidence](docs/allocation-evidence.md).
+[APFS allocation evidence](docs/allocation-evidence.md) and
+[Linux reflink verification](docs/linux-reflink.md).
 
 ## Project status
 
-The macOS/APFS implementation includes worktree creation, transparent Git
-interception, lifecycle recovery, cleanup, and disk accounting. Linux reflink
-and OverlayFS backends are next, followed by Windows support and broader Git
-checkout compatibility.
+The macOS/APFS and Linux reflink implementations include worktree creation,
+transparent Git interception, lifecycle recovery, cleanup, and disk accounting.
+Linux OverlayFS is the remaining Milestone 5 backend, followed by Windows
+support and broader Git checkout compatibility.
 
 Development plans and design details live in:
 

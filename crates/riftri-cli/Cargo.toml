@@ -20,4 +20,5 @@ riftri-core = { path = "../riftri-core" }
 serde_json.workspace = true
 
 [dev-dependencies]
+riftri-storage = { path = "../riftri-storage" }
 tempfile.workspace = true

@@ -280,6 +280,7 @@ dependencies = [
  "anyhow",
  "clap",
  "riftri-core",
+ "riftri-storage",
  "serde_json",
  "tempfile",
 ]
@@ -311,7 +312,9 @@ dependencies = [
 name = "riftri-storage"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "libc",
+ "rustix",
  "serde",
  "tempfile",
  "thiserror",

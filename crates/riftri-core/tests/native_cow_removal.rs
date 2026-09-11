@@ -1,4 +1,7 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", feature = "native-cow-integration")
+))]
 
 use std::ffi::OsString;
 use std::fs;

@@ -132,6 +132,13 @@ The repeatable matrix and global-activation boundaries are documented in
 Outcome: support common Linux development environments without putting FUSE on
 the hot path.
 
+The native reflink slice is implemented: Linux actively validates `FICLONE`
+with unnamed files, creates Btrfs and reflink-enabled XFS views through the same
+journaled lifecycle as APFS, exposes the selected backend, and runs Git
+correctness and allocation checks on disposable Btrfs and XFS volumes in CI.
+OverlayFS capability, mount lifecycle, and restart recovery remain open, so the
+milestone as a whole is not yet complete.
+
 - Add Btrfs/XFS reflink probing and creation.
 - Add kernel OverlayFS capability probing.
 - Add immutable lower, private upper, work, and merged-directory management.

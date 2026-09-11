@@ -16,9 +16,9 @@ commands. Riftri changes only how worktree files are materialized and stored.
 
 The repository has completed Milestones 1 through 4: the capability/Git-semantics
 foundation, explicit APFS prototype, recoverable storage lifecycle, and
-process-scoped transparent Git compatibility. On macOS
-it can create real linked worktrees from
-strict native APFS clones, reuse exact-tree immutable bases, persist atomic add
+process-scoped transparent Git compatibility. On macOS and supported Linux
+volumes it can create real linked worktrees from strict native APFS clones or
+Linux reflinks, reuse exact-tree immutable bases, persist atomic add
 journals, roll back failures, and recover interrupted adds without deleting a
 changed view. Repository-local activation, the process-scoped Git shim, and an
 explicitly evaluated sh/bash/zsh hook can route supported adds through the same
@@ -30,10 +30,12 @@ and status reports retained-base references and disk usage with repository-aware
 repair for incomplete journals. Explicit garbage collection uses its own
 recoverable journal and revalidates references under the immutable-base lock.
 Status reports unexplained or inconsistent state paths but never deletes them.
-Managed move and prune now use separate recoverable journals. It still has no
-forced move/removal lifecycle path, automatic orphan-state repair, filesystem
-mounts, Linux/Windows mutation backend, or daemon.
-The APFS checkout path accepts only an allowlisted deterministic subset of
+Managed move and prune now use separate recoverable journals. Linux creation
+actively verifies `FICLONE` with unnamed temporary files and supports Btrfs and
+reflink-enabled XFS without a byte-copy fallback. It still has no forced
+move/removal lifecycle path, automatic orphan-state repair, OverlayFS mounts,
+Windows mutation backend, or daemon.
+The native COW checkout path accepts only an allowlisted deterministic subset of
 in-tree attributes (`text`, `eol`, and `binary` semantics). External attributes,
 Git LFS, custom filters, encodings, ident substitution, legacy attributes, and
 unknown attribute names remain fail-closed.

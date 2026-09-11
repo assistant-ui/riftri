@@ -102,7 +102,7 @@ already covered by the exact tree ID. If Riftri cannot account for an active
 external input, it must reject optimized creation rather than reuse an
 ambiguous base.
 
-The current APFS policy asks Git to resolve attributes from the exact requested
+The current native COW policy asks Git to resolve attributes from the exact requested
 tree through an isolated temporary index. Only built-in `text`, `eol`, and
 `binary` checkout semantics are allowlisted; `diff` and `merge` records emitted
 by the built-in binary macro are checkout-neutral. Repository-local, global,
@@ -136,7 +136,8 @@ worktree.
 ### State and recovery
 
 Versioned JSON add-operation journals are written atomically and preserve native
-path units. They are the current recovery authority for the APFS prototype.
+path units. They are the current recovery authority for APFS and Linux reflink
+views.
 SQLite remains the planned Milestone 3 registry for bases, views, mounts, and
 reference counts.
 
@@ -207,7 +208,8 @@ intent-recorded
 Git performs the directory and administrative-metadata move. Recovery accepts
 only an intact registered source or an intact registered destination, preserves
 all inconsistent states, and atomically relocates the active add-journal
-reference. The source and destination must be on the same APFS volume.
+reference. The source and destination must be on the same native COW-capable
+volume.
 
 ## Prune-operation journal state machine
 
@@ -264,6 +266,14 @@ Native `clonefile` is used for every regular file in an APFS view. An error is
 returned if APFS cannot clone; there is no byte-copy path. Directory structure,
 symlinks, and executable modes are preserved. The base is made read-only and the
 cloned view restores owner write permission before Git index synchronization.
+
+On Linux, Riftri accepts Btrfs and reflink-enabled XFS only after an active
+`FICLONE` check succeeds on two unnamed files in the destination volume. The
+unnamed probe cannot leave a path behind after interruption. Every regular file
+in the view is then created with `FICLONE`; an unsupported ioctl aborts and rolls
+back instead of copying bytes. Linux uses the same immutable-base lock, add and
+removal journals, clean-state verification, recovery, accounting, and explicit
+garbage collection as APFS.
 
 Recovery validates every recorded cleanup path. It removes a visible incomplete
 view only when Git reports it clean or a byte/mode/symlink comparison proves it

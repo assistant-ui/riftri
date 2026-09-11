@@ -1,19 +1,15 @@
-//! Read-only storage capability probing and backend contracts.
-//!
-//! Milestone 1 deliberately stops at capability discovery. Implementations may
-//! inspect a destination volume, but no backend in this crate creates or
-//! removes files yet.
+//! Destination-specific storage capability probing and native COW operations.
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Errors from concrete native storage operations.
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("APFS cloning is only available on macOS")]
-    UnsupportedPlatform,
+    #[error("{backend} is unavailable on this platform")]
+    UnsupportedPlatform { backend: &'static str },
 
     #[error("clone source is not a directory: {0}")]
     InvalidSource(PathBuf),
@@ -53,7 +49,9 @@ impl ApfsCloner {
 
     #[cfg(not(target_os = "macos"))]
     pub fn clone_tree(_source: &Path, _destination: &Path) -> Result<(), StorageError> {
-        Err(StorageError::UnsupportedPlatform)
+        Err(StorageError::UnsupportedPlatform {
+            backend: "APFS cloning",
+        })
     }
 
     /// Remove write permission from an immutable base tree.
@@ -64,7 +62,9 @@ impl ApfsCloner {
 
     #[cfg(not(target_os = "macos"))]
     pub fn make_tree_read_only(_path: &Path) -> Result<(), StorageError> {
-        Err(StorageError::UnsupportedPlatform)
+        Err(StorageError::UnsupportedPlatform {
+            backend: "APFS cloning",
+        })
     }
 
     /// Restore owner write/search permission after cloning a read-only base.
@@ -75,15 +75,138 @@ impl ApfsCloner {
 
     #[cfg(not(target_os = "macos"))]
     pub fn make_tree_owner_writable(_path: &Path) -> Result<(), StorageError> {
-        Err(StorageError::UnsupportedPlatform)
+        Err(StorageError::UnsupportedPlatform {
+            backend: "APFS cloning",
+        })
     }
 }
 
 #[cfg(target_os = "macos")]
 mod apfs;
 
+/// Linux `FICLONE` operations used by the native reflink backend.
+pub struct ReflinkCloner;
+
+impl ReflinkCloner {
+    /// Actively verify reflink support using two unnamed files on the target
+    /// volume. No probe artifact remains after this call or a process exit.
+    #[cfg(target_os = "linux")]
+    pub fn probe(destination: &Path) -> BackendCapability {
+        let volume = match inspect_destination(destination) {
+            Ok(volume) => volume,
+            Err(error) => return unavailable(BackendKind::Reflink, &error),
+        };
+        if volume.read_only {
+            return BackendCapability {
+                kind: BackendKind::Reflink,
+                status: CapabilityStatus::Unsupported,
+                volume: Some(volume),
+                explanation: "reflinks require a writable destination volume".to_owned(),
+                requires_explicit_fallback: false,
+            };
+        }
+        if !matches!(volume.identity.filesystem.as_str(), "btrfs" | "xfs") {
+            let filesystem = volume.identity.filesystem.clone();
+            return BackendCapability {
+                kind: BackendKind::Reflink,
+                status: CapabilityStatus::Unsupported,
+                volume: Some(volume),
+                explanation: format!(
+                    "the Linux reflink backend currently supports Btrfs and reflink-enabled XFS, not {filesystem}"
+                ),
+                requires_explicit_fallback: false,
+            };
+        }
+
+        match reflink::probe(&volume.probe_path) {
+            Ok(()) => BackendCapability {
+                kind: BackendKind::Reflink,
+                status: CapabilityStatus::Supported,
+                explanation: format!(
+                    "active FICLONE probe succeeded on {}",
+                    volume.identity.filesystem
+                ),
+                volume: Some(volume),
+                requires_explicit_fallback: false,
+            },
+            Err(error) => {
+                let status = match error.raw_os_error() {
+                    Some(libc::EOPNOTSUPP | libc::ENOTTY | libc::EINVAL | libc::EXDEV) => {
+                        CapabilityStatus::Unsupported
+                    }
+                    _ => CapabilityStatus::Unavailable,
+                };
+                BackendCapability {
+                    kind: BackendKind::Reflink,
+                    status,
+                    explanation: format!(
+                        "active FICLONE probe failed on {}: {error}",
+                        volume.identity.filesystem
+                    ),
+                    volume: Some(volume),
+                    requires_explicit_fallback: false,
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn probe(destination: &Path) -> BackendCapability {
+        BackendCapability {
+            kind: BackendKind::Reflink,
+            status: CapabilityStatus::Unsupported,
+            volume: None,
+            explanation: format!(
+                "Linux FICLONE probing is unavailable for {}",
+                destination.display()
+            ),
+            requires_explicit_fallback: false,
+        }
+    }
+
+    /// Clone a directory tree without permitting a byte-copy fallback.
+    #[cfg(target_os = "linux")]
+    pub fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
+        reflink::clone_tree(source, destination)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn clone_tree(_source: &Path, _destination: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux reflinking",
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn make_tree_read_only(path: &Path) -> Result<(), StorageError> {
+        reflink::make_tree_read_only(path)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn make_tree_read_only(_path: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux reflinking",
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn make_tree_owner_writable(path: &Path) -> Result<(), StorageError> {
+        reflink::make_tree_owner_writable(path)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn make_tree_owner_writable(_path: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux reflinking",
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod reflink;
+
 /// A storage strategy Riftri may eventually use to materialize a worktree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackendKind {
     ApfsClone,
@@ -91,6 +214,18 @@ pub enum BackendKind {
     OverlayFs,
     RefsBlockClone,
     FullCopyFallback,
+}
+
+impl BackendKind {
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::ApfsClone => "APFS",
+            Self::Reflink => "Linux reflink",
+            Self::OverlayFs => "OverlayFS",
+            Self::RefsBlockClone => "ReFS block clone",
+            Self::FullCopyFallback => "full-copy fallback",
+        }
+    }
 }
 
 /// The result of probing one backend against a concrete destination volume.
