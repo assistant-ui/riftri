@@ -302,21 +302,48 @@ pub fn is_managed_worktree(repository: &Path, destination: &Path) -> Result<bool
     let git = Git::default();
     let repository_info = git.inspect_repository(repository)?;
     let state_directory = repository_info.identity.common_git_dir.join("riftri");
-    if !state_directory.exists() || !destination.exists() {
+    if !state_directory.exists() {
         return Ok(false);
     }
-    let destination = fs::canonicalize(destination)
-        .map_err(|source| io("resolve worktree destination", destination, source))?;
-    if find_managed_add_journal(&state_directory, &destination)?.is_some() {
-        return Ok(true);
+
+    let destinations = managed_destination_candidates(destination)?;
+    for destination in &destinations {
+        if find_managed_add_journal(&state_directory, destination)?.is_some() {
+            return Ok(true);
+        }
     }
+    let destinations = destinations.into_iter().collect::<HashSet<_>>();
     Ok(MoveJournalStore::open(&state_directory)
         .load_all()?
         .into_iter()
         .any(|journal| {
             journal.phase != MoveWorktreePhase::Complete
-                && (journal.source == destination || journal.destination == destination)
+                && (destinations.contains(&journal.source)
+                    || destinations.contains(&journal.destination))
         }))
+}
+
+fn managed_destination_candidates(destination: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
+    let absolute = absolute_path(destination)?;
+    let mut candidates = vec![absolute.clone()];
+
+    match fs::canonicalize(&absolute) {
+        Ok(canonical) => candidates.push(canonical),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(io("resolve worktree destination", destination, source)),
+    }
+
+    if let (Some(parent), Some(file_name)) = (absolute.parent(), absolute.file_name()) {
+        match fs::canonicalize(parent) {
+            Ok(parent) => candidates.push(parent.join(file_name)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(io("resolve worktree parent", parent, source)),
+        }
+    }
+
+    candidates.sort_unstable();
+    candidates.dedup();
+    Ok(candidates)
 }
 
 /// Inventory retained immutable bases and active views from durable journals.
