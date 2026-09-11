@@ -9,6 +9,7 @@ use riftri_core::{
     AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree, garbage_collect,
     remove_worktree, storage_accounting,
 };
+use riftri_git::Git;
 use riftri_storage::{BackendKind, CapabilityStatus, RefsBlockCloner};
 use tempfile::tempdir;
 
@@ -91,9 +92,15 @@ fn creates_reuses_and_removes_clean_isolated_git_worktrees() {
     assert_eq!(first_result.base_path, second_result.base_path);
     assert!(git(&first, &["status", "--porcelain=v1"]).is_empty());
     assert!(git(&second, &["status", "--porcelain=v1"]).is_empty());
+    let expected_second = second.canonicalize().expect("resolve second worktree");
     assert!(
-        git(&repository, &["worktree", "list", "--porcelain"])
-            .contains(second.to_string_lossy().as_ref())
+        Git::default()
+            .list_worktrees(&repository)
+            .expect("list linked worktrees")
+            .iter()
+            .any(|worktree| {
+                worktree.path.canonicalize().ok().as_ref() == Some(&expected_second)
+            })
     );
 
     fs::write(first.join("tracked.txt"), "private first change\n").expect("edit first worktree");
