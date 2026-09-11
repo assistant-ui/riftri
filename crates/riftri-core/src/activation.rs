@@ -588,6 +588,10 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             || argument == "--no-lazy-fetch"
             || argument == "--no-optional-locks"
             || argument == "--no-advice"
+            || argument == "--literal-pathspecs"
+            || argument == "--glob-pathspecs"
+            || argument == "--noglob-pathspecs"
+            || argument == "--icase-pathspecs"
             || argument == "--bare"
         {
             optimization_compatible = false;

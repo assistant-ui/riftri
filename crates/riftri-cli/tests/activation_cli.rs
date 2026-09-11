@@ -826,6 +826,61 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn enabled_pathspec_options_cannot_bypass_managed_removal_guard() {
+    for (index, option) in [
+        "--literal-pathspecs",
+        "--glob-pathspecs",
+        "--noglob-pathspecs",
+        "--icase-pathspecs",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let fixture = RepositoryFixture::new();
+        let destination = fixture
+            .directory
+            .path()
+            .join(format!("pathspec-option-guarded-view-{index}"));
+        assert!(riftri(&fixture.repository, &["enable"]).status.success());
+        let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args([
+                "exec",
+                "--",
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                &format!("feature/pathspec-option-guard-{index}"),
+            ])
+            .arg(&destination)
+            .arg("HEAD")
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("add managed worktree");
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+
+        let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", option, "worktree", "remove", "--force"])
+            .arg(&destination)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("guard pathspec-configured managed removal");
+
+        assert!(
+            !removal.status.success(),
+            "{option} bypassed the managed removal guard"
+        );
+        assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+        assert!(destination.is_dir());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn enabled_move_of_a_managed_view_is_journaled() {
     let fixture = RepositoryFixture::new();
     let source = fixture.directory.path().join("guarded-move-source");
