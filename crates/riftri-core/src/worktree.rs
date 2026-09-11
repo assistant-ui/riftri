@@ -570,11 +570,31 @@ pub fn storage_accounting(
     let state_directory = absolute_path(state_directory)?;
     let state_directory =
         resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
-    let loaded_add_journals = JournalStore::open(&state_directory).load_all()?;
-    let loaded_removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
-    let move_journals = MoveJournalStore::open(&state_directory).load_all()?;
-    let prune_journals = PruneJournalStore::open(&state_directory).load_all()?;
-    let collection_journals = CollectionJournalStore::open(&state_directory).load_all()?;
+    let add_load = JournalStore::open(&state_directory).load_all_for_status()?;
+    let removal_load = RemovalJournalStore::open(&state_directory).load_all_for_status()?;
+    let move_load = MoveJournalStore::open(&state_directory).load_all_for_status()?;
+    let prune_load = PruneJournalStore::open(&state_directory).load_all_for_status()?;
+    let collection_load = CollectionJournalStore::open(&state_directory).load_all_for_status()?;
+    let journal_issues = add_load
+        .issues
+        .into_iter()
+        .chain(removal_load.issues)
+        .chain(move_load.issues)
+        .chain(prune_load.issues)
+        .chain(collection_load.issues)
+        .map(|issue| StateDiagnosticIssue {
+            path: issue.path,
+            reason: format!(
+                "malformed durable operation journal; Riftri preserved it: {}",
+                issue.reason
+            ),
+        })
+        .collect::<Vec<_>>();
+    let loaded_add_journals = add_load.journals;
+    let loaded_removal_journals = removal_load.journals;
+    let move_journals = move_load.journals;
+    let prune_journals = prune_load.journals;
+    let collection_journals = collection_load.journals;
     let mut removal_journals = Vec::with_capacity(loaded_removal_journals.len());
     let mut invalid_removal_journals = Vec::new();
     for journal in loaded_removal_journals {
@@ -679,6 +699,7 @@ pub fn storage_accounting(
         &move_journals,
         &prune_journals,
         &collection_journals,
+        &journal_issues,
     )?;
     let invalid_journal_paths = invalid_add_journals
         .iter()
@@ -2608,12 +2629,16 @@ fn diagnose_state_paths(
     move_journals: &[DecodedMoveJournal],
     prune_journals: &[DecodedPruneJournal],
     collection_journals: &[DecodedCollectionJournal],
+    journal_issues: &[StateDiagnosticIssue],
 ) -> Result<StatePathDiagnosis, WorktreeError> {
     if !state_directory.exists() {
-        return Ok(StatePathDiagnosis::default());
+        return Ok(StatePathDiagnosis {
+            issues: journal_issues.to_vec(),
+            ..StatePathDiagnosis::default()
+        });
     }
 
-    let mut issues = Vec::new();
+    let mut issues = journal_issues.to_vec();
     let expected_roots = [
         "bases",
         "overlays",
@@ -2764,8 +2789,12 @@ fn diagnose_state_paths(
     _move_journals: &[DecodedMoveJournal],
     _prune_journals: &[DecodedPruneJournal],
     _collection_journals: &[DecodedCollectionJournal],
+    journal_issues: &[StateDiagnosticIssue],
 ) -> Result<StatePathDiagnosis, WorktreeError> {
-    Ok(StatePathDiagnosis::default())
+    Ok(StatePathDiagnosis {
+        issues: journal_issues.to_vec(),
+        ..StatePathDiagnosis::default()
+    })
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2779,11 +2808,13 @@ fn diagnose_journal_directory(
     }
     for path in child_paths(directory, "read Riftri journal directory")? {
         if !expected.contains(&path) {
-            add_state_issue(
-                issues,
-                path,
-                "not a recognized durable operation journal; Riftri will preserve it",
-            );
+            if !issues.iter().any(|issue| issue.path == path) {
+                add_state_issue(
+                    issues,
+                    path,
+                    "not a recognized durable operation journal; Riftri will preserve it",
+                );
+            }
         } else if !is_regular_file(&path)? {
             add_state_issue(
                 issues,
@@ -5333,6 +5364,40 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("private.txt")).expect("external file remains"),
             "must not be inventoried\n"
+        );
+    }
+
+    #[test]
+    fn status_reports_malformed_journals_without_changing_them() {
+        let fixture = tempdir().expect("fixture");
+        let state = fixture.path().join("state");
+        let mut malformed = HashSet::new();
+        for directory in ["operations", "removals", "moves", "prunes", "collections"] {
+            let path = state.join(directory).join("corrupt.json");
+            fs::create_dir_all(path.parent().expect("journal parent"))
+                .expect("create journal directory");
+            fs::write(&path, b"{not-json\n").expect("write malformed journal");
+            malformed.insert(path.canonicalize().expect("resolve malformed journal"));
+        }
+
+        let report = storage_accounting(&state).expect("status must diagnose malformed journals");
+        let reported = report
+            .diagnostic_issues
+            .iter()
+            .filter(|issue| issue.reason.contains("malformed durable operation journal"))
+            .map(|issue| issue.path.clone())
+            .collect::<HashSet<_>>();
+
+        assert_eq!(reported, malformed);
+        for path in &malformed {
+            assert_eq!(
+                fs::read(path).expect("malformed journal must remain"),
+                b"{not-json\n"
+            );
+        }
+        assert!(
+            recover_incomplete_operations(&state).is_err(),
+            "recovery must continue to fail closed"
         );
     }
 

@@ -329,6 +329,41 @@ fn status_and_repair_explain_an_empty_lifecycle() {
 }
 
 #[test]
+fn status_reports_a_malformed_journal_but_repair_fails_closed() {
+    let fixture = RepositoryFixture::new();
+    let state = fixture.directory.path().join("malformed-state");
+    let journal = state.join("operations/corrupt.json");
+    fs::create_dir_all(journal.parent().expect("journal parent"))
+        .expect("create journal directory");
+    fs::write(&journal, b"{not-json\n").expect("write malformed journal");
+    let reported_journal = fs::canonicalize(&journal).expect("resolve malformed journal");
+
+    let status = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["status", "--state-dir"])
+        .arg(&state)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run status");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let output = String::from_utf8_lossy(&status.stdout);
+    assert!(output.contains(reported_journal.to_string_lossy().as_ref()));
+    assert!(output.contains("malformed durable operation journal"));
+
+    let repair = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["repair", "--state-dir"])
+        .arg(&state)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run repair");
+    assert!(!repair.status.success());
+    assert_eq!(fs::read(journal).expect("journal remains"), b"{not-json\n");
+}
+
+#[test]
 fn exec_delegates_normal_git_to_the_real_executable() {
     let fixture = RepositoryFixture::new();
     assert!(riftri(&fixture.repository, &["enable"]).status.success());

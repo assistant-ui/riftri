@@ -60,6 +60,18 @@ pub enum JournalError {
     InvalidStateDirectory { path: PathBuf },
 }
 
+#[derive(Debug)]
+pub(crate) struct JournalLoadIssue {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct StatusJournalLoad<T> {
+    pub journals: Vec<T>,
+    pub issues: Vec<JournalLoadIssue>,
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub(crate) fn require_real_state_directory(directory: &Path) -> Result<(), JournalError> {
     let metadata = fs::symlink_metadata(directory)
@@ -154,6 +166,24 @@ fn validate_operation_identity(
         });
     }
     Ok(())
+}
+
+fn load_status_journals<T>(
+    paths: Vec<PathBuf>,
+    mut load: impl FnMut(PathBuf) -> Result<T, JournalError>,
+) -> StatusJournalLoad<T> {
+    let mut journals = Vec::new();
+    let mut issues = Vec::new();
+    for path in paths {
+        match load(path.clone()) {
+            Ok(journal) => journals.push(journal),
+            Err(error) => issues.push(JournalLoadIssue {
+                path,
+                reason: error.to_string(),
+            }),
+        }
+    }
+    StatusJournalLoad { journals, issues }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -875,17 +905,26 @@ impl JournalStore {
     pub fn load_all(&self) -> Result<Vec<DecodedJournal>, JournalError> {
         journal_paths(&self.directory)?
             .into_iter()
-            .map(|path| {
-                let file = open_real_journal(&path, "open operation journal")?;
-                let record: JournalRecord =
-                    serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                        path: path.clone(),
-                        source,
-                    })?;
-                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
-                record.decode(path)
-            })
+            .map(|path| self.load_path(path))
             .collect()
+    }
+
+    pub fn load_all_for_status(&self) -> Result<StatusJournalLoad<DecodedJournal>, JournalError> {
+        Ok(load_status_journals(
+            journal_paths(&self.directory)?,
+            |path| self.load_path(path),
+        ))
+    }
+
+    fn load_path(&self, path: PathBuf) -> Result<DecodedJournal, JournalError> {
+        let file = open_real_journal(&path, "open operation journal")?;
+        let record: JournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: path.clone(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, &path)?;
+        record.decode(path)
     }
 
     pub fn update_phase(
@@ -1080,17 +1119,28 @@ impl RemovalJournalStore {
     pub fn load_all(&self) -> Result<Vec<DecodedRemovalJournal>, JournalError> {
         journal_paths(&self.directory)?
             .into_iter()
-            .map(|path| {
-                let file = open_real_journal(&path, "open removal journal")?;
-                let record: RemovalJournalRecord =
-                    serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                        path: path.clone(),
-                        source,
-                    })?;
-                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
-                record.decode(path)
-            })
+            .map(|path| self.load_path(path))
             .collect()
+    }
+
+    pub fn load_all_for_status(
+        &self,
+    ) -> Result<StatusJournalLoad<DecodedRemovalJournal>, JournalError> {
+        Ok(load_status_journals(
+            journal_paths(&self.directory)?,
+            |path| self.load_path(path),
+        ))
+    }
+
+    fn load_path(&self, path: PathBuf) -> Result<DecodedRemovalJournal, JournalError> {
+        let file = open_real_journal(&path, "open removal journal")?;
+        let record: RemovalJournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: path.clone(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, &path)?;
+        record.decode(path)
     }
 }
 
@@ -1158,17 +1208,28 @@ impl MoveJournalStore {
     pub fn load_all(&self) -> Result<Vec<DecodedMoveJournal>, JournalError> {
         journal_paths(&self.directory)?
             .into_iter()
-            .map(|path| {
-                let file = open_real_journal(&path, "open move journal")?;
-                let record: MoveJournalRecord =
-                    serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                        path: path.clone(),
-                        source,
-                    })?;
-                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
-                record.decode(path)
-            })
+            .map(|path| self.load_path(path))
             .collect()
+    }
+
+    pub fn load_all_for_status(
+        &self,
+    ) -> Result<StatusJournalLoad<DecodedMoveJournal>, JournalError> {
+        Ok(load_status_journals(
+            journal_paths(&self.directory)?,
+            |path| self.load_path(path),
+        ))
+    }
+
+    fn load_path(&self, path: PathBuf) -> Result<DecodedMoveJournal, JournalError> {
+        let file = open_real_journal(&path, "open move journal")?;
+        let record: MoveJournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: path.clone(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, &path)?;
+        record.decode(path)
     }
 }
 
@@ -1236,17 +1297,28 @@ impl PruneJournalStore {
     pub fn load_all(&self) -> Result<Vec<DecodedPruneJournal>, JournalError> {
         journal_paths(&self.directory)?
             .into_iter()
-            .map(|path| {
-                let file = open_real_journal(&path, "open prune journal")?;
-                let record: PruneJournalRecord =
-                    serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                        path: path.clone(),
-                        source,
-                    })?;
-                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
-                record.decode(path)
-            })
+            .map(|path| self.load_path(path))
             .collect()
+    }
+
+    pub fn load_all_for_status(
+        &self,
+    ) -> Result<StatusJournalLoad<DecodedPruneJournal>, JournalError> {
+        Ok(load_status_journals(
+            journal_paths(&self.directory)?,
+            |path| self.load_path(path),
+        ))
+    }
+
+    fn load_path(&self, path: PathBuf) -> Result<DecodedPruneJournal, JournalError> {
+        let file = open_real_journal(&path, "open prune journal")?;
+        let record: PruneJournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: path.clone(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, &path)?;
+        record.decode(path)
     }
 }
 
@@ -1314,17 +1386,28 @@ impl CollectionJournalStore {
     pub fn load_all(&self) -> Result<Vec<DecodedCollectionJournal>, JournalError> {
         journal_paths(&self.directory)?
             .into_iter()
-            .map(|path| {
-                let file = open_real_journal(&path, "open collection journal")?;
-                let record: CollectionJournalRecord =
-                    serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                        path: path.clone(),
-                        source,
-                    })?;
-                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
-                record.decode(path)
-            })
+            .map(|path| self.load_path(path))
             .collect()
+    }
+
+    pub fn load_all_for_status(
+        &self,
+    ) -> Result<StatusJournalLoad<DecodedCollectionJournal>, JournalError> {
+        Ok(load_status_journals(
+            journal_paths(&self.directory)?,
+            |path| self.load_path(path),
+        ))
+    }
+
+    fn load_path(&self, path: PathBuf) -> Result<DecodedCollectionJournal, JournalError> {
+        let file = open_real_journal(&path, "open collection journal")?;
+        let record: CollectionJournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: path.clone(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, &path)?;
+        record.decode(path)
     }
 }
 
