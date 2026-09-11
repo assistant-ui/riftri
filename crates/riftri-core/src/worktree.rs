@@ -3965,6 +3965,7 @@ mod tests {
         next_operation_id, prune_worktrees_inner, recover_incomplete_operations,
         remove_worktree_inner, storage_accounting,
     };
+    #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
     use crate::test_support::writable_tempdir as tempdir;
     use crate::{
