@@ -64,6 +64,8 @@ fn probe_path(directory: &Path, role: &str) -> std::io::Result<PathBuf> {
 
 fn open_delete_on_close(path: &Path) -> std::io::Result<File> {
     OpenOptions::new()
+        .read(true)
+        .write(true)
         .create_new(true)
         .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)

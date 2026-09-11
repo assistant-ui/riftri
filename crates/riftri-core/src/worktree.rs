@@ -814,6 +814,7 @@ fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(clippy::permissions_set_readonly_false)]
 fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect collectible base directory", path, source))?;

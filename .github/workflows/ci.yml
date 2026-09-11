@@ -194,10 +194,10 @@ jobs:
           $vhdPath = Join-Path $env:RUNNER_TEMP "riftri-refs.vhdx"
           if (Test-Path $vhdPath) {
             $scriptPath = Join-Path $env:RUNNER_TEMP "riftri-refs-detach.txt"
-            @"
-            select vdisk file="$vhdPath"
-            detach vdisk
-            exit
-            "@ | Set-Content -Path $scriptPath -Encoding ascii
+            @(
+              "select vdisk file=`"$vhdPath`""
+              "detach vdisk"
+              "exit"
+            ) | Set-Content -Path $scriptPath -Encoding ascii
             diskpart.exe /s $scriptPath
           }
