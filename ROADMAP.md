@@ -138,16 +138,23 @@ journaled lifecycle as APFS, exposes the selected backend, and runs Git
 correctness and allocation checks on disposable Btrfs and XFS volumes in CI.
 The initial OverlayFS capability slice actively proves mount permission,
 copy-up, and lower-layer isolation against the destination volume without
-leaving a mount in the caller's namespace. Persistent mount lifecycle and
-restart recovery remain open, so the milestone as a whole is not yet complete.
+leaving a mount in the caller's namespace. The storage layer can now prepare
+journal-owned upper/work directories, mount directly at a requested merged
+path, persist an exact boot/namespace/mount identity, reject foreign unmounts,
+and recover a mount after its creator process exits. Core add/remove journal
+wiring and least-privilege activation remain open, so the milestone as a whole
+is not yet complete.
 
 The capability contract and remaining lifecycle boundary are documented in
 [`docs/linux-overlayfs.md`](docs/linux-overlayfs.md).
 
 - Add Btrfs/XFS reflink probing and creation.
 - Add kernel OverlayFS capability probing. (complete)
-- Add immutable lower, private upper, work, and merged-directory management.
-- Add least-privilege mount support and restart recovery.
+- Add durable private-layer placement and identity-checked mount primitives.
+  (complete)
+- Wire immutable lower, private upper/work, and merged mounts into the existing
+  add and removal journals.
+- Add least-privilege mount activation and reboot recovery.
 - Define fallback behavior when user namespaces or mounts are unavailable.
 
 Acceptance criteria:

@@ -268,6 +268,22 @@ volume is unsupported. This decision authorizes capability detection only;
 persistent views require journaled mount paths, unmount/removal semantics, and
 restart recovery first.
 
+### D028: persistent OverlayFS mounts require exact kernel identity
+
+One prepared OverlayFS view owns `upper` and `work` directories under a single
+`overlays/v1/<operation-id>` state root; the exact immutable base remains the
+lower and the requested Git worktree path is the merged mountpoint. Riftri
+opens all three layers before mounting and passes fixed `/proc/self/fd` paths to
+the kernel, keeping native user paths out of OverlayFS's delimiter-sensitive
+option string. A successful mount is identified by the Linux boot ID, mount
+namespace device and inode, kernel mount ID, and OverlayFS filesystem type.
+Unmount and private-layer deletion fail closed if the caller is in another
+namespace or a different mount occupies the destination. A prior-boot mount is
+considered absent only when no current mount occupies that exact path. This
+storage primitive does not choose the privilege boundary: persistent CLI
+activation still requires journal wiring and a narrow way to create the mount
+in the namespace where ordinary Git and agent processes can see it.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

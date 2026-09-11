@@ -241,6 +241,9 @@ and guarded prune use recoverable forward-only journals. The Linux reflink slice
 of Milestone 5 and Windows ReFS slice of Milestone 7 are exercised on disposable
 native volumes in CI. Linux can actively verify destination-specific OverlayFS
 mount and copy-up support in an isolated namespace, but does not yet create
-persistent OverlayFS worktrees. Automatic orphan-state repair, OverlayFS
-worktree mounts, ordinary-NTFS alternatives, managed-environment integration,
-mount recovery, and a daemon are not implemented.
+persistent OverlayFS worktrees. Its storage layer can prepare durable private
+layers, mount a requested view, and recover or reject that mount by exact
+kernel identity after the creator exits. Core worktree-journal wiring,
+least-privilege mount activation, reboot recovery, automatic orphan-state
+repair, ordinary-NTFS alternatives, managed-environment integration, and a
+daemon are not implemented.
