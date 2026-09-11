@@ -728,6 +728,51 @@ fn enabled_forced_removal_of_a_managed_view_fails_closed() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn enabled_forced_removal_of_a_missing_managed_view_fails_closed() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("missing-guarded-remove-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/missing-guarded-remove",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::remove_dir_all(&destination).expect("simulate a missing managed worktree view");
+
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove", "--force"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard forced removal of missing managed worktree");
+
+    assert!(!removal.status.success());
+    assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+    let inventory = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
+    assert!(inventory.status.success());
+    assert!(
+        String::from_utf8_lossy(&inventory.stdout).contains(destination.to_string_lossy().as_ref()),
+        "managed worktree registration was removed outside the Riftri journal"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn enabled_move_of_a_managed_view_is_journaled() {
     let fixture = RepositoryFixture::new();
     let source = fixture.directory.path().join("guarded-move-source");
