@@ -3937,7 +3937,11 @@ fn remove_managed_worktree_files(
         }
         restore_overlayfs_pointer(&layout)?;
         OverlayFsMounter::remove_private_layers(&layout, identity)?;
-        git.remove_worktree(repository, destination)?;
+        // Riftri already proved the mounted view clean before unmounting it.
+        // The underlying directory now contains only Git's pointer, so normal
+        // Git removal would interpret the intentionally absent lower files as
+        // deletions. Force is safe here only after that durable clean gate.
+        git.remove_worktree_force(repository, destination)?;
         Ok(())
     }
 }
