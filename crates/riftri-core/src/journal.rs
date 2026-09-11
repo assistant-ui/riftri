@@ -7,14 +7,14 @@ use riftri_storage::BackendKind;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::JournalTransitionError;
 use crate::RemoveJournalTransitionError;
 use crate::{
     AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
     RemoveWorktreePhase,
 };
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::{MoveJournalTransitionError, PruneJournalTransitionError};
 
 #[derive(Debug, Error)]
@@ -66,10 +66,21 @@ enum NativeOsString {
 }
 
 impl NativeOsString {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(unix)]
     fn encode(value: &OsStr) -> Self {
         use std::os::unix::ffi::OsStrExt;
         Self::UnixBytes(value.as_bytes().to_vec())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn encode(value: &OsStr) -> Self {
+        use std::os::windows::ffi::OsStrExt;
+        Self::WindowsWide(value.encode_wide().collect())
+    }
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    fn encode(value: &OsStr) -> Self {
+        Self::Utf8(value.to_string_lossy().into_owned())
     }
 
     #[cfg(unix)]
@@ -123,7 +134,7 @@ pub(crate) struct JournalRecord {
     pub last_forward_phase: AddWorktreePhase,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub(crate) struct JournalPaths<'a> {
     pub repository: &'a Path,
     pub destination: &'a Path,
@@ -191,21 +202,21 @@ pub(crate) struct CollectionJournalRecord {
     pub phase: GarbageCollectionPhase,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub(crate) struct RemovalJournalPaths<'a> {
     pub repository: &'a Path,
     pub destination: &'a Path,
     pub base_path: &'a Path,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub(crate) struct MoveJournalPaths<'a> {
     pub repository: &'a Path,
     pub source: &'a Path,
     pub destination: &'a Path,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub(crate) struct CollectionJournalPaths<'a> {
     pub base_path: &'a Path,
     pub quarantine_path: &'a Path,
@@ -224,7 +235,10 @@ pub(crate) struct DecodedRemovalJournal {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    allow(dead_code)
+)]
 pub(crate) struct DecodedMoveJournal {
     pub journal_path: PathBuf,
     pub operation_id: String,
@@ -236,7 +250,10 @@ pub(crate) struct DecodedMoveJournal {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    allow(dead_code)
+)]
 pub(crate) struct DecodedPruneJournal {
     pub journal_path: PathBuf,
     pub operation_id: String,
@@ -246,15 +263,15 @@ pub(crate) struct DecodedPruneJournal {
 
 #[derive(Debug, Clone)]
 pub(crate) struct DecodedCollectionJournal {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub journal_path: PathBuf,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub operation_id: String,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub base_path: PathBuf,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub quarantine_path: PathBuf,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub marker_path: PathBuf,
     pub phase: GarbageCollectionPhase,
 }
@@ -262,7 +279,7 @@ pub(crate) struct DecodedCollectionJournal {
 impl JournalRecord {
     pub const FORMAT_VERSION: u16 = 1;
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn new(
         operation_id: String,
         paths: JournalPaths<'_>,
@@ -286,7 +303,7 @@ impl JournalRecord {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn transition(&mut self, next: AddWorktreePhase) -> Result<(), JournalTransitionError> {
         if !self.phase.can_transition_to(next) {
             return Err(JournalTransitionError {
@@ -339,7 +356,7 @@ const fn legacy_apfs_backend() -> BackendKind {
 impl RemovalJournalRecord {
     pub const FORMAT_VERSION: u16 = 1;
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn new(
         operation_id: String,
         paths: RemovalJournalPaths<'_>,
@@ -392,7 +409,7 @@ impl RemovalJournalRecord {
 impl MoveJournalRecord {
     pub const FORMAT_VERSION: u16 = 1;
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn new(
         operation_id: String,
         paths: MoveJournalPaths<'_>,
@@ -409,7 +426,7 @@ impl MoveJournalRecord {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn transition(
         &mut self,
         next: MoveWorktreePhase,
@@ -446,7 +463,7 @@ impl MoveJournalRecord {
 impl PruneJournalRecord {
     pub const FORMAT_VERSION: u16 = 1;
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn new(operation_id: String, repository: &Path) -> Self {
         Self {
             format_version: Self::FORMAT_VERSION,
@@ -456,7 +473,7 @@ impl PruneJournalRecord {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn transition(
         &mut self,
         next: PruneWorktreesPhase,
@@ -490,7 +507,7 @@ impl PruneJournalRecord {
 impl CollectionJournalRecord {
     pub const FORMAT_VERSION: u16 = 1;
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn new(operation_id: String, paths: CollectionJournalPaths<'_>) -> Self {
         Self {
             format_version: Self::FORMAT_VERSION,
@@ -502,7 +519,7 @@ impl CollectionJournalRecord {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn transition(&mut self, next: GarbageCollectionPhase) -> Result<(), JournalError> {
         use GarbageCollectionPhase::{
             BaseQuarantined, Cancelled, Complete, IntentRecorded, MarkerRemoved,
@@ -533,16 +550,16 @@ impl CollectionJournalRecord {
             });
         }
         Ok(DecodedCollectionJournal {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             operation_id: self.operation_id,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             base_path: PathBuf::from(self.base_path.decode(&journal_path)?),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             quarantine_path: PathBuf::from(self.quarantine_path.decode(&journal_path)?),
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             marker_path: PathBuf::from(self.marker_path.decode(&journal_path)?),
             phase: self.phase,
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
             journal_path,
         })
     }
@@ -554,7 +571,7 @@ pub(crate) struct JournalStore {
 }
 
 impl JournalStore {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("operations");
         fs::create_dir_all(&directory)
@@ -603,8 +620,7 @@ impl JournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync operation journal", &temporary, source))?;
-        fs::rename(&temporary, &path)
-            .map_err(|source| io("replace operation journal", &path, source))?;
+        atomic_replace(&temporary, &path)?;
         sync_parent(&path)?;
         Ok(path)
     }
@@ -660,7 +676,7 @@ impl JournalStore {
         Ok(())
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn update_active_destination(
         &self,
         journal_path: &Path,
@@ -712,7 +728,7 @@ pub(crate) struct RemovalJournalStore {
 }
 
 impl RemovalJournalStore {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("removals");
         fs::create_dir_all(&directory)
@@ -761,8 +777,7 @@ impl RemovalJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync removal journal", &temporary, source))?;
-        fs::rename(&temporary, &path)
-            .map_err(|source| io("replace removal journal", &path, source))?;
+        atomic_replace(&temporary, &path)?;
         sync_parent(&path)?;
         Ok(path)
     }
@@ -808,7 +823,7 @@ pub(crate) struct MoveJournalStore {
 }
 
 impl MoveJournalStore {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("moves");
         fs::create_dir_all(&directory)
@@ -823,12 +838,12 @@ impl MoveJournalStore {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn path_for(&self, operation_id: &str) -> PathBuf {
         self.directory.join(format!("{operation_id}.json"))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn persist(&self, record: &MoveJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         let temporary = self.directory.join(format!(
@@ -859,8 +874,7 @@ impl MoveJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync move journal", &temporary, source))?;
-        fs::rename(&temporary, &path)
-            .map_err(|source| io("replace move journal", &path, source))?;
+        atomic_replace(&temporary, &path)?;
         sync_parent(&path)?;
         Ok(path)
     }
@@ -906,7 +920,7 @@ pub(crate) struct PruneJournalStore {
 }
 
 impl PruneJournalStore {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("prunes");
         fs::create_dir_all(&directory)
@@ -921,12 +935,12 @@ impl PruneJournalStore {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn path_for(&self, operation_id: &str) -> PathBuf {
         self.directory.join(format!("{operation_id}.json"))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn persist(&self, record: &PruneJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         let temporary = self.directory.join(format!(
@@ -957,8 +971,7 @@ impl PruneJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync prune journal", &temporary, source))?;
-        fs::rename(&temporary, &path)
-            .map_err(|source| io("replace prune journal", &path, source))?;
+        atomic_replace(&temporary, &path)?;
         sync_parent(&path)?;
         Ok(path)
     }
@@ -1004,7 +1017,7 @@ pub(crate) struct CollectionJournalStore {
 }
 
 impl CollectionJournalStore {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("collections");
         fs::create_dir_all(&directory)
@@ -1019,12 +1032,12 @@ impl CollectionJournalStore {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn path_for(&self, operation_id: &str) -> PathBuf {
         self.directory.join(format!("{operation_id}.json"))
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn persist(&self, record: &CollectionJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         let temporary = self.directory.join(format!(
@@ -1055,8 +1068,7 @@ impl CollectionJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync collection journal", &temporary, source))?;
-        fs::rename(&temporary, &path)
-            .map_err(|source| io("replace collection journal", &path, source))?;
+        atomic_replace(&temporary, &path)?;
         sync_parent(&path)?;
         Ok(path)
     }
@@ -1096,6 +1108,44 @@ impl CollectionJournalStore {
             })
             .collect()
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn atomic_replace(source: &Path, destination: &Path) -> Result<(), JournalError> {
+    fs::rename(source, destination)
+        .map_err(|source_error| io("replace operation journal", destination, source_error))
+}
+
+#[cfg(target_os = "windows")]
+fn atomic_replace(source: &Path, destination: &Path) -> Result<(), JournalError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let mut source_wide = source.as_os_str().encode_wide().collect::<Vec<_>>();
+    source_wide.push(0);
+    let mut destination_wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    destination_wide.push(0);
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers. REPLACE_EXISTING
+    // gives journal updates Windows' replacement semantics, while WRITE_THROUGH
+    // waits for the move to reach the filesystem before returning.
+    let succeeded = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if succeeded == 0 {
+        return Err(io(
+            "replace operation journal",
+            destination,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

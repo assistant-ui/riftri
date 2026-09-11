@@ -11,8 +11,8 @@ agents working on several tasks at once.
 > [!WARNING]
 > Riftri is experimental, pre-release software. Keep important work committed
 > or backed up. Optimized worktree operations require a writable APFS volume on
-> macOS, or Btrfs/reflink-enabled XFS on Linux. OverlayFS and Windows support
-> are still in development.
+> macOS, Btrfs/reflink-enabled XFS on Linux, or ReFS on Windows. OverlayFS and
+> broader Windows filesystem support are still in development.
 
 ## Why Riftri?
 
@@ -49,7 +49,7 @@ $ ./target/release/riftri doctor
 
 The npm package is a small launcher for a prebuilt Rust binary. Builds are
 provided for macOS, Linux, and Windows, but optimized worktree creation is
-currently available on APFS and supported Linux reflink volumes.
+currently available on APFS, supported Linux reflink volumes, and ReFS.
 
 ## Quick start
 
@@ -109,7 +109,8 @@ Git wrappers.
 
 ## Supported today
 
-On macOS with APFS and Linux with Btrfs or reflink-enabled XFS, Riftri supports:
+On macOS with APFS, Linux with Btrfs or reflink-enabled XFS, and Windows with
+ReFS, Riftri supports:
 
 - Optimized creation of real linked worktrees.
 - Repository-scoped and process-scoped Git interception.
@@ -136,21 +137,23 @@ $ riftri gc --apply
 ## How disk sharing works
 
 Riftri prepares one immutable base for an exact Git tree and creates native APFS
-clones or Linux reflinks from it. Those views initially share physical blocks.
-Editing a file allocates new blocks only for that worktree, so worktrees are
-lightweight—not free—and their disk use grows as they diverge.
+clones, Linux reflinks, or ReFS block clones from it. Those views initially
+share physical blocks. Editing a file allocates new blocks only for that
+worktree, so worktrees are lightweight—not free—and their disk use grows as
+they diverge.
 
 `riftri status` reports managed views and filesystem-accounted allocation. For
 details on measuring physical sharing, see
 [APFS allocation evidence](docs/allocation-evidence.md) and
-[Linux reflink verification](docs/linux-reflink.md).
+[Linux reflink verification](docs/linux-reflink.md), or see
+[Windows ReFS support](docs/windows-refs.md) for that backend's requirements.
 
 ## Project status
 
-The macOS/APFS and Linux reflink implementations include worktree creation,
-transparent Git interception, lifecycle recovery, cleanup, and disk accounting.
-Linux OverlayFS is the remaining Milestone 5 backend, followed by Windows
-support and broader Git checkout compatibility.
+The macOS/APFS, Linux reflink, and Windows/ReFS implementations include
+worktree creation, process-scoped Git interception, lifecycle recovery, cleanup,
+and disk accounting. Linux OverlayFS, broader checkout compatibility, ordinary
+Windows filesystem alternatives, and managed environments remain roadmap work.
 
 Development plans and design details live in:
 

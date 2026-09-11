@@ -3,32 +3,34 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::fs::OpenOptions;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use fs2::FileExt;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use riftri_git::WorktreeHead;
 use riftri_git::{Git, GitAttribute, GitError, ObjectId};
 #[cfg(target_os = "macos")]
 use riftri_storage::ApfsCloner as NativeCowCloner;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 use riftri_storage::ApfsCloner as NativeCowCloner;
 #[cfg(target_os = "linux")]
 use riftri_storage::ReflinkCloner as NativeCowCloner;
+#[cfg(target_os = "windows")]
+use riftri_storage::RefsBlockCloner as NativeCowCloner;
 use riftri_storage::{BackendKind, StorageError};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use riftri_storage::{CapabilityStatus, DestinationVolume, probe_backends};
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::journal::{
     CollectionJournalPaths, CollectionJournalRecord, JournalPaths, JournalRecord, MoveJournalPaths,
     MoveJournalRecord, PruneJournalRecord, RemovalJournalPaths,
@@ -45,12 +47,12 @@ use crate::{
     RepositoryCompatibilityBlockerKind, RepositoryCompatibilityReport,
 };
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 static OPERATION_NONCE: AtomicU64 = AtomicU64::new(0);
 
 struct CompatibilityAnalysis {
     report: RepositoryCompatibilityReport,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     checkout_profile: Vec<u8>,
 }
 
@@ -456,7 +458,7 @@ pub fn storage_accounting(
     })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn garbage_collect_inner(
     _state_directory: &Path,
     _apply: bool,
@@ -467,7 +469,7 @@ fn garbage_collect_inner(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn garbage_collect_inner(
     state_directory: &Path,
     apply: bool,
@@ -531,7 +533,7 @@ fn garbage_collect_inner(
     Ok(report)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn current_timestamp() -> Result<u128, WorktreeError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -539,7 +541,7 @@ fn current_timestamp() -> Result<u128, WorktreeError> {
         .map_err(|error| WorktreeError::InvalidRequest(format!("system clock error: {error}")))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn garbage_collection_candidates(
     state_directory: &Path,
 ) -> Result<Vec<GarbageCollectionCandidate>, WorktreeError> {
@@ -574,7 +576,7 @@ fn garbage_collection_candidates(
     Ok(candidates)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, WorktreeError> {
     let removals = RemovalJournalStore::open(state_directory).load_all()?;
     let completed = removals
@@ -593,7 +595,7 @@ fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, Work
         .collect())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn recover_collection_journals(state_directory: &Path) -> Result<usize, WorktreeError> {
     let store = CollectionJournalStore::open(state_directory);
     let journals = store.load_all()?;
@@ -610,7 +612,7 @@ fn recover_collection_journals(state_directory: &Path) -> Result<usize, Worktree
     Ok(recovered)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn resume_decoded_collection(
     state_directory: &Path,
     store: &CollectionJournalStore,
@@ -627,7 +629,7 @@ fn resume_decoded_collection(
     resume_collection(state_directory, store, &mut record, journal, fail_after)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn resume_collection(
     state_directory: &Path,
     store: &CollectionJournalStore,
@@ -719,7 +721,7 @@ fn resume_collection(
     Ok(record.phase == GarbageCollectionPhase::Complete)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_collection_paths(
     state_directory: &Path,
     journal: &DecodedCollectionJournal,
@@ -757,7 +759,7 @@ fn validate_collection_paths(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_collectible_base(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
     if journal.base_path.exists() {
         let metadata = fs::symlink_metadata(&journal.base_path)
@@ -772,7 +774,7 @@ fn validate_collectible_base(journal: &DecodedCollectionJournal) -> Result<(), W
     validate_collection_marker(journal)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
     if journal.marker_path.exists() {
         let metadata = fs::symlink_metadata(&journal.marker_path).map_err(|source| {
@@ -792,7 +794,7 @@ fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), 
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(unix)]
 fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -811,7 +813,24 @@ fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
     .map_err(|source| io("prepare collectible base directory", path, source))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "windows")]
+#[allow(clippy::permissions_set_readonly_false)]
+fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect collectible base directory", path, source))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "collectible base {} is not a real directory",
+            path.display()
+        )));
+    }
+    let mut permissions = metadata.permissions();
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
+        .map_err(|source| io("prepare collectible base directory", path, source))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn advance_collection(
     store: &CollectionJournalStore,
     journal: &mut CollectionJournalRecord,
@@ -823,7 +842,7 @@ fn advance_collection(
     fail_collection_if_requested(phase, fail_after)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn fail_collection_if_requested(
     phase: GarbageCollectionPhase,
     fail_after: Option<GarbageCollectionPhase>,
@@ -835,7 +854,7 @@ fn fail_collection_if_requested(
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn remove_worktree_inner(
     _request: RemoveWorktreeRequest,
     _fail_after: Option<RemoveWorktreePhase>,
@@ -845,7 +864,7 @@ fn remove_worktree_inner(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn remove_worktree_inner(
     request: RemoveWorktreeRequest,
     fail_after: Option<RemoveWorktreePhase>,
@@ -874,10 +893,11 @@ fn remove_worktree_inner(
         ))
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
+    let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
     if !git
         .list_worktrees(&repository_root)?
         .into_iter()
-        .any(|worktree| worktree.path == destination)
+        .any(|worktree| paths_match(&worktree.path, &destination))
     {
         return Err(WorktreeError::InvalidRequest(format!(
             "{} is not registered as a Git linked worktree",
@@ -918,6 +938,7 @@ fn remove_worktree_inner(
         RemoveWorktreePhase::WorktreeRemoved,
         fail_after,
     )?;
+    drop(metadata_lock);
     advance_removal(
         &store,
         &mut journal,
@@ -938,7 +959,7 @@ fn remove_worktree_inner(
     })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn move_worktree_inner(
     _request: MoveWorktreeRequest,
     _fail_after: Option<MoveWorktreePhase>,
@@ -948,7 +969,7 @@ fn move_worktree_inner(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn move_worktree_inner(
     request: MoveWorktreeRequest,
     fail_after: Option<MoveWorktreePhase>,
@@ -987,7 +1008,10 @@ fn move_worktree_inner(
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     let inventory = git.list_worktrees(&repository_root)?;
-    if !inventory.iter().any(|worktree| worktree.path == source) {
+    if !inventory
+        .iter()
+        .any(|worktree| paths_match(&worktree.path, &source))
+    {
         return Err(WorktreeError::InvalidRequest(format!(
             "{} is not registered as a Git linked worktree",
             source.display()
@@ -1036,7 +1060,7 @@ fn move_worktree_inner(
     })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn prune_worktrees_inner(
     _request: PruneWorktreesRequest,
     _fail_after: Option<PruneWorktreesPhase>,
@@ -1046,7 +1070,7 @@ fn prune_worktrees_inner(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn prune_worktrees_inner(
     request: PruneWorktreesRequest,
     fail_after: Option<PruneWorktreesPhase>,
@@ -1082,7 +1106,7 @@ fn prune_worktrees_inner(
     Ok(PruneWorktreesResult { journal_path })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn add_worktree_inner(
     _request: AddWorktreeRequest,
     _fail_after: Option<AddWorktreePhase>,
@@ -1093,7 +1117,7 @@ fn add_worktree_inner(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn add_worktree_inner(
     request: AddWorktreeRequest,
     fail_after: Option<AddWorktreePhase>,
@@ -1183,6 +1207,7 @@ fn add_worktree_inner(
             &request.revision,
             &request.mode,
             &resolved.tree,
+            &repository.identity.common_git_dir,
             fail_after,
         )
     });
@@ -1233,7 +1258,7 @@ fn add_worktree_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn perform_add(
     git: &Git,
     store: &JournalStore,
@@ -1247,12 +1272,14 @@ fn perform_add(
     revision: &OsStr,
     mode: &WorktreeMode,
     tree: &ObjectId,
+    common_git_dir: &Path,
     fail_after: Option<AddWorktreePhase>,
 ) -> Result<bool, WorktreeError> {
     let head = match mode {
         WorktreeMode::NewBranch(branch) => WorktreeHead::NewBranch(branch),
         WorktreeMode::Detached => WorktreeHead::Detached,
     };
+    let metadata_lock = acquire_git_worktree_metadata_lock(common_git_dir)?;
     git.add_worktree_no_checkout(repository, destination, revision, head)?;
     advance(
         store,
@@ -1260,6 +1287,7 @@ fn perform_add(
         AddWorktreePhase::GitMetadataCreated,
         fail_after,
     )?;
+    drop(metadata_lock);
 
     let reused_base = prepare_base(
         git,
@@ -1314,7 +1342,7 @@ fn perform_add(
     Ok(reused_base)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn advance(
     store: &JournalStore,
     journal: &mut JournalRecord,
@@ -1326,7 +1354,7 @@ fn advance(
     fail_add_if_requested(phase, fail_after)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn fail_add_if_requested(
     phase: AddWorktreePhase,
     fail_after: Option<AddWorktreePhase>,
@@ -1337,7 +1365,7 @@ fn fail_add_if_requested(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn prepare_base(
     git: &Git,
     repository: &Path,
@@ -1407,7 +1435,7 @@ fn prepare_base(
     Ok(false)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_compatibility(
     git: &Git,
     repository: &Path,
@@ -1508,7 +1536,7 @@ fn analyze_repository_compatibility(
             });
         }
     }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut profile = {
         let mut profile = Sha256::new();
         profile.update(b"riftri-checkout-profile-v1\0");
@@ -1550,7 +1578,7 @@ fn analyze_repository_compatibility(
         ),
     ] {
         let value = git.config_value(repository, key)?;
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
         if let Some(value) = value
             && !accepted
@@ -1566,7 +1594,7 @@ fn analyze_repository_compatibility(
             });
         }
     }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         for key in [
             "core.filemode",
@@ -1586,7 +1614,7 @@ fn analyze_repository_compatibility(
             compatible: blockers.is_empty(),
             blockers,
         },
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_profile: profile.finalize().to_vec(),
     })
 }
@@ -1601,7 +1629,7 @@ fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn hash_profile_input(hasher: &mut Sha256, key: &[u8], value: Option<&[u8]>) {
     hasher.update((key.len() as u64).to_le_bytes());
     hasher.update(key);
@@ -1615,7 +1643,7 @@ fn hash_profile_input(hasher: &mut Sha256, key: &[u8], value: Option<&[u8]>) {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn supported_native_cow_volume(path: &Path) -> Result<DestinationVolume, WorktreeError> {
     #[cfg(target_os = "macos")]
     let capability = probe_backends(path)
@@ -1628,6 +1656,8 @@ fn supported_native_cow_volume(path: &Path) -> Result<DestinationVolume, Worktre
         })?;
     #[cfg(target_os = "linux")]
     let capability = riftri_storage::ReflinkCloner::probe(path);
+    #[cfg(target_os = "windows")]
+    let capability = riftri_storage::RefsBlockCloner::probe(path);
     if capability.status != CapabilityStatus::Supported {
         return Err(WorktreeError::Unsupported(capability.explanation));
     }
@@ -1638,7 +1668,7 @@ fn supported_native_cow_volume(path: &Path) -> Result<DestinationVolume, Worktre
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn inspected_native_cow_volume(path: &Path) -> Result<DestinationVolume, WorktreeError> {
     let backend = native_backend_kind();
     let capability = probe_backends(path)
@@ -1663,6 +1693,13 @@ fn inspected_native_cow_volume(path: &Path) -> Result<DestinationVolume, Worktre
     {
         return Ok(volume);
     }
+    #[cfg(target_os = "windows")]
+    if capability.status == CapabilityStatus::Unavailable
+        && volume.identity.filesystem.eq_ignore_ascii_case("ReFS")
+        && !volume.read_only
+    {
+        return Ok(volume);
+    }
     if capability.status != CapabilityStatus::Supported {
         return Err(WorktreeError::Unsupported(capability.explanation));
     }
@@ -1679,7 +1716,12 @@ const fn native_backend_kind() -> BackendKind {
     BackendKind::Reflink
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "windows")]
+const fn native_backend_kind() -> BackendKind {
+    BackendKind::RefsBlockClone
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeError> {
     if destination.as_os_str().is_empty() {
         return Err(WorktreeError::InvalidRequest(
@@ -1728,7 +1770,53 @@ fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn paths_match(left: &Path, right: &Path) -> bool {
+    windows_path_key(left) == windows_path_key(right)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn paths_match(left: &Path, right: &Path) -> bool {
+    left == right
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_key(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let mut normalized = if wide.starts_with(VERBATIM_UNC) {
+        let mut unc = vec![b'\\' as u16, b'\\' as u16];
+        unc.extend_from_slice(&wide[VERBATIM_UNC.len()..]);
+        unc
+    } else if wide.starts_with(VERBATIM) {
+        wide[VERBATIM.len()..].to_vec()
+    } else {
+        wide
+    };
+    for unit in &mut normalized {
+        if *unit == b'/' as u16 {
+            *unit = b'\\' as u16;
+        } else if (b'a' as u16..=b'z' as u16).contains(unit) {
+            *unit -= u16::from(b'a' - b'A');
+        }
+    }
+    normalized
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
     for directory in [
         state_directory.to_path_buf(),
@@ -1742,7 +1830,31 @@ fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn acquire_git_worktree_metadata_lock(common_git_dir: &Path) -> Result<File, WorktreeError> {
+    let lock_path = common_git_dir.join("riftri-worktree-metadata.lock");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|source| io("open Git worktree metadata lock", &lock_path, source))?;
+    lock.lock_exclusive()
+        .map_err(|source| io("lock Git worktree metadata", &lock_path, source))?;
+    Ok(lock)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn acquire_git_worktree_metadata_lock_for_repository(
+    git: &Git,
+    repository: &Path,
+) -> Result<File, WorktreeError> {
+    let repository = git.inspect_repository(repository)?;
+    acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn allocate_operation_id(
     store: &JournalStore,
     state_directory: &Path,
@@ -1776,13 +1888,20 @@ fn allocate_operation_id(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn repository_cache_id(common_git_directory: &Path, checkout_profile: &[u8]) -> String {
     let mut hasher = Sha256::new();
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
         hasher.update(common_git_directory.as_os_str().as_bytes());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        for unit in common_git_directory.as_os_str().encode_wide() {
+            hasher.update(unit.to_le_bytes());
+        }
     }
     hasher.update([0]);
     hasher.update(checkout_profile);
@@ -1796,7 +1915,7 @@ fn repository_cache_id(common_git_directory: &Path, checkout_profile: &[u8]) -> 
     encoded
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn normalize_existing_destination(destination: &Path) -> Result<PathBuf, WorktreeError> {
     if destination.as_os_str().is_empty() {
         return Err(WorktreeError::InvalidRequest(
@@ -1851,7 +1970,7 @@ fn find_managed_add_journal(
     Ok(managed)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, WorktreeError> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1868,19 +1987,19 @@ fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, 
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn allocate_move_operation_id(store: &MoveJournalStore) -> Result<String, WorktreeError> {
     allocate_lifecycle_operation_id("move", |operation_id| store.path_for(operation_id).exists())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn allocate_prune_operation_id(store: &PruneJournalStore) -> Result<String, WorktreeError> {
     allocate_lifecycle_operation_id("prune", |operation_id| {
         store.path_for(operation_id).exists()
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn allocate_lifecycle_operation_id(
     prefix: &str,
     exists: impl Fn(&str) -> bool,
@@ -1900,13 +2019,13 @@ fn allocate_lifecycle_operation_id(
     )))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn next_operation_id(timestamp: u128) -> String {
     let nonce = OPERATION_NONCE.fetch_add(1, Ordering::Relaxed);
     format!("{timestamp:x}-{:x}-{nonce:x}", std::process::id())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn advance_removal(
     store: &RemovalJournalStore,
     journal: &mut RemovalJournalRecord,
@@ -1918,7 +2037,7 @@ fn advance_removal(
     fail_removal_if_requested(phase, fail_after)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn fail_removal_if_requested(
     phase: RemoveWorktreePhase,
     fail_after: Option<RemoveWorktreePhase>,
@@ -1929,7 +2048,7 @@ fn fail_removal_if_requested(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn diagnose_state_paths(
     state_directory: &Path,
     add_journals: &[DecodedJournal],
@@ -2083,7 +2202,7 @@ fn diagnose_state_paths(
     })
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn diagnose_state_paths(
     _state_directory: &Path,
     _add_journals: &[DecodedJournal],
@@ -2095,7 +2214,7 @@ fn diagnose_state_paths(
     Ok(StatePathDiagnosis::default())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn diagnose_journal_directory(
     directory: &Path,
     expected: HashSet<PathBuf>,
@@ -2122,7 +2241,7 @@ fn diagnose_journal_directory(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn diagnose_temporary_directory(
     directory: &Path,
     expected: HashSet<PathBuf>,
@@ -2143,7 +2262,7 @@ fn diagnose_temporary_directory(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn diagnose_base_directories(
     state_directory: &Path,
     collection_journals: &[DecodedCollectionJournal],
@@ -2245,7 +2364,7 @@ fn diagnose_base_directories(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn child_paths(directory: &Path, operation: &'static str) -> Result<Vec<PathBuf>, WorktreeError> {
     let mut paths = fs::read_dir(directory)
         .map_err(|source| io(operation, directory, source))?
@@ -2259,7 +2378,7 @@ fn child_paths(directory: &Path, operation: &'static str) -> Result<Vec<PathBuf>
     Ok(paths)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn add_state_issue(
     issues: &mut Vec<StateDiagnosticIssue>,
     path: PathBuf,
@@ -2271,14 +2390,14 @@ fn add_state_issue(
     });
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn is_real_directory(path: &Path) -> Result<bool, WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect Riftri state path", path, source))?;
     Ok(metadata.is_dir() && !metadata.file_type().is_symlink())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn is_real_directory_if_present(path: &Path) -> Result<bool, WorktreeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.is_dir() && !metadata.file_type().is_symlink()),
@@ -2287,14 +2406,14 @@ fn is_real_directory_if_present(path: &Path) -> Result<bool, WorktreeError> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn is_regular_file(path: &Path) -> Result<bool, WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect Riftri state path", path, source))?;
     Ok(metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn is_regular_file_if_present(path: &Path) -> Result<bool, WorktreeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
@@ -2303,7 +2422,7 @@ fn is_regular_file_if_present(path: &Path) -> Result<bool, WorktreeError> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn looks_like_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -2350,7 +2469,7 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect storage accounting path", path, source))?;
     let mut logical_bytes = if metadata.is_dir() { 0 } else { metadata.len() };
-    let mut allocated_bytes = allocated_bytes(&metadata);
+    let mut allocated_bytes = allocated_bytes(path, &metadata)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         for entry in fs::read_dir(path)
             .map_err(|source| io("read storage accounting directory", path, source))?
@@ -2366,15 +2485,48 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
 }
 
 #[cfg(unix)]
-fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
+fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, WorktreeError> {
     use std::os::unix::fs::MetadataExt;
 
-    metadata.blocks().saturating_mul(512)
+    Ok(metadata.blocks().saturating_mul(512))
 }
 
-#[cfg(not(unix))]
-fn allocated_bytes(metadata: &fs::Metadata) -> u64 {
-    metadata.len()
+#[cfg(target_os = "windows")]
+fn allocated_bytes(path: &Path, metadata: &fs::Metadata) -> Result<u64, WorktreeError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, GetLastError, SetLastError};
+    use windows_sys::Win32::Storage::FileSystem::{GetCompressedFileSizeW, INVALID_FILE_SIZE};
+
+    if !metadata.is_file() {
+        return Ok(0);
+    }
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    wide.push(0);
+    let mut high = 0_u32;
+    // SAFETY: the path is NUL-terminated, `high` is writable, and clearing the
+    // thread-local last error disambiguates a valid low word of `u32::MAX`.
+    let low = unsafe {
+        SetLastError(ERROR_SUCCESS);
+        GetCompressedFileSizeW(wide.as_ptr(), &mut high)
+    };
+    if low == INVALID_FILE_SIZE {
+        // SAFETY: this reads the calling thread's error value immediately after
+        // `GetCompressedFileSizeW`.
+        let error = unsafe { GetLastError() };
+        if error != ERROR_SUCCESS {
+            return Err(io(
+                "measure filesystem allocation",
+                path,
+                std::io::Error::from_raw_os_error(error as i32),
+            ));
+        }
+    }
+    Ok((u64::from(high) << 32) | u64::from(low))
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, WorktreeError> {
+    Ok(metadata.len())
 }
 
 pub fn recover_incomplete_operations(
@@ -2460,7 +2612,7 @@ pub fn recover_incomplete_operations(
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     for journal in move_journals {
         if journal.phase == MoveWorktreePhase::Complete {
             report.completed_moves += 1;
@@ -2476,7 +2628,7 @@ pub fn recover_incomplete_operations(
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     for journal in prune_journals {
         if journal.phase == PruneWorktreesPhase::Complete {
             report.completed_prunes += 1;
@@ -2492,7 +2644,7 @@ pub fn recover_incomplete_operations(
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     for journal in collection_journals {
         match journal.phase {
             GarbageCollectionPhase::Complete => report.completed_collections += 1,
@@ -2580,6 +2732,15 @@ fn resume_removal(
         ))
     })?;
 
+    let metadata_lock = if record.phase <= RemoveWorktreePhase::CleanVerified {
+        Some(acquire_git_worktree_metadata_lock_for_repository(
+            git,
+            &journal.repository,
+        )?)
+    } else {
+        None
+    };
+
     if record.phase == RemoveWorktreePhase::IntentRecorded {
         verify_recoverable_removal(git, &journal)?;
         record.transition(RemoveWorktreePhase::CleanVerified)?;
@@ -2605,6 +2766,7 @@ fn resume_removal(
         record.transition(RemoveWorktreePhase::WorktreeRemoved)?;
         store.persist(&record)?;
     }
+    drop(metadata_lock);
 
     if record.phase >= RemoveWorktreePhase::WorktreeRemoved {
         let (registered, destination_exists) = removal_presence(git, &journal)?;
@@ -2628,7 +2790,7 @@ fn resume_removal(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn resume_move(
     git: &Git,
     store: &MoveJournalStore,
@@ -2653,6 +2815,8 @@ fn resume_move(
     })?;
 
     if record.phase == MoveWorktreePhase::IntentRecorded {
+        let metadata_lock =
+            acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
         let (source_registered, destination_registered) = move_registration(git, &journal)?;
         let source_exists = journal.source.exists();
         let destination_exists = journal.destination.exists();
@@ -2676,6 +2840,7 @@ fn resume_move(
             MoveWorktreePhase::WorktreeMoved,
             fail_after,
         )?;
+        drop(metadata_lock);
     }
 
     if record.phase >= MoveWorktreePhase::WorktreeMoved {
@@ -2722,7 +2887,7 @@ fn resume_move(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_move_paths(
     state_directory: &Path,
     journal: &DecodedMoveJournal,
@@ -2759,7 +2924,7 @@ fn validate_move_paths(
     validate_recovery_paths(state_directory, &source)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn move_registration(
     git: &Git,
     journal: &DecodedMoveJournal,
@@ -2768,14 +2933,14 @@ fn move_registration(
     Ok((
         inventory
             .iter()
-            .any(|worktree| worktree.path == journal.source),
+            .any(|worktree| paths_match(&worktree.path, &journal.source)),
         inventory
             .iter()
-            .any(|worktree| worktree.path == journal.destination),
+            .any(|worktree| paths_match(&worktree.path, &journal.destination)),
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn resume_prune(
     git: &Git,
     store: &PruneJournalStore,
@@ -2804,6 +2969,8 @@ fn resume_prune(
         ))
     })?;
     if record.phase == PruneWorktreesPhase::IntentRecorded {
+        let metadata_lock =
+            acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
         verify_prune_safe(
             git,
             &state_directory,
@@ -2817,6 +2984,7 @@ fn resume_prune(
             PruneWorktreesPhase::GitMetadataPruned,
             fail_after,
         )?;
+        drop(metadata_lock);
     }
     if record.phase == PruneWorktreesPhase::GitMetadataPruned {
         verify_prune_safe(
@@ -2835,7 +3003,7 @@ fn resume_prune(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn verify_prune_safe(
     git: &Git,
     state_directory: &Path,
@@ -2894,7 +3062,7 @@ fn verify_prune_safe(
         if !journal.destination.is_dir()
             || !inventory
                 .iter()
-                .any(|worktree| worktree.path == journal.destination)
+                .any(|worktree| paths_match(&worktree.path, &journal.destination))
         {
             return Err(WorktreeError::InvalidRequest(format!(
                 "managed worktree {} is missing or not registered; prune was not run",
@@ -2905,7 +3073,7 @@ fn verify_prune_safe(
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn lifecycle_state_directory(
     journal_path: &Path,
     operation: &str,
@@ -2922,7 +3090,7 @@ fn lifecycle_state_directory(
         })
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn advance_move(
     store: &MoveJournalStore,
     record: &mut MoveJournalRecord,
@@ -2934,7 +3102,7 @@ fn advance_move(
     fail_move_if_requested(phase, fail_after)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn fail_move_if_requested(
     phase: MoveWorktreePhase,
     fail_after: Option<MoveWorktreePhase>,
@@ -2946,7 +3114,7 @@ fn fail_move_if_requested(
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn advance_prune(
     store: &PruneJournalStore,
     record: &mut PruneJournalRecord,
@@ -2958,7 +3126,7 @@ fn advance_prune(
     fail_prune_if_requested(phase, fail_after)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn fail_prune_if_requested(
     phase: PruneWorktreesPhase,
     fail_after: Option<PruneWorktreesPhase>,
@@ -2997,7 +3165,7 @@ fn removal_presence(
     let registered = git
         .list_worktrees(&journal.repository)?
         .into_iter()
-        .any(|worktree| worktree.path == journal.destination);
+        .any(|worktree| paths_match(&worktree.path, &journal.destination));
     Ok((registered, journal.destination.exists()))
 }
 
@@ -3033,6 +3201,8 @@ fn validate_recovery_paths(
 }
 
 fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeError> {
+    let metadata_lock =
+        acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
     let expected_branch_target =
         if journal.last_forward_phase >= AddWorktreePhase::GitMetadataCreated {
             journal
@@ -3057,7 +3227,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     let registered = git
         .list_worktrees(&journal.repository)?
         .into_iter()
-        .any(|worktree| worktree.path == journal.destination);
+        .any(|worktree| paths_match(&worktree.path, &journal.destination));
 
     if registered {
         restore_pointer_for_rollback(journal)?;
@@ -3091,6 +3261,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     if let Some((branch, Some(_))) = expected_branch_target {
         git.delete_branch_force(&journal.repository, branch)?;
     }
+    drop(metadata_lock);
     Ok(())
 }
 
@@ -3302,7 +3473,7 @@ fn remove_empty_directory_if_present(path: &Path) -> Result<(), WorktreeError> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(unix)]
 fn sync_parent(path: &Path) -> Result<(), WorktreeError> {
     let parent = path.expect_parent()?;
     File::open(parent)
@@ -3310,12 +3481,17 @@ fn sync_parent(path: &Path) -> Result<(), WorktreeError> {
         .map_err(|source| io("sync parent directory", parent, source))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn sync_parent(path: &Path) -> Result<(), WorktreeError> {
+    path.expect_parent().map(|_| ())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 trait PathExt {
     fn expect_parent(&self) -> Result<&Path, WorktreeError>;
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 impl PathExt for Path {
     fn expect_parent(&self) -> Result<&Path, WorktreeError> {
         self.parent().ok_or_else(|| {
@@ -3336,7 +3512,10 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     test,
     any(
         target_os = "macos",
-        all(target_os = "linux", feature = "native-cow-integration")
+        all(
+            feature = "native-cow-integration",
+            any(target_os = "linux", target_os = "windows")
+        )
     )
 ))]
 mod tests {
@@ -3372,6 +3551,19 @@ mod tests {
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn matches_git_and_verbatim_windows_worktree_paths() {
+        assert!(super::paths_match(
+            Path::new(r"R:\repo\view"),
+            Path::new(r"\\?\r:/repo/view")
+        ));
+        assert!(super::paths_match(
+            Path::new(r"\\server\share\view"),
+            Path::new(r"\\?\UNC\SERVER\SHARE\VIEW")
+        ));
     }
 
     #[test]
@@ -4024,6 +4216,7 @@ mod tests {
         assert_eq!(after.candidates.len(), 1);
     }
 
+    #[cfg(unix)]
     #[test]
     fn garbage_collection_rejects_a_symlinked_completion_marker() {
         use std::os::unix::fs::symlink;

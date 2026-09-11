@@ -133,3 +133,71 @@ jobs:
           if mountpoint --quiet "$RUNNER_TEMP/riftri-reflink"; then
             sudo umount "$RUNNER_TEMP/riftri-reflink"
           fi
+
+  windows-refs:
+    name: Windows ReFS block-clone integration
+    runs-on: windows-2025
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Create disposable ReFS test volume
+        shell: pwsh
+        run: |
+          $vhdPath = Join-Path $env:RUNNER_TEMP "riftri-refs.vhdx"
+          $scriptPath = Join-Path $env:RUNNER_TEMP "riftri-refs-create.txt"
+          @"
+          create vdisk file="$vhdPath" maximum=4096 type=expandable
+          select vdisk file="$vhdPath"
+          attach vdisk
+          create partition primary
+          format fs=refs quick label=Riftri
+          assign letter=R
+          exit
+          "@ | Set-Content -Path $scriptPath -Encoding ascii
+          diskpart.exe /s $scriptPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "diskpart failed with exit code $LASTEXITCODE"
+          }
+          $volume = Get-Volume -DriveLetter R
+          if ($volume.FileSystem -ne "ReFS") {
+            throw "expected ReFS test volume, found $($volume.FileSystem)"
+          }
+          New-Item -ItemType Directory -Path "R:\riftri-temp" | Out-Null
+
+      - name: Run Windows ReFS integration suite
+        shell: pwsh
+        env:
+          RIFTRI_REQUIRE_REFS: "1"
+          TEMP: R:\riftri-temp
+          TMP: R:\riftri-temp
+        run: cargo test --workspace --features riftri-core/native-cow-integration
+
+      - name: Verify cached-view physical allocation
+        shell: pwsh
+        env:
+          RIFTRI_REQUIRE_REFS: "1"
+          TEMP: R:\riftri-temp
+          TMP: R:\riftri-temp
+        run: >-
+          cargo test -p riftri-core
+          --features native-cow-integration
+          --test native_cow_worktree
+          cached_view_uses_materially_less_physical_space_than_its_logical_size
+          -- --ignored --exact --nocapture
+
+      - name: Detach disposable ReFS test volume
+        if: always()
+        shell: pwsh
+        run: |
+          $vhdPath = Join-Path $env:RUNNER_TEMP "riftri-refs.vhdx"
+          if (Test-Path $vhdPath) {
+            $scriptPath = Join-Path $env:RUNNER_TEMP "riftri-refs-detach.txt"
+            @(
+              "select vdisk file=`"$vhdPath`""
+              "detach vdisk"
+              "exit"
+            ) | Set-Content -Path $scriptPath -Encoding ascii
+            diskpart.exe /s $scriptPath
+          }

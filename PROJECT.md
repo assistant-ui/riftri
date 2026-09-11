@@ -220,22 +220,25 @@ Riftri should eventually report and benchmark:
 ## Current state
 
 The Rust workspace and Milestones 1 through 4 are complete. On writable APFS,
-Btrfs, and reflink-enabled XFS volumes, `riftri worktree add` builds or reuses an
-exact-tree immutable base, creates real linked-worktree metadata with checkout
-suppressed, activates a native COW view, synchronizes the index, and requires a
-clean Git status before success. Linux support uses an active unnamed-file
-`FICLONE` probe and never substitutes a byte copy. Add operations are journaled
-and recoverable. Repository-local enable/disable state, process-scoped execution,
-and an explicitly activated sh/bash/zsh hook now route supported normal Git
-adds through that same transaction. Process-scoped commands can also be bound
-to a validated existing worktree without agent-specific behavior. Clean managed
-removals use a separate, recoverable journal, and retained bases now expose
-derived reference counts plus logical and allocated-byte accounting.
+Btrfs, reflink-enabled XFS, and ReFS volumes, `riftri worktree add` builds or
+reuses an exact-tree immutable base, creates real linked-worktree metadata with
+checkout suppressed, activates a native COW view, synchronizes the index, and
+requires a clean Git status before success. Linux uses an active unnamed-file
+`FICLONE` probe. Windows actively verifies ReFS block cloning and private-write
+isolation before mutation. Neither backend substitutes a full byte copy when
+its native operation fails. Add operations are journaled and recoverable.
+Repository-local enable/disable state, process-scoped execution, and an
+explicitly activated sh/bash/zsh hook route supported normal Git adds through
+that same transaction. Process-scoped commands can also be bound to a validated
+existing worktree without agent-specific behavior. Clean managed removals use a
+separate, recoverable journal, and retained bases expose derived reference
+counts plus logical and allocated-byte accounting.
 Repository-aware repair resumes incomplete journals, and explicit journaled
 garbage collection can remove independently revalidated zero-reference bases.
 Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
 missing paths referenced by active journals without deleting them. Managed move
 and guarded prune use recoverable forward-only journals. The Linux reflink slice
-of Milestone 5 is implemented and exercised on disposable Btrfs and XFS volumes
-in CI. Automatic orphan-state repair, OverlayFS and Windows mutation backends,
-mount recovery, and a daemon are not implemented.
+of Milestone 5 and Windows ReFS slice of Milestone 7 are exercised on disposable
+native volumes in CI. Automatic orphan-state repair, OverlayFS, ordinary-NTFS
+alternatives, managed-environment integration, mount recovery, and a daemon are
+not implemented.

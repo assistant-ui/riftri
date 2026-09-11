@@ -136,8 +136,8 @@ worktree.
 ### State and recovery
 
 Versioned JSON add-operation journals are written atomically and preserve native
-path units. They are the current recovery authority for APFS and Linux reflink
-views.
+path units. They are the current recovery authority for APFS, Linux reflink,
+and Windows ReFS views.
 SQLite remains the planned Milestone 3 registry for bases, views, mounts, and
 reference counts.
 
@@ -157,6 +157,11 @@ For an enabled `git worktree add <path> <ref>` operation, the intended sequence 
 
 Failures are rolled back from an operation journal. Riftri must not silently
 fall back to a full copy unless the user explicitly allows that policy.
+
+Calls that mutate Git's shared linked-worktree administration are serialized by
+a repository-local Riftri lock. Base construction and native view cloning stay
+outside that critical section, so parallel adds share immutable preparation
+without racing Git's `worktrees/` metadata.
 
 ## Add-operation journal state machine
 
@@ -275,6 +280,18 @@ back instead of copying bytes. Linux uses the same immutable-base lock, add and
 removal journals, clean-state verification, recovery, accounting, and explicit
 garbage collection as APFS.
 
+On Windows, Riftri accepts ReFS only after an active
+`FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in
+the destination volume and a private write leaves the source unchanged. The
+destination is temporarily sparse while it is sized so the operation does not
+allocate zero-backed clusters before cloning. Matching sparse and
+integrity-stream settings are restored, and aligned regions are cloned in
+requests below the ReFS 4 GiB limit. The final unaligned tail—at most one
+filesystem cluster—is copied because the Windows API requires cluster-aligned
+extents. Any aligned block-clone failure aborts and rolls back; it never
+triggers a full-file copy. The same immutable bases, locks, journals, recovery,
+clean removal, move/prune, and garbage-collection rules apply.
+
 Recovery validates every recorded cleanup path. It removes a visible incomplete
 view only when Git reports it clean or a byte/mode/symlink comparison proves it
 still equals the immutable base. Otherwise it retains the view and journal for
@@ -282,9 +299,9 @@ manual attention.
 
 Storage accounting is derived from add/removal journals and completion markers.
 It reports active views, retained bases, per-base reference counts, logical
-bytes, and filesystem-allocated bytes. Allocated bytes can include shared APFS
-blocks and are not an exclusive-space measurement; the volume-delta benchmark
-remains the authoritative sharing check. Bases reaching zero references remain
+bytes, and filesystem-allocated bytes. Allocated bytes can include shared native
+COW blocks and are not an exclusive-space measurement; the volume-delta
+benchmark remains the authoritative sharing check. Bases reaching zero references remain
 cached until the explicit garbage collector independently proves deletion is
 safe and records its intent. The collector is never part of normal worktree file
 access or Git command passthrough.
@@ -336,4 +353,4 @@ concurrent worktree requests.
 4. Process-scoped Git shim. (add/clean-remove slice complete)
 5. Linux reflink and OverlayFS backends.
 6. Compaction and compatibility expansion.
-7. Windows native backends.
+7. Windows ReFS block cloning. (initial slice complete)

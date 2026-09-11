@@ -167,12 +167,28 @@ Outcome: cover real-world repositories and long-lived worktrees.
 
 Outcome: expand the same storage contract without changing the Git UX.
 
-- ReFS block-clone capability and implementation.
+The first Windows-native slice is implemented: Riftri actively verifies ReFS
+block cloning and private-write isolation on the destination volume, creates
+real linked worktrees through the existing journaled lifecycle, and exercises
+explicit and process-scoped Git commands on a disposable ReFS volume in CI.
+Windows shell-profile integration, ordinary-NTFS alternatives, and managed
+environments remain open, so the milestone as a whole is not yet complete.
+
+- ReFS block-clone capability and implementation. (complete)
 - Evaluate differencing VHDX and ProjFS only where native block cloning is
   unavailable.
 - Managed VM or microVM integration.
 - Temporary Git credentials and lifecycle callbacks.
 - Usage metering based on compute time, retained private data, and egress.
+
+Acceptance criteria:
+
+- The shared Git correctness and crash-recovery suites pass on a real ReFS
+  volume.
+- An active destination probe verifies block cloning before mutation.
+- Cached views consume materially less new physical space than their logical
+  size.
+- Unsupported Windows filesystems stop without a silent full-copy fallback.
 
 ## Deferred ideas
 

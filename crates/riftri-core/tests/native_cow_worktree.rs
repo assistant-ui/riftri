@@ -1,12 +1,16 @@
 #![cfg(any(
     target_os = "macos",
-    all(target_os = "linux", feature = "native-cow-integration")
+    all(
+        feature = "native-cow-integration",
+        any(target_os = "linux", target_os = "windows")
+    )
 ))]
 
 use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
@@ -45,16 +49,17 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
     git(&repository, &["config", "core.autocrlf", "false"]);
     fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
     fs::write(repository.join("executable.sh"), "#!/bin/sh\nexit 0\n").expect("write executable");
+    #[cfg(unix)]
     fs::set_permissions(
         repository.join("executable.sh"),
         fs::Permissions::from_mode(0o755),
     )
     .expect("set executable mode");
+    #[cfg(unix)]
     symlink("tracked.txt", repository.join("tracked-link")).expect("create symlink");
-    git(
-        &repository,
-        &["add", "--", "tracked.txt", "executable.sh", "tracked-link"],
-    );
+    git(&repository, &["add", "--", "tracked.txt", "executable.sh"]);
+    #[cfg(unix)]
+    git(&repository, &["add", "--", "tracked-link"]);
     git(&repository, &["commit", "--quiet", "-m", "initial"]);
 
     let first_result = add_worktree(AddWorktreeRequest {
@@ -79,6 +84,7 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
     assert!(git(&repository, &["worktree", "list", "--porcelain"]).contains("feature/first"));
     assert!(git(&first, &["status", "--porcelain=v1"]).is_empty());
     assert!(git(&second, &["status", "--porcelain=v1"]).is_empty());
+    #[cfg(unix)]
     assert_ne!(
         fs::metadata(first.join("executable.sh"))
             .expect("executable metadata")
@@ -87,6 +93,7 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
             & 0o111,
         0
     );
+    #[cfg(unix)]
     assert_eq!(
         fs::read_link(first.join("tracked-link")).expect("read symlink"),
         Path::new("tracked.txt")

@@ -35,7 +35,7 @@ const platforms = [
   {
     name: "Windows",
     backend: "ReFS block clone",
-    status: "planned · M7",
+    status: "experimental · current",
   },
 ] as const;
 
@@ -51,9 +51,8 @@ function BackendCycle() {
         ))}
       </span>
       <span className="visually-hidden">
-        Native copy-on-write view. APFS clone on macOS and Linux reflinks are current. Linux
-        OverlayFS remains planned for milestone 5. Windows ReFS block clone is planned for
-        milestone 7.
+        Native copy-on-write view. APFS clone on macOS, Linux reflinks, and Windows ReFS block
+        clones are current. Linux OverlayFS remains planned for milestone 5.
       </span>
     </>
   );
