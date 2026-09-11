@@ -10,6 +10,18 @@ use thiserror::Error;
 
 mod activation;
 mod journal;
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(
+            feature = "native-cow-integration",
+            any(target_os = "linux", target_os = "windows")
+        )
+    )
+))]
+#[path = "../tests/support/mod.rs"]
+mod test_support;
 mod worktree;
 
 pub use activation::{

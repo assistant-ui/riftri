@@ -16,7 +16,9 @@ use std::path::Path;
 use std::process::Command;
 
 use riftri_core::{AddWorktreeRequest, WorktreeMode, add_worktree};
-use tempfile::tempdir;
+
+mod support;
+use support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -35,6 +37,7 @@ fn git(path: &Path, arguments: &[&str]) -> String {
 #[test]
 fn creates_clean_isolated_linked_worktrees_from_one_base() {
     let fixture = tempdir().expect("fixture directory");
+    let fixture_path = fixture.path().to_path_buf();
     let repository = fixture.path().join("repository");
     let state = fixture.path().join("state");
     let first = fixture.path().join("first");
@@ -107,6 +110,12 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
     assert_eq!(
         fs::read_to_string(first_result.base_path.join("tracked.txt")).unwrap(),
         "base\n"
+    );
+
+    drop(fixture);
+    assert!(
+        !fixture_path.exists(),
+        "read-only immutable base prevented fixture cleanup"
     );
 }
 
