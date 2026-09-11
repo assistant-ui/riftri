@@ -187,7 +187,7 @@ impl Git {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn process_attempts(&self) -> usize {
         self.process_attempts.load(Ordering::Relaxed)
     }
@@ -1292,8 +1292,11 @@ fn command_failed(arguments: &[OsString], output: &Output) -> GitError {
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::process::Command;
+
+    #[cfg(unix)]
+    use std::path::PathBuf;
 
     use tempfile::{TempDir, tempdir};
 
@@ -1702,6 +1705,7 @@ mod tests {
         assert!(parse_attribute_records(b"tracked.txt\0text").is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn checks_large_attribute_path_sets_with_one_git_process() {
         let fixture = RepositoryFixture::committed();
