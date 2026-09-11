@@ -8,6 +8,8 @@
 
 use std::ffi::OsString;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
 
@@ -118,6 +120,105 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
         after.diagnostic_issues.is_empty(),
         "unexpected state issues: {:?}",
         after.diagnostic_issues
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn base_reuse_rejects_symlinked_completion_markers() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let first = fixture.path().join("first-worktree");
+    let second = fixture.path().join("second-worktree");
+    let third = fixture.path().join("third-worktree");
+    let protected_file = fixture.path().join("protected-marker-target");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    fs::write(&protected_file, "preserve\n").expect("write protected file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+    let added = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: first.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/marker-first")),
+        state_dir: Some(state.clone()),
+    })
+    .expect("create first worktree");
+    remove_worktree(RemoveWorktreeRequest {
+        repository: repository.clone(),
+        destination: first,
+        state_dir: Some(state.clone()),
+    })
+    .expect("remove first worktree");
+    let marker = added.base_path.with_extension("complete");
+    fs::remove_file(&marker).expect("remove real completion marker");
+    symlink(&protected_file, &marker).expect("replace completion marker with symlink");
+
+    let error = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: second.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/marker-second")),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("symlinked completion marker must prevent base reuse");
+
+    assert!(error.to_string().contains("completion marker"));
+    assert!(error.to_string().contains("not a real file"));
+    assert!(
+        fs::symlink_metadata(&marker)
+            .expect("marker metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        fs::read_to_string(&protected_file).expect("read protected file"),
+        "preserve\n"
+    );
+    assert!(!second.exists());
+    assert!(
+        !git(&repository, &["worktree", "list", "--porcelain"])
+            .contains(second.to_string_lossy().as_ref())
+    );
+    assert!(
+        !git(&repository, &["branch", "--list", "feature/marker-second"])
+            .contains("feature/marker-second")
+    );
+
+    fs::remove_file(&marker).expect("remove live marker symlink");
+    symlink(fixture.path().join("missing-marker-target"), &marker)
+        .expect("create broken completion-marker symlink");
+    let error = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: third.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/marker-third")),
+        state_dir: Some(state),
+    })
+    .expect_err("broken completion-marker symlink must prevent base reuse");
+
+    assert!(error.to_string().contains("completion marker"));
+    assert!(error.to_string().contains("not a real file"));
+    assert!(
+        fs::symlink_metadata(&marker)
+            .expect("broken marker metadata")
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!third.exists());
+    assert!(
+        !git(&repository, &["branch", "--list", "feature/marker-third"])
+            .contains("feature/marker-third")
     );
 }
 
