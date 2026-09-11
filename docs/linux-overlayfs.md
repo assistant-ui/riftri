@@ -12,6 +12,12 @@ writes different bytes through that view. Success requires the immutable lower
 file to remain unchanged and the private bytes to appear in the upper layer.
 The child then unmounts and the parent removes the complete probe directory.
 
+A separate caller-namespace probe uses the durable mount primitive without
+`unshare(2)` and repeats the lower-read, copy-up, lower-isolation, unmount, and
+artifact-cleanup checks. User-facing selection must pass this stricter probe;
+the isolated probe alone cannot prove that a long-lived view will be visible to
+ordinary Git and agent processes.
+
 The probe uses `userxattr`, `index=off`, `metacopy=off`, and
 `redirect_dir=nofollow`. OverlayFS does not permit redirect creation with the
 unprivileged xattr mode. The later worktree backend must therefore prove that
@@ -62,10 +68,14 @@ proves copy-up isolation, identity-mismatch refusal, and recovery after the
 creator process terminates.
 
 The existing version 1 add journal now has an optional OverlayFS-only record.
-Before any future mount mutation, it can persist the exact private-layer root
-and a 256-bit recovery token; after mounting, the same record can carry the
-kernel identity. Missing mount intent on an OverlayFS journal, mount intent on
-another backend, malformed tokens, and layout paths outside
+Before any future mount mutation, it can persist the exact private-layer root,
+a 256-bit recovery token, and the current boot and mount-namespace context;
+after mounting, the same record can carry the kernel identity. A token-bound
+regular file in the private upper layer lets recovery identify a mount that
+survived a crash before its kernel mount ID reached the journal. The marker is
+removed only after that identity is durable. Missing mount intent on an
+OverlayFS journal, mount intent on another backend, malformed tokens, and
+layout paths outside
 `overlays/v1/<operation-id>` all fail closed. Status recognizes journal-owned
 layout roots and reports unowned roots without deleting them. Existing APFS,
 reflink, and ReFS journals remain compatible because they omit this record.

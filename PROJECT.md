@@ -243,9 +243,12 @@ native volumes in CI. Linux can actively verify destination-specific OverlayFS
 mount and copy-up support in an isolated namespace, but does not yet create
 persistent OverlayFS worktrees. Its storage layer can prepare durable private
 layers, mount a requested view, and recover or reject that mount by exact
-kernel identity after the creator exits. Add journals can encode validated
-OverlayFS layout intent, a recovery token, and the eventual mount identity;
-status diagnoses unowned private-layer roots without deleting them. Executing
-those mounts through the core worktree transaction, least-privilege activation,
-reboot recovery, automatic orphan-state repair, ordinary-NTFS alternatives,
-managed-environment integration, and a daemon are not implemented.
+kernel identity after the creator exits. It can also prove mount capability in
+the caller's current namespace and recover the mount-ID persistence crash gap
+through a private ownership marker. Add journals can encode validated
+OverlayFS layout intent, a recovery token, pre-mount namespace context, and the
+eventual mount identity; status diagnoses unowned private-layer roots without
+deleting them. Executing those mounts through the core worktree transaction,
+least-privilege activation, reboot recovery, automatic orphan-state repair,
+ordinary-NTFS alternatives, managed-environment integration, and a daemon are
+not implemented.

@@ -255,11 +255,39 @@ pub struct OverlayFsMountIdentity {
     pub mount_id: u64,
 }
 
+/// Boot and mount-namespace identity persisted before an OverlayFS mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayFsMountContext {
+    pub boot_id: String,
+    pub mount_namespace_device: u64,
+    pub mount_namespace_inode: u64,
+}
+
+impl OverlayFsMountIdentity {
+    pub fn context(&self) -> OverlayFsMountContext {
+        OverlayFsMountContext {
+            boot_id: self.boot_id.clone(),
+            mount_namespace_device: self.mount_namespace_device,
+            mount_namespace_inode: self.mount_namespace_inode,
+        }
+    }
+}
+
 /// Relationship between the current process and a journaled OverlayFS mount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayFsMountState {
     Active,
     Absent,
+    DifferentNamespace,
+    Foreign,
+}
+
+/// Recoverable state between durable mount intent and mount-ID persistence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OverlayFsRecoveryState {
+    Absent,
+    Prepared,
+    Mounted(OverlayFsMountIdentity),
     DifferentNamespace,
     Foreign,
 }
@@ -313,6 +341,83 @@ impl OverlayFsMounter {
                 }
             }
         }
+    }
+
+    /// Verify that a persistent mount can be created in the caller's current
+    /// mount namespace, rather than only in an isolated probe child.
+    #[cfg(target_os = "linux")]
+    pub fn probe_current_namespace(destination: &Path) -> BackendCapability {
+        let volume = match inspect_destination(destination) {
+            Ok(volume) => volume,
+            Err(error) => return unavailable(BackendKind::OverlayFs, &error),
+        };
+        if volume.read_only {
+            return BackendCapability {
+                kind: BackendKind::OverlayFs,
+                status: CapabilityStatus::Unsupported,
+                volume: Some(volume),
+                explanation: "OverlayFS needs writable upper and work directories".to_owned(),
+                requires_explicit_fallback: false,
+            };
+        }
+
+        match overlayfs::probe_current_namespace(&volume.probe_path) {
+            Ok(()) => BackendCapability {
+                kind: BackendKind::OverlayFs,
+                status: CapabilityStatus::Supported,
+                explanation: format!(
+                    "caller-visible OverlayFS mount and private copy-up probe succeeded on {}",
+                    volume.identity.filesystem
+                ),
+                volume: Some(volume),
+                requires_explicit_fallback: false,
+            },
+            Err(error) => {
+                let status = match error.raw_os_error() {
+                    Some(libc::ENODEV | libc::EOPNOTSUPP | libc::EINVAL | libc::EXDEV) => {
+                        CapabilityStatus::Unsupported
+                    }
+                    _ => CapabilityStatus::Unavailable,
+                };
+                BackendCapability {
+                    kind: BackendKind::OverlayFs,
+                    status,
+                    explanation: format!(
+                        "caller-visible OverlayFS probe failed on {} while trying to {}: {}",
+                        volume.identity.filesystem, error.operation, error.source
+                    ),
+                    volume: Some(volume),
+                    requires_explicit_fallback: false,
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn probe_current_namespace(destination: &Path) -> BackendCapability {
+        BackendCapability {
+            kind: BackendKind::OverlayFs,
+            status: CapabilityStatus::Unsupported,
+            volume: None,
+            explanation: format!(
+                "Linux OverlayFS probing is unavailable for {}",
+                destination.display()
+            ),
+            requires_explicit_fallback: false,
+        }
+    }
+
+    /// Capture the boot and mount namespace before any persistent mount.
+    #[cfg(target_os = "linux")]
+    pub fn current_mount_context() -> Result<OverlayFsMountContext, StorageError> {
+        overlayfs::current_mount_context()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn current_mount_context() -> Result<OverlayFsMountContext, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -379,6 +484,73 @@ impl OverlayFsMounter {
 
     #[cfg(not(target_os = "linux"))]
     pub fn mount(_layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Persist a private recovery marker before issuing the mount syscall.
+    #[cfg(target_os = "linux")]
+    pub fn arm_recovery(layout: &OverlayFsLayout, token: &str) -> Result<(), StorageError> {
+        overlayfs::arm_recovery(layout, token)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn arm_recovery(_layout: &OverlayFsLayout, _token: &str) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Recover a mount created after durable intent but before its mount ID
+    /// reached the journal.
+    #[cfg(target_os = "linux")]
+    pub fn recover_mount(
+        layout: &OverlayFsLayout,
+        context: &OverlayFsMountContext,
+        token: &str,
+    ) -> Result<OverlayFsRecoveryState, StorageError> {
+        overlayfs::recover_mount(layout, context, token)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn recover_mount(
+        _layout: &OverlayFsLayout,
+        _context: &OverlayFsMountContext,
+        _token: &str,
+    ) -> Result<OverlayFsRecoveryState, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Remove the recovery marker after the journal durably records mount ID.
+    #[cfg(target_os = "linux")]
+    pub fn clear_recovery(layout: &OverlayFsLayout, token: &str) -> Result<(), StorageError> {
+        overlayfs::clear_recovery(layout, token)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn clear_recovery(_layout: &OverlayFsLayout, _token: &str) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Remove a prepared, unmounted layout only in the persisted namespace.
+    #[cfg(target_os = "linux")]
+    pub fn remove_unmounted_private_layers(
+        layout: &OverlayFsLayout,
+        context: &OverlayFsMountContext,
+    ) -> Result<(), StorageError> {
+        overlayfs::remove_unmounted_private_layers(layout, context)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn remove_unmounted_private_layers(
+        _layout: &OverlayFsLayout,
+        _context: &OverlayFsMountContext,
+    ) -> Result<(), StorageError> {
         Err(StorageError::UnsupportedPlatform {
             backend: "Linux OverlayFS",
         })

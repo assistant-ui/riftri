@@ -20,6 +20,8 @@ use riftri_storage::ApfsCloner as NativeCowCloner;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 use riftri_storage::ApfsCloner as NativeCowCloner;
 #[cfg(target_os = "linux")]
+use riftri_storage::OverlayFsMounter;
+#[cfg(target_os = "linux")]
 use riftri_storage::ReflinkCloner as NativeCowCloner;
 #[cfg(target_os = "windows")]
 use riftri_storage::RefsBlockCloner as NativeCowCloner;
@@ -1331,12 +1333,17 @@ fn add_worktree_inner(
     let backend = native_backend_kind();
     let mut journal = if backend == BackendKind::OverlayFs {
         let layout_root = state_directory.join("overlays/v1").join(&operation_id);
+        #[cfg(target_os = "linux")]
+        let mount_context = Some(OverlayFsMounter::current_mount_context()?);
+        #[cfg(not(target_os = "linux"))]
+        let mount_context = None;
         JournalRecord::new_overlayfs(
             operation_id,
             journal_paths,
             resolved.commit.as_str().to_owned(),
             &layout_root,
             overlayfs_recovery_token(&layout_root),
+            mount_context,
         )?
     } else {
         JournalRecord::new(
@@ -3484,6 +3491,9 @@ fn validate_recovery_paths(
     let overlay_paths_valid = match (&journal.backend, &journal.overlayfs) {
         (BackendKind::OverlayFs, Some(overlayfs)) => {
             let overlay_root = state_directory.join("overlays/v1");
+            let context_valid = overlayfs.mount_context.as_ref().is_none_or(|context| {
+                !context.boot_id.is_empty() && context.mount_namespace_inode != 0
+            });
             let identity_valid = overlayfs.mount_identity.as_ref().is_none_or(|identity| {
                 !identity.boot_id.is_empty()
                     && identity.mount_namespace_inode != 0
@@ -3492,6 +3502,7 @@ fn validate_recovery_paths(
             overlayfs.layout_root.parent() == Some(overlay_root.as_path())
                 && overlayfs.layout_root.file_name() == Some(OsStr::new(&journal.operation_id))
                 && overlayfs.recovery_token.len() == 64
+                && context_valid
                 && identity_valid
         }
         (BackendKind::OverlayFs, None) => false,
