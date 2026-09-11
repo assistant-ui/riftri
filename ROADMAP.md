@@ -141,9 +141,11 @@ copy-up, and lower-layer isolation against the destination volume without
 leaving a mount in the caller's namespace. The storage layer can now prepare
 journal-owned upper/work directories, mount directly at a requested merged
 path, persist an exact boot/namespace/mount identity, reject foreign unmounts,
-and recover a mount after its creator process exits. Core add/remove journal
-wiring and least-privilege activation remain open, so the milestone as a whole
-is not yet complete.
+and recover a mount after its creator process exits. Core add journals can now
+carry validated OverlayFS layout intent, a recovery token, and an optional
+exact mount identity without breaking older journals. Transaction execution
+and least-privilege activation remain open, so the milestone as a whole is not
+yet complete.
 
 The capability contract and remaining lifecycle boundary are documented in
 [`docs/linux-overlayfs.md`](docs/linux-overlayfs.md).
@@ -152,8 +154,10 @@ The capability contract and remaining lifecycle boundary are documented in
 - Add kernel OverlayFS capability probing. (complete)
 - Add durable private-layer placement and identity-checked mount primitives.
   (complete)
-- Wire immutable lower, private upper/work, and merged mounts into the existing
-  add and removal journals.
+- Record backward-compatible OverlayFS mount intent and identity in add
+  journals and diagnose unowned private-layer roots. (complete)
+- Execute immutable lower, private upper/work, and merged mounts through the
+  existing add and removal transactions.
 - Add least-privilege mount activation and reboot recovery.
 - Define fallback behavior when user namespaces or mounts are unavailable.
 

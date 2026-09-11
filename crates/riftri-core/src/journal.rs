@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use riftri_storage::BackendKind;
+use riftri_storage::{BackendKind, OverlayFsMountIdentity};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -158,8 +158,17 @@ pub(crate) struct JournalRecord {
     pub expected_commit: String,
     #[serde(default = "legacy_apfs_backend")]
     pub backend: BackendKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overlayfs: Option<OverlayFsJournalRecord>,
     pub phase: AddWorktreePhase,
     pub last_forward_phase: AddWorktreePhase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OverlayFsJournalRecord {
+    layout_root: NativeOsString,
+    recovery_token: String,
+    mount_identity: Option<OverlayFsMountIdentity>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -186,8 +195,16 @@ pub(crate) struct DecodedJournal {
     pub branch: Option<OsString>,
     pub expected_commit: String,
     pub backend: BackendKind,
+    pub overlayfs: Option<DecodedOverlayFsJournal>,
     pub phase: AddWorktreePhase,
     pub last_forward_phase: AddWorktreePhase,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DecodedOverlayFsJournal {
+    pub layout_root: PathBuf,
+    pub recovery_token: String,
+    pub mount_identity: Option<OverlayFsMountIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -326,9 +343,28 @@ impl JournalRecord {
             branch: paths.branch.map(NativeOsString::encode),
             expected_commit,
             backend,
+            overlayfs: None,
             phase: AddWorktreePhase::IntentRecorded,
             last_forward_phase: AddWorktreePhase::IntentRecorded,
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn new_overlayfs(
+        operation_id: String,
+        paths: JournalPaths<'_>,
+        expected_commit: String,
+        layout_root: &Path,
+        recovery_token: String,
+    ) -> Result<Self, JournalError> {
+        validate_recovery_token(Path::new("<new-overlayfs-journal>"), &recovery_token)?;
+        let mut record = Self::new(operation_id, paths, expected_commit, BackendKind::OverlayFs);
+        record.overlayfs = Some(OverlayFsJournalRecord {
+            layout_root: NativeOsString::encode(layout_root.as_os_str()),
+            recovery_token,
+            mount_identity: None,
+        });
+        Ok(record)
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -356,6 +392,29 @@ impl JournalRecord {
                 version: self.format_version,
             });
         }
+        let overlayfs = match (self.backend, self.overlayfs) {
+            (BackendKind::OverlayFs, Some(overlayfs)) => {
+                validate_recovery_token(&journal_path, &overlayfs.recovery_token)?;
+                Some(DecodedOverlayFsJournal {
+                    layout_root: PathBuf::from(overlayfs.layout_root.decode(&journal_path)?),
+                    recovery_token: overlayfs.recovery_token,
+                    mount_identity: overlayfs.mount_identity,
+                })
+            }
+            (BackendKind::OverlayFs, None) => {
+                return Err(JournalError::InvalidRecord {
+                    path: journal_path,
+                    detail: "OverlayFS journal is missing its durable mount intent".to_owned(),
+                });
+            }
+            (_, Some(_)) => {
+                return Err(JournalError::InvalidRecord {
+                    path: journal_path,
+                    detail: "non-OverlayFS journal contains OverlayFS mount intent".to_owned(),
+                });
+            }
+            (_, None) => None,
+        };
         Ok(DecodedJournal {
             operation_id: self.operation_id,
             repository: PathBuf::from(self.repository.decode(&journal_path)?),
@@ -370,11 +429,23 @@ impl JournalRecord {
                 .transpose()?,
             expected_commit: self.expected_commit,
             backend: self.backend,
+            overlayfs,
             phase: self.phase,
             last_forward_phase: self.last_forward_phase,
             journal_path,
         })
     }
+}
+
+fn validate_recovery_token(journal_path: &Path, token: &str) -> Result<(), JournalError> {
+    if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err(JournalError::InvalidRecord {
+        path: journal_path.to_path_buf(),
+        detail: "OverlayFS recovery token must be exactly 32 bytes encoded as hexadecimal"
+            .to_owned(),
+    })
 }
 
 const fn legacy_apfs_backend() -> BackendKind {
@@ -1192,7 +1263,7 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> JournalEr
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use std::os::unix::fs::symlink;
     use std::path::Path;
@@ -1274,6 +1345,102 @@ mod tests {
         let legacy: JournalRecord =
             serde_json::from_value(legacy).expect("read journal without backend field");
         assert_eq!(legacy.backend, riftri_storage::BackendKind::ApfsClone);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlayfs_journal_round_trips_mount_intent_and_identity() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        use riftri_storage::{BackendKind, OverlayFsMountIdentity};
+
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let layout_root = directory
+            .path()
+            .join(OsString::from_vec(b"overlay-\xff".to_vec()));
+        let record = JournalRecord::new_overlayfs(
+            "operation".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            &layout_root,
+            "ab".repeat(32),
+        )
+        .expect("create OverlayFS journal");
+        let mut value = serde_json::to_value(record).expect("serialize OverlayFS journal");
+        value["overlayfs"]["mount_identity"] = serde_json::to_value(OverlayFsMountIdentity {
+            boot_id: "01234567-89ab-cdef-0123-456789abcdef".to_owned(),
+            mount_namespace_device: 4,
+            mount_namespace_inode: 5,
+            mount_id: 6,
+        })
+        .expect("serialize mount identity");
+        let record: JournalRecord =
+            serde_json::from_value(value).expect("attach mount identity fixture");
+        store.persist(&record).expect("persist OverlayFS journal");
+
+        let loaded = store.load_all().expect("load OverlayFS journal");
+        let overlayfs = loaded[0]
+            .overlayfs
+            .as_ref()
+            .expect("decoded OverlayFS intent");
+        assert_eq!(loaded[0].backend, BackendKind::OverlayFs);
+        assert_eq!(
+            overlayfs.layout_root.as_os_str().as_bytes(),
+            layout_root.as_os_str().as_bytes()
+        );
+        assert_eq!(overlayfs.recovery_token, "ab".repeat(32));
+        assert_eq!(overlayfs.mount_identity.as_ref().unwrap().mount_id, 6);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn overlayfs_journal_requires_valid_durable_mount_intent() {
+        let record = JournalRecord::new(
+            "operation".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            riftri_storage::BackendKind::OverlayFs,
+        );
+        let error = record
+            .decode(Path::new("/journal.json").to_path_buf())
+            .expect_err("OverlayFS record without intent must fail closed");
+        assert!(error.to_string().contains("mount intent"));
+
+        let error = JournalRecord::new_overlayfs(
+            "operation".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            Path::new("/layout"),
+            "not-a-256-bit-token".to_owned(),
+        )
+        .expect_err("short recovery token must fail closed");
+        assert!(error.to_string().contains("32 bytes"));
     }
 
     #[cfg(unix)]
