@@ -318,6 +318,43 @@ code, pre { font-family: var(--font-mono); }
 .materialization-track strong { font-family: var(--font-sans); font-size: 0.82rem; font-weight: 500; }
 .materialization-track small { color: var(--ink-faint); font-size: 0.55rem; }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.materialization-track li > .backend-cycle {
+  position: relative;
+  display: block;
+  min-height: 2.15rem;
+  color: var(--ink);
+  font-size: inherit;
+}
+
+.backend-cycle-item {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  gap: 0.42rem;
+  opacity: 0;
+  transform: translateY(0.22rem);
+  animation: backend-cycle 9s var(--ease-out) infinite both;
+}
+
+.backend-cycle-item:nth-child(2) { animation-delay: 3s; }
+.backend-cycle-item:nth-child(3) { animation-delay: 6s; }
+
+@keyframes backend-cycle {
+  0% { opacity: 0; transform: translateY(0.22rem); }
+  3%, 29% { opacity: 1; transform: translateY(0); }
+  32%, 100% { opacity: 0; transform: translateY(-0.22rem); }
+}
+
 .materialization-foot {
   display: flex;
   min-height: 42px;
@@ -350,9 +387,13 @@ code, pre { font-family: var(--font-mono); }
   align-items: center;
   gap: 0.7rem;
   padding: 0.9rem 1.1rem;
+  opacity: 0.56;
+  animation: platform-focus 9s ease-in-out infinite both;
 }
 
 .platform-backend + .platform-backend { border-left: 1px solid var(--line); }
+.platform-backend:nth-child(2) { animation-delay: 3s; }
+.platform-backend:nth-child(3) { animation-delay: 6s; }
 .platform-backend > div { display: grid; min-width: 0; gap: 0.2rem; }
 .platform-backend strong { font-family: var(--font-sans); font-size: 0.68rem; font-weight: 500; }
 .platform-backend small { overflow: hidden; color: var(--ink-faint); font-size: 0.5rem; text-overflow: ellipsis; white-space: nowrap; }
@@ -366,7 +407,6 @@ code, pre { font-family: var(--font-mono); }
 .platform-backend.is-current .platform-signal {
   border-color: var(--accent);
   background: var(--accent);
-  animation: backend-pulse 2.4s ease-in-out infinite;
 }
 
 .platform-status {
@@ -379,9 +419,10 @@ code, pre { font-family: var(--font-mono); }
 
 .platform-backend.is-current .platform-status { color: var(--accent); }
 
-@keyframes backend-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgb(240 106 58 / 0); opacity: 0.72; }
-  50% { box-shadow: 0 0 0 4px rgb(240 106 58 / 0.12); opacity: 1; }
+@keyframes platform-focus {
+  0% { background: transparent; opacity: 0.56; }
+  3%, 29% { background: rgb(241 238 229 / 0.025); opacity: 1; }
+  32%, 100% { background: transparent; opacity: 0.56; }
 }
 
 .essential-grid {
@@ -545,6 +586,10 @@ code, pre { font-family: var(--font-mono); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  .backend-cycle-item { animation: none !important; }
+  .backend-cycle-item:first-child { position: relative; opacity: 1; transform: none; }
+  .backend-cycle-item:not(:first-child) { display: none; }
+  .platform-backend { animation: none !important; opacity: 1; }
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;

@@ -39,6 +39,25 @@ const platforms = [
   },
 ] as const;
 
+function BackendCycle() {
+  return (
+    <>
+      <span className="backend-cycle" aria-hidden="true">
+        {platforms.map((platform) => (
+          <span className="backend-cycle-item" key={platform.name}>
+            <strong>{platform.backend}</strong>
+            <small>{platform.name} · {platform.status}</small>
+          </span>
+        ))}
+      </span>
+      <span className="visually-hidden">
+        Native copy-on-write view. APFS clone on macOS is current. Linux reflink or OverlayFS is
+        planned for milestone 5. Windows ReFS block clone is planned for milestone 7.
+      </span>
+    </>
+  );
+}
+
 export function MaterializationMap() {
   return (
     <figure className="materialization-map graph-frame">
@@ -50,10 +69,16 @@ export function MaterializationMap() {
 
       <ol className="materialization-track" aria-label="Riftri worktree materialization path">
         {stages.map((stage) => (
-          <li key={stage.index}>
+          <li className={stage.index === "03" ? "is-backend-stage" : undefined} key={stage.index}>
             <span>{stage.index}</span>
-            <strong>{stage.title}</strong>
-            <small>{stage.detail}</small>
+            {stage.index === "03" ? (
+              <BackendCycle />
+            ) : (
+              <>
+                <strong>{stage.title}</strong>
+                <small>{stage.detail}</small>
+              </>
+            )}
           </li>
         ))}
       </ol>
