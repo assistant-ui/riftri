@@ -1697,18 +1697,20 @@ mod tests {
         let wrapper_parent = test_executable.parent().expect("test executable directory");
         let wrapper_directory = tempfile::tempdir_in(wrapper_parent).expect("wrapper directory");
         let wrapper = wrapper_directory.path().join("git-wrapper");
+        let staged_wrapper = wrapper_directory.path().join("git-wrapper.staged");
         let calls = wrapper_directory.path().join("git-wrapper.calls");
-        let mut wrapper_file = fs::File::create(&wrapper).expect("create Git wrapper");
+        let mut wrapper_file = fs::File::create(&staged_wrapper).expect("stage Git wrapper");
         wrapper_file
             .write_all(b"#!/bin/sh\nprintf 'call\\n' >> \"$0.calls\"\nexec git \"$@\"\n")
             .expect("write Git wrapper");
         wrapper_file.sync_all().expect("sync Git wrapper");
         drop(wrapper_file);
-        let mut permissions = fs::metadata(&wrapper)
-            .expect("wrapper metadata")
+        let mut permissions = fs::metadata(&staged_wrapper)
+            .expect("staged wrapper metadata")
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+        fs::set_permissions(&staged_wrapper, permissions).expect("make staged wrapper executable");
+        fs::rename(&staged_wrapper, &wrapper).expect("publish closed Git wrapper atomically");
         let paths = (0..300)
             .map(|index| PathBuf::from(format!("path-{index}.txt")))
             .collect::<Vec<_>>();
