@@ -37,9 +37,11 @@ reflink-enabled XFS without a byte-copy fallback. Windows creation actively
 verifies ReFS block cloning and private-write isolation before mutation, and
 uses the same journaled lifecycle. Linux also has an artifact-clean active
 OverlayFS probe that isolates its test mount in a private mount namespace; it
-does not yet use OverlayFS for persistent worktrees. Riftri still has no forced
-move/removal lifecycle path, automatic orphan-state repair, OverlayFS worktree
-mounts, ordinary-NTFS backend, managed-environment integration, or daemon.
+does not yet use OverlayFS for persistent worktrees. Its add-journal extension
+can describe the exact private-layer root, recovery token, and eventual kernel
+mount identity. Riftri still has no forced move/removal lifecycle path,
+automatic orphan-state repair, user-facing OverlayFS mutation backend,
+ordinary-NTFS backend, managed-environment integration, or daemon.
 The native COW checkout path accepts only an allowlisted deterministic subset of
 in-tree attributes (`text`, `eol`, and `binary` semantics). External attributes,
 Git LFS, custom filters, encodings, ident substitution, legacy attributes, and

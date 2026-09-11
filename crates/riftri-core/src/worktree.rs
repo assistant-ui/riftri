@@ -1319,20 +1319,33 @@ fn add_worktree_inner(
         WorktreeMode::NewBranch(branch) => Some(branch.as_os_str()),
         WorktreeMode::Detached => None,
     };
-    let mut journal = JournalRecord::new(
-        operation_id,
-        JournalPaths {
-            repository: &repository_root,
-            destination: &destination,
-            scratch: &scratch,
-            base_staging: &base_staging,
-            base_path: &base_path,
-            temporary_index: &temporary_index,
-            branch,
-        },
-        resolved.commit.as_str().to_owned(),
-        native_backend_kind(),
-    );
+    let journal_paths = JournalPaths {
+        repository: &repository_root,
+        destination: &destination,
+        scratch: &scratch,
+        base_staging: &base_staging,
+        base_path: &base_path,
+        temporary_index: &temporary_index,
+        branch,
+    };
+    let backend = native_backend_kind();
+    let mut journal = if backend == BackendKind::OverlayFs {
+        let layout_root = state_directory.join("overlays/v1").join(&operation_id);
+        JournalRecord::new_overlayfs(
+            operation_id,
+            journal_paths,
+            resolved.commit.as_str().to_owned(),
+            &layout_root,
+            overlayfs_recovery_token(&layout_root),
+        )?
+    } else {
+        JournalRecord::new(
+            operation_id,
+            journal_paths,
+            resolved.commit.as_str().to_owned(),
+            backend,
+        )
+    };
     let journal_path = store.persist(&journal)?;
 
     let operation = fail_add_if_requested(journal.phase, fail_after).and_then(|()| {
@@ -1982,6 +1995,8 @@ fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
     for directory in [
         state_directory.join("bases"),
         state_directory.join("bases/v1"),
+        state_directory.join("overlays"),
+        state_directory.join("overlays/v1"),
         state_directory.join("operations"),
         state_directory.join("removals"),
         state_directory.join("moves"),
@@ -2073,6 +2088,26 @@ fn repository_cache_id(common_git_directory: &Path, checkout_profile: &[u8]) -> 
     let digest = hasher.finalize();
     let mut encoded = String::with_capacity(2 + digest.len() * 2);
     encoded.push_str("r-");
+    for byte in digest {
+        use std::fmt::Write;
+        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn overlayfs_recovery_token(layout_root: &Path) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"riftri-overlayfs-recovery-v1\0");
+    hasher.update(
+        layout_root
+            .file_name()
+            .expect("an OverlayFS layout root always has an operation ID")
+            .to_string_lossy()
+            .as_bytes(),
+    );
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
     for byte in digest {
         use std::fmt::Write;
         write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
@@ -2229,6 +2264,7 @@ fn diagnose_state_paths(
     let mut issues = Vec::new();
     let expected_roots = [
         "bases",
+        "overlays",
         "operations",
         "removals",
         "moves",
@@ -2327,6 +2363,7 @@ fn diagnose_state_paths(
         &mut issues,
         &mut coordination_locks,
     )?;
+    diagnose_overlay_directories(state_directory, add_journals, removal_journals, &mut issues)?;
 
     let completed_removals = removal_journals
         .iter()
@@ -2524,6 +2561,79 @@ fn diagnose_base_directories(
                     "immutable-base artifact is not explained by a completion marker or journal",
                 );
             }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn diagnose_overlay_directories(
+    state_directory: &Path,
+    add_journals: &[DecodedJournal],
+    removal_journals: &[DecodedRemovalJournal],
+    issues: &mut Vec<StateDiagnosticIssue>,
+) -> Result<(), WorktreeError> {
+    let overlays = state_directory.join("overlays");
+    if is_real_directory_if_present(&overlays)? {
+        for path in child_paths(&overlays, "read OverlayFS state layout")? {
+            if path != overlays.join("v1") {
+                add_state_issue(
+                    issues,
+                    path,
+                    "not part of the supported OverlayFS state layout version",
+                );
+            }
+        }
+    }
+
+    let root = overlays.join("v1");
+    if !is_real_directory_if_present(&root)? {
+        return Ok(());
+    }
+    let completed_removals = removal_journals
+        .iter()
+        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
+    let expected = add_journals
+        .iter()
+        .filter(|journal| {
+            journal.backend == BackendKind::OverlayFs
+                && journal.phase != AddWorktreePhase::RolledBack
+                && journal.last_forward_phase >= AddWorktreePhase::ViewCreated
+                && !completed_removals.contains(journal.operation_id.as_str())
+        })
+        .filter_map(|journal| {
+            journal
+                .overlayfs
+                .as_ref()
+                .map(|overlayfs| overlayfs.layout_root.clone())
+        })
+        .collect::<HashSet<_>>();
+
+    for path in &expected {
+        if !is_real_directory_if_present(path)? {
+            add_state_issue(
+                issues,
+                path.clone(),
+                "a live OverlayFS journal references missing or unsafe private layers",
+            );
+        }
+    }
+
+    for path in child_paths(&root, "read OverlayFS view roots")? {
+        if !expected.contains(&path) {
+            add_state_issue(
+                issues,
+                path,
+                "OverlayFS private layers are not referenced by a live add journal",
+            );
+        } else if !is_real_directory(&path)? {
+            add_state_issue(
+                issues,
+                path,
+                "journaled OverlayFS private layers must use a real directory",
+            );
         }
     }
     Ok(())
@@ -3371,6 +3481,23 @@ fn validate_recovery_paths(
     let bases = state_directory.join("bases/v1");
     let temporary = state_directory.join("tmp");
     let base_repository = journal.base_path.parent();
+    let overlay_paths_valid = match (&journal.backend, &journal.overlayfs) {
+        (BackendKind::OverlayFs, Some(overlayfs)) => {
+            let overlay_root = state_directory.join("overlays/v1");
+            let identity_valid = overlayfs.mount_identity.as_ref().is_none_or(|identity| {
+                !identity.boot_id.is_empty()
+                    && identity.mount_namespace_inode != 0
+                    && identity.mount_id != 0
+            });
+            overlayfs.layout_root.parent() == Some(overlay_root.as_path())
+                && overlayfs.layout_root.file_name() == Some(OsStr::new(&journal.operation_id))
+                && overlayfs.recovery_token.len() == 64
+                && identity_valid
+        }
+        (BackendKind::OverlayFs, None) => false,
+        (_, None) => true,
+        (_, Some(_)) => false,
+    };
     if base_repository != journal.base_staging.parent()
         || base_repository.and_then(Path::parent) != Some(bases.as_path())
         || !journal
@@ -3386,6 +3513,7 @@ fn validate_recovery_paths(
             .is_some_and(|name| name.to_string_lossy().starts_with(".riftri-view-"))
         || !journal.repository.is_absolute()
         || !journal.destination.is_absolute()
+        || !overlay_paths_valid
     {
         return Err(WorktreeError::InvalidRequest(format!(
             "journal {} contains paths outside its operation scope",
@@ -3791,10 +3919,12 @@ mod tests {
         let empty_bucket = state.join("bases/v1/empty-bucket");
         let stray_journal = state.join("operations/stray.tmp");
         let stray_temporary = state.join("tmp/orphan-index");
+        let stray_overlay = state.join("overlays/v1/orphan-view");
         let unknown_root = state.join("unknown-root");
         fs::create_dir_all(&empty_bucket).expect("create empty base bucket");
         fs::create_dir_all(state.join("operations")).expect("create journal directory");
         fs::create_dir_all(state.join("tmp")).expect("create temporary directory");
+        fs::create_dir_all(&stray_overlay).expect("create stray OverlayFS layers");
         fs::write(&stray_journal, "unfinished\n").expect("write stray journal");
         fs::write(&stray_temporary, "temporary\n").expect("write stray temporary file");
         fs::create_dir(&unknown_root).expect("create unknown state directory");
@@ -3803,6 +3933,9 @@ mod tests {
         let stray_temporary = stray_temporary
             .canonicalize()
             .expect("resolve stray temporary file");
+        let stray_overlay = stray_overlay
+            .canonicalize()
+            .expect("resolve stray OverlayFS layers");
         let unknown_root = unknown_root.canonicalize().expect("resolve unknown root");
 
         let report = storage_accounting(&state).expect("diagnose state");
@@ -3812,14 +3945,16 @@ mod tests {
             .map(|issue| issue.path.as_path())
             .collect::<HashSet<_>>();
 
-        assert_eq!(report.diagnostic_issues.len(), 4);
+        assert_eq!(report.diagnostic_issues.len(), 5);
         assert!(paths.contains(empty_bucket.as_path()));
         assert!(paths.contains(stray_journal.as_path()));
         assert!(paths.contains(stray_temporary.as_path()));
+        assert!(paths.contains(stray_overlay.as_path()));
         assert!(paths.contains(unknown_root.as_path()));
         assert!(empty_bucket.is_dir());
         assert!(stray_journal.is_file());
         assert!(stray_temporary.is_file());
+        assert!(stray_overlay.is_dir());
         assert!(unknown_root.is_dir());
     }
 

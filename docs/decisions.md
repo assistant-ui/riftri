@@ -284,6 +284,21 @@ storage primitive does not choose the privilege boundary: persistent CLI
 activation still requires journal wiring and a narrow way to create the mount
 in the namespace where ordinary Git and agent processes can see it.
 
+### D029: OverlayFS mount intent extends the version 1 add journal
+
+An add journal whose backend is OverlayFS must contain an OverlayFS-specific
+record; other backends must not contain one. The record preserves the native
+path to the exact `overlays/v1/<operation-id>` private-layer root, a 256-bit
+hexadecimal recovery token written with the original operation intent, and an
+optional kernel mount identity populated only after mounting. This optional
+field is backward-compatible with existing version 1 journals, which never
+selected OverlayFS and therefore omit it. Recovery path validation rejects a
+root outside the operation's exact state location. State diagnostics recognize
+live journal-owned roots, report unowned roots, and never infer that an unknown
+private layer is safe to delete. This schema closes the durable-intent
+prerequisite only; selecting and mutating the OverlayFS backend remains gated
+on transaction and mount-activation work.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

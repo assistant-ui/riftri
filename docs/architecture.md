@@ -138,6 +138,12 @@ worktree.
 Versioned JSON add-operation journals are written atomically and preserve native
 path units. They are the current recovery authority for APFS, Linux reflink,
 and Windows ReFS views.
+The version 1 format has a backward-compatible OverlayFS extension that is
+valid only when the selected backend is OverlayFS. It records the exact
+`overlays/v1/<operation-id>` private-layer root, a 256-bit hexadecimal recovery
+token before mount mutation, and the boot/namespace/mount identity after a
+mount succeeds. Older journals omit this extension and continue to decode with
+their existing backend semantics.
 SQLite remains the planned Milestone 3 registry for bases, views, mounts, and
 reference counts.
 
@@ -311,7 +317,9 @@ when that full identity is absent or matches; a different namespace or foreign
 mount is preserved for manual attention. This primitive deliberately mounts
 only in the caller's current namespace. Core add/removal journal integration,
 the narrow least-privilege activation boundary, and reboot recovery remain
-gates before Riftri selects OverlayFS for worktree creation.
+gates before Riftri selects OverlayFS for worktree creation. The add-journal
+schema and state inventory now recognize the future private-layer root and
+mount identity, but no transaction invokes the persistent mounter yet.
 
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in
