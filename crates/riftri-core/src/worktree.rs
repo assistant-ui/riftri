@@ -307,6 +307,65 @@ pub fn is_managed_worktree(repository: &Path, destination: &Path) -> Result<bool
     Ok(managed_worktree_state_directory(repository, destination)?.is_some())
 }
 
+/// Forget one explicitly selected state-directory registration after the
+/// directory has been removed. Existing paths are never unregistered here.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub fn forget_missing_state_directory(
+    repository: &Path,
+    state_directory: &Path,
+) -> Result<PathBuf, WorktreeError> {
+    let git = Git::default();
+    let repository = git.inspect_repository(repository)?;
+    let repository_root = repository.root.as_deref().ok_or_else(|| {
+        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    })?;
+    let state_directory = absolute_path(state_directory)?;
+    match fs::symlink_metadata(&state_directory) {
+        Ok(_) => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "registered Riftri state path still exists; refusing to forget it: {}",
+                state_directory.display()
+            )));
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(io(
+                "inspect registered Riftri state directory",
+                &state_directory,
+                source,
+            ));
+        }
+    }
+
+    let _lock = acquire_state_directory_locator_lock(&repository.identity.common_git_dir)?;
+    let registered = git
+        .local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?
+        .into_iter()
+        .find(|registered| paths_match(registered, &state_directory))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "Riftri state path is not registered in this repository: {}",
+                state_directory.display()
+            ))
+        })?;
+    git.unset_local_config_value(
+        repository_root,
+        STATE_DIRECTORY_CONFIG_KEY,
+        registered.as_os_str(),
+    )?;
+    Ok(state_directory)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub fn forget_missing_state_directory(
+    _repository: &Path,
+    _state_directory: &Path,
+) -> Result<PathBuf, WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "state-directory registration recovery requires macOS, Linux, or Windows".to_owned(),
+    ))
+}
+
 pub(crate) fn managed_worktree_state_directory(
     repository: &Path,
     destination: &Path,
@@ -392,19 +451,7 @@ fn register_state_directory(
     if resolve_real_state_directory_if_present(&default)?.as_deref() == Some(state_directory) {
         return Ok(());
     }
-    let lock_path = repository
-        .identity
-        .common_git_dir
-        .join("riftri-state-directory.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|source| io("open state-directory locator lock", &lock_path, source))?;
-    lock.lock_exclusive()
-        .map_err(|source| io("lock state-directory locators", &lock_path, source))?;
+    let _lock = acquire_state_directory_locator_lock(&repository.identity.common_git_dir)?;
     let registered = git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?;
     for registered in registered {
         if registered == state_directory
@@ -415,6 +462,21 @@ fn register_state_directory(
     }
     git.add_local_config_path(repository_root, STATE_DIRECTORY_CONFIG_KEY, state_directory)?;
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn acquire_state_directory_locator_lock(common_git_dir: &Path) -> Result<File, WorktreeError> {
+    let lock_path = common_git_dir.join("riftri-state-directory.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|source| io("open state-directory locator lock", &lock_path, source))?;
+    lock.lock_exclusive()
+        .map_err(|source| io("lock state-directory locators", &lock_path, source))?;
+    Ok(lock)
 }
 
 fn managed_destination_candidates(destination: &Path) -> Result<Vec<PathBuf>, WorktreeError> {

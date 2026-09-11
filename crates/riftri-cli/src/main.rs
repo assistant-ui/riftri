@@ -112,6 +112,12 @@ enum Command {
         apply: bool,
     },
 
+    /// Manage repository-local Riftri state registrations.
+    State {
+        #[command(subcommand)]
+        command: StateCommand,
+    },
+
     /// Create or recover Riftri-backed real Git worktrees.
     Worktree {
         #[command(subcommand)]
@@ -195,6 +201,19 @@ enum WorktreeCommand {
         /// Riftri state directory; defaults to <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StateCommand {
+    /// Forget an explicitly selected registration whose directory is missing.
+    ForgetMissing {
+        /// Missing state directory to forget.
+        path: PathBuf,
+
+        /// Repository containing the local registration.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
     },
 }
 
@@ -335,6 +354,13 @@ fn main() -> Result<()> {
             let report = riftri_core::garbage_collect(&state_directory, apply)?;
             print_garbage_collection_report(&state_directory, &report);
         }
+        Command::State { command } => match command {
+            StateCommand::ForgetMissing { path, repository } => {
+                let forgotten = riftri_core::forget_missing_state_directory(&repository, &path)?;
+                println!("Forgot missing Riftri state registration");
+                println!("State: {}", forgotten.display());
+            }
+        },
         Command::Worktree { command } => match command {
             WorktreeCommand::Add {
                 path,
