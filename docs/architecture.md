@@ -304,7 +304,11 @@ resolves the private probe root as a native byte path in the new namespace and
 mounts fixed relative layer names. Commas, colons, spaces, long paths, and
 non-UTF-8 bytes in the destination therefore never become mount-option syntax.
 The caller's mount namespace is never changed and the parent removes the probe
-directory. The probe itself does not activate a persistent worktree.
+directory. A separate caller-namespace probe performs the same read, copy-up,
+isolation, and cleanup checks without namespace isolation. Core must require
+that stricter result before selecting a persistent backend, because success in
+an isolated child does not prove that ordinary Git processes can see a durable
+mount. Neither probe activates a persistent worktree.
 
 The persistent storage primitive places `upper` and `work` under one
 journal-owned `overlays/v1/<operation-id>` directory and mounts the immutable
@@ -315,11 +319,14 @@ grammar. A successful mount returns its Linux boot ID, mount-namespace device
 and inode, and kernel mount ID. Recovery unmounts or deletes private layers only
 when that full identity is absent or matches; a different namespace or foreign
 mount is preserved for manual attention. This primitive deliberately mounts
-only in the caller's current namespace. Core add/removal journal integration,
-the narrow least-privilege activation boundary, and reboot recovery remain
-gates before Riftri selects OverlayFS for worktree creation. The add-journal
-schema and state inventory now recognize the future private-layer root and
-mount identity, but no transaction invokes the persistent mounter yet.
+only in the caller's current namespace. Before mounting, the journal can retain
+the current boot and namespace context and the upper layer can contain a
+token-bound recovery marker. If the process exits after `mount(2)` but before
+the kernel mount ID reaches the journal, recovery accepts only an OverlayFS
+mount at the exact destination that exposes the same private marker. A
+different namespace or any marker mismatch remains foreign. Core add/removal
+journal execution, the narrow least-privilege activation boundary, and reboot
+recovery remain gates before Riftri selects OverlayFS for worktree creation.
 
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in

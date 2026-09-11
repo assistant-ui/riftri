@@ -299,6 +299,20 @@ private layer is safe to delete. This schema closes the durable-intent
 prerequisite only; selecting and mutating the OverlayFS backend remains gated
 on transaction and mount-activation work.
 
+### D030: OverlayFS closes the mount-ID crash gap with namespace intent and a private marker
+
+The kernel assigns a mount ID only after `mount(2)` succeeds, so a process can
+exit while the mount exists but the journal still has no ID. Before mounting,
+Riftri persists the Linux boot ID and mount-namespace device and inode, then
+creates a token-bound regular file in the journal-owned upper layer. Recovery
+adopts the live mount only in that same boot and namespace, at the exact merged
+path, with filesystem type `overlay`, and when the marker has identical bytes
+through both the private upper and merged views. The marker is removed only
+after the exact mount identity is durable. Missing, changed, foreign-namespace,
+or foreign-filesystem state fails closed. A caller-namespace active probe is a
+separate selection gate because the isolated capability probe does not prove
+that a persistent mount will be visible to ordinary Git processes.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

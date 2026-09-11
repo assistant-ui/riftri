@@ -10,13 +10,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
-use crate::{OverlayFsLayout, OverlayFsMountIdentity, OverlayFsMountState, StorageError};
+use crate::{
+    OverlayFsLayout, OverlayFsMountContext, OverlayFsMountIdentity, OverlayFsMountState,
+    OverlayFsRecoveryState, StorageError,
+};
 
 const PROBE_CONTENTS: &[u8; 4] = b"base";
 const PRIVATE_CONTENTS: &[u8; 4] = b"view";
 static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 const OVERLAY_OPTIONS: &str = "userxattr,index=off,metacopy=off,redirect_dir=nofollow";
+const RECOVERY_MARKER_PREFIX: &str = ".riftri-overlayfs-recovery-";
 
 #[derive(Debug, Error)]
 #[error("{operation}: {source}")]
@@ -76,6 +80,10 @@ impl ProbeDirectory {
             .map_err(|error| ProbeFailure::new("remove probe directory", error))?;
         self.path = PathBuf::new();
         Ok(())
+    }
+
+    fn abandon(mut self) {
+        self.path = PathBuf::new();
     }
 }
 
@@ -143,6 +151,69 @@ pub(crate) fn probe(directory: &Path) -> Result<(), ProbeFailure> {
     drop(lower_payload_file);
     let cleanup = root.close();
     result.and(cleanup)
+}
+
+pub(crate) fn probe_current_namespace(directory: &Path) -> Result<(), ProbeFailure> {
+    let root = ProbeDirectory::create(directory)?;
+    let lower = root.path.join("lower");
+    let layout_root = root.path.join("layout");
+    let merged = root.path.join("merged");
+    fs::create_dir(&lower).map_err(|error| ProbeFailure::new("create probe lower", error))?;
+    fs::create_dir(&merged).map_err(|error| ProbeFailure::new("create probe mountpoint", error))?;
+    let lower_payload = lower.join("payload");
+    let mut payload = File::create(&lower_payload)
+        .map_err(|error| ProbeFailure::new("create lower probe file", error))?;
+    payload
+        .write_all(PROBE_CONTENTS)
+        .and_then(|()| payload.sync_all())
+        .map_err(|error| ProbeFailure::new("write lower probe file", error))?;
+    drop(payload);
+
+    let layout = prepare(&layout_root, &lower, &merged)
+        .map_err(|error| storage_probe_failure("prepare caller-visible probe", error))?;
+    let identity = mount(&layout)
+        .map_err(|error| storage_probe_failure("mount caller-visible probe", error))?;
+
+    let verification = (|| {
+        let contents = fs::read(merged.join("payload"))
+            .map_err(|error| ProbeFailure::new("read lower file through probe view", error))?;
+        if contents != PROBE_CONTENTS {
+            return Err(ProbeFailure::new(
+                "read lower file through probe view",
+                std::io::Error::other("probe view returned different lower bytes"),
+            ));
+        }
+        fs::write(merged.join("payload"), PRIVATE_CONTENTS)
+            .map_err(|error| ProbeFailure::new("copy up private probe write", error))?;
+        if fs::read(&lower_payload)
+            .map_err(|error| ProbeFailure::new("verify immutable lower probe file", error))?
+            != PROBE_CONTENTS
+        {
+            return Err(ProbeFailure::new(
+                "verify immutable lower probe file",
+                std::io::Error::other("copy-up changed the lower file"),
+            ));
+        }
+        if fs::read(layout.upper.join("payload"))
+            .map_err(|error| ProbeFailure::new("verify private upper probe file", error))?
+            != PRIVATE_CONTENTS
+        {
+            return Err(ProbeFailure::new(
+                "verify private upper probe file",
+                std::io::Error::other("private write did not reach the upper layer"),
+            ));
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = unmount(&layout, &identity) {
+        root.abandon();
+        return Err(storage_probe_failure("unmount caller-visible probe", error));
+    }
+    remove_private_layers(&layout, &identity)
+        .map_err(|error| storage_probe_failure("remove caller-visible probe layers", error))?;
+    let cleanup = root.close();
+    verification.and(cleanup)
 }
 
 pub(crate) fn prepare(
@@ -263,12 +334,21 @@ pub(crate) fn load(
     })
 }
 
+pub(crate) fn current_mount_context() -> Result<OverlayFsMountContext, StorageError> {
+    let boot_id = current_boot_id()?;
+    let (mount_namespace_device, mount_namespace_inode) = current_mount_namespace()?;
+    Ok(OverlayFsMountContext {
+        boot_id,
+        mount_namespace_device,
+        mount_namespace_inode,
+    })
+}
+
 pub(crate) fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
     validate_layout(layout)?;
     require_empty_directory(&layout.merged, "merged destination")?;
     require_empty_directory(&layout.work, "private work")?;
-    let boot_id = current_boot_id()?;
-    let (mount_namespace_device, mount_namespace_inode) = current_mount_namespace()?;
+    let context = current_mount_context()?;
     let current = current_mount_entry(&layout.merged)?;
     if current.mount_point == layout.merged {
         return Err(mount_conflict(
@@ -324,11 +404,121 @@ pub(crate) fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, 
     }
     cleanup.disarm();
     Ok(OverlayFsMountIdentity {
-        boot_id,
-        mount_namespace_device,
-        mount_namespace_inode,
+        boot_id: context.boot_id,
+        mount_namespace_device: context.mount_namespace_device,
+        mount_namespace_inode: context.mount_namespace_inode,
         mount_id: entry.mount_id,
     })
+}
+
+pub(crate) fn arm_recovery(layout: &OverlayFsLayout, token: &str) -> Result<(), StorageError> {
+    validate_layout(layout)?;
+    let marker = recovery_marker_path(layout, token)?;
+    let contents = recovery_marker_contents(token);
+    let mut options = File::options();
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    match options.open(&marker) {
+        Ok(mut file) => {
+            file.write_all(&contents)
+                .and_then(|()| file.sync_all())
+                .map_err(|source| storage_io("write OverlayFS recovery marker", &marker, source))?;
+            sync_directory(&layout.upper)
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
+            require_recovery_marker(&marker, token)
+        }
+        Err(source) => Err(storage_io(
+            "create OverlayFS recovery marker",
+            &marker,
+            source,
+        )),
+    }
+}
+
+pub(crate) fn recover_mount(
+    layout: &OverlayFsLayout,
+    context: &OverlayFsMountContext,
+    token: &str,
+) -> Result<OverlayFsRecoveryState, StorageError> {
+    validate_layout(layout)?;
+    let marker = recovery_marker_path(layout, token)?;
+    let current_context = current_mount_context()?;
+    if current_context != *context {
+        return Ok(OverlayFsRecoveryState::DifferentNamespace);
+    }
+
+    let entry = current_mount_entry(&layout.merged)?;
+    if entry.mount_point != layout.merged {
+        return match require_recovery_marker(&marker, token) {
+            Ok(()) => Ok(OverlayFsRecoveryState::Prepared),
+            Err(StorageError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(OverlayFsRecoveryState::Absent)
+            }
+            Err(error) => Err(error),
+        };
+    }
+    if entry.filesystem_type != "overlay" {
+        return Ok(OverlayFsRecoveryState::Foreign);
+    }
+    if require_recovery_marker(&marker, token).is_err()
+        || require_recovery_marker(&layout.merged.join(recovery_marker_name(token)?), token)
+            .is_err()
+    {
+        return Ok(OverlayFsRecoveryState::Foreign);
+    }
+
+    Ok(OverlayFsRecoveryState::Mounted(OverlayFsMountIdentity {
+        boot_id: current_context.boot_id,
+        mount_namespace_device: current_context.mount_namespace_device,
+        mount_namespace_inode: current_context.mount_namespace_inode,
+        mount_id: entry.mount_id,
+    }))
+}
+
+pub(crate) fn clear_recovery(layout: &OverlayFsLayout, token: &str) -> Result<(), StorageError> {
+    validate_layout(layout)?;
+    let marker = recovery_marker_path(layout, token)?;
+    require_recovery_marker(&marker, token)?;
+    fs::remove_file(&marker)
+        .map_err(|source| storage_io("remove OverlayFS recovery marker", &marker, source))?;
+    sync_directory(&layout.upper)
+}
+
+pub(crate) fn remove_unmounted_private_layers(
+    layout: &OverlayFsLayout,
+    context: &OverlayFsMountContext,
+) -> Result<(), StorageError> {
+    validate_layout(layout)?;
+    if current_mount_context()? != *context {
+        return Err(mount_conflict(
+            &layout.merged,
+            "prepared layers belong to a different boot or mount namespace",
+        ));
+    }
+    let entry = current_mount_entry(&layout.merged)?;
+    if entry.mount_point == layout.merged {
+        return Err(mount_conflict(
+            &layout.merged,
+            format!(
+                "destination is still mount {} ({})",
+                entry.mount_id, entry.filesystem_type
+            ),
+        ));
+    }
+    require_exact_layout_entries(&layout.root)?;
+    fs::remove_dir_all(&layout.root).map_err(|source| {
+        storage_io("remove OverlayFS private layer root", &layout.root, source)
+    })?;
+    if let Some(parent) = layout.root.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn mount_state(
@@ -490,6 +680,62 @@ fn validate_layout(layout: &OverlayFsLayout) -> Result<(), StorageError> {
         return Err(invalid_layout(
             &layout.root,
             "layout paths no longer resolve to their prepared locations",
+        ));
+    }
+    Ok(())
+}
+
+fn recovery_marker_name(token: &str) -> Result<OsString, StorageError> {
+    validate_recovery_token(token)?;
+    Ok(OsString::from(format!("{RECOVERY_MARKER_PREFIX}{token}")))
+}
+
+fn recovery_marker_path(layout: &OverlayFsLayout, token: &str) -> Result<PathBuf, StorageError> {
+    Ok(layout.upper.join(recovery_marker_name(token)?))
+}
+
+fn recovery_marker_contents(token: &str) -> Vec<u8> {
+    format!("riftri-overlayfs-recovery-v1\n{token}\n").into_bytes()
+}
+
+fn validate_recovery_token(token: &str) -> Result<(), StorageError> {
+    if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err(invalid_layout(
+        Path::new("<overlayfs-recovery-token>"),
+        "recovery token must be exactly 32 bytes encoded as hexadecimal",
+    ))
+}
+
+fn require_recovery_marker(path: &Path, token: &str) -> Result<(), StorageError> {
+    let expected = recovery_marker_contents(token);
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| storage_io("inspect OverlayFS recovery marker", path, source))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(invalid_layout(
+            path,
+            "recovery marker must be a regular file",
+        ));
+    }
+    if metadata.len() != expected.len() as u64 {
+        return Err(invalid_layout(
+            path,
+            "recovery marker contains unexpected bytes",
+        ));
+    }
+    let mut file = File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|source| storage_io("open OverlayFS recovery marker", path, source))?;
+    let mut contents = Vec::with_capacity(expected.len());
+    file.read_to_end(&mut contents)
+        .map_err(|source| storage_io("read OverlayFS recovery marker", path, source))?;
+    if contents != expected {
+        return Err(invalid_layout(
+            path,
+            "recovery marker contains unexpected bytes",
         ));
     }
     Ok(())
@@ -687,6 +933,14 @@ fn storage_io(operation: &'static str, path: &Path, source: std::io::Error) -> S
         path: path.to_path_buf(),
         source,
     }
+}
+
+fn storage_probe_failure(operation: &'static str, error: StorageError) -> ProbeFailure {
+    let source = match error {
+        StorageError::Io { source, .. } => source,
+        other => std::io::Error::other(other.to_string()),
+    };
+    ProbeFailure::new(operation, source)
 }
 
 fn invalid_layout(path: &Path, detail: impl Into<String>) -> StorageError {
