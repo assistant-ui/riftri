@@ -350,6 +350,35 @@ impl Git {
         }
     }
 
+    /// Read every repository-local path value using Git's path parser while
+    /// preserving native path units.
+    pub fn local_config_paths(&self, path: &Path, key: &str) -> Result<Vec<PathBuf>, GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--null"),
+            OsString::from("--path"),
+            OsString::from("--get-all"),
+            OsString::from(key),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            output
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|value| !value.is_empty())
+                .map(|value| {
+                    os_string_from_git(value, "repository-local path configuration")
+                        .map(PathBuf::from)
+                })
+                .collect()
+        } else if output.status.code() == Some(1) {
+            Ok(Vec::new())
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
+    }
+
     /// Read a repository-local boolean using Git's own boolean parser.
     pub fn local_config_bool(&self, path: &Path, key: &str) -> Result<Option<bool>, GitError> {
         let arguments = [
@@ -387,6 +416,24 @@ impl Git {
             OsString::from("--replace-all"),
             OsString::from(key),
             value.to_os_string(),
+        ];
+        self.run_os(Some(path), &arguments)?;
+        Ok(())
+    }
+
+    /// Append one repository-local path value through Git.
+    pub fn add_local_config_path(
+        &self,
+        path: &Path,
+        key: &str,
+        value: &Path,
+    ) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--add"),
+            OsString::from(key),
+            value.as_os_str().to_os_string(),
         ];
         self.run_os(Some(path), &arguments)?;
         Ok(())
@@ -1456,6 +1503,18 @@ mod tests {
             git.local_config_value(fixture.path(), "riftri.enabled")
                 .expect("read removed local configuration"),
             None
+        );
+
+        let first = fixture.path().join("state one");
+        let second = fixture.path().join("state-two");
+        git.add_local_config_path(fixture.path(), "riftri.stateDirectory", &first)
+            .expect("register first state path");
+        git.add_local_config_path(fixture.path(), "riftri.stateDirectory", &second)
+            .expect("register second state path");
+        assert_eq!(
+            git.local_config_paths(fixture.path(), "riftri.stateDirectory")
+                .expect("read registered state paths"),
+            vec![first, second]
         );
     }
 

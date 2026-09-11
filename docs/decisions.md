@@ -234,6 +234,19 @@ preparation and native COW view creation remain independently concurrent. The
 lock lives in the common Git directory so separate Riftri state directories
 cannot race the same repository.
 
+### D026: custom state directories have repository-local discovery locators
+
+An explicit add that uses a non-default state directory records its canonical
+absolute path as a multi-valued `riftri.stateDirectory` entry in the
+repository's local Git configuration before operation intent is written. This
+locator lets the process-scoped and shell Git shims find lifecycle journals
+that must remain on another COW-capable volume. Remove and move route through
+the state directory that owns the matched add journal. Prune revalidates every
+registered state directory before Git changes shared worktree metadata.
+Missing, relative, or unsafe registered paths fail closed; a locator never
+authorizes deletion and does not replace the operation journals as recovery
+authority.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

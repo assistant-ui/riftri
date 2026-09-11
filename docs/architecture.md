@@ -141,6 +141,15 @@ and Windows ReFS views.
 SQLite remains the planned Milestone 3 registry for bases, views, mounts, and
 reference counts.
 
+The default state directory remains `<common-git-dir>/riftri`. When an explicit
+operation places state elsewhere, Riftri records the canonical absolute path as
+a multi-valued `riftri.stateDirectory` entry in repository-local Git
+configuration before recording operation intent. The Git shim consults the
+default and every registered state directory when routing remove, move, and
+prune operations. Missing or malformed registered locations fail closed. Bases
+and mutation journals remain on the destination's COW-capable volume; the Git
+configuration entry is only a small discovery locator.
+
 ## Worktree-add transaction
 
 For an enabled `git worktree add <path> <ref>` operation, the intended sequence is:
