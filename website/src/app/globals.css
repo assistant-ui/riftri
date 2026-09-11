@@ -550,7 +550,7 @@ code, pre { font-family: var(--font-mono); }
 }
 
 .copy-button:active { transform: scale(0.97); }
-.copy-button.is-copied { background: var(--success); color: var(--canvas-deep); }
+.copy-button.is-copied { background: var(--accent); color: var(--canvas-deep); }
 
 .site-footer {
   display: grid;
@@ -570,7 +570,7 @@ code, pre { font-family: var(--font-mono); }
 .site-footer .github-icon { font-size: 0.8rem; }
 
 @media (hover: hover) and (pointer: fine) {
-  .copy-button:hover { background: var(--ink); color: var(--canvas-deep); }
+  .copy-button:not(.is-copied):hover { background: var(--ink); color: var(--canvas-deep); }
   .button:hover { transform: translateY(-1px); }
   .button:hover > span { transform: translateX(2px); }
   a:hover .external-link-icon { transform: translate(1px, -1px); }
