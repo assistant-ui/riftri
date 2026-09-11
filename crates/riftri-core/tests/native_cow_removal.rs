@@ -170,6 +170,51 @@ fn removal_preserves_untracked_files_when_status_configuration_hides_them() {
 }
 
 #[test]
+fn accounting_keeps_a_reference_for_a_missing_unreleased_view() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let worktree = fixture.path().join("worktree");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+    let added = add_worktree(AddWorktreeRequest {
+        repository,
+        destination: worktree.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/missing-accounting")),
+        state_dir: Some(state.clone()),
+    })
+    .expect("create Riftri worktree");
+    fs::remove_dir_all(&worktree).expect("simulate missing managed view");
+
+    let accounting = storage_accounting(&state).expect("account missing managed view");
+    assert_eq!(accounting.active_views, 0);
+    assert_eq!(accounting.bases.len(), 1);
+    assert_eq!(accounting.bases[0].path, added.base_path);
+    assert_eq!(accounting.bases[0].reference_count, 1);
+    assert!(accounting.diagnostic_issues.iter().any(|issue| {
+        issue.path == added.destination && issue.reason.contains("missing worktree")
+    }));
+    assert!(
+        garbage_collect(&state, false)
+            .expect("plan collection with missing view")
+            .candidates
+            .is_empty(),
+        "the referenced base must not be advertised as collectible"
+    );
+}
+
+#[test]
 fn accounting_tracks_two_views_that_reuse_one_retained_base() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");

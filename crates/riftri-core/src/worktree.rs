@@ -484,19 +484,19 @@ pub fn storage_accounting(
     let mut references = BTreeMap::<PathBuf, usize>::new();
     let mut views = Vec::new();
     for journal in add_journals.iter().filter(|journal| {
-        journal.phase == AddWorktreePhase::Active
-            && !completed.contains(&journal.operation_id)
-            && journal.destination.is_dir()
+        journal.phase == AddWorktreePhase::Active && !completed.contains(&journal.operation_id)
     }) {
-        let (logical_bytes, allocated_bytes) = tree_usage(&journal.destination)?;
         *references.entry(journal.base_path.clone()).or_default() += 1;
-        views.push(ViewStorageAccounting {
-            destination: journal.destination.clone(),
-            base_path: journal.base_path.clone(),
-            backend: journal.backend,
-            logical_bytes,
-            allocated_bytes,
-        });
+        if journal.destination.is_dir() {
+            let (logical_bytes, allocated_bytes) = tree_usage(&journal.destination)?;
+            views.push(ViewStorageAccounting {
+                destination: journal.destination.clone(),
+                base_path: journal.base_path.clone(),
+                backend: journal.backend,
+                logical_bytes,
+                allocated_bytes,
+            });
+        }
     }
     views.sort_unstable_by(|left, right| left.destination.cmp(&right.destination));
 
