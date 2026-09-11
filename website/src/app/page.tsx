@@ -5,6 +5,7 @@ import { SectionLink } from "../components/section-link";
 import { StorageMap } from "../components/storage-map";
 
 const githubUrl = "https://github.com/assistant-ui/riftri";
+const agentbaseUrl = "https://agentbase.dev";
 
 export const metadata: Metadata = {
   title: "Riftri — Lightweight Git workspaces for parallel development",
@@ -183,7 +184,9 @@ function GetStarted() {
 function Footer() {
   return (
     <footer className="site-footer">
-      <span>RIFTRI</span>
+      <a className="footer-maker-link" href={agentbaseUrl}>
+        AGENTBASE AI <ArrowUpRightIcon />
+      </a>
       <a href={githubUrl}>
         <GitHubIcon /> GET ON GITHUB <ArrowUpRightIcon />
       </a>

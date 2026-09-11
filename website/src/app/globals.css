@@ -538,7 +538,9 @@ code, pre { font-family: var(--font-mono); }
 
 .site-footer > * { display: flex; height: 100%; align-items: center; padding: 1.5rem; }
 .site-footer > * + * { border-left: 1px solid var(--line); }
-.site-footer a { justify-content: flex-end; gap: 0.55rem; color: var(--ink-muted); }
+.site-footer a { gap: 0.55rem; color: var(--ink-muted); }
+.site-footer a:last-child { justify-content: flex-end; }
+.site-footer .footer-maker-link { justify-content: flex-start; }
 .site-footer .github-icon { font-size: 0.8rem; }
 
 @media (hover: hover) and (pointer: fine) {
