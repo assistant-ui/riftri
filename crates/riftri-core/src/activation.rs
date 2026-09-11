@@ -531,6 +531,7 @@ struct CommandContext {
 
 fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
     let mut repository = current_directory.to_path_buf();
+    let mut work_tree = None;
     let mut optimization_compatible = true;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
@@ -543,6 +544,27 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
                 repository.join(directory)
             };
             index += 2;
+        } else if argument == "--git-dir" || argument == "--work-tree" {
+            let value = arguments.get(index + 1)?;
+            let path = resolve_command_path(&repository, value);
+            if argument == "--work-tree" {
+                work_tree = Some(path);
+            } else if path.file_name() == Some(OsStr::new(".git")) {
+                repository = path.parent()?.to_path_buf();
+            }
+            optimization_compatible = false;
+            index += 2;
+        } else if let Some(value) = option_value(argument, "--git-dir=") {
+            let path = resolve_command_path(&repository, &value);
+            if path.file_name() == Some(OsStr::new(".git")) {
+                repository = path.parent()?.to_path_buf();
+            }
+            optimization_compatible = false;
+            index += 1;
+        } else if let Some(value) = option_value(argument, "--work-tree=") {
+            work_tree = Some(resolve_command_path(&repository, &value));
+            optimization_compatible = false;
+            index += 1;
         } else if argument == "--no-pager"
             || argument == "--paginate"
             || argument == "-p"
@@ -556,17 +578,47 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
         } else if argument.to_string_lossy().starts_with("--config-env=") {
             optimization_compatible = false;
             index += 1;
+        } else if argument == "--namespace" {
+            arguments.get(index + 1)?;
+            optimization_compatible = false;
+            index += 2;
+        } else if argument.to_string_lossy().starts_with("--namespace=")
+            || argument == "--no-replace-objects"
+            || argument == "--no-lazy-fetch"
+            || argument == "--no-optional-locks"
+            || argument == "--no-advice"
+            || argument == "--bare"
+        {
+            optimization_compatible = false;
+            index += 1;
         } else if argument.to_string_lossy().starts_with('-') {
             return None;
         } else {
             return Some(CommandContext {
-                repository,
+                repository: work_tree.unwrap_or(repository),
                 command_index: index,
                 optimization_compatible,
             });
         }
     }
     None
+}
+
+fn resolve_command_path(base: &Path, value: &OsStr) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+fn option_value(argument: &OsStr, prefix: &str) -> Option<OsString> {
+    let encoded = argument.as_encoded_bytes();
+    let value = encoded.strip_prefix(prefix.as_bytes())?;
+    // SAFETY: the split occurs immediately after an ASCII prefix, which is a
+    // valid boundary in the platform-independent encoded representation.
+    Some(unsafe { OsStr::from_encoded_bytes_unchecked(value) }.to_os_string())
 }
 
 fn parse_enabled_add(

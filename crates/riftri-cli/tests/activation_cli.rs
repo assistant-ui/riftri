@@ -773,6 +773,59 @@ fn enabled_forced_removal_of_a_missing_managed_view_fails_closed() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("global-option-guarded-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/global-option-guard",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "--git-dir=.git",
+            "--work-tree=.",
+            "worktree",
+            "remove",
+            "--force",
+        ])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard globally configured managed removal");
+
+    assert!(!removal.status.success());
+    assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+    assert!(destination.is_dir());
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn enabled_move_of_a_managed_view_is_journaled() {
     let fixture = RepositoryFixture::new();
     let source = fixture.directory.path().join("guarded-move-source");
