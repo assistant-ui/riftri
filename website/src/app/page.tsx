@@ -82,7 +82,7 @@ const essentials = [
   {
     index: "02",
     title: "Shared unchanged data",
-    description: "APFS clones share existing file blocks; edits stay private to each workspace.",
+    description: "Native copy-on-write backends share unchanged data; edits stay private.",
   },
   {
     index: "03",
@@ -146,8 +146,8 @@ function GetStarted() {
           <h2>Install. Check. Create.</h2>
         </div>
         <p>
-          Run these commands from a Git repository on macOS. Riftri will stop with an explanation
-          if the destination cannot use its APFS backend safely.
+          Run these commands from a Git repository. Riftri checks the destination first and stops
+          unless a supported native storage backend is available.
         </p>
       </div>
 
@@ -163,24 +163,6 @@ function GetStarted() {
           </li>
         ))}
       </ol>
-
-      <div className="activation-note">
-        <div>
-          <span>OPTIONAL</span>
-          <strong>Prefer normal <code>git worktree</code> commands?</strong>
-        </div>
-        <p>
-          Shell interception is explicitly activated, and <code>riftri enable</code> still opts in
-          one repository at a time.
-        </p>
-        <a href={`${githubUrl}#quick-start-on-macos`}>Read activation setup →</a>
-      </div>
-
-      <div className="release-note">
-        <span>EXPERIMENTAL</span>
-        <p>Optimized operations currently require macOS and APFS. Unsupported checkouts stop before mutation.</p>
-        <a href={githubUrl}>Full support notes ↗</a>
-      </div>
     </section>
   );
 }
