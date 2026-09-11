@@ -1660,7 +1660,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let fixture = RepositoryFixture::committed();
-        let wrapper_directory = tempdir().expect("wrapper directory");
+        let test_executable = std::env::current_exe().expect("current test executable");
+        let wrapper_parent = test_executable.parent().expect("test executable directory");
+        let wrapper_directory = tempfile::tempdir_in(wrapper_parent).expect("wrapper directory");
         let wrapper = wrapper_directory.path().join("git-wrapper");
         let calls = wrapper_directory.path().join("git-wrapper.calls");
         let mut wrapper_file = fs::File::create(&wrapper).expect("create Git wrapper");
