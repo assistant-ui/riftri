@@ -252,6 +252,7 @@ code, pre { font-family: var(--font-mono); }
   flex-wrap: wrap;
   gap: 1.1rem;
   padding: 0.8rem 1rem;
+  background: var(--surface);
   color: var(--ink-faint);
   font-size: 0.55rem;
   letter-spacing: 0.04em;
