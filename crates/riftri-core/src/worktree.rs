@@ -692,6 +692,9 @@ fn garbage_collect_inner(
                 marker_path: &marker_path,
             },
         );
+        let journal_path = store.path_for(&journal.operation_id);
+        let decoded = journal.clone().decode(journal_path.clone())?;
+        validate_new_collection_candidate(&state_directory, &decoded)?;
         let journal_path = store.persist(&journal)?;
         fail_collection_if_requested(journal.phase, fail_after)?;
         let decoded = journal.clone().decode(journal_path)?;
@@ -843,7 +846,10 @@ fn resume_collection(
             advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
             return Ok(false);
         } else {
-            validate_collectible_base(journal)?;
+            if let Err(error) = validate_collectible_base(journal) {
+                advance_collection(store, record, GarbageCollectionPhase::Cancelled, None)?;
+                return Err(error);
+            }
             remove_file_if_present(&journal.marker_path)?;
             sync_parent(&journal.marker_path)?;
             advance_collection(
@@ -869,7 +875,10 @@ fn resume_collection(
             advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
             return Ok(false);
         } else {
-            validate_collectible_base(journal)?;
+            if let Err(error) = validate_collectible_base(journal) {
+                advance_collection(store, record, GarbageCollectionPhase::Cancelled, None)?;
+                return Err(error);
+            }
             if journal.base_path.exists() {
                 make_directory_owner_writable(&journal.base_path)?;
                 fs::rename(&journal.base_path, &journal.quarantine_path).map_err(|source| {
@@ -937,35 +946,68 @@ fn validate_collection_paths(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn validate_new_collection_candidate(
+    state_directory: &Path,
+    journal: &DecodedCollectionJournal,
+) -> Result<(), WorktreeError> {
+    validate_collection_paths(state_directory, journal)?;
+    let base_metadata = fs::symlink_metadata(&journal.base_path)
+        .map_err(|source| io("inspect collectible base", &journal.base_path, source))?;
+    if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "collectible base {} is not a real directory",
+            journal.base_path.display()
+        )));
+    }
+    let marker_metadata = fs::symlink_metadata(&journal.marker_path).map_err(|source| {
+        io(
+            "inspect collectible base marker",
+            &journal.marker_path,
+            source,
+        )
+    })?;
+    if !marker_metadata.is_file() || marker_metadata.file_type().is_symlink() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "collectible base marker {} is not a real file",
+            journal.marker_path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_collectible_base(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
-    if journal.base_path.exists() {
-        let metadata = fs::symlink_metadata(&journal.base_path)
-            .map_err(|source| io("inspect collectible base", &journal.base_path, source))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+    match fs::symlink_metadata(&journal.base_path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
             return Err(WorktreeError::InvalidRequest(format!(
                 "collectible base {} is not a real directory",
                 journal.base_path.display()
             )));
         }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => return Err(io("inspect collectible base", &journal.base_path, source)),
     }
     validate_collection_marker(journal)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
-    if journal.marker_path.exists() {
-        let metadata = fs::symlink_metadata(&journal.marker_path).map_err(|source| {
-            io(
-                "inspect collectible base marker",
-                &journal.marker_path,
-                source,
-            )
-        })?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
+    match fs::symlink_metadata(&journal.marker_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
             return Err(WorktreeError::InvalidRequest(format!(
                 "collectible base marker {} is not a real file",
                 journal.marker_path.display()
             )));
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(io(
+                "inspect collectible base marker",
+                &journal.marker_path,
+                source,
+            ));
         }
     }
     Ok(())
@@ -3923,6 +3965,8 @@ mod tests {
         next_operation_id, prune_worktrees_inner, recover_incomplete_operations,
         remove_worktree_inner, storage_accounting,
     };
+    #[cfg(unix)]
+    use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
     use crate::test_support::writable_tempdir as tempdir;
     use crate::{
         AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
@@ -4692,10 +4736,42 @@ mod tests {
             .expect_err("symlinked marker must stop collection");
         assert!(error.to_string().contains("not a real file"));
         assert!(added.base_path.is_dir());
+        let accounting = storage_accounting(&state).expect("account rejected collection");
+        assert_eq!(accounting.pending_collections, 0);
         assert_eq!(
             fs::read_to_string(&protected_file).expect("read protected file"),
             "preserve\n"
         );
+
+        let operation_id = "gc-existing-invalid".to_owned();
+        let quarantine_path = added
+            .base_path
+            .parent()
+            .expect("base parent")
+            .join(format!(".riftri-gc-{operation_id}"));
+        let store = CollectionJournalStore::create(&state).expect("open collection store");
+        store
+            .persist(&CollectionJournalRecord::new(
+                operation_id,
+                CollectionJournalPaths {
+                    base_path: &added.base_path,
+                    quarantine_path: &quarantine_path,
+                    marker_path: &marker,
+                },
+            ))
+            .expect("persist prior invalid collection intent");
+        let recovery = recover_incomplete_operations(&state).expect("recover prior intent");
+        assert_eq!(recovery.errors.len(), 1);
+        let accounting = storage_accounting(&state).expect("account cancelled collection");
+        assert_eq!(accounting.pending_collections, 0);
+        assert_eq!(accounting.cancelled_collections, 1);
+
+        fs::remove_file(&marker).expect("remove unsafe marker");
+        fs::write(&marker, []).expect("restore real marker");
+        let collected = garbage_collect_inner(&state, true, None)
+            .expect("collect after repairing completion marker");
+        assert_eq!(collected.resumed_collections, 0);
+        assert_eq!(collected.collected, vec![added.base_path]);
     }
 
     #[test]
