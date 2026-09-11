@@ -568,11 +568,12 @@ impl Git {
         destination: &Path,
         temporary_index: &Path,
     ) -> Result<(), GitError> {
+        let temporary_index = git_path_argument(temporary_index);
         let environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
         let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
         self.run_os_with_env(Some(repository), &read_tree, &environment)?;
 
-        let mut prefix = destination.as_os_str().to_os_string();
+        let mut prefix = git_path_argument(destination);
         prefix.push(std::path::MAIN_SEPARATOR.to_string());
         let checkout = [
             OsString::from("checkout-index"),
@@ -606,7 +607,7 @@ impl Git {
             }
             WorktreeHead::Detached => arguments.push(OsString::from("--detach")),
         }
-        arguments.push(destination.as_os_str().to_os_string());
+        arguments.push(git_path_argument(destination));
         arguments.push(revision.to_os_string());
         self.run_os(Some(repository), &arguments)?;
         Ok(())
@@ -630,7 +631,7 @@ impl Git {
             OsString::from("worktree"),
             OsString::from("remove"),
             OsString::from("--"),
-            worktree.as_os_str().to_os_string(),
+            git_path_argument(worktree),
         ];
         self.run_os(Some(repository), &arguments)?;
         Ok(())
@@ -647,7 +648,7 @@ impl Git {
             OsString::from("worktree"),
             OsString::from("remove"),
             OsString::from("--force"),
-            worktree.as_os_str().to_os_string(),
+            git_path_argument(worktree),
         ];
         self.run_os(Some(repository), &arguments)?;
         Ok(())
@@ -665,8 +666,8 @@ impl Git {
             OsString::from("worktree"),
             OsString::from("move"),
             OsString::from("--"),
-            source.as_os_str().to_os_string(),
-            destination.as_os_str().to_os_string(),
+            git_path_argument(source),
+            git_path_argument(destination),
         ];
         self.run_os(Some(repository), &arguments)?;
         Ok(())
@@ -1123,6 +1124,37 @@ fn trim_line_endings(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
+fn git_path_argument(path: &Path) -> OsString {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        const VERBATIM_UNC: &[u16] = &[
+            b'\\' as u16,
+            b'\\' as u16,
+            b'?' as u16,
+            b'\\' as u16,
+            b'U' as u16,
+            b'N' as u16,
+            b'C' as u16,
+            b'\\' as u16,
+        ];
+
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if wide.starts_with(VERBATIM_UNC) {
+            let mut normalized = vec![b'\\' as u16, b'\\' as u16];
+            normalized.extend_from_slice(&wide[VERBATIM_UNC.len()..]);
+            return OsString::from_wide(&normalized);
+        }
+        if wide.starts_with(VERBATIM) {
+            return OsString::from_wide(&wide[VERBATIM.len()..]);
+        }
+    }
+
+    path.as_os_str().to_os_string()
+}
+
 #[cfg(unix)]
 fn os_string_from_git(bytes: &[u8], _context: &'static str) -> Result<OsString, GitError> {
     use std::os::unix::ffi::OsStringExt;
@@ -1205,6 +1237,23 @@ mod tests {
             .status()
             .expect("start Git fixture command");
         assert!(status.success(), "git {arguments:?} failed");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn removes_windows_verbatim_prefixes_from_git_path_arguments() {
+        assert_eq!(
+            super::git_path_argument(Path::new(r"\\?\C:\repo\view")),
+            OsStr::new(r"C:\repo\view")
+        );
+        assert_eq!(
+            super::git_path_argument(Path::new(r"\\?\UNC\server\share\view")),
+            OsStr::new(r"\\server\share\view")
+        );
+        assert_eq!(
+            super::git_path_argument(Path::new(r"C:\repo\view")),
+            OsStr::new(r"C:\repo\view")
+        );
     }
 
     #[test]

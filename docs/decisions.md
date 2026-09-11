@@ -176,7 +176,7 @@ A managed `worktree move` records its source, destination, repository, and
 source add operation before asking Git to move the linked worktree. Recovery
 reconciles the two safe observable states, then atomically updates the active add
 journal and completes the move journal. Cross-volume moves are rejected because
-their storage semantics are not an APFS rename. Before `worktree prune`, Riftri
+their storage semantics are not an atomic same-volume rename. Before `worktree prune`, Riftri
 requires every active managed view to exist and remain in Git's structured
 inventory and refuses to proceed while another lifecycle journal is pending.
 Prune can then be repeated safely during recovery. Unsupported configured or
@@ -207,6 +207,20 @@ then required to resolve to the same volume, and every view file must reflink;
 an ioctl failure rolls the journaled operation back and never triggers a byte
 copy. Read-only diagnostics remain conservative for XFS because its per-volume
 reflink feature cannot be proven from the filesystem name alone.
+
+### D024: Windows ReFS uses an active destination probe and aligned block clones
+
+Windows worktree creation supports ReFS through
+`FSCTL_DUPLICATE_EXTENTS_TO_FILE`. Before Git metadata or Riftri state is
+mutated, Riftri block-clones between delete-on-close files on the destination
+volume and verifies that a private write does not change the source. View files
+are pre-sized and inherit the source's sparse and integrity-stream settings.
+Aligned data is cloned in requests below 4 GiB; only the final unaligned tail,
+which is smaller than one filesystem cluster, is copied to satisfy the Windows
+API contract. A failed aligned clone aborts and rolls the journaled operation
+back instead of silently creating a full copy. ReFS is the only supported
+Windows mutation filesystem in this slice; alternatives for ordinary NTFS
+remain an explicit design question.
 
 ## Open design questions
 
