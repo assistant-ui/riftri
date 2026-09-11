@@ -386,28 +386,65 @@ code, pre { font-family: var(--font-mono); }
 .materialization-track li > .backend-cycle {
   position: relative;
   display: block;
-  min-height: 2.35rem;
+  min-height: 2.6rem;
+  overflow: hidden;
   color: var(--ink);
   font-size: inherit;
+  isolation: isolate;
+}
+
+.backend-cycle::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 1px;
+  background: var(--line);
+  content: "";
 }
 
 .backend-cycle-item {
+  --cycle-delay: 0s;
   position: absolute;
   inset: 0;
   display: grid;
   gap: 0.42rem;
+  padding-bottom: 0.35rem;
   opacity: 0;
-  transform: translateY(0.22rem);
-  animation: backend-cycle 9s var(--ease-out) infinite both;
+  transform: translate3d(0, 0.35rem, 0);
+  animation: backend-cycle 9s var(--ease-out) var(--cycle-delay) infinite both;
+  will-change: opacity, transform;
 }
 
-.backend-cycle-item:nth-child(2) { animation-delay: 3s; }
-.backend-cycle-item:nth-child(3) { animation-delay: 6s; }
+.backend-cycle-item::after {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 1;
+  height: 1px;
+  background: var(--accent);
+  content: "";
+  opacity: 0;
+  transform: scaleX(0);
+  transform-origin: left center;
+  animation: backend-progress 9s linear var(--cycle-delay) infinite both;
+}
+
+.backend-cycle-item:nth-child(2) { --cycle-delay: 3s; }
+.backend-cycle-item:nth-child(3) { --cycle-delay: 6s; }
 
 @keyframes backend-cycle {
-  0% { opacity: 0; transform: translateY(0.22rem); }
-  3%, 29% { opacity: 1; transform: translateY(0); }
-  32%, 100% { opacity: 0; transform: translateY(-0.22rem); }
+  0% { opacity: 0; transform: translate3d(0, 0.35rem, 0); }
+  2.5%, 31.5% { opacity: 1; transform: translate3d(0, 0, 0); }
+  34.5%, 100% { opacity: 0; transform: translate3d(0, -0.25rem, 0); }
+}
+
+@keyframes backend-progress {
+  0% { opacity: 0; transform: scaleX(0); }
+  2.5% { opacity: 0.82; transform: scaleX(0); }
+  31.5% { opacity: 0.82; transform: scaleX(1); }
+  34.5%, 100% { opacity: 0; transform: scaleX(1); }
 }
 
 .materialization-foot {
