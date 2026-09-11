@@ -1,6 +1,9 @@
 /target/
 /node_modules/
 /dist/
+/website/node_modules/
+/website/.farm/
+/website/.vercel/
 /package/platforms/*/bin/
 *.tgz
 .DS_Store
