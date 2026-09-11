@@ -122,6 +122,40 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
     File::open(path).map_err(|source| io(operation, path, source))
 }
 
+fn validate_operation_id(operation_id: &str, journal_path: &Path) -> Result<(), JournalError> {
+    let mut components = Path::new(operation_id).components();
+    let is_single_normal_component = matches!(
+        components.next(),
+        Some(std::path::Component::Normal(component)) if component == OsStr::new(operation_id)
+    ) && components.next().is_none();
+    if operation_id.is_empty()
+        || operation_id.contains('/')
+        || operation_id.contains('\\')
+        || !is_single_normal_component
+    {
+        return Err(JournalError::InvalidRecord {
+            path: journal_path.to_path_buf(),
+            detail: "operation ID is not a safe filename component".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_operation_identity(
+    directory: &Path,
+    operation_id: &str,
+    journal_path: &Path,
+) -> Result<(), JournalError> {
+    validate_operation_id(operation_id, journal_path)?;
+    if directory.join(format!("{operation_id}.json")) != journal_path {
+        return Err(JournalError::InvalidRecord {
+            path: journal_path.to_path_buf(),
+            detail: "operation ID does not match the journal filename".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "encoding", content = "units", rename_all = "kebab-case")]
 enum NativeOsString {
@@ -805,6 +839,7 @@ impl JournalStore {
 
     pub fn persist(&self, record: &JournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
+        validate_operation_id(&record.operation_id, &path)?;
         let temporary = self.directory.join(format!(
             ".{}.{}.tmp",
             record.operation_id,
@@ -847,6 +882,7 @@ impl JournalStore {
                         path: path.clone(),
                         source,
                     })?;
+                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
                 record.decode(path)
             })
             .collect()
@@ -863,6 +899,7 @@ impl JournalStore {
                 path: journal_path.to_path_buf(),
                 source,
             })?;
+        validate_operation_identity(&self.directory, &record.operation_id, journal_path)?;
         record.phase = phase;
         self.persist(&record)?;
         Ok(())
@@ -954,12 +991,7 @@ impl JournalStore {
                 path: journal_path.to_path_buf(),
                 source,
             })?;
-        if self.path_for(&record.operation_id) != journal_path {
-            return Err(JournalError::InvalidRecord {
-                path: journal_path.to_path_buf(),
-                detail: "operation ID does not match the journal filename".to_owned(),
-            });
-        }
+        validate_operation_identity(&self.directory, &record.operation_id, journal_path)?;
         let decoded = record.clone().decode(journal_path.to_path_buf())?;
         if decoded.phase != AddWorktreePhase::Active {
             return Err(JournalError::InvalidRecord {
@@ -1012,6 +1044,7 @@ impl RemovalJournalStore {
 
     pub fn persist(&self, record: &RemovalJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
+        validate_operation_id(&record.operation_id, &path)?;
         let temporary = self.directory.join(format!(
             ".{}.{}.tmp",
             record.operation_id,
@@ -1054,6 +1087,7 @@ impl RemovalJournalStore {
                         path: path.clone(),
                         source,
                     })?;
+                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
                 record.decode(path)
             })
             .collect()
@@ -1088,6 +1122,7 @@ impl MoveJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn persist(&self, record: &MoveJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
+        validate_operation_id(&record.operation_id, &path)?;
         let temporary = self.directory.join(format!(
             ".{}.{}.tmp",
             record.operation_id,
@@ -1130,6 +1165,7 @@ impl MoveJournalStore {
                         path: path.clone(),
                         source,
                     })?;
+                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
                 record.decode(path)
             })
             .collect()
@@ -1164,6 +1200,7 @@ impl PruneJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn persist(&self, record: &PruneJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
+        validate_operation_id(&record.operation_id, &path)?;
         let temporary = self.directory.join(format!(
             ".{}.{}.tmp",
             record.operation_id,
@@ -1206,6 +1243,7 @@ impl PruneJournalStore {
                         path: path.clone(),
                         source,
                     })?;
+                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
                 record.decode(path)
             })
             .collect()
@@ -1240,6 +1278,7 @@ impl CollectionJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn persist(&self, record: &CollectionJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
+        validate_operation_id(&record.operation_id, &path)?;
         let temporary = self.directory.join(format!(
             ".{}.{}.tmp",
             record.operation_id,
@@ -1282,6 +1321,7 @@ impl CollectionJournalStore {
                         path: path.clone(),
                         source,
                     })?;
+                validate_operation_identity(&self.directory, &record.operation_id, &path)?;
                 record.decode(path)
             })
             .collect()
@@ -1454,6 +1494,133 @@ mod tests {
             std::fs::remove_file(journal_path).expect("remove journal symlink");
             std::fs::remove_dir(journal_directory).expect("remove journal directory");
         }
+    }
+
+    fn assert_invalid_journal<T>(result: Result<T, JournalError>, expected_path: &Path) {
+        assert!(
+            matches!(result, Err(JournalError::InvalidRecord { path, .. }) if path == expected_path),
+            "journal identity mismatch must fail closed"
+        );
+    }
+
+    #[test]
+    fn journal_phase_updates_bind_the_operation_id_to_the_filename() {
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let record = JournalRecord::new(
+            "original".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        let journal_path = store.persist(&record).expect("persist journal");
+        let mut tampered = record;
+        tampered.operation_id = "replacement".to_owned();
+        std::fs::write(
+            &journal_path,
+            serde_json::to_vec_pretty(&tampered).expect("serialize tampered journal"),
+        )
+        .expect("tamper operation ID");
+
+        let result = store.update_phase(&journal_path, crate::AddWorktreePhase::BaseReady);
+
+        assert_invalid_journal(result, &journal_path);
+        assert!(
+            !store.path_for("replacement").exists(),
+            "mismatched update created a second journal"
+        );
+    }
+
+    #[test]
+    fn every_journal_reader_binds_operation_ids_to_filenames() {
+        let directory = tempdir().expect("journal fixture");
+
+        let add_store = JournalStore::create(directory.path()).expect("create add store");
+        let add = JournalRecord::new(
+            "add-operation".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        let path = add_store.persist(&add).expect("persist add journal");
+        let renamed = path.with_file_name("renamed.json");
+        std::fs::rename(path, &renamed).expect("rename add journal");
+        assert_invalid_journal(add_store.load_all(), &renamed);
+
+        let removal_store =
+            RemovalJournalStore::create(directory.path()).expect("create removal store");
+        let removal = RemovalJournalRecord::new(
+            "remove-operation".to_owned(),
+            RemovalJournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                base_path: Path::new("/base"),
+            },
+            "add-operation".to_owned(),
+        );
+        let path = removal_store
+            .persist(&removal)
+            .expect("persist removal journal");
+        let renamed = path.with_file_name("renamed.json");
+        std::fs::rename(path, &renamed).expect("rename removal journal");
+        assert_invalid_journal(removal_store.load_all(), &renamed);
+
+        let move_store = MoveJournalStore::create(directory.path()).expect("create move store");
+        let move_record = MoveJournalRecord::new(
+            "move-operation".to_owned(),
+            MoveJournalPaths {
+                repository: Path::new("/repository"),
+                source: Path::new("/source"),
+                destination: Path::new("/destination"),
+            },
+            "add-operation".to_owned(),
+        );
+        let path = move_store
+            .persist(&move_record)
+            .expect("persist move journal");
+        let renamed = path.with_file_name("renamed.json");
+        std::fs::rename(path, &renamed).expect("rename move journal");
+        assert_invalid_journal(move_store.load_all(), &renamed);
+
+        let prune_store = PruneJournalStore::create(directory.path()).expect("create prune store");
+        let prune = PruneJournalRecord::new("prune-operation".to_owned(), Path::new("/repository"));
+        let path = prune_store.persist(&prune).expect("persist prune journal");
+        let renamed = path.with_file_name("renamed.json");
+        std::fs::rename(path, &renamed).expect("rename prune journal");
+        assert_invalid_journal(prune_store.load_all(), &renamed);
+
+        let collection_store =
+            CollectionJournalStore::create(directory.path()).expect("create collection store");
+        let collection = CollectionJournalRecord::new(
+            "collection-operation".to_owned(),
+            CollectionJournalPaths {
+                base_path: Path::new("/base"),
+                quarantine_path: Path::new("/quarantine"),
+                marker_path: Path::new("/marker"),
+            },
+        );
+        let path = collection_store
+            .persist(&collection)
+            .expect("persist collection journal");
+        let renamed = path.with_file_name("renamed.json");
+        std::fs::rename(path, &renamed).expect("rename collection journal");
+        assert_invalid_journal(collection_store.load_all(), &renamed);
     }
 
     #[cfg(unix)]
