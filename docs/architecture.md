@@ -298,9 +298,20 @@ resolves the private probe root as a native byte path in the new namespace and
 mounts fixed relative layer names. Commas, colons, spaces, long paths, and
 non-UTF-8 bytes in the destination therefore never become mount-option syntax.
 The caller's mount namespace is never changed and the parent removes the probe
-directory. This only proves capability;
-durable upper/work placement, a visible merged worktree, journaled
-unmount/removal, and restart recovery remain part of the persistent backend.
+directory. The probe itself does not activate a persistent worktree.
+
+The persistent storage primitive places `upper` and `work` under one
+journal-owned `overlays/v1/<operation-id>` directory and mounts the immutable
+base directly at the requested merged worktree path. Layer mount options use
+already-open `/proc/self/fd` directory references, so user-controlled commas,
+colons, spaces, long paths, and non-UTF-8 bytes never enter OverlayFS's option
+grammar. A successful mount returns its Linux boot ID, mount-namespace device
+and inode, and kernel mount ID. Recovery unmounts or deletes private layers only
+when that full identity is absent or matches; a different namespace or foreign
+mount is preserved for manual attention. This primitive deliberately mounts
+only in the caller's current namespace. Core add/removal journal integration,
+the narrow least-privilege activation boundary, and reboot recovery remain
+gates before Riftri selects OverlayFS for worktree creation.
 
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in

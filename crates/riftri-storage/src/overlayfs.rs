@@ -1,18 +1,22 @@
-use std::ffi::CString;
+use std::ffi::{CString, OsString};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
+use crate::{OverlayFsLayout, OverlayFsMountIdentity, OverlayFsMountState, StorageError};
+
 const PROBE_CONTENTS: &[u8; 4] = b"base";
 const PRIVATE_CONTENTS: &[u8; 4] = b"view";
 static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+const OVERLAY_OPTIONS: &str = "userxattr,index=off,metacopy=off,redirect_dir=nofollow";
 
 #[derive(Debug, Error)]
 #[error("{operation}: {source}")]
@@ -139,6 +143,564 @@ pub(crate) fn probe(directory: &Path) -> Result<(), ProbeFailure> {
     drop(lower_payload_file);
     let cleanup = root.close();
     result.and(cleanup)
+}
+
+pub(crate) fn prepare(
+    layout_root: &Path,
+    lower: &Path,
+    merged: &Path,
+) -> Result<OverlayFsLayout, StorageError> {
+    for (name, path) in [
+        ("layout root", layout_root),
+        ("immutable lower", lower),
+        ("merged destination", merged),
+    ] {
+        if !path.is_absolute() {
+            return Err(invalid_layout(
+                path,
+                format!("{name} path must be absolute"),
+            ));
+        }
+    }
+    let lower = canonical_real_directory(lower, "immutable lower")?;
+    let merged = canonical_real_directory(merged, "merged destination")?;
+    require_empty_directory(&merged, "merged destination")?;
+
+    let parent = layout_root
+        .parent()
+        .ok_or_else(|| invalid_layout(layout_root, "layout root must have a parent directory"))?;
+    fs::create_dir_all(parent)
+        .map_err(|source| storage_io("create OverlayFS layout parent", parent, source))?;
+    let parent = canonical_real_directory(parent, "layout parent")?;
+    let file_name = layout_root
+        .file_name()
+        .ok_or_else(|| invalid_layout(layout_root, "layout root must name a child directory"))?;
+    let normalized_root = parent.join(file_name);
+    if normalized_root != layout_root {
+        return Err(invalid_layout(
+            layout_root,
+            format!(
+                "layout root resolves through a different path: {}",
+                normalized_root.display()
+            ),
+        ));
+    }
+    if lower.starts_with(&normalized_root)
+        || merged.starts_with(&normalized_root)
+        || normalized_root.starts_with(&lower)
+        || normalized_root.starts_with(&merged)
+    {
+        return Err(invalid_layout(
+            &normalized_root,
+            "layout root, lower, and merged paths must not contain one another",
+        ));
+    }
+
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder
+        .create(&normalized_root)
+        .map_err(|source| storage_io("create OverlayFS layout root", &normalized_root, source))?;
+    let cleanup = PreparedLayoutGuard {
+        root: normalized_root.clone(),
+        armed: true,
+    };
+    for path in [normalized_root.join("upper"), normalized_root.join("work")] {
+        builder
+            .create(&path)
+            .map_err(|source| storage_io("create OverlayFS private layer", &path, source))?;
+    }
+    sync_directory(&normalized_root)?;
+    sync_directory(&parent)?;
+
+    let layout = load(&normalized_root, &lower, &merged)?;
+    cleanup.disarm();
+    Ok(layout)
+}
+
+pub(crate) fn load(
+    layout_root: &Path,
+    lower: &Path,
+    merged: &Path,
+) -> Result<OverlayFsLayout, StorageError> {
+    let root = canonical_real_directory(layout_root, "layout root")?;
+    if root != layout_root {
+        return Err(invalid_layout(
+            layout_root,
+            format!(
+                "layout root resolves through a different path: {}",
+                root.display()
+            ),
+        ));
+    }
+    let lower = canonical_real_directory(lower, "immutable lower")?;
+    let merged = canonical_real_directory(merged, "merged destination")?;
+    let upper = canonical_real_directory(&root.join("upper"), "private upper")?;
+    let work = canonical_real_directory(&root.join("work"), "private work")?;
+    require_exact_layout_entries(&root)?;
+
+    if upper
+        .metadata()
+        .map_err(|source| storage_io("inspect OverlayFS private upper", &upper, source))?
+        .dev()
+        != work
+            .metadata()
+            .map_err(|source| storage_io("inspect OverlayFS private work", &work, source))?
+            .dev()
+    {
+        return Err(invalid_layout(
+            &root,
+            "private upper and work directories are on different filesystems",
+        ));
+    }
+
+    Ok(OverlayFsLayout {
+        root,
+        lower,
+        upper,
+        work,
+        merged,
+    })
+}
+
+pub(crate) fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
+    validate_layout(layout)?;
+    require_empty_directory(&layout.merged, "merged destination")?;
+    require_empty_directory(&layout.work, "private work")?;
+    let boot_id = current_boot_id()?;
+    let (mount_namespace_device, mount_namespace_inode) = current_mount_namespace()?;
+    let current = current_mount_entry(&layout.merged)?;
+    if current.mount_point == layout.merged {
+        return Err(mount_conflict(
+            &layout.merged,
+            format!(
+                "destination is already mount {} ({})",
+                current.mount_id, current.filesystem_type
+            ),
+        ));
+    }
+
+    let lower = open_path_directory(&layout.lower, "open OverlayFS immutable lower")?;
+    let upper = open_path_directory(&layout.upper, "open OverlayFS private upper")?;
+    let work = open_path_directory(&layout.work, "open OverlayFS private work")?;
+    let options = CString::new(format!(
+        "lowerdir=/proc/self/fd/{},upperdir=/proc/self/fd/{},workdir=/proc/self/fd/{},{OVERLAY_OPTIONS}",
+        lower.as_raw_fd(),
+        upper.as_raw_fd(),
+        work.as_raw_fd(),
+    ))
+    .expect("controlled OverlayFS options contain no NUL");
+    let target = storage_path_c_string(&layout.merged, "encode OverlayFS mountpoint")?;
+    const OVERLAY: &[u8] = b"overlay\0";
+    // SAFETY: all strings are NUL-terminated, the directory descriptors stay
+    // open for option resolution, and the exact target was validated above.
+    if unsafe {
+        libc::mount(
+            OVERLAY.as_ptr().cast(),
+            target.as_ptr(),
+            OVERLAY.as_ptr().cast(),
+            (libc::MS_NODEV | libc::MS_NOSUID) as libc::c_ulong,
+            options.as_ptr().cast(),
+        )
+    } != 0
+    {
+        return Err(storage_io(
+            "mount durable OverlayFS view",
+            &layout.merged,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let cleanup = MountedViewGuard {
+        target,
+        armed: true,
+    };
+
+    let entry = current_mount_entry(&layout.merged)?;
+    if entry.mount_point != layout.merged || entry.filesystem_type != "overlay" {
+        return Err(mount_conflict(
+            &layout.merged,
+            "kernel did not expose the newly created OverlayFS mount at the requested path",
+        ));
+    }
+    cleanup.disarm();
+    Ok(OverlayFsMountIdentity {
+        boot_id,
+        mount_namespace_device,
+        mount_namespace_inode,
+        mount_id: entry.mount_id,
+    })
+}
+
+pub(crate) fn mount_state(
+    layout: &OverlayFsLayout,
+    identity: &OverlayFsMountIdentity,
+) -> Result<OverlayFsMountState, StorageError> {
+    validate_layout(layout)?;
+    let current_boot = current_boot_id()?;
+    let entry = current_mount_entry(&layout.merged)?;
+    if current_boot != identity.boot_id {
+        return Ok(if entry.mount_point == layout.merged {
+            OverlayFsMountState::Foreign
+        } else {
+            OverlayFsMountState::Absent
+        });
+    }
+    let (namespace_device, namespace_inode) = current_mount_namespace()?;
+    if namespace_device != identity.mount_namespace_device
+        || namespace_inode != identity.mount_namespace_inode
+    {
+        return Ok(OverlayFsMountState::DifferentNamespace);
+    }
+    if entry.mount_point != layout.merged {
+        return Ok(OverlayFsMountState::Absent);
+    }
+    if entry.mount_id == identity.mount_id && entry.filesystem_type == "overlay" {
+        Ok(OverlayFsMountState::Active)
+    } else {
+        Ok(OverlayFsMountState::Foreign)
+    }
+}
+
+pub(crate) fn unmount(
+    layout: &OverlayFsLayout,
+    identity: &OverlayFsMountIdentity,
+) -> Result<bool, StorageError> {
+    match mount_state(layout, identity)? {
+        OverlayFsMountState::Absent => return Ok(false),
+        OverlayFsMountState::Active => {}
+        OverlayFsMountState::DifferentNamespace => {
+            return Err(mount_conflict(
+                &layout.merged,
+                "journaled mount belongs to a different mount namespace",
+            ));
+        }
+        OverlayFsMountState::Foreign => {
+            return Err(mount_conflict(
+                &layout.merged,
+                "the current mount does not match the journaled boot, namespace, mount ID, and filesystem type",
+            ));
+        }
+    }
+
+    let target = storage_path_c_string(&layout.merged, "encode OverlayFS mountpoint")?;
+    // SAFETY: mount_state proved that this exact target is the journaled
+    // OverlayFS mount, and UMOUNT_NOFOLLOW rejects a replaced final symlink.
+    if unsafe { libc::umount2(target.as_ptr(), libc::UMOUNT_NOFOLLOW) } != 0 {
+        return Err(storage_io(
+            "unmount durable OverlayFS view",
+            &layout.merged,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    if mount_state(layout, identity)? != OverlayFsMountState::Absent {
+        return Err(mount_conflict(
+            &layout.merged,
+            "journaled mount still appears active after unmount",
+        ));
+    }
+    Ok(true)
+}
+
+pub(crate) fn remove_private_layers(
+    layout: &OverlayFsLayout,
+    identity: &OverlayFsMountIdentity,
+) -> Result<(), StorageError> {
+    validate_layout(layout)?;
+    match mount_state(layout, identity)? {
+        OverlayFsMountState::Absent => {}
+        OverlayFsMountState::Active => {
+            return Err(mount_conflict(
+                &layout.merged,
+                "journaled mount is still active",
+            ));
+        }
+        OverlayFsMountState::DifferentNamespace => {
+            return Err(mount_conflict(
+                &layout.merged,
+                "journaled mount may still be active in a different mount namespace",
+            ));
+        }
+        OverlayFsMountState::Foreign => {
+            return Err(mount_conflict(
+                &layout.merged,
+                "a foreign mount occupies the journaled destination",
+            ));
+        }
+    }
+    require_exact_layout_entries(&layout.root)?;
+    fs::remove_dir_all(&layout.root).map_err(|source| {
+        storage_io("remove OverlayFS private layer root", &layout.root, source)
+    })?;
+    if let Some(parent) = layout.root.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+struct PreparedLayoutGuard {
+    root: PathBuf,
+    armed: bool,
+}
+
+impl PreparedLayoutGuard {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PreparedLayoutGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
+struct MountedViewGuard {
+    target: CString,
+    armed: bool,
+}
+
+impl MountedViewGuard {
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for MountedViewGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            // SAFETY: the guard is armed only after this process successfully
+            // mounted the exact target and before the identity is returned.
+            let _ = unsafe { libc::umount2(self.target.as_ptr(), libc::UMOUNT_NOFOLLOW) };
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MountEntry {
+    mount_id: u64,
+    mount_point: PathBuf,
+    filesystem_type: String,
+}
+
+fn validate_layout(layout: &OverlayFsLayout) -> Result<(), StorageError> {
+    let loaded = load(&layout.root, &layout.lower, &layout.merged)?;
+    if loaded != *layout {
+        return Err(invalid_layout(
+            &layout.root,
+            "layout paths no longer resolve to their prepared locations",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_real_directory(path: &Path, name: &str) -> Result<PathBuf, StorageError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| storage_io("inspect OverlayFS directory", path, source))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(invalid_layout(
+            path,
+            format!("{name} must be a real directory"),
+        ));
+    }
+    fs::canonicalize(path).map_err(|source| storage_io("resolve OverlayFS directory", path, source))
+}
+
+fn require_empty_directory(path: &Path, name: &str) -> Result<(), StorageError> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|source| storage_io("read OverlayFS directory", path, source))?;
+    if entries.next().is_some() {
+        return Err(invalid_layout(path, format!("{name} must be empty")));
+    }
+    Ok(())
+}
+
+fn require_exact_layout_entries(root: &Path) -> Result<(), StorageError> {
+    let mut entries = fs::read_dir(root)
+        .map_err(|source| storage_io("read OverlayFS layout root", root, source))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|source| storage_io("read OverlayFS layout entry", root, source))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_unstable();
+    if entries != [OsString::from("upper"), OsString::from("work")] {
+        return Err(invalid_layout(
+            root,
+            "layout root must contain only the journal-owned upper and work directories",
+        ));
+    }
+    Ok(())
+}
+
+fn open_path_directory(path: &Path, operation: &'static str) -> Result<File, StorageError> {
+    File::options()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|source| storage_io(operation, path, source))
+}
+
+fn current_mount_entry(path: &Path) -> Result<MountEntry, StorageError> {
+    let directory =
+        File::open(path).map_err(|source| storage_io("open OverlayFS mountpoint", path, source))?;
+    let fdinfo_path = PathBuf::from(format!("/proc/self/fdinfo/{}", directory.as_raw_fd()));
+    let fdinfo = fs::read(&fdinfo_path)
+        .map_err(|source| storage_io("read mountpoint file-descriptor identity", path, source))?;
+    let mount_id = fdinfo
+        .split(|byte| *byte == b'\n')
+        .find_map(|line| line.strip_prefix(b"mnt_id:\t"))
+        .ok_or_else(|| invalid_layout(path, "kernel did not report a mount ID for the path"))?;
+    let mount_id = std::str::from_utf8(mount_id)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| invalid_layout(path, "kernel reported an invalid mount ID"))?;
+
+    let mountinfo = fs::read("/proc/self/mountinfo").map_err(|source| {
+        storage_io(
+            "read current mount namespace inventory",
+            Path::new("/proc/self/mountinfo"),
+            source,
+        )
+    })?;
+    for line in mountinfo.split(|byte| *byte == b'\n') {
+        let fields = line
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        if fields.len() < 7 {
+            continue;
+        }
+        let Some(line_mount_id) = std::str::from_utf8(fields[0])
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if line_mount_id != mount_id {
+            continue;
+        }
+        let separator = fields
+            .iter()
+            .position(|field| *field == b"-")
+            .ok_or_else(|| invalid_layout(path, "kernel mount inventory entry has no separator"))?;
+        if separator + 2 >= fields.len() {
+            return Err(invalid_layout(
+                path,
+                "kernel mount inventory entry is incomplete",
+            ));
+        }
+        let mount_point = PathBuf::from(OsString::from_vec(decode_mount_field(fields[4])?));
+        let filesystem_type = std::str::from_utf8(fields[separator + 1])
+            .map_err(|_| invalid_layout(path, "kernel reported a non-UTF-8 filesystem type"))?
+            .to_owned();
+        return Ok(MountEntry {
+            mount_id,
+            mount_point,
+            filesystem_type,
+        });
+    }
+    Err(invalid_layout(
+        path,
+        format!("mount ID {mount_id} was absent from the current namespace inventory"),
+    ))
+}
+
+fn decode_mount_field(field: &[u8]) -> Result<Vec<u8>, StorageError> {
+    let mut decoded = Vec::with_capacity(field.len());
+    let mut index = 0;
+    while index < field.len() {
+        if field[index] != b'\\' {
+            decoded.push(field[index]);
+            index += 1;
+            continue;
+        }
+        if index + 3 >= field.len()
+            || !(b'0'..=b'7').contains(&field[index + 1])
+            || !(b'0'..=b'7').contains(&field[index + 2])
+            || !(b'0'..=b'7').contains(&field[index + 3])
+        {
+            return Err(invalid_layout(
+                Path::new("/proc/self/mountinfo"),
+                "kernel mount inventory contains an invalid path escape",
+            ));
+        }
+        decoded.push(
+            (field[index + 1] - b'0') * 64
+                + (field[index + 2] - b'0') * 8
+                + (field[index + 3] - b'0'),
+        );
+        index += 4;
+    }
+    Ok(decoded)
+}
+
+fn current_mount_namespace() -> Result<(u64, u64), StorageError> {
+    let path = Path::new("/proc/self/ns/mnt");
+    let metadata = fs::metadata(path)
+        .map_err(|source| storage_io("inspect current mount namespace", path, source))?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+fn current_boot_id() -> Result<String, StorageError> {
+    let path = Path::new("/proc/sys/kernel/random/boot_id");
+    let boot_id = fs::read_to_string(path)
+        .map_err(|source| storage_io("read Linux boot identity", path, source))?;
+    let boot_id = boot_id.trim();
+    if boot_id.is_empty()
+        || !boot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        return Err(invalid_layout(
+            path,
+            "kernel reported an invalid boot identity",
+        ));
+    }
+    Ok(boot_id.to_owned())
+}
+
+fn sync_directory(path: &Path) -> Result<(), StorageError> {
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| storage_io("sync OverlayFS directory", path, source))
+}
+
+fn storage_path_c_string(path: &Path, operation: &'static str) -> Result<CString, StorageError> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        storage_io(
+            operation,
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "path contains an embedded NUL byte",
+            ),
+        )
+    })
+}
+
+fn storage_io(operation: &'static str, path: &Path, source: std::io::Error) -> StorageError {
+    StorageError::Io {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
+fn invalid_layout(path: &Path, detail: impl Into<String>) -> StorageError {
+    StorageError::InvalidOverlayFsLayout {
+        path: path.to_path_buf(),
+        detail: detail.into(),
+    }
+}
+
+fn mount_conflict(path: &Path, detail: impl Into<String>) -> StorageError {
+    StorageError::OverlayFsMountConflict {
+        path: path.to_path_buf(),
+        detail: detail.into(),
+    }
 }
 
 fn path_c_string(path: &Path) -> Result<CString, ProbeFailure> {

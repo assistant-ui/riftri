@@ -35,6 +35,12 @@ pub enum StorageError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("invalid OverlayFS layout at {path}: {detail}")]
+    InvalidOverlayFsLayout { path: PathBuf, detail: String },
+
+    #[error("refusing to change OverlayFS mount at {path}: {detail}")]
+    OverlayFsMountConflict { path: PathBuf, detail: String },
 }
 
 /// Native APFS clone operations used by the explicit macOS prototype.
@@ -208,6 +214,56 @@ mod reflink;
 /// Linux kernel OverlayFS mount operations.
 pub struct OverlayFsMounter;
 
+/// Durable paths owned by one OverlayFS-backed worktree operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayFsLayout {
+    root: PathBuf,
+    lower: PathBuf,
+    upper: PathBuf,
+    work: PathBuf,
+    merged: PathBuf,
+}
+
+impl OverlayFsLayout {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn lower(&self) -> &Path {
+        &self.lower
+    }
+
+    pub fn upper(&self) -> &Path {
+        &self.upper
+    }
+
+    pub fn work(&self) -> &Path {
+        &self.work
+    }
+
+    pub fn merged(&self) -> &Path {
+        &self.merged
+    }
+}
+
+/// Kernel identity required to recover or unmount one exact OverlayFS mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayFsMountIdentity {
+    pub boot_id: String,
+    pub mount_namespace_device: u64,
+    pub mount_namespace_inode: u64,
+    pub mount_id: u64,
+}
+
+/// Relationship between the current process and a journaled OverlayFS mount.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayFsMountState {
+    Active,
+    Absent,
+    DifferentNamespace,
+    Foreign,
+}
+
 impl OverlayFsMounter {
     /// Actively verify mount permission, upper/work compatibility, copy-up,
     /// and private-write isolation against the destination volume.
@@ -271,6 +327,118 @@ impl OverlayFsMounter {
             ),
             requires_explicit_fallback: false,
         }
+    }
+
+    /// Create the private upper/work layout for a future durable mount.
+    #[cfg(target_os = "linux")]
+    pub fn prepare(
+        layout_root: &Path,
+        lower: &Path,
+        merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        overlayfs::prepare(layout_root, lower, merged)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn prepare(
+        _layout_root: &Path,
+        _lower: &Path,
+        _merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Validate and reopen a previously prepared private layout.
+    #[cfg(target_os = "linux")]
+    pub fn load(
+        layout_root: &Path,
+        lower: &Path,
+        merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        overlayfs::load(layout_root, lower, merged)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn load(
+        _layout_root: &Path,
+        _lower: &Path,
+        _merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Mount a prepared view in the caller's current mount namespace.
+    #[cfg(target_os = "linux")]
+    pub fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
+        overlayfs::mount(layout)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn mount(_layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Inspect one journaled mount without adopting an unrelated mount.
+    #[cfg(target_os = "linux")]
+    pub fn mount_state(
+        layout: &OverlayFsLayout,
+        identity: &OverlayFsMountIdentity,
+    ) -> Result<OverlayFsMountState, StorageError> {
+        overlayfs::mount_state(layout, identity)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn mount_state(
+        _layout: &OverlayFsLayout,
+        _identity: &OverlayFsMountIdentity,
+    ) -> Result<OverlayFsMountState, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Unmount only when the visible mount still has the journaled identity.
+    #[cfg(target_os = "linux")]
+    pub fn unmount(
+        layout: &OverlayFsLayout,
+        identity: &OverlayFsMountIdentity,
+    ) -> Result<bool, StorageError> {
+        overlayfs::unmount(layout, identity)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn unmount(
+        _layout: &OverlayFsLayout,
+        _identity: &OverlayFsMountIdentity,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Remove private upper/work state after the identified mount is absent.
+    #[cfg(target_os = "linux")]
+    pub fn remove_private_layers(
+        layout: &OverlayFsLayout,
+        identity: &OverlayFsMountIdentity,
+    ) -> Result<(), StorageError> {
+        overlayfs::remove_private_layers(layout, identity)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn remove_private_layers(
+        _layout: &OverlayFsLayout,
+        _identity: &OverlayFsMountIdentity,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
     }
 }
 
