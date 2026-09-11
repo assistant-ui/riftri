@@ -22,6 +22,19 @@ function GitHubIcon() {
   );
 }
 
+function ArrowUpRightIcon() {
+  return (
+    <svg
+      className="external-link-icon"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M4.5 11.5 11.5 4.5M5 4.5h6.5V11" />
+    </svg>
+  );
+}
+
 function GraphLabel({
   index,
   children,
@@ -62,7 +75,7 @@ function Hero() {
             Get started <span aria-hidden="true">→</span>
           </SectionLink>
           <a className="button button-secondary" href={githubUrl}>
-            <GitHubIcon /> View GitHub <span aria-hidden="true">↗</span>
+            <GitHubIcon /> View GitHub <ArrowUpRightIcon />
           </a>
         </div>
       </div>
@@ -172,7 +185,7 @@ function Footer() {
     <footer className="site-footer">
       <span>RIFTRI</span>
       <a href={githubUrl}>
-        <GitHubIcon /> ASSISTANT-UI/RIFTRI ↗
+        <GitHubIcon /> GET ON GITHUB <ArrowUpRightIcon />
       </a>
     </footer>
   );

@@ -100,6 +100,18 @@ code, pre { font-family: var(--font-mono); }
   fill: currentColor;
 }
 
+.external-link-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: square;
+  stroke-linejoin: miter;
+  stroke-width: 1.4;
+  transition: transform 140ms var(--ease-out);
+}
+
 .hero h1 {
   max-width: 640px;
   margin: 1.55rem 0 0;
@@ -483,6 +495,7 @@ code, pre { font-family: var(--font-mono); }
   .copy-button:hover { background: var(--ink); color: var(--canvas-deep); }
   .button:hover { transform: translateY(-1px); }
   .button:hover > span { transform: translateX(2px); }
+  a:hover .external-link-icon { transform: translate(1px, -1px); }
   .button-primary:hover { border-color: var(--accent); background: var(--accent); }
   .button-secondary:hover { color: var(--ink); }
   .site-footer a:hover { color: var(--accent); }
