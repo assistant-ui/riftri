@@ -1531,9 +1531,25 @@ fn prepare_base(
     let base_exists = base_path
         .try_exists()
         .map_err(|source| io("inspect immutable base", base_path, source))?;
-    let complete_exists = complete_path
-        .try_exists()
-        .map_err(|source| io("inspect immutable-base marker", &complete_path, source))?;
+    let complete_exists = match fs::symlink_metadata(&complete_path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "immutable-base completion marker {} is not a real file",
+                    complete_path.display()
+                )));
+            }
+            true
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(io(
+                "inspect immutable-base completion marker",
+                &complete_path,
+                source,
+            ));
+        }
+    };
     if base_exists && complete_exists {
         let metadata = fs::symlink_metadata(base_path)
             .map_err(|source| io("inspect immutable base", base_path, source))?;
