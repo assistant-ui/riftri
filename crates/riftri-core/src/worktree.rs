@@ -362,11 +362,8 @@ fn repository_state_directories_with_git(
     })?;
     let default = repository.identity.common_git_dir.join("riftri");
     let mut directories = Vec::new();
-    if default.exists() {
-        directories.push(
-            fs::canonicalize(&default)
-                .map_err(|source| io("resolve default state directory", &default, source))?,
-        );
+    if let Some(default) = resolve_real_state_directory_if_present(&default)? {
+        directories.push(default);
     }
     for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
         if !configured.is_absolute() {
@@ -375,27 +372,7 @@ fn repository_state_directories_with_git(
                 configured.display()
             )));
         }
-        let canonical = fs::canonicalize(&configured).map_err(|source| {
-            io(
-                "resolve registered Riftri state directory",
-                &configured,
-                source,
-            )
-        })?;
-        let metadata = fs::symlink_metadata(&canonical).map_err(|source| {
-            io(
-                "inspect registered Riftri state directory",
-                &canonical,
-                source,
-            )
-        })?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "registered Riftri state path is not a real directory: {}",
-                canonical.display()
-            )));
-        }
-        directories.push(canonical);
+        directories.push(resolve_real_state_directory(&configured)?);
     }
     directories.sort_unstable();
     directories.dedup();
@@ -412,7 +389,7 @@ fn register_state_directory(
         WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
     })?;
     let default = repository.identity.common_git_dir.join("riftri");
-    if fs::canonicalize(&default).is_ok_and(|path| path == state_directory) {
+    if resolve_real_state_directory_if_present(&default)?.as_deref() == Some(state_directory) {
         return Ok(());
     }
     let lock_path = repository
@@ -429,11 +406,12 @@ fn register_state_directory(
     lock.lock_exclusive()
         .map_err(|source| io("lock state-directory locators", &lock_path, source))?;
     let registered = git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?;
-    if registered.into_iter().any(|path| {
-        path == state_directory
-            || fs::canonicalize(path).is_ok_and(|canonical| canonical == state_directory)
-    }) {
-        return Ok(());
+    for registered in registered {
+        if registered == state_directory
+            || resolve_real_state_directory(&registered)? == state_directory
+        {
+            return Ok(());
+        }
     }
     git.add_local_config_path(repository_root, STATE_DIRECTORY_CONFIG_KEY, state_directory)?;
     Ok(())
@@ -467,12 +445,8 @@ pub fn storage_accounting(
     state_directory: &Path,
 ) -> Result<StorageAccountingReport, WorktreeError> {
     let state_directory = absolute_path(state_directory)?;
-    let state_directory = if state_directory.exists() {
-        fs::canonicalize(&state_directory)
-            .map_err(|source| io("resolve state directory", &state_directory, source))?
-    } else {
-        state_directory
-    };
+    let state_directory =
+        resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
     let add_journals = JournalStore::open(&state_directory).load_all()?;
     let removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
     let move_journals = MoveJournalStore::open(&state_directory).load_all()?;
@@ -619,14 +593,12 @@ fn garbage_collect_inner(
     fail_after: Option<GarbageCollectionPhase>,
 ) -> Result<GarbageCollectionReport, WorktreeError> {
     let state_directory = absolute_path(state_directory)?;
-    if !state_directory.exists() {
+    let Some(state_directory) = resolve_real_state_directory_if_present(&state_directory)? else {
         return Ok(GarbageCollectionReport {
             applied: apply,
             ..GarbageCollectionReport::default()
         });
-    }
-    let state_directory = fs::canonicalize(&state_directory)
-        .map_err(|source| io("resolve state directory", &state_directory, source))?;
+    };
 
     let resumed_collections = if apply {
         recover_collection_journals(&state_directory)?
@@ -1026,8 +998,7 @@ fn remove_worktree_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = fs::canonicalize(absolute_path(&requested_state)?)
-        .map_err(|source| io("resolve state directory", &requested_state, source))?;
+    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
             "{} is not an active Riftri-managed worktree in {}",
@@ -1140,8 +1111,7 @@ fn move_worktree_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = fs::canonicalize(absolute_path(&requested_state)?)
-        .map_err(|source| io("resolve state directory", &requested_state, source))?;
+    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
     let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
             "{} is not an active Riftri-managed worktree in {}",
@@ -1231,8 +1201,7 @@ fn prune_worktrees_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = fs::canonicalize(absolute_path(&requested_state)?)
-        .map_err(|source| io("resolve state directory", &requested_state, source))?;
+    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
     verify_repository_prune_safe(&git, &state_directory, &repository_root, None)?;
 
     let store = PruneJournalStore::create(&state_directory)?;
@@ -1295,8 +1264,7 @@ fn add_worktree_inner(
     }
 
     create_state_layout(&state_directory)?;
-    let state_directory = fs::canonicalize(&state_directory)
-        .map_err(|source| io("resolve state directory", &state_directory, source))?;
+    let state_directory = resolve_real_state_directory(&state_directory)?;
     register_state_directory(&git, &repository, &state_directory)?;
     let store = JournalStore::create(&state_directory)?;
     let base_directory = state_directory.join("bases/v1").join(repository_cache_id(
@@ -1945,6 +1913,36 @@ fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
         std::env::current_dir()
             .map(|current| current.join(path))
             .map_err(|source| io("resolve current directory", path, source))
+    }
+}
+
+fn resolve_real_state_directory(path: &Path) -> Result<PathBuf, WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect Riftri state directory", path, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(JournalError::InvalidStateDirectory {
+            path: path.to_path_buf(),
+        }
+        .into());
+    }
+    fs::canonicalize(path).map_err(|source| io("resolve state directory", path, source))
+}
+
+fn resolve_real_state_directory_if_present(path: &Path) -> Result<Option<PathBuf>, WorktreeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(JournalError::InvalidStateDirectory {
+                    path: path.to_path_buf(),
+                }
+                .into());
+            }
+            fs::canonicalize(path)
+                .map(Some)
+                .map_err(|source| io("resolve state directory", path, source))
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io("inspect Riftri state directory", path, source)),
     }
 }
 
@@ -2815,12 +2813,8 @@ pub fn recover_incomplete_operations(
     state_directory: &Path,
 ) -> Result<RecoveryReport, WorktreeError> {
     let state_directory = absolute_path(state_directory)?;
-    let state_directory = if state_directory.exists() {
-        fs::canonicalize(&state_directory)
-            .map_err(|source| io("resolve state directory", &state_directory, source))?
-    } else {
-        state_directory
-    };
+    let state_directory =
+        resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
     let store = JournalStore::open(&state_directory);
     let journals = store.load_all()?;
     let removal_store = RemovalJournalStore::open(&state_directory);
@@ -3865,7 +3859,7 @@ mod tests {
         AddWorktreeRequest, MoveWorktreeRequest, PruneWorktreesRequest, RemoveWorktreeRequest,
         WorktreeMode, add_worktree_inner, garbage_collect_inner, move_worktree_inner,
         next_operation_id, prune_worktrees_inner, recover_incomplete_operations,
-        remove_worktree_inner, storage_accounting,
+        remove_worktree_inner, repository_state_directories, storage_accounting,
     };
     use crate::test_support::writable_tempdir as tempdir;
     use crate::{
@@ -3920,6 +3914,35 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(ids.len(), WORKERS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_operations_reject_a_symlinked_state_root() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let external_state = fixture.path().join("external-state");
+        fs::create_dir(&repository).expect("create repository");
+        fs::create_dir(&external_state).expect("create external state");
+        git(&repository, &["init", "--quiet"]);
+        let state = repository.join(".git/riftri");
+        symlink(&external_state, &state).expect("symlink state root");
+
+        let discovery = repository_state_directories(&repository)
+            .expect_err("repository discovery must reject a symlinked state root");
+        assert!(discovery.to_string().contains("not a real directory"));
+
+        for error in [
+            storage_accounting(&state).expect_err("status must reject a symlinked state root"),
+            garbage_collect_inner(&state, false, None)
+                .expect_err("garbage collection must reject a symlinked state root"),
+            recover_incomplete_operations(&state)
+                .expect_err("recovery must reject a symlinked state root"),
+        ] {
+            assert!(error.to_string().contains("not a real directory"));
+        }
     }
 
     #[test]
