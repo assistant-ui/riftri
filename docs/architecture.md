@@ -137,7 +137,7 @@ worktree.
 
 Versioned JSON add-operation journals are written atomically and preserve native
 path units. They are the current recovery authority for APFS, Linux reflink,
-and Windows ReFS views.
+Linux OverlayFS, and Windows ReFS views.
 The version 1 format has a backward-compatible OverlayFS extension that is
 valid only when the selected backend is OverlayFS. It records the exact
 `overlays/v1/<operation-id>` private-layer root, a 256-bit hexadecimal recovery
@@ -324,9 +324,17 @@ the current boot and namespace context and the upper layer can contain a
 token-bound recovery marker. If the process exits after `mount(2)` but before
 the kernel mount ID reaches the journal, recovery accepts only an OverlayFS
 mount at the exact destination that exposes the same private marker. A
-different namespace or any marker mismatch remains foreign. Core add/removal
-journal execution, the narrow least-privilege activation boundary, and reboot
-recovery remain gates before Riftri selects OverlayFS for worktree creation.
+different namespace or any marker mismatch remains foreign. Core selects
+OverlayFS only after the caller-namespace probe succeeds and reflink probing
+does not. Add moves the real linked-worktree pointer into the private upper,
+arms recovery, mounts the immutable base, persists exact mount identity, clears
+the marker, synchronizes Git's index, and verifies cleanliness. Removal
+rechecks Git cleanliness, unmounts only that identity, restores the pointer to
+the underlying destination, removes journal-owned private layers, and lets real
+Git remove the linked worktree. A crash at any persisted add or removal phase
+is recoverable in the same namespace, including the gap after `mount(2)` and
+before identity persistence. Mounted moves fail before mutation. The narrow
+least-privilege activation boundary and reboot recovery remain open.
 
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in

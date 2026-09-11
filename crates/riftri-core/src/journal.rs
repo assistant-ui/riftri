@@ -373,6 +373,67 @@ impl JournalRecord {
         Ok(record)
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn record_overlayfs_mount_identity(
+        &mut self,
+        identity: OverlayFsMountIdentity,
+    ) -> Result<(), JournalError> {
+        let overlayfs = self
+            .overlayfs
+            .as_mut()
+            .ok_or_else(|| JournalError::InvalidRecord {
+                path: PathBuf::from("<in-memory>"),
+                detail: "cannot record an OverlayFS mount identity without durable mount intent"
+                    .to_owned(),
+            })?;
+        if self.backend != BackendKind::OverlayFs {
+            return Err(JournalError::InvalidRecord {
+                path: PathBuf::from("<in-memory>"),
+                detail: "cannot record an OverlayFS mount identity for another backend".to_owned(),
+            });
+        }
+        if overlayfs
+            .mount_context
+            .as_ref()
+            .is_none_or(|context| *context != identity.context())
+        {
+            return Err(JournalError::InvalidRecord {
+                path: PathBuf::from("<in-memory>"),
+                detail: "OverlayFS mount identity does not match its durable mount context"
+                    .to_owned(),
+            });
+        }
+        if overlayfs
+            .mount_identity
+            .as_ref()
+            .is_some_and(|current| current != &identity)
+        {
+            return Err(JournalError::InvalidRecord {
+                path: PathBuf::from("<in-memory>"),
+                detail: "OverlayFS journal already identifies a different mount".to_owned(),
+            });
+        }
+        overlayfs.mount_identity = Some(identity);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn overlayfs_intent(&self) -> Result<DecodedOverlayFsJournal, JournalError> {
+        let overlayfs = self
+            .overlayfs
+            .as_ref()
+            .ok_or_else(|| JournalError::InvalidRecord {
+                path: PathBuf::from("<in-memory>"),
+                detail: "OverlayFS journal is missing its durable mount intent".to_owned(),
+            })?;
+        Ok(DecodedOverlayFsJournal {
+            layout_root: PathBuf::from(overlayfs.layout_root.decode(Path::new("<in-memory>"))?),
+            recovery_token: overlayfs.recovery_token.clone(),
+            mount_context: overlayfs.mount_context.clone(),
+            mount_identity: overlayfs.mount_identity.clone(),
+        })
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn transition(&mut self, next: AddWorktreePhase) -> Result<(), JournalTransitionError> {
         if !self.phase.can_transition_to(next) {
@@ -788,6 +849,30 @@ impl JournalStore {
         record.phase = phase;
         self.persist(&record)?;
         Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn record_overlayfs_mount_identity(
+        &self,
+        journal_path: &Path,
+        identity: OverlayFsMountIdentity,
+    ) -> Result<DecodedJournal, JournalError> {
+        let file = File::open(journal_path)
+            .map_err(|source| io("open operation journal", journal_path, source))?;
+        let mut record: JournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: journal_path.to_path_buf(),
+                source,
+            })?;
+        if self.path_for(&record.operation_id) != journal_path {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "operation ID does not match the journal filename".to_owned(),
+            });
+        }
+        record.record_overlayfs_mount_identity(identity)?;
+        self.persist(&record)?;
+        record.decode(journal_path.to_path_buf())
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]

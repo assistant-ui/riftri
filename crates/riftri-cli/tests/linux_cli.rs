@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use riftri_storage::{CapabilityStatus, ReflinkCloner};
+use riftri_storage::{CapabilityStatus, OverlayFsMounter, ReflinkCloner};
 
 mod support;
 use support::writable_tempdir as tempdir;
@@ -34,6 +34,20 @@ fn require_reflink(path: &Path) -> bool {
         capability.explanation
     );
     false
+}
+
+fn require_overlayfs(path: &Path) -> bool {
+    if std::env::var_os("RIFTRI_REQUIRE_OVERLAYFS").as_deref() != Some(OsStr::new("1")) {
+        return false;
+    }
+    let capability = OverlayFsMounter::probe_current_namespace(path);
+    assert_eq!(
+        capability.status,
+        CapabilityStatus::Supported,
+        "Linux OverlayFS test namespace is required but unavailable: {}",
+        capability.explanation
+    );
+    true
 }
 
 fn initialize_repository(repository: &Path) {
@@ -128,4 +142,101 @@ fn explicit_and_transparent_commands_create_linux_reflink_worktrees() {
             .stdout
             .is_empty()
     );
+}
+
+#[test]
+fn explicit_and_transparent_commands_manage_linux_overlayfs_worktrees() {
+    let fixture = tempdir().expect("fixture directory");
+    if !require_overlayfs(fixture.path()) {
+        return;
+    }
+    let repository = fixture.path().join("repository");
+    let explicit = fixture.path().join("explicit");
+    let transparent = fixture.path().join("transparent");
+    initialize_repository(&repository);
+
+    let explicit_output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&explicit)
+        .args(["-b", "feature/overlay-explicit", "HEAD"])
+        .current_dir(&repository)
+        .output()
+        .expect("run explicit OverlayFS add");
+    assert!(
+        explicit_output.status.success(),
+        "explicit OverlayFS add failed: {}",
+        String::from_utf8_lossy(&explicit_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&explicit_output.stdout)
+            .contains("Created Linux OverlayFS-backed Git worktree")
+    );
+    assert!(
+        git(&explicit, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+
+    assert!(
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .arg("enable")
+            .current_dir(&repository)
+            .status()
+            .expect("enable repository")
+            .success()
+    );
+    let transparent_output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/overlay-transparent",
+        ])
+        .arg(&transparent)
+        .arg("HEAD")
+        .current_dir(&repository)
+        .output()
+        .expect("run transparent OverlayFS add");
+    assert!(
+        transparent_output.status.success(),
+        "transparent OverlayFS add failed: {}",
+        String::from_utf8_lossy(&transparent_output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&transparent_output.stderr)
+            .contains("optimized Linux OverlayFS worktree")
+    );
+    assert!(
+        git(&transparent, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+
+    let transparent_remove = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove"])
+        .arg(&transparent)
+        .current_dir(&repository)
+        .output()
+        .expect("run transparent OverlayFS removal");
+    assert!(
+        transparent_remove.status.success(),
+        "transparent OverlayFS removal failed: {}",
+        String::from_utf8_lossy(&transparent_remove.stderr)
+    );
+    let explicit_remove = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "remove"])
+        .arg(&explicit)
+        .current_dir(&repository)
+        .output()
+        .expect("run explicit OverlayFS removal");
+    assert!(
+        explicit_remove.status.success(),
+        "explicit OverlayFS removal failed: {}",
+        String::from_utf8_lossy(&explicit_remove.stderr)
+    );
+    assert!(!explicit.exists());
+    assert!(!transparent.exists());
 }
