@@ -19,11 +19,13 @@ normal full-copy worktree.
 ## Block-clone behavior
 
 ReFS requires clone offsets and lengths to align to filesystem clusters and
-limits each clone request to less than 4 GiB. Riftri pre-sizes destination files,
-preserves sparse and integrity-stream settings, and splits large files into
-valid aligned requests. The final unaligned tail of a file—less than one
-cluster—is copied because the Windows API cannot block-clone that region. A
-failure while cloning an aligned region aborts and rolls back the worktree.
+limits each clone request to less than 4 GiB. Riftri temporarily marks each
+destination sparse before extending it so that pre-sizing does not allocate a
+full file of zero-backed clusters. It then clones valid aligned requests,
+restores the source's sparse status, and preserves its integrity-stream setting.
+The final unaligned tail of a file—less than one cluster—is copied because the
+Windows API cannot block-clone that region. A failure while cloning an aligned
+region aborts and rolls back the worktree.
 
 Small files below one cluster may therefore be copied in full. Larger files
 share their aligned physical blocks and allocate private blocks as a worktree

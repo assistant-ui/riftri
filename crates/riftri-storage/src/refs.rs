@@ -33,6 +33,7 @@ pub(crate) fn probe(directory: &Path) -> std::io::Result<()> {
     let contents = vec![0x5a; PROBE_BYTES];
     source.write_all(&contents)?;
     source.sync_all()?;
+    set_sparse(&destination, true)?;
     destination.set_len(PROBE_BYTES as u64)?;
     clone_extent(&source, &destination, 0, PROBE_BYTES as u64)?;
     destination.seek(SeekFrom::Start(0))?;
@@ -163,18 +164,19 @@ fn clone_file(source: &Path, destination: &Path, cluster_size: u64) -> Result<()
             source: source_error,
         })?;
 
-    match prepare_destination_attributes(&source_file, &destination_file, &metadata) {
-        Ok(()) => {}
-        Err(source_error) => {
-            drop(destination_file);
-            let _ = fs::remove_file(destination);
-            return Err(StorageError::Clone {
-                source_path: source.to_path_buf(),
-                destination: destination.to_path_buf(),
-                source: source_error,
-            });
-        }
-    }
+    let source_is_sparse =
+        match prepare_destination_attributes(&source_file, &destination_file, &metadata) {
+            Ok(source_is_sparse) => source_is_sparse,
+            Err(source_error) => {
+                drop(destination_file);
+                let _ = fs::remove_file(destination);
+                return Err(StorageError::Clone {
+                    source_path: source.to_path_buf(),
+                    destination: destination.to_path_buf(),
+                    source: source_error,
+                });
+            }
+        };
     let length = metadata.file_size();
     destination_file
         .set_len(length)
@@ -218,6 +220,13 @@ fn clone_file(source: &Path, destination: &Path, cluster_size: u64) -> Result<()
                 source: source_error,
             })?;
     }
+    if !source_is_sparse {
+        set_sparse(&destination_file, false).map_err(|source_error| StorageError::Clone {
+            source_path: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            source: source_error,
+        })?;
+    }
     destination_file
         .sync_all()
         .map_err(|source_error| StorageError::Clone {
@@ -234,11 +243,14 @@ fn prepare_destination_attributes(
     source: &File,
     destination: &File,
     metadata: &fs::Metadata,
-) -> std::io::Result<()> {
-    if metadata.file_attributes() & FILE_ATTRIBUTE_SPARSE_FILE != 0 {
-        let sparse = FILE_SET_SPARSE_BUFFER { SetSparse: true };
-        device_io_control_input(destination, FSCTL_SET_SPARSE, &sparse)?;
-    }
+) -> std::io::Result<bool> {
+    let source_is_sparse = metadata.file_attributes() & FILE_ATTRIBUTE_SPARSE_FILE != 0;
+
+    // Extending an ordinary file may allocate zero-backed clusters before the
+    // block-clone remaps them. Build the target as sparse so SetEndOfFile is a
+    // metadata-only operation, then restore a non-sparse source's attributes
+    // after every range has been populated.
+    set_sparse(destination, true)?;
 
     let source_integrity = integrity_information(source)?;
     let destination_integrity = integrity_information(destination)?;
@@ -252,7 +264,12 @@ fn prepare_destination_attributes(
         };
         device_io_control_input(destination, FSCTL_SET_INTEGRITY_INFORMATION, &requested)?;
     }
-    Ok(())
+    Ok(source_is_sparse)
+}
+
+fn set_sparse(file: &File, enabled: bool) -> std::io::Result<()> {
+    let sparse = FILE_SET_SPARSE_BUFFER { SetSparse: enabled };
+    device_io_control_input(file, FSCTL_SET_SPARSE, &sparse)
 }
 
 fn integrity_information(file: &File) -> std::io::Result<FSCTL_GET_INTEGRITY_INFORMATION_BUFFER> {

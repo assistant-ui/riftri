@@ -283,13 +283,14 @@ garbage collection as APFS.
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in
 the destination volume and a private write leaves the source unchanged. The
-destination file is sized first, matching sparse and integrity-stream settings
-are preserved, and aligned regions are cloned in requests below the ReFS 4 GiB
-limit. The final unaligned tail—at most one filesystem cluster—is copied because
-the Windows API requires cluster-aligned extents. Any aligned block-clone
-failure aborts and rolls back; it never triggers a full-file copy. The same
-immutable bases, locks, journals, recovery, clean removal, move/prune, and
-garbage-collection rules apply.
+destination is temporarily sparse while it is sized so the operation does not
+allocate zero-backed clusters before cloning. Matching sparse and
+integrity-stream settings are restored, and aligned regions are cloned in
+requests below the ReFS 4 GiB limit. The final unaligned tail—at most one
+filesystem cluster—is copied because the Windows API requires cluster-aligned
+extents. Any aligned block-clone failure aborts and rolls back; it never
+triggers a full-file copy. The same immutable bases, locks, journals, recovery,
+clean removal, move/prune, and garbage-collection rules apply.
 
 Recovery validates every recorded cleanup path. It removes a visible incomplete
 view only when Git reports it clean or a byte/mode/symlink comparison proves it

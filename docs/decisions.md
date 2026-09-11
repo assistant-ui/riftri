@@ -214,13 +214,15 @@ Windows worktree creation supports ReFS through
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE`. Before Git metadata or Riftri state is
 mutated, Riftri block-clones between delete-on-close files on the destination
 volume and verifies that a private write does not change the source. View files
-are pre-sized and inherit the source's sparse and integrity-stream settings.
-Aligned data is cloned in requests below 4 GiB; only the final unaligned tail,
-which is smaller than one filesystem cluster, is copied to satisfy the Windows
-API contract. A failed aligned clone aborts and rolls the journaled operation
-back instead of silently creating a full copy. ReFS is the only supported
-Windows mutation filesystem in this slice; alternatives for ordinary NTFS
-remain an explicit design question.
+are temporarily made sparse before they are pre-sized, avoiding allocation of
+zero-backed clusters that would immediately be replaced by cloned extents. They
+then inherit the source's sparse and integrity-stream settings. Aligned data is
+cloned in requests below 4 GiB; only the final unaligned tail, which is smaller
+than one filesystem cluster, is copied to satisfy the Windows API contract. A
+failed aligned clone aborts and rolls the journaled operation back instead of
+silently creating a full copy. ReFS is the only supported Windows mutation
+filesystem in this slice; alternatives for ordinary NTFS remain an explicit
+design question.
 
 ### D025: Git worktree metadata mutation is repository-serialized
 

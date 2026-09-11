@@ -3,10 +3,12 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
+use std::os::windows::fs::MetadataExt;
 use std::path::Path;
 
 use riftri_storage::{CapabilityStatus, RefsBlockCloner};
 use tempfile::tempdir;
+use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SPARSE_FILE;
 
 fn refs_available(path: &Path) -> bool {
     let capability = RefsBlockCloner::probe(path);
@@ -69,6 +71,14 @@ fn clones_aligned_data_and_keeps_writes_private() {
     assert_eq!(
         fs::read(destination.join("payload.bin")).expect("read cloned payload"),
         contents
+    );
+    assert_eq!(
+        fs::metadata(destination.join("payload.bin"))
+            .expect("inspect cloned payload")
+            .file_attributes()
+            & FILE_ATTRIBUTE_SPARSE_FILE,
+        0,
+        "a non-sparse source must produce a non-sparse view"
     );
     let mut cloned = fs::OpenOptions::new()
         .write(true)
