@@ -203,6 +203,57 @@ fn rejects_effective_attributes_before_creating_state_or_git_metadata() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_a_symlinked_state_layout_directory_without_writing_through_it() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let outside_bases = fixture.path().join("outside-bases");
+    let destination = fixture.path().join("worktree");
+    fs::create_dir(&repository).expect("create repository");
+    fs::create_dir(&state).expect("create state directory");
+    fs::create_dir(&outside_bases).expect("create outside base directory");
+    symlink(&outside_bases, state.join("bases")).expect("symlink bases directory");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+    let error = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/symlinked-state-layout")),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("symlinked state layout must be rejected");
+
+    assert!(error.to_string().contains("real directory"));
+    assert!(error.to_string().contains("bases"));
+    assert!(!destination.exists());
+    assert!(
+        fs::read_dir(&outside_bases)
+            .expect("read outside base directory")
+            .next()
+            .is_none(),
+        "Riftri wrote through the state-layout symlink"
+    );
+    assert!(
+        !git(
+            &repository,
+            &["branch", "--list", "feature/symlinked-state-layout"]
+        )
+        .contains("feature/symlinked-state-layout")
+    );
+}
+
 #[test]
 #[ignore = "physical allocation benchmark; run explicitly on an otherwise quiet native COW volume"]
 fn cached_view_uses_materially_less_physical_space_than_its_logical_size() {

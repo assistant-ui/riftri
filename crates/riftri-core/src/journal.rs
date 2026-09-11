@@ -55,6 +55,34 @@ pub enum JournalError {
 
     #[error("invalid operation journal {path}: {detail}")]
     InvalidRecord { path: PathBuf, detail: String },
+
+    #[error("Riftri state path is not a real directory: {path}")]
+    InvalidStateDirectory { path: PathBuf },
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub(crate) fn require_real_state_directory(directory: &Path) -> Result<(), JournalError> {
+    let metadata = fs::symlink_metadata(directory)
+        .map_err(|source| io("inspect Riftri state directory", directory, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(JournalError::InvalidStateDirectory {
+            path: directory.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub(crate) fn ensure_real_state_directory(
+    directory: &Path,
+    operation: &'static str,
+) -> Result<(), JournalError> {
+    match fs::create_dir(directory) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(source) => return Err(io(operation, directory, source)),
+    }
+    require_real_state_directory(directory)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -574,8 +602,7 @@ impl JournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("operations");
-        fs::create_dir_all(&directory)
-            .map_err(|source| io("create journal directory", &directory, source))?;
+        ensure_real_state_directory(&directory, "create journal directory")?;
         sync_parent(&directory)?;
         Ok(Self { directory })
     }
@@ -731,8 +758,7 @@ impl RemovalJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("removals");
-        fs::create_dir_all(&directory)
-            .map_err(|source| io("create removal journal directory", &directory, source))?;
+        ensure_real_state_directory(&directory, "create removal journal directory")?;
         sync_parent(&directory)?;
         Ok(Self { directory })
     }
@@ -826,8 +852,7 @@ impl MoveJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("moves");
-        fs::create_dir_all(&directory)
-            .map_err(|source| io("create move journal directory", &directory, source))?;
+        ensure_real_state_directory(&directory, "create move journal directory")?;
         sync_parent(&directory)?;
         Ok(Self { directory })
     }
@@ -923,8 +948,7 @@ impl PruneJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("prunes");
-        fs::create_dir_all(&directory)
-            .map_err(|source| io("create prune journal directory", &directory, source))?;
+        ensure_real_state_directory(&directory, "create prune journal directory")?;
         sync_parent(&directory)?;
         Ok(Self { directory })
     }
@@ -1020,8 +1044,7 @@ impl CollectionJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("collections");
-        fs::create_dir_all(&directory)
-            .map_err(|source| io("create collection journal directory", &directory, source))?;
+        ensure_real_state_directory(&directory, "create collection journal directory")?;
         sync_parent(&directory)?;
         Ok(Self { directory })
     }
@@ -1171,6 +1194,7 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> JournalEr
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    use std::os::unix::fs::symlink;
     use std::path::Path;
 
     use tempfile::tempdir;
@@ -1182,6 +1206,25 @@ mod tests {
         RemovalJournalStore,
     };
     use crate::{GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase};
+
+    #[test]
+    fn journal_store_rejects_a_symlinked_state_directory() {
+        let directory = tempdir().expect("journal fixture");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        symlink(&outside, directory.path().join("operations")).expect("symlink journal directory");
+
+        let error = JournalStore::create(directory.path())
+            .expect_err("symlinked journal directory must be rejected");
+
+        assert!(error.to_string().contains("not a real directory"));
+        assert!(
+            std::fs::read_dir(outside)
+                .expect("read outside directory")
+                .next()
+                .is_none()
+        );
+    }
 
     #[cfg(unix)]
     #[test]
