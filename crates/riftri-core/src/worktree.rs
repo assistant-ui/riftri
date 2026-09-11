@@ -3859,7 +3859,7 @@ mod tests {
         AddWorktreeRequest, MoveWorktreeRequest, PruneWorktreesRequest, RemoveWorktreeRequest,
         WorktreeMode, add_worktree_inner, garbage_collect_inner, move_worktree_inner,
         next_operation_id, prune_worktrees_inner, recover_incomplete_operations,
-        remove_worktree_inner, repository_state_directories, storage_accounting,
+        remove_worktree_inner, storage_accounting,
     };
     use crate::test_support::writable_tempdir as tempdir;
     use crate::{
@@ -3930,7 +3930,7 @@ mod tests {
         let state = repository.join(".git/riftri");
         symlink(&external_state, &state).expect("symlink state root");
 
-        let discovery = repository_state_directories(&repository)
+        let discovery = super::repository_state_directories(&repository)
             .expect_err("repository discovery must reject a symlinked state root");
         assert!(discovery.to_string().contains("not a real directory"));
 
