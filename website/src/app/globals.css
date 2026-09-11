@@ -257,7 +257,9 @@ code, pre { font-family: var(--font-mono); }
 .block-track {
   position: relative;
   display: flex;
+  width: max-content;
   font-size: 0.74rem;
+  justify-self: end;
   line-height: 1;
 }
 .track-line, .track-counter { display: flex; gap: 1px; }
@@ -558,7 +560,8 @@ code, pre { font-family: var(--font-mono); }
   .hero-actions { gap: 1.25rem; }
   .hero-graph { padding: 2.5rem 1rem; }
   .base-node, .view-row { grid-template-columns: 1.5rem minmax(0, 1fr); }
-  .base-track, .block-track { grid-column: 2; justify-content: flex-start; }
+  .base-track, .block-track { grid-column: 2; }
+  .block-track { justify-self: start; }
   .branch-line { padding-left: 2.9rem; }
   .content-section { padding: 3.75rem 1.4rem; }
   .materialization-track { grid-template-columns: 1fr; padding-block: 0.9rem; }
