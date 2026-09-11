@@ -4,6 +4,12 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
 
+#[cfg(test)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 #[cfg(unix)]
 use std::process::Stdio;
 
@@ -159,6 +165,8 @@ pub enum GitError {
 #[derive(Debug, Clone)]
 pub struct Git {
     command: PathBuf,
+    #[cfg(test)]
+    process_attempts: Arc<AtomicUsize>,
 }
 
 impl Default for Git {
@@ -174,7 +182,14 @@ impl Git {
     pub fn new(command: impl Into<PathBuf>) -> Self {
         Self {
             command: command.into(),
+            #[cfg(test)]
+            process_attempts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    fn process_attempts(&self) -> usize {
+        self.process_attempts.load(Ordering::Relaxed)
     }
 
     pub fn detect(&self) -> Result<GitInfo, GitError> {
@@ -919,6 +934,8 @@ impl Git {
         arguments: &[OsString],
         environment: &[(&OsStr, &OsStr)],
     ) -> Result<Output, GitError> {
+        #[cfg(test)]
+        self.process_attempts.fetch_add(1, Ordering::Relaxed);
         let mut command = Command::new(&self.command);
         command.args(arguments).envs(environment.iter().copied());
 
@@ -942,6 +959,8 @@ impl Git {
     ) -> Result<Output, GitError> {
         use std::io::Write;
 
+        #[cfg(test)]
+        self.process_attempts.fetch_add(1, Ordering::Relaxed);
         let mut command = Command::new(&self.command);
         command
             .args(arguments)
@@ -1686,44 +1705,21 @@ mod tests {
         assert!(parse_attribute_records(b"tracked.txt\0text").is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn checks_large_attribute_path_sets_with_one_git_process() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         let fixture = RepositoryFixture::committed();
-        let test_executable = std::env::current_exe().expect("current test executable");
-        let wrapper_parent = test_executable.parent().expect("test executable directory");
-        let wrapper_directory = tempfile::tempdir_in(wrapper_parent).expect("wrapper directory");
-        let wrapper = wrapper_directory.path().join("git-wrapper");
-        let staged_wrapper = wrapper_directory.path().join("git-wrapper.staged");
-        let calls = wrapper_directory.path().join("git-wrapper.calls");
-        let mut wrapper_file = fs::File::create(&staged_wrapper).expect("stage Git wrapper");
-        wrapper_file
-            .write_all(b"#!/bin/sh\nprintf 'call\\n' >> \"$0.calls\"\nexec git \"$@\"\n")
-            .expect("write Git wrapper");
-        wrapper_file.sync_all().expect("sync Git wrapper");
-        drop(wrapper_file);
-        let mut permissions = fs::metadata(&staged_wrapper)
-            .expect("staged wrapper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&staged_wrapper, permissions).expect("make staged wrapper executable");
-        fs::rename(&staged_wrapper, &wrapper).expect("publish closed Git wrapper atomically");
+        let git = Git::new("git");
         let paths = (0..300)
             .map(|index| PathBuf::from(format!("path-{index}.txt")))
             .collect::<Vec<_>>();
 
-        let attributes = Git::new(&wrapper)
+        let attempts_before = git.process_attempts();
+        let attributes = git
             .paths_have_effective_attributes(fixture.path(), &paths)
             .expect("check attributes");
 
         assert!(!attributes);
-        assert_eq!(
-            fs::read_to_string(calls).expect("read wrapper calls"),
-            "call\n",
-        );
+        assert_eq!(git.process_attempts() - attempts_before, 1);
     }
 
     #[test]
