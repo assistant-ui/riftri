@@ -169,7 +169,7 @@ fn explicit_and_transparent_commands_manage_linux_overlayfs_worktrees() {
     );
     assert!(
         String::from_utf8_lossy(&explicit_output.stdout)
-            .contains("Created Linux OverlayFS-backed Git worktree")
+            .contains("Created OverlayFS-backed Git worktree")
     );
     assert!(
         git(&explicit, &["status", "--porcelain=v1"])
@@ -207,7 +207,7 @@ fn explicit_and_transparent_commands_manage_linux_overlayfs_worktrees() {
     );
     assert!(
         String::from_utf8_lossy(&transparent_output.stderr)
-            .contains("optimized Linux OverlayFS worktree")
+            .contains("optimized OverlayFS worktree")
     );
     assert!(
         git(&transparent, &["status", "--porcelain=v1"])
