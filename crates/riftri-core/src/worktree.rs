@@ -33,7 +33,8 @@ use thiserror::Error;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::journal::{
     CollectionJournalPaths, CollectionJournalRecord, JournalPaths, JournalRecord, MoveJournalPaths,
-    MoveJournalRecord, PruneJournalRecord, RemovalJournalPaths,
+    MoveJournalRecord, PruneJournalRecord, RemovalJournalPaths, ensure_real_state_directory,
+    require_real_state_directory,
 };
 use crate::journal::{
     CollectionJournalStore, DecodedCollectionJournal, DecodedJournal, DecodedMoveJournal,
@@ -1959,13 +1960,20 @@ fn windows_path_key(path: &Path) -> Vec<u16> {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
+    fs::create_dir_all(state_directory)
+        .map_err(|source| io("create Riftri state directory", state_directory, source))?;
+    require_real_state_directory(state_directory)?;
     for directory in [
-        state_directory.to_path_buf(),
+        state_directory.join("bases"),
         state_directory.join("bases/v1"),
+        state_directory.join("operations"),
+        state_directory.join("removals"),
+        state_directory.join("moves"),
+        state_directory.join("prunes"),
+        state_directory.join("collections"),
         state_directory.join("tmp"),
     ] {
-        fs::create_dir_all(&directory)
-            .map_err(|source| io("create Riftri state directory", &directory, source))?;
+        ensure_real_state_directory(&directory, "create Riftri state directory")?;
     }
     sync_parent(state_directory)?;
     Ok(())
