@@ -487,6 +487,26 @@ impl Git {
         Ok(())
     }
 
+    /// Remove one exact repository-local configuration value while preserving
+    /// other values for the same key.
+    pub fn unset_local_config_value(
+        &self,
+        path: &Path,
+        key: &str,
+        value: &OsStr,
+    ) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--local"),
+            OsString::from("--fixed-value"),
+            OsString::from("--unset-all"),
+            OsString::from(key),
+            value.to_os_string(),
+        ];
+        self.run_os(Some(path), &arguments)?;
+        Ok(())
+    }
+
     /// Remove a repository-local configuration key. Missing keys are accepted.
     pub fn unset_local_config(&self, path: &Path, key: &str) -> Result<(), GitError> {
         if self.local_config_value(path, key)?.is_none() {
@@ -1566,7 +1586,15 @@ mod tests {
         assert_eq!(
             git.local_config_paths(fixture.path(), "riftri.stateDirectory")
                 .expect("read registered state paths"),
-            vec![first, second]
+            vec![first.clone(), second.clone()]
+        );
+
+        git.unset_local_config_value(fixture.path(), "riftri.stateDirectory", first.as_os_str())
+            .expect("remove one registered state path");
+        assert_eq!(
+            git.local_config_paths(fixture.path(), "riftri.stateDirectory")
+                .expect("read remaining registered state paths"),
+            vec![second]
         );
     }
 

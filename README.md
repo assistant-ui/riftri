@@ -132,7 +132,13 @@ $ riftri status
 $ riftri repair
 $ riftri gc
 $ riftri gc --apply
+$ riftri state forget-missing /absolute/path/to/removed-state
 ```
+
+If a custom state directory was removed outside Riftri, lifecycle interception
+continues to fail closed. Remove that exact stale repository-local registration
+explicitly with `riftri state forget-missing`; existing state directories are
+never accepted by this command.
 
 ## How disk sharing works
 

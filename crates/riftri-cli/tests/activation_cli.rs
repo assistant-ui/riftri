@@ -102,6 +102,70 @@ fn enable_and_disable_change_only_repository_local_config() {
 }
 
 #[test]
+fn explicitly_forgets_only_a_missing_registered_state_directory() {
+    let fixture = RepositoryFixture::new();
+    let missing = fixture.directory.path().join("removed-custom-state");
+    let existing = fixture.directory.path().join("existing-custom-state");
+    fs::create_dir(&existing).expect("create existing state directory");
+    for state in [&missing, &existing] {
+        assert!(
+            git(
+                &fixture.repository,
+                &[
+                    "config",
+                    "--local",
+                    "--add",
+                    "riftri.stateDirectory",
+                    state.to_str().expect("UTF-8 fixture state path"),
+                ],
+            )
+            .status
+            .success()
+        );
+    }
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["state", "forget-missing"])
+        .arg(&existing)
+        .arg("--repository")
+        .arg(&fixture.repository)
+        .output()
+        .expect("refuse existing state registration");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("still exists"));
+
+    let forgotten = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["state", "forget-missing"])
+        .arg(&missing)
+        .arg("--repository")
+        .arg(&fixture.repository)
+        .output()
+        .expect("forget missing state registration");
+    assert!(
+        forgotten.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forgotten.stderr)
+    );
+    assert!(String::from_utf8_lossy(&forgotten.stdout).contains("Forgot missing Riftri state"));
+
+    let registered = git(
+        &fixture.repository,
+        &[
+            "config",
+            "--local",
+            "--path",
+            "--get-all",
+            "riftri.stateDirectory",
+        ],
+    );
+    assert!(registered.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&registered.stdout).trim(),
+        existing.to_string_lossy()
+    );
+}
+
+#[test]
 fn doctor_reports_checkout_compatibility_before_mutation() {
     let fixture = RepositoryFixture::new();
 
