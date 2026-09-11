@@ -6,7 +6,9 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use riftri_storage::{CapabilityStatus, RefsBlockCloner};
-use tempfile::tempdir;
+
+mod support;
+use support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> Output {
     Command::new("git")

@@ -4,11 +4,31 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::os::windows::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use riftri_storage::{CapabilityStatus, RefsBlockCloner};
 use tempfile::tempdir;
 use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SPARSE_FILE;
+
+struct OwnerWritableOnDrop(PathBuf);
+
+impl Drop for OwnerWritableOnDrop {
+    fn drop(&mut self) {
+        if let Err(error) = RefsBlockCloner::make_tree_owner_writable(&self.0) {
+            if std::thread::panicking() {
+                eprintln!(
+                    "failed to restore writable fixture permissions for {}: {error}",
+                    self.0.display()
+                );
+                return;
+            }
+            panic!(
+                "failed to restore writable fixture permissions for {}: {error}",
+                self.0.display()
+            );
+        }
+    }
+}
 
 fn refs_available(path: &Path) -> bool {
     let capability = RefsBlockCloner::probe(path);
@@ -64,6 +84,7 @@ fn clones_aligned_data_and_keeps_writes_private() {
     contents.extend_from_slice(b"unaligned tail");
     fs::write(source.join("payload.bin"), &contents).expect("write source payload");
     RefsBlockCloner::make_tree_read_only(&source).expect("protect immutable base");
+    let _source_permissions = OwnerWritableOnDrop(source.clone());
 
     RefsBlockCloner::clone_tree(&source, &destination).expect("clone ReFS tree");
     RefsBlockCloner::make_tree_owner_writable(&destination).expect("make view writable");

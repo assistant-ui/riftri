@@ -1,4 +1,7 @@
 #[cfg(unix)]
+mod support;
+
+#[cfg(unix)]
 mod unix {
     use std::env;
     use std::ffi::OsStr;
@@ -9,16 +12,18 @@ mod unix {
     use std::process::{Command, Output, Stdio};
     use std::time::Instant;
 
-    use tempfile::{TempDir, tempdir};
+    use tempfile::tempdir;
+
+    use crate::support::{WritableTempDir, writable_tempdir};
 
     struct RepositoryFixture {
-        directory: TempDir,
+        directory: WritableTempDir,
         repository: PathBuf,
     }
 
     impl RepositoryFixture {
         fn new() -> Self {
-            let directory = tempdir().expect("fixture directory");
+            let directory = writable_tempdir().expect("fixture directory");
             let repository = directory.path().join("repository");
             fs::create_dir(&repository).expect("create repository");
             for arguments in [

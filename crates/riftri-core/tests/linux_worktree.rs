@@ -11,7 +11,8 @@ use riftri_core::{
     remove_worktree, storage_accounting,
 };
 use riftri_storage::{BackendKind, CapabilityStatus, ReflinkCloner};
-use tempfile::tempdir;
+mod support;
+use support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

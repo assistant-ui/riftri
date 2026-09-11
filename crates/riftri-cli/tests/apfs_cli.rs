@@ -4,7 +4,8 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use tempfile::tempdir;
+mod support;
+use support::writable_tempdir as tempdir;
 
 fn command(program: &Path, path: &Path, arguments: &[&str]) -> Output {
     Command::new(program)

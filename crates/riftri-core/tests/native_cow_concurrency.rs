@@ -18,7 +18,9 @@ use riftri_core::{
     AddWorktreeRequest, AddWorktreeResult, WorktreeMode, add_worktree, storage_accounting,
 };
 use riftri_git::Git;
-use tempfile::tempdir;
+
+mod support;
+use support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

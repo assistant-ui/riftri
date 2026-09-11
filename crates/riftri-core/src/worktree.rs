@@ -3850,14 +3850,13 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    use tempfile::tempdir;
-
     use super::{
         AddWorktreeRequest, MoveWorktreeRequest, PruneWorktreesRequest, RemoveWorktreeRequest,
         WorktreeMode, add_worktree_inner, garbage_collect_inner, move_worktree_inner,
         next_operation_id, prune_worktrees_inner, recover_incomplete_operations,
         remove_worktree_inner, storage_accounting,
     };
+    use crate::test_support::writable_tempdir as tempdir;
     use crate::{
         AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
         RemoveWorktreePhase,
