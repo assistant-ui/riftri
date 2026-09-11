@@ -114,7 +114,18 @@ jobs:
         env:
           RIFTRI_REQUIRE_REFLINK: "1"
           TMPDIR: ${{ runner.temp }}/riftri-reflink
-        run: cargo test --workspace
+        run: cargo test --workspace --features riftri-core/native-cow-integration
+
+      - name: Verify cached-view physical allocation
+        env:
+          RIFTRI_REQUIRE_REFLINK: "1"
+          TMPDIR: ${{ runner.temp }}/riftri-reflink
+        run: >-
+          cargo test -p riftri-core
+          --features native-cow-integration
+          --test native_cow_worktree
+          cached_view_uses_materially_less_physical_space_than_its_logical_size
+          -- --ignored --exact --nocapture
 
       - name: Unmount disposable test volume
         if: always()

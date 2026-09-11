@@ -17,7 +17,11 @@ runs the Rust workspace with `RIFTRI_REQUIRE_REFLINK=1`. The Linux tests require
 - real linked-worktree registration and clean Git status;
 - reusable exact-tree immutable bases;
 - private writes that do not change another view or its base;
+- eight simultaneous adds that converge on one base and keep parallel commits
+  isolated;
 - dirty-worktree removal refusal and clean journaled removal;
+- injected interruption and repeated recovery at every durable add, remove,
+  garbage-collection, move, and prune transition;
 - explicit base garbage collection; and
 - materially lower volume growth than the logical size of a cached view.
 

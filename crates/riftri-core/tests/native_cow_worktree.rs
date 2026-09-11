@@ -1,4 +1,7 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", feature = "native-cow-integration")
+))]
 
 use std::ffi::OsString;
 use std::fs;
@@ -194,7 +197,7 @@ fn rejects_effective_attributes_before_creating_state_or_git_metadata() {
 }
 
 #[test]
-#[ignore = "physical allocation benchmark; run explicitly on an otherwise quiet APFS volume"]
+#[ignore = "physical allocation benchmark; run explicitly on an otherwise quiet native COW volume"]
 fn cached_view_uses_materially_less_physical_space_than_its_logical_size() {
     const LOGICAL_BYTES: usize = 32 * 1024 * 1024;
 
@@ -251,7 +254,7 @@ fn cached_view_uses_materially_less_physical_space_than_its_logical_size() {
 
     assert!(result.reused_base);
     eprintln!(
-        "cached view logical bytes: {LOGICAL_BYTES}; measured APFS volume growth: {physical_growth}"
+        "cached view logical bytes: {LOGICAL_BYTES}; measured native COW volume growth: {physical_growth}"
     );
     assert!(
         physical_growth < (LOGICAL_BYTES as u64 / 4),

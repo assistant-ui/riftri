@@ -3332,7 +3332,13 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(target_os = "linux", feature = "native-cow-integration")
+    )
+))]
 mod tests {
     use std::collections::HashSet;
     use std::ffi::OsString;
