@@ -896,7 +896,7 @@ fn remove_worktree_inner(
     if !git
         .list_worktrees(&repository_root)?
         .into_iter()
-        .any(|worktree| worktree.path == destination)
+        .any(|worktree| paths_match(&worktree.path, &destination))
     {
         return Err(WorktreeError::InvalidRequest(format!(
             "{} is not registered as a Git linked worktree",
@@ -1006,7 +1006,10 @@ fn move_worktree_inner(
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     let inventory = git.list_worktrees(&repository_root)?;
-    if !inventory.iter().any(|worktree| worktree.path == source) {
+    if !inventory
+        .iter()
+        .any(|worktree| paths_match(&worktree.path, &source))
+    {
         return Err(WorktreeError::InvalidRequest(format!(
             "{} is not registered as a Git linked worktree",
             source.display()
@@ -1759,6 +1762,54 @@ fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
             .map(|current| current.join(path))
             .map_err(|source| io("resolve current directory", path, source))
     }
+}
+
+fn paths_match(left: &Path, right: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_path_key(left) == windows_path_key(right);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        left == right
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_path_key(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const VERBATIM: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    const VERBATIM_UNC: &[u16] = &[
+        b'\\' as u16,
+        b'\\' as u16,
+        b'?' as u16,
+        b'\\' as u16,
+        b'U' as u16,
+        b'N' as u16,
+        b'C' as u16,
+        b'\\' as u16,
+    ];
+
+    let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let mut normalized = if wide.starts_with(VERBATIM_UNC) {
+        let mut unc = vec![b'\\' as u16, b'\\' as u16];
+        unc.extend_from_slice(&wide[VERBATIM_UNC.len()..]);
+        unc
+    } else if wide.starts_with(VERBATIM) {
+        wide[VERBATIM.len()..].to_vec()
+    } else {
+        wide
+    };
+    for unit in &mut normalized {
+        if *unit == b'/' as u16 {
+            *unit = b'\\' as u16;
+        } else if (b'a' as u16..=b'z' as u16).contains(unit) {
+            *unit -= u16::from(b'a' - b'A');
+        }
+    }
+    normalized
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2808,10 +2859,10 @@ fn move_registration(
     Ok((
         inventory
             .iter()
-            .any(|worktree| worktree.path == journal.source),
+            .any(|worktree| paths_match(&worktree.path, &journal.source)),
         inventory
             .iter()
-            .any(|worktree| worktree.path == journal.destination),
+            .any(|worktree| paths_match(&worktree.path, &journal.destination)),
     ))
 }
 
@@ -2934,7 +2985,7 @@ fn verify_prune_safe(
         if !journal.destination.is_dir()
             || !inventory
                 .iter()
-                .any(|worktree| worktree.path == journal.destination)
+                .any(|worktree| paths_match(&worktree.path, &journal.destination))
         {
             return Err(WorktreeError::InvalidRequest(format!(
                 "managed worktree {} is missing or not registered; prune was not run",
@@ -3037,7 +3088,7 @@ fn removal_presence(
     let registered = git
         .list_worktrees(&journal.repository)?
         .into_iter()
-        .any(|worktree| worktree.path == journal.destination);
+        .any(|worktree| paths_match(&worktree.path, &journal.destination));
     Ok((registered, journal.destination.exists()))
 }
 
@@ -3097,7 +3148,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     let registered = git
         .list_worktrees(&journal.repository)?
         .into_iter()
-        .any(|worktree| worktree.path == journal.destination);
+        .any(|worktree| paths_match(&worktree.path, &journal.destination));
 
     if registered {
         restore_pointer_for_rollback(journal)?;
@@ -3420,6 +3471,19 @@ mod tests {
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn matches_git_and_verbatim_windows_worktree_paths() {
+        assert!(super::paths_match(
+            Path::new(r"R:\repo\view"),
+            Path::new(r"\\?\r:/repo/view")
+        ));
+        assert!(super::paths_match(
+            Path::new(r"\\server\share\view"),
+            Path::new(r"\\?\UNC\SERVER\SHARE\VIEW")
+        ));
     }
 
     #[test]
