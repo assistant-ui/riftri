@@ -620,7 +620,10 @@ impl Git {
     }
 
     pub fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, GitError> {
-        let output = self.run(Some(worktree), &["status", "--porcelain=v1", "-z"])?;
+        let output = self.run(
+            Some(worktree),
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
         Ok(output.stdout.is_empty())
     }
 

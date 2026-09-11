@@ -119,6 +119,54 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
 }
 
 #[test]
+fn removal_preserves_untracked_files_when_status_configuration_hides_them() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let worktree = fixture.path().join("worktree");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+    add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/untracked-removal")),
+        state_dir: Some(state.clone()),
+    })
+    .expect("create Riftri worktree");
+    git(&repository, &["config", "status.showUntrackedFiles", "no"]);
+    let untracked = worktree.join("private-untracked.txt");
+    fs::write(&untracked, "preserve me\n").expect("write untracked file");
+
+    let error = remove_worktree(RemoveWorktreeRequest {
+        repository,
+        destination: worktree.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("untracked file must prevent removal");
+
+    assert!(error.to_string().contains("changes"), "unexpected: {error}");
+    assert_eq!(
+        fs::read_to_string(untracked).expect("read preserved untracked file"),
+        "preserve me\n"
+    );
+    assert!(worktree.is_dir());
+    let accounting = storage_accounting(&state).expect("account preserved worktree");
+    assert_eq!(accounting.active_views, 1);
+    assert_eq!(accounting.pending_removals, 0);
+}
+
+#[test]
 fn accounting_tracks_two_views_that_reuse_one_retained_base() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");
