@@ -239,6 +239,8 @@ Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
 missing paths referenced by active journals without deleting them. Managed move
 and guarded prune use recoverable forward-only journals. The Linux reflink slice
 of Milestone 5 and Windows ReFS slice of Milestone 7 are exercised on disposable
-native volumes in CI. Automatic orphan-state repair, OverlayFS, ordinary-NTFS
-alternatives, managed-environment integration, mount recovery, and a daemon are
-not implemented.
+native volumes in CI. Linux can actively verify destination-specific OverlayFS
+mount and copy-up support in an isolated namespace, but does not yet create
+persistent OverlayFS worktrees. Automatic orphan-state repair, OverlayFS
+worktree mounts, ordinary-NTFS alternatives, managed-environment integration,
+mount recovery, and a daemon are not implemented.

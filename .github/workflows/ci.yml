@@ -134,6 +134,47 @@ jobs:
             sudo umount "$RUNNER_TEMP/riftri-reflink"
           fi
 
+  linux-overlayfs:
+    name: Linux OverlayFS capability integration
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Enable unprivileged test namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl --write kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Create disposable OverlayFS test volume
+        run: |
+          truncate --size 1G "$RUNNER_TEMP/riftri-overlayfs.img"
+          mkdir "$RUNNER_TEMP/riftri-overlayfs"
+          mkfs.ext4 -F "$RUNNER_TEMP/riftri-overlayfs.img"
+          sudo mount --options loop "$RUNNER_TEMP/riftri-overlayfs.img" "$RUNNER_TEMP/riftri-overlayfs"
+          sudo chown "$(id --user):$(id --group)" "$RUNNER_TEMP/riftri-overlayfs"
+
+      - name: Run active OverlayFS capability probe
+        env:
+          RIFTRI_REQUIRE_OVERLAYFS: "1"
+          TMPDIR: ${{ runner.temp }}/riftri-overlayfs
+        run: |
+          if unshare --user --map-root-user --mount --propagation private \
+            cargo test -p riftri-storage --test linux_overlayfs -- --nocapture; then
+            exit 0
+          fi
+          sudo dmesg | grep --ignore-case overlay | tail --lines=50 || true
+          exit 1
+
+      - name: Unmount disposable test volume
+        if: always()
+        run: |
+          if mountpoint --quiet "$RUNNER_TEMP/riftri-overlayfs"; then
+            sudo umount "$RUNNER_TEMP/riftri-overlayfs"
+          fi
+
   windows-refs:
     name: Windows ReFS block-clone integration
     runs-on: windows-2025
