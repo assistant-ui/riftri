@@ -122,8 +122,8 @@ FUSE and network filesystems are not part of the default hot path.
 
 Capability results have three meanings:
 
-- `supported`: read-only checks establish that the destination volume supplies
-  the primitive;
+- `supported`: conservative inspection or an artifact-clean active probe
+  establishes that the destination supplies the primitive;
 - `unsupported`: the inspected destination is incompatible; and
 - `unavailable`: Riftri cannot establish a reliable answer without a later
   active probe or because inspection failed.
@@ -288,6 +288,19 @@ in the view is then created with `FICLONE`; an unsupported ioctl aborts and roll
 back instead of copying bytes. Linux uses the same immutable-base lock, add and
 removal journals, clean-state verification, recovery, accounting, and explicit
 garbage collection as APFS.
+
+OverlayFS capability probing creates lower, upper, work, and merged directories
+on the destination volume, then forks a short-lived child into a private mount
+namespace. The child mounts OverlayFS with explicit rootless-compatible options,
+verifies lower reads and private copy-up writes, unmounts, and reports the exact
+failing stage and operating-system error. After namespace isolation, the child
+resolves the private probe root as a native byte path in the new namespace and
+mounts fixed relative layer names. Commas, colons, spaces, long paths, and
+non-UTF-8 bytes in the destination therefore never become mount-option syntax.
+The caller's mount namespace is never changed and the parent removes the probe
+directory. This only proves capability;
+durable upper/work placement, a visible merged worktree, journaled
+unmount/removal, and restart recovery remain part of the persistent backend.
 
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in

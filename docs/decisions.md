@@ -247,6 +247,27 @@ Missing, relative, or unsafe registered paths fail closed; a locator never
 authorizes deletion and does not replace the operation journals as recovery
 authority.
 
+### D027: OverlayFS support starts with an isolated active probe
+
+Linux OverlayFS cannot be accepted from `/proc/filesystems` alone because
+mount permission, upper/work filesystem compatibility, and copy-up behavior are
+destination- and execution-context-specific. Riftri therefore creates temporary
+lower, upper, work, and merged directories on the destination volume and tests
+an actual mount in a forked private mount namespace. The probe verifies a lower
+read, a private write, the unchanged lower file, and the copied-up upper file,
+then unmounts and removes its paths. The child resolves the probe root after
+entering its new mount namespace, then fixed relative names identify the layers.
+This prevents stale references to the caller's namespace and avoids OverlayFS
+option-delimiter ambiguity. The initial options are
+explicit (`userxattr`, `index=off`, `metacopy=off`, and
+`redirect_dir=nofollow`). The kernel rejects redirect creation together with
+the unprivileged `userxattr` mode, so directory-rename compatibility remains a
+gate for the persistent backend rather than being hidden by this basic copy-up
+probe. A permission failure is `unavailable`, not evidence that the kernel or
+volume is unsupported. This decision authorizes capability detection only;
+persistent views require journaled mount paths, unmount/removal semantics, and
+restart recovery first.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
@@ -258,6 +279,8 @@ authority.
 - How should operation journals and SQLite state reconcile after either one is
   partially written?
 - What is the safest removal transaction for a mounted OverlayFS worktree?
+- Can rootless OverlayFS preserve required directory-rename behavior with
+  `redirect_dir=nofollow`, or does mounting require a narrow privileged helper?
 - Should clean-view compaction be manual, idle-time automatic, or policy-based?
 - Which Windows fallback provides acceptable performance on ordinary NTFS?
 - What integration is possible for harnesses that use libgit2 or another

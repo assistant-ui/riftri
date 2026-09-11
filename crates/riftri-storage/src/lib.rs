@@ -205,6 +205,78 @@ impl ReflinkCloner {
 #[cfg(target_os = "linux")]
 mod reflink;
 
+/// Linux kernel OverlayFS mount operations.
+pub struct OverlayFsMounter;
+
+impl OverlayFsMounter {
+    /// Actively verify mount permission, upper/work compatibility, copy-up,
+    /// and private-write isolation against the destination volume.
+    #[cfg(target_os = "linux")]
+    pub fn probe(destination: &Path) -> BackendCapability {
+        let volume = match inspect_destination(destination) {
+            Ok(volume) => volume,
+            Err(error) => return unavailable(BackendKind::OverlayFs, &error),
+        };
+        if volume.read_only {
+            return BackendCapability {
+                kind: BackendKind::OverlayFs,
+                status: CapabilityStatus::Unsupported,
+                volume: Some(volume),
+                explanation: "OverlayFS needs writable upper and work directories".to_owned(),
+                requires_explicit_fallback: false,
+            };
+        }
+
+        match overlayfs::probe(&volume.probe_path) {
+            Ok(()) => BackendCapability {
+                kind: BackendKind::OverlayFs,
+                status: CapabilityStatus::Supported,
+                explanation: format!(
+                    "active OverlayFS mount and private copy-up probe succeeded on {}",
+                    volume.identity.filesystem
+                ),
+                volume: Some(volume),
+                requires_explicit_fallback: false,
+            },
+            Err(error) => {
+                let status = match error.raw_os_error() {
+                    Some(libc::ENODEV | libc::EOPNOTSUPP | libc::EINVAL | libc::EXDEV) => {
+                        CapabilityStatus::Unsupported
+                    }
+                    _ => CapabilityStatus::Unavailable,
+                };
+                BackendCapability {
+                    kind: BackendKind::OverlayFs,
+                    status,
+                    explanation: format!(
+                        "active OverlayFS probe failed on {} while trying to {}: {}",
+                        volume.identity.filesystem, error.operation, error.source
+                    ),
+                    volume: Some(volume),
+                    requires_explicit_fallback: false,
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn probe(destination: &Path) -> BackendCapability {
+        BackendCapability {
+            kind: BackendKind::OverlayFs,
+            status: CapabilityStatus::Unsupported,
+            volume: None,
+            explanation: format!(
+                "Linux OverlayFS probing is unavailable for {}",
+                destination.display()
+            ),
+            requires_explicit_fallback: false,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod overlayfs;
+
 /// Windows ReFS block-clone operations.
 pub struct RefsBlockCloner;
 
@@ -360,7 +432,8 @@ impl BackendKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CapabilityStatus {
-    /// Read-only checks show that the volume supplies the required primitive.
+    /// A conservative inspection or artifact-clean active probe established
+    /// that the destination supplies the required primitive.
     Supported,
     /// The destination was inspected and does not supply the primitive.
     Unsupported,
@@ -400,7 +473,7 @@ pub struct BackendCapability {
     pub requires_explicit_fallback: bool,
 }
 
-/// Read-only half of the storage backend contract.
+/// Capability half of the storage backend contract.
 ///
 /// Mutation methods will be added only with a concrete Milestone 2 backend and
 /// its rollback tests. This prevents the foundation from exposing an unsafe,

@@ -136,11 +136,16 @@ The native reflink slice is implemented: Linux actively validates `FICLONE`
 with unnamed files, creates Btrfs and reflink-enabled XFS views through the same
 journaled lifecycle as APFS, exposes the selected backend, and runs Git
 correctness and allocation checks on disposable Btrfs and XFS volumes in CI.
-OverlayFS capability, mount lifecycle, and restart recovery remain open, so the
-milestone as a whole is not yet complete.
+The initial OverlayFS capability slice actively proves mount permission,
+copy-up, and lower-layer isolation against the destination volume without
+leaving a mount in the caller's namespace. Persistent mount lifecycle and
+restart recovery remain open, so the milestone as a whole is not yet complete.
+
+The capability contract and remaining lifecycle boundary are documented in
+[`docs/linux-overlayfs.md`](docs/linux-overlayfs.md).
 
 - Add Btrfs/XFS reflink probing and creation.
-- Add kernel OverlayFS capability probing.
+- Add kernel OverlayFS capability probing. (complete)
 - Add immutable lower, private upper, work, and merged-directory management.
 - Add least-privilege mount support and restart recovery.
 - Define fallback behavior when user namespaces or mounts are unavailable.
