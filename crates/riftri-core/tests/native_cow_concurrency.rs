@@ -1,6 +1,9 @@
 #![cfg(any(
     target_os = "macos",
-    all(target_os = "linux", feature = "native-cow-integration")
+    all(
+        feature = "native-cow-integration",
+        any(target_os = "linux", target_os = "windows")
+    )
 ))]
 
 use std::collections::HashSet;

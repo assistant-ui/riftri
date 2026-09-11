@@ -205,6 +205,134 @@ impl ReflinkCloner {
 #[cfg(target_os = "linux")]
 mod reflink;
 
+/// Windows ReFS block-clone operations.
+pub struct RefsBlockCloner;
+
+impl RefsBlockCloner {
+    /// Actively verify ReFS block cloning and private-write isolation on the
+    /// destination volume.
+    #[cfg(target_os = "windows")]
+    pub fn probe(destination: &Path) -> BackendCapability {
+        let volume = match inspect_destination(destination) {
+            Ok(volume) => volume,
+            Err(error) => return unavailable(BackendKind::RefsBlockClone, &error),
+        };
+        if volume.read_only {
+            return BackendCapability {
+                kind: BackendKind::RefsBlockClone,
+                status: CapabilityStatus::Unsupported,
+                volume: Some(volume),
+                explanation: "ReFS block cloning requires a writable destination volume".to_owned(),
+                requires_explicit_fallback: false,
+            };
+        }
+        if !volume.identity.filesystem.eq_ignore_ascii_case("ReFS") {
+            let filesystem = volume.identity.filesystem.clone();
+            return BackendCapability {
+                kind: BackendKind::RefsBlockClone,
+                status: CapabilityStatus::Unsupported,
+                volume: Some(volume),
+                explanation: format!(
+                    "the Windows block-clone backend requires ReFS, not {filesystem}"
+                ),
+                requires_explicit_fallback: false,
+            };
+        }
+
+        match refs::probe(&volume.probe_path) {
+            Ok(()) => BackendCapability {
+                kind: BackendKind::RefsBlockClone,
+                status: CapabilityStatus::Supported,
+                explanation: "active FSCTL_DUPLICATE_EXTENTS_TO_FILE probe succeeded on ReFS"
+                    .to_owned(),
+                volume: Some(volume),
+                requires_explicit_fallback: false,
+            },
+            Err(error) => {
+                use windows_sys::Win32::Foundation::{
+                    ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SAME_DEVICE,
+                    ERROR_NOT_SUPPORTED,
+                };
+
+                let status = match error.raw_os_error().map(|code| code as u32) {
+                    Some(
+                        ERROR_INVALID_FUNCTION
+                        | ERROR_INVALID_PARAMETER
+                        | ERROR_NOT_SAME_DEVICE
+                        | ERROR_NOT_SUPPORTED,
+                    ) => CapabilityStatus::Unsupported,
+                    _ => CapabilityStatus::Unavailable,
+                };
+                BackendCapability {
+                    kind: BackendKind::RefsBlockClone,
+                    status,
+                    explanation: format!(
+                        "active FSCTL_DUPLICATE_EXTENTS_TO_FILE probe failed on ReFS: {error}"
+                    ),
+                    volume: Some(volume),
+                    requires_explicit_fallback: false,
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn probe(destination: &Path) -> BackendCapability {
+        BackendCapability {
+            kind: BackendKind::RefsBlockClone,
+            status: CapabilityStatus::Unsupported,
+            volume: None,
+            explanation: format!(
+                "Windows ReFS block-clone probing is unavailable for {}",
+                destination.display()
+            ),
+            requires_explicit_fallback: false,
+        }
+    }
+
+    /// Clone a directory tree with ReFS block cloning. Unaligned file tails
+    /// are copied as required by the ReFS cluster-alignment contract; a failed
+    /// block-clone request is never replaced with a full-file copy.
+    #[cfg(target_os = "windows")]
+    pub fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
+        refs::clone_tree(source, destination)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn clone_tree(_source: &Path, _destination: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Windows ReFS block cloning",
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn make_tree_read_only(path: &Path) -> Result<(), StorageError> {
+        refs::make_tree_read_only(path)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn make_tree_read_only(_path: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Windows ReFS block cloning",
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn make_tree_owner_writable(path: &Path) -> Result<(), StorageError> {
+        refs::make_tree_owner_writable(path)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn make_tree_owner_writable(_path: &Path) -> Result<(), StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Windows ReFS block cloning",
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod refs;
+
 /// A storage strategy Riftri may eventually use to materialize a worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -671,11 +799,31 @@ fn platform_capabilities(
     volume: &Result<DestinationVolume, VolumeProbeError>,
 ) -> Vec<BackendCapability> {
     vec![match volume {
+        Ok(volume) if volume.read_only => BackendCapability {
+            kind: BackendKind::RefsBlockClone,
+            status: CapabilityStatus::Unsupported,
+            volume: Some(volume.clone()),
+            explanation: "ReFS block cloning requires a writable destination volume".to_owned(),
+            requires_explicit_fallback: false,
+        },
+        Ok(volume) if volume.identity.filesystem.eq_ignore_ascii_case("ReFS") => {
+            BackendCapability {
+                kind: BackendKind::RefsBlockClone,
+                status: CapabilityStatus::Unavailable,
+                volume: Some(volume.clone()),
+                explanation: "ReFS detected; block cloning requires an active private-write probe"
+                    .to_owned(),
+                requires_explicit_fallback: false,
+            }
+        }
         Ok(volume) => BackendCapability {
             kind: BackendKind::RefsBlockClone,
-            status: CapabilityStatus::Unavailable,
+            status: CapabilityStatus::Unsupported,
             volume: Some(volume.clone()),
-            explanation: "ReFS block-clone probing is not implemented yet".to_owned(),
+            explanation: format!(
+                "the Windows block-clone backend requires ReFS, not {}",
+                volume.identity.filesystem
+            ),
             requires_explicit_fallback: false,
         },
         Err(error) => unavailable(BackendKind::RefsBlockClone, error),
