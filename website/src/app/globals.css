@@ -240,15 +240,10 @@ code, pre { font-family: var(--font-mono); }
 .base-node small, .view-row small { overflow: hidden; color: var(--ink-faint); font-size: 0.55rem; text-overflow: ellipsis; white-space: nowrap; }
 .node-index { color: var(--accent); font-size: 0.56rem; }
 .base-track {
-  background: linear-gradient(90deg, var(--ink-faint) 0%, var(--ink) 42%, var(--success) 50%, var(--ink) 58%, var(--ink-faint) 100%);
-  background-clip: text;
-  background-size: 220% 100%;
-  color: transparent;
+  color: var(--ink);
   font-size: 0.65rem;
   letter-spacing: 0.03em;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: shared-base-flow 5.5s linear infinite;
+  animation: graph-count-up 7.5s steps(16, end) infinite both;
 }
 
 .branch-line {
@@ -257,43 +252,27 @@ code, pre { font-family: var(--font-mono); }
   color: var(--ink-faint);
   font-size: 0.65rem;
   white-space: nowrap;
-  animation: branch-signal 5.5s ease-in-out infinite;
 }
 .view-list { border-block: 1px dashed var(--line); }
-.view-row {
-  animation: worktree-activity 9s ease-in-out infinite both;
-}
 .view-row + .view-row { border-top: 1px solid var(--line); }
-.block-track { display: flex; gap: 1px; font-size: 0.74rem; line-height: 1; }
+.block-track {
+  display: flex;
+  gap: 1px;
+  font-size: 0.74rem;
+  line-height: 1;
+  animation: graph-count-up 7.5s steps(16, end) infinite both;
+}
 .shared-block { color: var(--ink-faint); }
-.private-block {
-  display: inline-block;
-  color: var(--accent);
-  transform-origin: center;
-  animation: private-block-write 9s ease-in-out infinite both;
-}
+.private-block { color: var(--accent); }
 
-.view-row:nth-child(2), .view-row:nth-child(2) .private-block { animation-delay: 3s; }
-.view-row:nth-child(3), .view-row:nth-child(3) .private-block { animation-delay: 6s; }
+.view-row:nth-child(1) .block-track { animation-delay: 0.55s; }
+.view-row:nth-child(2) .block-track { animation-delay: 0.95s; }
+.view-row:nth-child(3) .block-track { animation-delay: 1.35s; }
 
-@keyframes shared-base-flow {
-  from { background-position: 120% 0; }
-  to { background-position: -120% 0; }
-}
-
-@keyframes branch-signal {
-  0%, 100% { color: var(--ink-faint); opacity: 0.58; }
-  48%, 58% { color: var(--ink-muted); opacity: 1; }
-}
-
-@keyframes worktree-activity {
-  0%, 4%, 30%, 100% { background-color: transparent; box-shadow: inset 0 0 0 transparent; }
-  9%, 24% { background-color: rgb(241 238 229 / 0.025); box-shadow: inset 2px 0 0 rgb(240 106 58 / 0.72); }
-}
-
-@keyframes private-block-write {
-  0%, 4%, 30%, 100% { opacity: 0.56; transform: scaleY(0.82); }
-  9%, 24% { opacity: 1; transform: scaleY(1.08); }
+@keyframes graph-count-up {
+  0%, 8% { clip-path: inset(0 100% 0 0); }
+  52%, 99.9% { clip-path: inset(0 0 0 0); }
+  100% { clip-path: inset(0 100% 0 0); }
 }
 
 .map-legend {
@@ -600,12 +579,7 @@ code, pre { font-family: var(--font-mono); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .base-track {
-    background: none;
-    color: var(--ink);
-    -webkit-text-fill-color: currentColor;
-  }
-  .base-track, .branch-line, .view-row, .private-block { animation: none !important; }
+  .base-track, .block-track { clip-path: none; animation: none !important; }
   .backend-cycle-item { animation: none !important; }
   .backend-cycle-item:first-child { position: relative; opacity: 1; transform: none; }
   .backend-cycle-item:not(:first-child) { display: none; }
