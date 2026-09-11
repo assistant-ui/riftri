@@ -219,12 +219,13 @@ Riftri should eventually report and benchmark:
 
 ## Current state
 
-The Rust workspace, Milestone 1 foundation, and Milestone 2 explicit APFS
-prototype exist. On a writable APFS volume, `riftri worktree add` builds or
-reuses an exact-tree immutable base, creates real linked-worktree metadata with
-checkout suppressed, activates a native COW clone, synchronizes the index, and
-requires a clean Git status before success. Add operations are journaled and
-recoverable. Repository-local enable/disable state, process-scoped execution,
+The Rust workspace and Milestones 1 through 4 are complete. On writable APFS,
+Btrfs, and reflink-enabled XFS volumes, `riftri worktree add` builds or reuses an
+exact-tree immutable base, creates real linked-worktree metadata with checkout
+suppressed, activates a native COW view, synchronizes the index, and requires a
+clean Git status before success. Linux support uses an active unnamed-file
+`FICLONE` probe and never substitutes a byte copy. Add operations are journaled
+and recoverable. Repository-local enable/disable state, process-scoped execution,
 and an explicitly activated sh/bash/zsh hook now route supported normal Git
 adds through that same transaction. Process-scoped commands can also be bound
 to a validated existing worktree without agent-specific behavior. Clean managed
@@ -233,9 +234,8 @@ derived reference counts plus logical and allocated-byte accounting.
 Repository-aware repair resumes incomplete journals, and explicit journaled
 garbage collection can remove independently revalidated zero-reference bases.
 Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
-missing paths referenced by active journals without deleting them. Managed
-move and guarded prune now use recoverable forward-only journals. Automatic
-orphan-state repair, Linux/Windows mutation backends, mounts, and a daemon are
-not implemented. The APFS storage-lifecycle safety work through Milestone 3 and
-the transparent Git compatibility work in Milestone 4 are complete; subsequent
-roadmap milestones add native Linux and Windows backends.
+missing paths referenced by active journals without deleting them. Managed move
+and guarded prune use recoverable forward-only journals. The Linux reflink slice
+of Milestone 5 is implemented and exercised on disposable Btrfs and XFS volumes
+in CI. Automatic orphan-state repair, OverlayFS and Windows mutation backends,
+mount recovery, and a daemon are not implemented.

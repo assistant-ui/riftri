@@ -196,6 +196,18 @@ narrows D016's initial blanket rejection without changing its exact-tree or
 external-input safety requirements; existing bases need no migration because
 an attributed tree was previously rejected before base creation.
 
+### D023: Linux reflinks use an active unnamed-file probe
+
+Linux worktree creation supports Btrfs and reflink-enabled XFS through the
+kernel `FICLONE` ioctl. Before Git metadata or Riftri state is mutated, Riftri
+actively clones between unnamed files on the destination volume and verifies
+that a private write does not change the source. Unnamed files make probe
+cleanup automatic after normal exit or interruption. The state directory is
+then required to resolve to the same volume, and every view file must reflink;
+an ioctl failure rolls the journaled operation back and never triggers a byte
+copy. Read-only diagnostics remain conservative for XFS because its per-volume
+reflink feature cannot be proven from the filesystem name alone.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

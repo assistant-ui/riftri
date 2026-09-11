@@ -80,3 +80,45 @@ jobs:
 
       - name: Build website
         run: pnpm --dir website build
+
+  linux-reflink:
+    name: Linux reflink integration (${{ matrix.filesystem }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        filesystem:
+          - btrfs
+          - xfs
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install filesystem tools
+        run: sudo apt-get update && sudo apt-get install --yes btrfs-progs xfsprogs
+
+      - name: Create disposable reflink test volume
+        run: |
+          truncate --size 2G "$RUNNER_TEMP/riftri-reflink.img"
+          mkdir "$RUNNER_TEMP/riftri-reflink"
+          if [ "${{ matrix.filesystem }}" = "btrfs" ]; then
+            sudo mkfs.btrfs --force "$RUNNER_TEMP/riftri-reflink.img"
+          else
+            sudo mkfs.xfs --force -m reflink=1 "$RUNNER_TEMP/riftri-reflink.img"
+          fi
+          sudo mount --options loop "$RUNNER_TEMP/riftri-reflink.img" "$RUNNER_TEMP/riftri-reflink"
+          sudo chown "$(id --user):$(id --group)" "$RUNNER_TEMP/riftri-reflink"
+
+      - name: Run Linux reflink integration suite
+        env:
+          RIFTRI_REQUIRE_REFLINK: "1"
+          TMPDIR: ${{ runner.temp }}/riftri-reflink
+        run: cargo test --workspace
+
+      - name: Unmount disposable test volume
+        if: always()
+        run: |
+          if mountpoint --quiet "$RUNNER_TEMP/riftri-reflink"; then
+            sudo umount "$RUNNER_TEMP/riftri-reflink"
+          fi

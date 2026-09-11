@@ -3,26 +3,32 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::fs::OpenOptions;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use fs2::FileExt;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use riftri_git::WorktreeHead;
 use riftri_git::{Git, GitAttribute, GitError, ObjectId};
-use riftri_storage::{ApfsCloner, StorageError};
 #[cfg(target_os = "macos")]
-use riftri_storage::{BackendKind, CapabilityStatus, DestinationVolume, probe_backends};
-#[cfg(target_os = "macos")]
+use riftri_storage::ApfsCloner as NativeCowCloner;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+use riftri_storage::ApfsCloner as NativeCowCloner;
+#[cfg(target_os = "linux")]
+use riftri_storage::ReflinkCloner as NativeCowCloner;
+use riftri_storage::{BackendKind, StorageError};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use riftri_storage::{CapabilityStatus, DestinationVolume, probe_backends};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use crate::journal::{
     CollectionJournalPaths, CollectionJournalRecord, JournalPaths, JournalRecord, MoveJournalPaths,
     MoveJournalRecord, PruneJournalRecord, RemovalJournalPaths,
@@ -39,12 +45,12 @@ use crate::{
     RepositoryCompatibilityBlockerKind, RepositoryCompatibilityReport,
 };
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 static OPERATION_NONCE: AtomicU64 = AtomicU64::new(0);
 
 struct CompatibilityAnalysis {
     report: RepositoryCompatibilityReport,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     checkout_profile: Vec<u8>,
 }
 
@@ -61,7 +67,7 @@ pub struct AddWorktreeRequest {
     pub revision: OsString,
     pub mode: WorktreeMode,
     /// Defaults to `<common-git-dir>/riftri`. A custom directory must be on the
-    /// same APFS volume as the destination.
+    /// same filesystem volume as the destination.
     pub state_dir: Option<PathBuf>,
 }
 
@@ -73,6 +79,7 @@ pub struct AddWorktreeResult {
     pub base_path: PathBuf,
     pub journal_path: PathBuf,
     pub reused_base: bool,
+    pub backend: BackendKind,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +138,7 @@ pub struct BaseStorageAccounting {
 pub struct ViewStorageAccounting {
     pub destination: PathBuf,
     pub base_path: PathBuf,
+    pub backend: BackendKind,
     pub logical_bytes: u64,
     pub allocated_bytes: u64,
 }
@@ -343,6 +351,7 @@ pub fn storage_accounting(
         views.push(ViewStorageAccounting {
             destination: journal.destination.clone(),
             base_path: journal.base_path.clone(),
+            backend: journal.backend,
             logical_bytes,
             allocated_bytes,
         });
@@ -447,7 +456,7 @@ pub fn storage_accounting(
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn garbage_collect_inner(
     _state_directory: &Path,
     _apply: bool,
@@ -458,7 +467,7 @@ fn garbage_collect_inner(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn garbage_collect_inner(
     state_directory: &Path,
     apply: bool,
@@ -522,7 +531,7 @@ fn garbage_collect_inner(
     Ok(report)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn current_timestamp() -> Result<u128, WorktreeError> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -530,7 +539,7 @@ fn current_timestamp() -> Result<u128, WorktreeError> {
         .map_err(|error| WorktreeError::InvalidRequest(format!("system clock error: {error}")))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn garbage_collection_candidates(
     state_directory: &Path,
 ) -> Result<Vec<GarbageCollectionCandidate>, WorktreeError> {
@@ -565,7 +574,7 @@ fn garbage_collection_candidates(
     Ok(candidates)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, WorktreeError> {
     let removals = RemovalJournalStore::open(state_directory).load_all()?;
     let completed = removals
@@ -584,7 +593,7 @@ fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, Work
         .collect())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn recover_collection_journals(state_directory: &Path) -> Result<usize, WorktreeError> {
     let store = CollectionJournalStore::open(state_directory);
     let journals = store.load_all()?;
@@ -601,7 +610,7 @@ fn recover_collection_journals(state_directory: &Path) -> Result<usize, Worktree
     Ok(recovered)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn resume_decoded_collection(
     state_directory: &Path,
     store: &CollectionJournalStore,
@@ -618,7 +627,7 @@ fn resume_decoded_collection(
     resume_collection(state_directory, store, &mut record, journal, fail_after)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn resume_collection(
     state_directory: &Path,
     store: &CollectionJournalStore,
@@ -710,7 +719,7 @@ fn resume_collection(
     Ok(record.phase == GarbageCollectionPhase::Complete)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_collection_paths(
     state_directory: &Path,
     journal: &DecodedCollectionJournal,
@@ -748,7 +757,7 @@ fn validate_collection_paths(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_collectible_base(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
     if journal.base_path.exists() {
         let metadata = fs::symlink_metadata(&journal.base_path)
@@ -763,7 +772,7 @@ fn validate_collectible_base(journal: &DecodedCollectionJournal) -> Result<(), W
     validate_collection_marker(journal)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
     if journal.marker_path.exists() {
         let metadata = fs::symlink_metadata(&journal.marker_path).map_err(|source| {
@@ -783,7 +792,7 @@ fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), 
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -802,7 +811,7 @@ fn make_directory_owner_writable(path: &Path) -> Result<(), WorktreeError> {
     .map_err(|source| io("prepare collectible base directory", path, source))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn advance_collection(
     store: &CollectionJournalStore,
     journal: &mut CollectionJournalRecord,
@@ -814,7 +823,7 @@ fn advance_collection(
     fail_collection_if_requested(phase, fail_after)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn fail_collection_if_requested(
     phase: GarbageCollectionPhase,
     fail_after: Option<GarbageCollectionPhase>,
@@ -826,7 +835,7 @@ fn fail_collection_if_requested(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn remove_worktree_inner(
     _request: RemoveWorktreeRequest,
     _fail_after: Option<RemoveWorktreePhase>,
@@ -836,7 +845,7 @@ fn remove_worktree_inner(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn remove_worktree_inner(
     request: RemoveWorktreeRequest,
     fail_after: Option<RemoveWorktreePhase>,
@@ -929,7 +938,7 @@ fn remove_worktree_inner(
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn move_worktree_inner(
     _request: MoveWorktreeRequest,
     _fail_after: Option<MoveWorktreePhase>,
@@ -939,7 +948,7 @@ fn move_worktree_inner(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn move_worktree_inner(
     request: MoveWorktreeRequest,
     fail_after: Option<MoveWorktreePhase>,
@@ -956,8 +965,8 @@ fn move_worktree_inner(
     })?;
     let source = normalize_existing_destination(&request.source)?;
     let destination = normalize_new_destination(&request.destination)?;
-    let source_volume = supported_apfs_volume(&source)?;
-    let destination_volume = supported_apfs_volume(&destination)?;
+    let source_volume = inspected_native_cow_volume(&source)?;
+    let destination_volume = supported_native_cow_volume(&destination)?;
     if source_volume.identity != destination_volume.identity {
         return Err(WorktreeError::Unsupported(
             "moving an optimized worktree across filesystem volumes is not supported".to_owned(),
@@ -1027,7 +1036,7 @@ fn move_worktree_inner(
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn prune_worktrees_inner(
     _request: PruneWorktreesRequest,
     _fail_after: Option<PruneWorktreesPhase>,
@@ -1037,7 +1046,7 @@ fn prune_worktrees_inner(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn prune_worktrees_inner(
     request: PruneWorktreesRequest,
     fail_after: Option<PruneWorktreesPhase>,
@@ -1073,18 +1082,18 @@ fn prune_worktrees_inner(
     Ok(PruneWorktreesResult { journal_path })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn add_worktree_inner(
     _request: AddWorktreeRequest,
     _fail_after: Option<AddWorktreePhase>,
     _rollback_on_error: bool,
 ) -> Result<AddWorktreeResult, WorktreeError> {
     Err(WorktreeError::Unsupported(
-        "the explicit prototype currently requires a writable APFS volume on macOS".to_owned(),
+        "this build has no supported native copy-on-write worktree backend".to_owned(),
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn add_worktree_inner(
     request: AddWorktreeRequest,
     fail_after: Option<AddWorktreePhase>,
@@ -1094,7 +1103,7 @@ fn add_worktree_inner(
     let repository = git.inspect_repository(&request.repository)?;
     if repository.is_bare {
         return Err(WorktreeError::Unsupported(
-            "bare repositories are not supported by the APFS prototype".to_owned(),
+            "bare repositories are not supported by optimized checkout".to_owned(),
         ));
     }
     let repository_root = repository.root.ok_or_else(|| {
@@ -1103,16 +1112,16 @@ fn add_worktree_inner(
     let destination = normalize_new_destination(&request.destination)?;
     let checkout_profile = validate_compatibility(&git, &repository_root, &request.revision)?;
     let resolved = git.resolve_revision(&repository_root, &request.revision)?;
-    let destination_volume = supported_apfs_volume(&destination)?;
+    let destination_volume = supported_native_cow_volume(&destination)?;
 
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let state_directory = absolute_path(&requested_state)?;
-    let state_volume = supported_apfs_volume(&state_directory)?;
+    let state_volume = inspected_native_cow_volume(&state_directory)?;
     if destination_volume.identity != state_volume.identity {
         return Err(WorktreeError::Unsupported(format!(
-            "state directory {} and destination {} are on different volumes; pass --state-dir on the destination APFS volume",
+            "state directory {} and destination {} are on different volumes; pass --state-dir on the destination filesystem volume",
             state_directory.display(),
             destination.display()
         )));
@@ -1156,6 +1165,7 @@ fn add_worktree_inner(
             branch,
         },
         resolved.commit.as_str().to_owned(),
+        native_backend_kind(),
     );
     let journal_path = store.persist(&journal)?;
 
@@ -1185,6 +1195,7 @@ fn add_worktree_inner(
             base_path,
             journal_path,
             reused_base,
+            backend: native_backend_kind(),
         }),
         Err(operation_error) => {
             if !rollback_on_error {
@@ -1222,7 +1233,7 @@ fn add_worktree_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn perform_add(
     git: &Git,
     store: &JournalStore,
@@ -1260,8 +1271,8 @@ fn perform_add(
     )?;
     advance(store, journal, AddWorktreePhase::BaseReady, fail_after)?;
 
-    ApfsCloner::clone_tree(base_path, scratch)?;
-    ApfsCloner::make_tree_owner_writable(scratch)?;
+    NativeCowCloner::clone_tree(base_path, scratch)?;
+    NativeCowCloner::make_tree_owner_writable(scratch)?;
     advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
 
     let git_pointer = destination.join(".git");
@@ -1276,7 +1287,7 @@ fn perform_add(
     fs::remove_dir(destination)
         .map_err(|source| io("remove empty checkout directory", destination, source))?;
     fs::rename(scratch, destination)
-        .map_err(|source| io("activate APFS worktree view", destination, source))?;
+        .map_err(|source| io("activate native COW worktree view", destination, source))?;
     sync_parent(destination)?;
     advance(
         store,
@@ -1303,7 +1314,7 @@ fn perform_add(
     Ok(reused_base)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn advance(
     store: &JournalStore,
     journal: &mut JournalRecord,
@@ -1315,7 +1326,7 @@ fn advance(
     fail_add_if_requested(phase, fail_after)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn fail_add_if_requested(
     phase: AddWorktreePhase,
     fail_after: Option<AddWorktreePhase>,
@@ -1326,7 +1337,7 @@ fn fail_add_if_requested(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn prepare_base(
     git: &Git,
     repository: &Path,
@@ -1383,7 +1394,7 @@ fn prepare_base(
     remove_file_if_present(temporary_index)?;
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
-    ApfsCloner::make_tree_read_only(base_path)?;
+    NativeCowCloner::make_tree_read_only(base_path)?;
     let marker = OpenOptions::new()
         .create_new(true)
         .write(true)
@@ -1396,7 +1407,7 @@ fn prepare_base(
     Ok(false)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_compatibility(
     git: &Git,
     repository: &Path,
@@ -1497,7 +1508,7 @@ fn analyze_repository_compatibility(
             });
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let mut profile = {
         let mut profile = Sha256::new();
         profile.update(b"riftri-checkout-profile-v1\0");
@@ -1539,7 +1550,7 @@ fn analyze_repository_compatibility(
         ),
     ] {
         let value = git.config_value(repository, key)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
         if let Some(value) = value
             && !accepted
@@ -1555,7 +1566,7 @@ fn analyze_repository_compatibility(
             });
         }
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         for key in [
             "core.filemode",
@@ -1575,7 +1586,7 @@ fn analyze_repository_compatibility(
             compatible: blockers.is_empty(),
             blockers,
         },
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         checkout_profile: profile.finalize().to_vec(),
     })
 }
@@ -1590,7 +1601,7 @@ fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn hash_profile_input(hasher: &mut Sha256, key: &[u8], value: Option<&[u8]>) {
     hasher.update((key.len() as u64).to_le_bytes());
     hasher.update(key);
@@ -1604,8 +1615,9 @@ fn hash_profile_input(hasher: &mut Sha256, key: &[u8], value: Option<&[u8]>) {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn supported_apfs_volume(path: &Path) -> Result<DestinationVolume, WorktreeError> {
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn supported_native_cow_volume(path: &Path) -> Result<DestinationVolume, WorktreeError> {
+    #[cfg(target_os = "macos")]
     let capability = probe_backends(path)
         .into_iter()
         .find(|capability| capability.kind == BackendKind::ApfsClone)
@@ -1614,15 +1626,60 @@ fn supported_apfs_volume(path: &Path) -> Result<DestinationVolume, WorktreeError
                 "this build does not provide the APFS clone backend".to_owned(),
             )
         })?;
+    #[cfg(target_os = "linux")]
+    let capability = riftri_storage::ReflinkCloner::probe(path);
     if capability.status != CapabilityStatus::Supported {
         return Err(WorktreeError::Unsupported(capability.explanation));
     }
     capability.volume.ok_or_else(|| {
-        WorktreeError::Unsupported("APFS capability did not include a volume identity".to_owned())
+        WorktreeError::Unsupported(
+            "native COW capability did not include a volume identity".to_owned(),
+        )
     })
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn inspected_native_cow_volume(path: &Path) -> Result<DestinationVolume, WorktreeError> {
+    let backend = native_backend_kind();
+    let capability = probe_backends(path)
+        .into_iter()
+        .find(|capability| capability.kind == backend)
+        .ok_or_else(|| {
+            WorktreeError::Unsupported(format!(
+                "this build does not provide the {} backend",
+                backend.display_name()
+            ))
+        })?;
+    let volume = capability.volume.ok_or_else(|| {
+        WorktreeError::Unsupported(format!(
+            "{} capability did not include a volume identity",
+            backend.display_name()
+        ))
+    })?;
+    #[cfg(target_os = "linux")]
+    if capability.status == CapabilityStatus::Unavailable
+        && volume.identity.filesystem == "xfs"
+        && !volume.read_only
+    {
+        return Ok(volume);
+    }
+    if capability.status != CapabilityStatus::Supported {
+        return Err(WorktreeError::Unsupported(capability.explanation));
+    }
+    Ok(volume)
+}
+
 #[cfg(target_os = "macos")]
+const fn native_backend_kind() -> BackendKind {
+    BackendKind::ApfsClone
+}
+
+#[cfg(target_os = "linux")]
+const fn native_backend_kind() -> BackendKind {
+    BackendKind::Reflink
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeError> {
     if destination.as_os_str().is_empty() {
         return Err(WorktreeError::InvalidRequest(
@@ -1671,7 +1728,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
     for directory in [
         state_directory.to_path_buf(),
@@ -1685,7 +1742,7 @@ fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn allocate_operation_id(
     store: &JournalStore,
     state_directory: &Path,
@@ -1719,7 +1776,7 @@ fn allocate_operation_id(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn repository_cache_id(common_git_directory: &Path, checkout_profile: &[u8]) -> String {
     let mut hasher = Sha256::new();
     #[cfg(unix)]
@@ -1739,7 +1796,7 @@ fn repository_cache_id(common_git_directory: &Path, checkout_profile: &[u8]) -> 
     encoded
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn normalize_existing_destination(destination: &Path) -> Result<PathBuf, WorktreeError> {
     if destination.as_os_str().is_empty() {
         return Err(WorktreeError::InvalidRequest(
@@ -1794,7 +1851,7 @@ fn find_managed_add_journal(
     Ok(managed)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, WorktreeError> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1811,19 +1868,19 @@ fn allocate_removal_operation_id(store: &RemovalJournalStore) -> Result<String, 
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn allocate_move_operation_id(store: &MoveJournalStore) -> Result<String, WorktreeError> {
     allocate_lifecycle_operation_id("move", |operation_id| store.path_for(operation_id).exists())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn allocate_prune_operation_id(store: &PruneJournalStore) -> Result<String, WorktreeError> {
     allocate_lifecycle_operation_id("prune", |operation_id| {
         store.path_for(operation_id).exists()
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn allocate_lifecycle_operation_id(
     prefix: &str,
     exists: impl Fn(&str) -> bool,
@@ -1843,13 +1900,13 @@ fn allocate_lifecycle_operation_id(
     )))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn next_operation_id(timestamp: u128) -> String {
     let nonce = OPERATION_NONCE.fetch_add(1, Ordering::Relaxed);
     format!("{timestamp:x}-{:x}-{nonce:x}", std::process::id())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn advance_removal(
     store: &RemovalJournalStore,
     journal: &mut RemovalJournalRecord,
@@ -1861,7 +1918,7 @@ fn advance_removal(
     fail_removal_if_requested(phase, fail_after)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn fail_removal_if_requested(
     phase: RemoveWorktreePhase,
     fail_after: Option<RemoveWorktreePhase>,
@@ -1872,7 +1929,7 @@ fn fail_removal_if_requested(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn diagnose_state_paths(
     state_directory: &Path,
     add_journals: &[DecodedJournal],
@@ -2026,7 +2083,7 @@ fn diagnose_state_paths(
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn diagnose_state_paths(
     _state_directory: &Path,
     _add_journals: &[DecodedJournal],
@@ -2038,7 +2095,7 @@ fn diagnose_state_paths(
     Ok(StatePathDiagnosis::default())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn diagnose_journal_directory(
     directory: &Path,
     expected: HashSet<PathBuf>,
@@ -2065,7 +2122,7 @@ fn diagnose_journal_directory(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn diagnose_temporary_directory(
     directory: &Path,
     expected: HashSet<PathBuf>,
@@ -2086,7 +2143,7 @@ fn diagnose_temporary_directory(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn diagnose_base_directories(
     state_directory: &Path,
     collection_journals: &[DecodedCollectionJournal],
@@ -2188,7 +2245,7 @@ fn diagnose_base_directories(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn child_paths(directory: &Path, operation: &'static str) -> Result<Vec<PathBuf>, WorktreeError> {
     let mut paths = fs::read_dir(directory)
         .map_err(|source| io(operation, directory, source))?
@@ -2202,7 +2259,7 @@ fn child_paths(directory: &Path, operation: &'static str) -> Result<Vec<PathBuf>
     Ok(paths)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn add_state_issue(
     issues: &mut Vec<StateDiagnosticIssue>,
     path: PathBuf,
@@ -2214,14 +2271,14 @@ fn add_state_issue(
     });
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_real_directory(path: &Path) -> Result<bool, WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect Riftri state path", path, source))?;
     Ok(metadata.is_dir() && !metadata.file_type().is_symlink())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_real_directory_if_present(path: &Path) -> Result<bool, WorktreeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.is_dir() && !metadata.file_type().is_symlink()),
@@ -2230,14 +2287,14 @@ fn is_real_directory_if_present(path: &Path) -> Result<bool, WorktreeError> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_regular_file(path: &Path) -> Result<bool, WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect Riftri state path", path, source))?;
     Ok(metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_regular_file_if_present(path: &Path) -> Result<bool, WorktreeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
@@ -2246,7 +2303,7 @@ fn is_regular_file_if_present(path: &Path) -> Result<bool, WorktreeError> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn looks_like_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -2403,7 +2460,7 @@ pub fn recover_incomplete_operations(
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     for journal in move_journals {
         if journal.phase == MoveWorktreePhase::Complete {
             report.completed_moves += 1;
@@ -2419,7 +2476,7 @@ pub fn recover_incomplete_operations(
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     for journal in prune_journals {
         if journal.phase == PruneWorktreesPhase::Complete {
             report.completed_prunes += 1;
@@ -2435,7 +2492,7 @@ pub fn recover_incomplete_operations(
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     for journal in collection_journals {
         match journal.phase {
             GarbageCollectionPhase::Complete => report.completed_collections += 1,
@@ -2571,7 +2628,7 @@ fn resume_removal(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn resume_move(
     git: &Git,
     store: &MoveJournalStore,
@@ -2665,7 +2722,7 @@ fn resume_move(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn validate_move_paths(
     state_directory: &Path,
     journal: &DecodedMoveJournal,
@@ -2702,7 +2759,7 @@ fn validate_move_paths(
     validate_recovery_paths(state_directory, &source)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn move_registration(
     git: &Git,
     journal: &DecodedMoveJournal,
@@ -2718,7 +2775,7 @@ fn move_registration(
     ))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn resume_prune(
     git: &Git,
     store: &PruneJournalStore,
@@ -2778,7 +2835,7 @@ fn resume_prune(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn verify_prune_safe(
     git: &Git,
     state_directory: &Path,
@@ -2848,7 +2905,7 @@ fn verify_prune_safe(
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn lifecycle_state_directory(
     journal_path: &Path,
     operation: &str,
@@ -2865,7 +2922,7 @@ fn lifecycle_state_directory(
         })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn advance_move(
     store: &MoveJournalStore,
     record: &mut MoveJournalRecord,
@@ -2877,7 +2934,7 @@ fn advance_move(
     fail_move_if_requested(phase, fail_after)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn fail_move_if_requested(
     phase: MoveWorktreePhase,
     fail_after: Option<MoveWorktreePhase>,
@@ -2889,7 +2946,7 @@ fn fail_move_if_requested(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn advance_prune(
     store: &PruneJournalStore,
     record: &mut PruneJournalRecord,
@@ -2901,7 +2958,7 @@ fn advance_prune(
     fail_prune_if_requested(phase, fail_after)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn fail_prune_if_requested(
     phase: PruneWorktreesPhase,
     fail_after: Option<PruneWorktreesPhase>,
@@ -3225,7 +3282,7 @@ fn remove_tree_if_present(path: &Path) -> Result<(), WorktreeError> {
             path.display()
         )));
     }
-    ApfsCloner::make_tree_owner_writable(path)?;
+    NativeCowCloner::make_tree_owner_writable(path)?;
     fs::remove_dir_all(path).map_err(|source| io("remove rollback directory", path, source))
 }
 
@@ -3245,7 +3302,7 @@ fn remove_empty_directory_if_present(path: &Path) -> Result<(), WorktreeError> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn sync_parent(path: &Path) -> Result<(), WorktreeError> {
     let parent = path.expect_parent()?;
     File::open(parent)
@@ -3253,12 +3310,12 @@ fn sync_parent(path: &Path) -> Result<(), WorktreeError> {
         .map_err(|source| io("sync parent directory", parent, source))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 trait PathExt {
     fn expect_parent(&self) -> Result<&Path, WorktreeError>;
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl PathExt for Path {
     fn expect_parent(&self) -> Result<&Path, WorktreeError> {
         self.parent().ok_or_else(|| {

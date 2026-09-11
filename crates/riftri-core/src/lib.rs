@@ -388,7 +388,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
     };
 
     DoctorReport {
-        project_stage: "apfs-prototype-with-repository-activation",
+        project_stage: "native-cow-with-repository-activation",
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
         cow_backend_active: false,
