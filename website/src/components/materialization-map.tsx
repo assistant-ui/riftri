@@ -83,24 +83,6 @@ export function MaterializationMap() {
         ))}
       </ol>
 
-      <ul className="platform-lane" aria-label="Riftri native storage backend roadmap">
-        {platforms.map((platform) => (
-          <li
-            className={
-              platform.status === "current" ? "platform-backend is-current" : "platform-backend"
-            }
-            key={platform.name}
-          >
-            <span className="platform-signal" aria-hidden="true" />
-            <div>
-              <strong>{platform.name}</strong>
-              <small>{platform.backend}</small>
-            </div>
-            <span className="platform-status">{platform.status}</span>
-          </li>
-        ))}
-      </ul>
-
       <div className="materialization-foot">
         <span>GIT OWNS THE WORKTREE</span>
         <span><i aria-hidden="true" /> RIFTRI EXITS AFTER CREATION</span>
