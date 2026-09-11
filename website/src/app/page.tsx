@@ -108,8 +108,8 @@ function Overview() {
   return (
     <section className="content-section" id="overview">
       <div className="section-heading">
-        <GraphLabel index="01">WHAT RIFTRI CHANGES</GraphLabel>
-        <h2>One tree. Many workspaces.</h2>
+        <GraphLabel index="01">STORAGE MODEL</GraphLabel>
+        <h2>How Riftri stores linked worktrees</h2>
         <p>
           Riftri changes how worktree files are created and stored. It does not replace Git,
           manage branches, or sit between your tools and the filesystem.
@@ -155,8 +155,8 @@ function GetStarted() {
     <section className="content-section start-section" id="start">
       <div className="section-heading split-heading">
         <div>
-          <GraphLabel index="02">GET STARTED</GraphLabel>
-          <h2>Install. Check. Create.</h2>
+          <GraphLabel index="02">QUICK START</GraphLabel>
+          <h2>Create a Riftri worktree</h2>
         </div>
         <p>
           Run these commands from a Git repository. Riftri checks the destination first and stops
