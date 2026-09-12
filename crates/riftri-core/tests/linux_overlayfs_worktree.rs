@@ -2,6 +2,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
@@ -12,6 +13,18 @@ use riftri_core::{
 use riftri_storage::{BackendKind, CapabilityStatus, OverlayFsMountIdentity, OverlayFsMounter};
 mod support;
 use support::writable_tempdir as tempdir;
+
+const PRIVATE_XATTR: &str = "user.riftri.private";
+
+fn read_private_xattr(path: &Path) -> rustix::io::Result<Vec<u8>> {
+    let mut value = Vec::with_capacity(64);
+    rustix::fs::getxattr(
+        path,
+        PRIVATE_XATTR,
+        rustix::buffer::spare_capacity(&mut value),
+    )?;
+    Ok(value)
+}
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -65,9 +78,26 @@ fn creates_isolates_and_removes_real_overlayfs_worktrees() {
     );
     git(&repository, &["config", "core.autocrlf", "false"]);
     fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    fs::write(repository.join("executable.sh"), "#!/bin/sh\nexit 0\n").expect("write executable");
+    fs::set_permissions(
+        repository.join("executable.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("set executable mode");
+    symlink("tracked.txt", repository.join("tracked-link")).expect("create tracked symlink");
     fs::write(repository.join("large.bin"), vec![7_u8; 8 * 1024 * 1024])
         .expect("write allocation fixture");
-    git(&repository, &["add", "--", "tracked.txt", "large.bin"]);
+    git(
+        &repository,
+        &[
+            "add",
+            "--",
+            "tracked.txt",
+            "executable.sh",
+            "tracked-link",
+            "large.bin",
+        ],
+    );
     git(&repository, &["commit", "--quiet", "-m", "initial"]);
 
     let first_result = add_worktree(AddWorktreeRequest {
@@ -126,6 +156,64 @@ fn creates_isolates_and_removes_real_overlayfs_worktrees() {
             .expect("inspect second mountpoint")
             .success()
     );
+
+    fs::set_permissions(
+        first.join("executable.sh"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("change executable mode in first view");
+    assert_eq!(
+        fs::metadata(first.join("executable.sh"))
+            .expect("first executable metadata")
+            .permissions()
+            .mode()
+            & 0o111,
+        0
+    );
+    for path in [&second, &first_result.base_path] {
+        assert_ne!(
+            fs::metadata(path.join("executable.sh"))
+                .expect("unchanged executable metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+    }
+    fs::set_permissions(
+        first.join("executable.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("restore executable mode");
+
+    fs::remove_file(first.join("tracked-link")).expect("replace first-view symlink");
+    symlink("executable.sh", first.join("tracked-link")).expect("create private symlink");
+    assert_eq!(
+        fs::read_link(second.join("tracked-link")).expect("read second-view symlink"),
+        Path::new("tracked.txt")
+    );
+    assert_eq!(
+        fs::read_link(first_result.base_path.join("tracked-link"))
+            .expect("read immutable-base symlink"),
+        Path::new("tracked.txt")
+    );
+    fs::remove_file(first.join("tracked-link")).expect("remove private symlink");
+    symlink("tracked.txt", first.join("tracked-link")).expect("restore tracked symlink");
+
+    rustix::fs::setxattr(
+        first.join("tracked.txt"),
+        PRIVATE_XATTR,
+        b"first-view",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .expect("set private worktree xattr");
+    assert_eq!(
+        read_private_xattr(&first.join("tracked.txt")).expect("read first-view xattr"),
+        b"first-view"
+    );
+    assert!(read_private_xattr(&second.join("tracked.txt")).is_err());
+    assert!(read_private_xattr(&first_result.base_path.join("tracked.txt")).is_err());
+    assert!(git(&first, &["status", "--porcelain=v1"]).is_empty());
 
     fs::write(first.join("tracked.txt"), "private first change\n").expect("edit first worktree");
     assert_eq!(

@@ -73,6 +73,22 @@ fn destination_is_case_sensitive(parent: &Path) -> bool {
         .is_ok()
 }
 
+#[cfg(target_os = "macos")]
+const PRIVATE_XATTR: &str = "com.assistantui.riftri.private";
+#[cfg(target_os = "linux")]
+const PRIVATE_XATTR: &str = "user.riftri.private";
+
+#[cfg(unix)]
+fn read_private_xattr(path: &Path) -> rustix::io::Result<Vec<u8>> {
+    let mut value = Vec::with_capacity(64);
+    rustix::fs::getxattr(
+        path,
+        PRIVATE_XATTR,
+        rustix::buffer::spare_capacity(&mut value),
+    )?;
+    Ok(value)
+}
+
 #[test]
 fn creates_clean_isolated_linked_worktrees_from_one_base() {
     let fixture = tempdir().expect("fixture directory");
@@ -140,6 +156,68 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
         fs::read_link(first.join("tracked-link")).expect("read symlink"),
         Path::new("tracked.txt")
     );
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(
+            first.join("executable.sh"),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("change executable mode in first view");
+        assert_eq!(
+            fs::metadata(first.join("executable.sh"))
+                .expect("first executable metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        for path in [&second, &first_result.base_path] {
+            assert_ne!(
+                fs::metadata(path.join("executable.sh"))
+                    .expect("unchanged executable metadata")
+                    .permissions()
+                    .mode()
+                    & 0o111,
+                0
+            );
+        }
+        fs::set_permissions(
+            first.join("executable.sh"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("restore executable mode in first view");
+
+        fs::remove_file(first.join("tracked-link")).expect("replace first-view symlink");
+        symlink("executable.sh", first.join("tracked-link"))
+            .expect("create private first-view symlink");
+        assert_eq!(
+            fs::read_link(second.join("tracked-link")).expect("read second-view symlink"),
+            Path::new("tracked.txt")
+        );
+        assert_eq!(
+            fs::read_link(first_result.base_path.join("tracked-link"))
+                .expect("read immutable-base symlink"),
+            Path::new("tracked.txt")
+        );
+        fs::remove_file(first.join("tracked-link")).expect("remove private symlink");
+        symlink("tracked.txt", first.join("tracked-link")).expect("restore tracked symlink");
+
+        rustix::fs::setxattr(
+            first.join("tracked.txt"),
+            PRIVATE_XATTR,
+            b"first-view",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .expect("set private worktree xattr");
+        assert_eq!(
+            read_private_xattr(&first.join("tracked.txt")).expect("read first-view xattr"),
+            b"first-view"
+        );
+        assert!(read_private_xattr(&second.join("tracked.txt")).is_err());
+        assert!(read_private_xattr(&first_result.base_path.join("tracked.txt")).is_err());
+        assert!(git(&first, &["status", "--porcelain=v1"]).is_empty());
+    }
 
     fs::write(first.join("tracked.txt"), "first change\n").expect("edit first view");
     assert_eq!(

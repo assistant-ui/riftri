@@ -282,6 +282,7 @@ dependencies = [
  "libc",
  "riftri-core",
  "riftri-storage",
+ "rustix",
  "serde_json",
  "tempfile",
 ]
@@ -294,6 +295,7 @@ dependencies = [
  "libc",
  "riftri-git",
  "riftri-storage",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

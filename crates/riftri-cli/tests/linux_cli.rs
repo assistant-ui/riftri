@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -10,6 +10,31 @@ use riftri_storage::{CapabilityStatus, OverlayFsMounter, ReflinkCloner};
 
 mod support;
 use support::writable_tempdir as tempdir;
+
+const PRIVATE_XATTR: &str = "user.riftri.private";
+
+fn read_private_xattr(path: &Path) -> rustix::io::Result<Vec<u8>> {
+    let mut value = Vec::with_capacity(64);
+    rustix::fs::getxattr(
+        path,
+        PRIVATE_XATTR,
+        rustix::buffer::spare_capacity(&mut value),
+    )?;
+    Ok(value)
+}
+
+fn allocated_bytes(path: &Path) -> u64 {
+    let metadata = fs::symlink_metadata(path).expect("inspect allocated-byte fixture");
+    let mut bytes = metadata.blocks().saturating_mul(512);
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).expect("read allocated-byte directory") {
+            bytes = bytes.saturating_add(allocated_bytes(
+                &entry.expect("read allocated-byte entry").path(),
+            ));
+        }
+    }
+    bytes
+}
 
 fn git(path: &Path, arguments: &[&str]) -> Output {
     Command::new("git")
@@ -251,6 +276,32 @@ fn installed_helper_manages_overlayfs_from_an_ordinary_shell() {
     let repository = fixture.path().join("repository");
     let worktree = fixture.path().join("helper-view");
     initialize_repository(&repository);
+    fs::write(repository.join("executable.sh"), "#!/bin/sh\nexit 0\n")
+        .expect("write executable fixture");
+    fs::set_permissions(
+        repository.join("executable.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("set executable fixture mode");
+    symlink("tracked.txt", repository.join("tracked-link")).expect("create symlink fixture");
+    fs::write(repository.join("large.bin"), vec![0x5a; 8 * 1024 * 1024])
+        .expect("write allocation fixture");
+    assert!(
+        git(
+            &repository,
+            &["add", "--", "executable.sh", "tracked-link", "large.bin",],
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(
+            &repository,
+            &["commit", "--quiet", "-m", "metadata fixtures"],
+        )
+        .status
+        .success()
+    );
 
     let helper = Path::new(OverlayFsMounter::DEFAULT_HELPER_PATH);
     let metadata = fs::symlink_metadata(helper).expect("installed helper metadata");
@@ -324,6 +375,16 @@ fn installed_helper_manages_overlayfs_from_an_ordinary_shell() {
     let journal: serde_json::Value =
         serde_json::from_slice(&fs::read(&journal_path).expect("read helper-backed add journal"))
             .expect("decode helper-backed add journal");
+    let operation_id = journal["operation_id"]
+        .as_str()
+        .expect("helper-backed operation ID");
+    let layout_root = repository
+        .join(".git/riftri/overlays/v1")
+        .join(operation_id);
+    assert!(
+        allocated_bytes(&layout_root.join("upper")) < 1024 * 1024,
+        "metadata-only helper activation allocated too much private data"
+    );
     assert_eq!(
         journal["overlayfs"]["mount_context"]["profile"],
         "privileged-trusted-xattr"
@@ -331,6 +392,52 @@ fn installed_helper_manages_overlayfs_from_an_ordinary_shell() {
     assert_eq!(
         journal["overlayfs"]["mount_identity"]["profile"],
         "privileged-trusted-xattr"
+    );
+
+    fs::set_permissions(
+        worktree.join("executable.sh"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("change helper-view executable mode");
+    assert_eq!(
+        fs::metadata(worktree.join("executable.sh"))
+            .expect("helper-view executable metadata")
+            .permissions()
+            .mode()
+            & 0o111,
+        0
+    );
+    fs::set_permissions(
+        worktree.join("executable.sh"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .expect("restore helper-view executable mode");
+
+    fs::remove_file(worktree.join("tracked-link")).expect("replace helper-view symlink");
+    symlink("executable.sh", worktree.join("tracked-link"))
+        .expect("create private helper-view symlink");
+    assert_eq!(
+        String::from_utf8_lossy(&git(&worktree, &["show", "HEAD:tracked-link"]).stdout),
+        "tracked.txt"
+    );
+    fs::remove_file(worktree.join("tracked-link")).expect("remove private helper-view symlink");
+    symlink("tracked.txt", worktree.join("tracked-link")).expect("restore helper-view symlink");
+
+    rustix::fs::setxattr(
+        worktree.join("tracked.txt"),
+        PRIVATE_XATTR,
+        b"helper-view",
+        rustix::fs::XattrFlags::empty(),
+    )
+    .expect("set helper-view xattr");
+    assert_eq!(
+        read_private_xattr(&worktree.join("tracked.txt")).expect("read helper-view xattr"),
+        b"helper-view"
+    );
+    assert!(
+        git(&worktree, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
     );
 
     fs::write(worktree.join("tracked.txt"), "private\n").expect("write through merged view");

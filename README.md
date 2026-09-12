@@ -179,6 +179,8 @@ details on measuring physical sharing, see
 [APFS allocation evidence](docs/allocation-evidence.md) and
 [Linux reflink verification](docs/linux-reflink.md), or see
 [Windows ReFS support](docs/windows-refs.md) for that backend's requirements.
+The tested metadata guarantees and platform boundaries are documented in
+[Filesystem metadata compatibility](docs/filesystem-compatibility.md).
 
 ## Project status
 

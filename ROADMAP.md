@@ -196,7 +196,9 @@ Outcome: cover real-world repositories and long-lived worktrees.
 - Git LFS and custom filter compatibility.
 - Sparse-checkout profiles.
 - Submodule policy and support.
-- Symlinks, executable modes, xattrs, and case-sensitivity testing.
+- Symlinks, executable modes, xattrs, and case-sensitivity testing. (native
+  Unix metadata-isolation matrix and ASCII case-collision preflight complete;
+  non-ASCII case folding and normalization remain in progress)
 - Clean-worktree compaction onto a new immutable base.
 - Shared dependency and build-cache guidance without sharing unsafe writable
   directories.
