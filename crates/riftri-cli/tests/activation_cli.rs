@@ -183,6 +183,118 @@ fn doctor_reports_checkout_compatibility_before_mutation() {
 }
 
 #[test]
+fn doctor_explains_destination_readiness_and_repository_activation() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("future-worktree");
+
+    let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--destination"])
+        .arg(&destination)
+        .arg("--json")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run destination-aware doctor");
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    let readiness = &report["destination_readiness"];
+    assert_eq!(
+        readiness["destination"],
+        destination.to_string_lossy().as_ref()
+    );
+    assert_eq!(readiness["copy_on_write"], readiness["backend"].is_string());
+    if readiness["backend"].is_string() {
+        assert_eq!(readiness["status"], "needs-activation");
+        assert_eq!(readiness["next_command"], "riftri enable");
+    } else {
+        assert_eq!(readiness["status"], "blocked");
+        assert!(
+            readiness["blockers"]
+                .as_array()
+                .expect("readiness blockers")
+                .iter()
+                .any(|blocker| blocker["kind"] == "storage-backend")
+        );
+    }
+    assert!(
+        readiness["blockers"]
+            .as_array()
+            .expect("readiness blockers")
+            .iter()
+            .any(|blocker| {
+                blocker["kind"] == "repository-activation"
+                    && blocker["remedy"].as_str().is_some_and(|remedy| {
+                        remedy.contains("riftri enable")
+                            && remedy.contains("one repository at a time")
+                    })
+            })
+    );
+    assert!(!fixture.repository.join(".git/riftri").exists());
+    assert!(!destination.exists());
+}
+
+#[test]
+fn doctor_human_output_leads_with_a_decisive_destination_summary() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("human-summary");
+
+    let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--destination"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run destination-aware doctor");
+    assert!(doctor.status.success());
+
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert!(stdout.starts_with("Riftri doctor\nDestination readiness: "));
+    assert!(stdout.contains(&format!("Destination: {}", destination.display())));
+    assert!(stdout.contains("Copy-on-write: "));
+    assert!(stdout.contains("OverlayFS helper: "));
+    assert!(stdout.contains("repository-activation:"));
+}
+
+#[test]
+fn doctor_marks_an_enabled_supported_destination_ready() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("ready-worktree");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--destination"])
+        .arg(&destination)
+        .arg("--json")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run destination-aware doctor");
+    assert!(doctor.status.success());
+
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    let readiness = &report["destination_readiness"];
+    if readiness["backend"].is_string() {
+        assert_eq!(readiness["status"], "ready");
+        assert_eq!(readiness["copy_on_write"], true);
+        assert_eq!(readiness["blockers"], serde_json::json!([]));
+        assert!(
+            readiness["next_command"]
+                .as_str()
+                .is_some_and(|command| command.starts_with("riftri worktree add "))
+        );
+    } else {
+        assert_eq!(readiness["status"], "blocked");
+        assert_eq!(readiness["copy_on_write"], false);
+    }
+    assert!(!fixture.repository.join(".git/riftri").exists());
+    assert!(!destination.exists());
+}
+
+#[test]
 fn doctor_accepts_deterministic_in_tree_attributes() {
     let fixture = RepositoryFixture::new();
     fs::write(

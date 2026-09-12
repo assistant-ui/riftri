@@ -108,7 +108,10 @@ installed sh/bash/zsh shells, disabled repositories, brand-neutral child
 process inheritance, Claude/Codex-named harnesses, passthrough standard I/O and
 exit status, repeated activation, deactivation, base reuse, and clean real Git
 worktrees. A manual, non-gating latency probe reports the global shim's
-per-command cost without imposing a host-load-sensitive threshold.
+per-command cost without imposing a host-load-sensitive threshold. Destination-
+aware doctor output now combines repository consent, checkout compatibility,
+the exact selected COW backend, OverlayFS helper readiness, and actionable next
+steps without creating lifecycle state.
 
 - Add `riftri exec -- <command>` and explicit shell activation.
 - Add a small Git shim scoped to the child process environment.

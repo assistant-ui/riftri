@@ -88,6 +88,11 @@ struct SelectedBackend {
     overlayfs_profile: Option<OverlayFsMountProfile>,
 }
 
+pub(crate) struct DestinationBackendReadiness {
+    pub kind: BackendKind,
+    pub overlayfs_helper_required: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeMode {
     NewBranch(OsString),
@@ -2419,6 +2424,20 @@ fn supported_worktree_backend(path: &Path) -> Result<SelectedBackend, WorktreeEr
         volume,
         #[cfg(target_os = "linux")]
         overlayfs_profile,
+    })
+}
+
+pub(crate) fn destination_backend_readiness(
+    path: &Path,
+) -> Result<DestinationBackendReadiness, WorktreeError> {
+    let selected = supported_worktree_backend(path)?;
+    Ok(DestinationBackendReadiness {
+        kind: selected.kind,
+        #[cfg(target_os = "linux")]
+        overlayfs_helper_required: selected.kind == BackendKind::OverlayFs
+            && selected.overlayfs_profile == Some(OverlayFsMountProfile::PrivilegedTrustedXattr),
+        #[cfg(not(target_os = "linux"))]
+        overlayfs_helper_required: false,
     })
 }
 
