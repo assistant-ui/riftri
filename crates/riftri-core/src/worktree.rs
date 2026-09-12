@@ -4570,8 +4570,10 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    #[cfg(unix)]
+    use super::Git;
     use super::{
-        AddWorktreeRequest, BackendKind, Git, MoveWorktreeRequest, PruneWorktreesRequest,
+        AddWorktreeRequest, BackendKind, MoveWorktreeRequest, PruneWorktreesRequest,
         RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, garbage_collect_inner,
         move_worktree_inner, next_operation_id, prune_worktrees_inner,
         recover_incomplete_operations, remove_worktree_inner, storage_accounting,
