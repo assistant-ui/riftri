@@ -713,8 +713,7 @@ impl JournalStore {
             std::process::id()
         ));
         let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|source| io("create temporary journal", &temporary, source))?;
@@ -869,8 +868,7 @@ impl RemovalJournalStore {
             std::process::id()
         ));
         let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|source| io("create temporary removal journal", &temporary, source))?;
@@ -965,8 +963,7 @@ impl MoveJournalStore {
             std::process::id()
         ));
         let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|source| io("create temporary move journal", &temporary, source))?;
@@ -1061,8 +1058,7 @@ impl PruneJournalStore {
             std::process::id()
         ));
         let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|source| io("create temporary prune journal", &temporary, source))?;
@@ -1157,8 +1153,7 @@ impl CollectionJournalStore {
             std::process::id()
         ));
         let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .write(true)
             .open(&temporary)
             .map_err(|source| io("create temporary collection journal", &temporary, source))?;
@@ -1602,5 +1597,107 @@ mod tests {
         assert_eq!(prunes.len(), 1);
         assert_eq!(prunes[0].repository, Path::new("/repository"));
         assert_eq!(prunes[0].phase, PruneWorktreesPhase::GitMetadataPruned);
+    }
+
+    #[test]
+    fn journal_stores_do_not_write_through_temporary_file_symlinks() {
+        fn plant_symlink(state: &Path, directory: &str, operation_id: &str, target: &Path) {
+            let temporary = state
+                .join(directory)
+                .join(format!(".{operation_id}.{}.tmp", std::process::id()));
+            symlink(target, temporary).expect("plant temporary-file symlink");
+        }
+
+        let directory = tempdir().expect("journal fixture");
+        let protected = directory.path().join("protected");
+        std::fs::write(&protected, "must remain unchanged\n").expect("write protected file");
+
+        let add_store = JournalStore::create(directory.path()).expect("create add store");
+        let add = JournalRecord::new(
+            "add-operation".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        plant_symlink(directory.path(), "operations", "add-operation", &protected);
+        add_store
+            .persist(&add)
+            .expect_err("add journal must reject the symlink");
+
+        let removal_store =
+            RemovalJournalStore::create(directory.path()).expect("create removal store");
+        let removal = RemovalJournalRecord::new(
+            "removal-operation".to_owned(),
+            RemovalJournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                base_path: Path::new("/base"),
+            },
+            "add-operation".to_owned(),
+        );
+        plant_symlink(
+            directory.path(),
+            "removals",
+            "removal-operation",
+            &protected,
+        );
+        removal_store
+            .persist(&removal)
+            .expect_err("removal journal must reject the symlink");
+
+        let move_store = MoveJournalStore::create(directory.path()).expect("create move store");
+        let move_record = MoveJournalRecord::new(
+            "move-operation".to_owned(),
+            MoveJournalPaths {
+                repository: Path::new("/repository"),
+                source: Path::new("/source"),
+                destination: Path::new("/destination"),
+            },
+            "add-operation".to_owned(),
+        );
+        plant_symlink(directory.path(), "moves", "move-operation", &protected);
+        move_store
+            .persist(&move_record)
+            .expect_err("move journal must reject the symlink");
+
+        let prune_store = PruneJournalStore::create(directory.path()).expect("create prune store");
+        let prune = PruneJournalRecord::new("prune-operation".to_owned(), Path::new("/repository"));
+        plant_symlink(directory.path(), "prunes", "prune-operation", &protected);
+        prune_store
+            .persist(&prune)
+            .expect_err("prune journal must reject the symlink");
+
+        let collection_store =
+            CollectionJournalStore::create(directory.path()).expect("create collection store");
+        let collection = CollectionJournalRecord::new(
+            "collection-operation".to_owned(),
+            CollectionJournalPaths {
+                base_path: Path::new("/base"),
+                quarantine_path: Path::new("/quarantine"),
+                marker_path: Path::new("/marker"),
+            },
+        );
+        plant_symlink(
+            directory.path(),
+            "collections",
+            "collection-operation",
+            &protected,
+        );
+        collection_store
+            .persist(&collection)
+            .expect_err("collection journal must reject the symlink");
+
+        assert_eq!(
+            std::fs::read_to_string(protected).expect("read protected file"),
+            "must remain unchanged\n"
+        );
     }
 }
