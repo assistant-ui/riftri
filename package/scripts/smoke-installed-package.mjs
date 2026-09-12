@@ -77,9 +77,10 @@ function pack(packageDirectory, tarballsDirectory, repositoryRoot) {
 }
 
 function runInstalled(launcher, arguments_, cwd, environment) {
-  return run(process.execPath, [launcher, ...arguments_], {
+  return run(launcher, arguments_, {
     cwd,
     env: environment,
+    shell: process.platform === "win32",
   });
 }
 
@@ -87,7 +88,7 @@ function runGit(repository, arguments_) {
   return run("git", arguments_, { cwd: repository });
 }
 
-async function exerciseApfsLifecycle(root, launcher, environment) {
+async function exerciseNativeLifecycle(root, launcher, environment) {
   const repository = path.join(root, "repository");
   const view = path.join(root, "packaged-view");
   await mkdir(path.join(repository, "src"), { recursive: true });
@@ -216,41 +217,29 @@ export async function smokeInstalledPackage(options = {}) {
     const platformTarball = pack(platformStage, tarballs, repositoryRoot);
     const rootTarball = pack(rootStage, tarballs, repositoryRoot);
 
-    const consumer = path.join(temporary, "consumer");
-    await mkdir(consumer);
-    await writeFile(
-      path.join(consumer, "package.json"),
-      `${JSON.stringify(
-        {
-          private: true,
-          dependencies: {
-            riftri: `file:${rootTarball}`,
-            [packageName]: `file:${platformTarball}`,
-          },
-        },
-        null,
-        2,
-      )}\n`,
-    );
+    const globalPrefix = path.join(temporary, "global-prefix");
+    await mkdir(globalPrefix);
     runNpm(
       [
         "install",
+        "--global",
+        "--prefix",
+        globalPrefix,
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",
         "--offline",
         "--omit=optional",
+        rootTarball,
+        platformTarball,
       ],
-      { cwd: consumer },
+      { cwd: temporary },
     );
 
-    const launcher = path.join(
-      consumer,
-      "node_modules",
-      "riftri",
-      "bin",
-      "riftri.js",
-    );
+    const launcher =
+      process.platform === "win32"
+        ? path.join(globalPrefix, "riftri.cmd")
+        : path.join(globalPrefix, "bin", "riftri");
     await access(launcher);
     const environment = { ...process.env };
     for (const key of [
@@ -261,22 +250,28 @@ export async function smokeInstalledPackage(options = {}) {
     ]) {
       delete environment[key];
     }
-    const version = runInstalled(launcher, ["--version"], consumer, environment);
+    const version = runInstalled(launcher, ["--version"], temporary, environment);
     const gitVersion = runInstalled(
       launcher,
       ["exec", "--", "git", "--version"],
-      consumer,
+      temporary,
       environment,
     );
     if (!gitVersion.startsWith("git version ")) {
       throw new Error(`packaged process-scoped Git failed: ${gitVersion}`);
     }
 
-    const lifecycleTested = process.platform === "darwin";
+    const lifecycleTested =
+      process.platform === "darwin" ||
+      process.env.RIFTRI_REQUIRE_INSTALLED_LIFECYCLE === "1";
     if (lifecycleTested) {
-      await exerciseApfsLifecycle(temporary, launcher, environment);
+      await exerciseNativeLifecycle(temporary, launcher, environment);
     }
-    return { lifecycleTested, version };
+    return {
+      installMode: "isolated-global-prefix",
+      lifecycleTested,
+      version,
+    };
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -284,7 +279,7 @@ export async function smokeInstalledPackage(options = {}) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const result = await smokeInstalledPackage();
-  const scope = result.lifecycleTested ? "APFS lifecycle" : "launcher only";
+  const scope = result.lifecycleTested ? "native COW lifecycle" : "launcher only";
   process.stdout.write(
     `installed-package smoke passed (${scope})\n`,
   );

@@ -18,8 +18,8 @@ tarball.
 
 Native packages provide a CLI binary for each advertised target. They do not
 claim that every filesystem has a mutation backend. Optimized worktrees require
-macOS/APFS, supported Linux reflinks or caller-visible OverlayFS, or Windows/ReFS,
-and an active capability probe must succeed before mutation.
+macOS/APFS, Btrfs, reflink-enabled XFS, caller-visible OverlayFS mounts, or
+Windows/ReFS, and an active capability probe must succeed before mutation.
 
 ## Before making the repository public
 
@@ -86,8 +86,10 @@ restartable: package versions already present in npm are detected and skipped.
    ```
 
    `npm test` includes an installed-package smoke check using locally generated
-   npm tarballs and no registry access. On macOS it also runs the complete
-   managed APFS lifecycle against a disposable real Git repository. Run it
+   npm tarballs, an isolated global npm prefix, and no registry access. On
+   macOS it also runs the complete managed APFS lifecycle against a disposable
+   real Git repository. Native-backend CI repeats that installed lifecycle on
+   Btrfs, reflink-enabled XFS, helper-backed OverlayFS, and ReFS. Run it
    separately with `npm run smoke:installed` when diagnosing release packaging.
 
 4. Open and squash-merge a conventional release pull request such as
@@ -115,7 +117,8 @@ After the workflow succeeds:
    `SHA256SUMS`.
 2. Confirm npm shows provenance for the launcher and all native packages.
 3. Test `npx --yes riftri@<version> doctor` on at least one supported target.
-4. On APFS, create an enabled disposable repository, add and remove a managed
-   worktree, run `riftri status`, and verify Git reports clean state.
+4. On at least one supported native COW filesystem, create an enabled disposable
+   repository, add and remove a managed worktree, run `riftri status`, and
+   verify Git reports clean state.
 5. If a published release is defective, deprecate it and issue a fixed version;
    do not move or reuse an existing tag or npm version.

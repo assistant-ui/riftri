@@ -95,6 +95,11 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
       - name: Install filesystem tools
         run: sudo apt-get update && sudo apt-get install --yes btrfs-progs xfsprogs
 
@@ -115,6 +120,12 @@ jobs:
           RIFTRI_REQUIRE_REFLINK: "1"
           TMPDIR: ${{ runner.temp }}/riftri-reflink
         run: cargo test --workspace --features riftri-core/native-cow-integration
+
+      - name: Run installed npm workflow on the reflink volume
+        env:
+          RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
+          TMPDIR: ${{ runner.temp }}/riftri-reflink
+        run: npm run smoke:installed
 
       - name: Verify cached-view physical allocation
         env:
@@ -141,6 +152,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
 
       - name: Enable unprivileged test namespaces
         run: |
@@ -188,6 +204,12 @@ jobs:
           installed_helper_manages_overlayfs_from_an_ordinary_shell
           -- --exact --nocapture
 
+      - name: Run installed npm workflow through the OverlayFS helper
+        env:
+          RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
+          TMPDIR: ${{ runner.temp }}/riftri-overlayfs
+        run: npm run smoke:installed
+
       - name: Unmount disposable test volume
         if: always()
         run: |
@@ -202,6 +224,11 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
 
       - name: Create disposable ReFS test volume
         shell: pwsh
@@ -234,6 +261,14 @@ jobs:
           TEMP: R:\riftri-temp
           TMP: R:\riftri-temp
         run: cargo test --workspace --features riftri-core/native-cow-integration
+
+      - name: Run installed npm workflow on ReFS
+        shell: pwsh
+        env:
+          RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
+          TEMP: R:\riftri-temp
+          TMP: R:\riftri-temp
+        run: npm run smoke:installed
 
       - name: Verify cached-view physical allocation
         shell: pwsh
