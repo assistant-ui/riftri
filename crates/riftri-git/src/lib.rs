@@ -275,7 +275,7 @@ impl Git {
         revision: &OsStr,
     ) -> Result<ResolvedRevision, GitError> {
         let commit = self.resolve_required_object(path, revision, "^{commit}")?;
-        let tree = self.resolve_required_object(path, revision, "^{tree}")?;
+        let tree = self.resolve_required_object(path, OsStr::new(commit.as_str()), "^{tree}")?;
         Ok(ResolvedRevision { commit, tree })
     }
 
@@ -1423,6 +1423,33 @@ mod tests {
         assert_eq!(repository.head_commit, Some(resolved.commit));
         assert_eq!(repository.head_tree, Some(resolved.tree));
         assert_eq!(repository.clean, Some(true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_tree_from_commit_even_when_the_revision_moves() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = RepositoryFixture::committed();
+        let original = Git::default()
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("original revision");
+        fs::write(fixture.path().join("tracked.txt"), "new tree\n").expect("change tree");
+        git(fixture.path(), &["commit", "-am", "second", "--quiet"]);
+        git(
+            fixture.path(),
+            &["branch", "moving", original.commit.as_str()],
+        );
+        let wrapper = fixture.path().join("moving-git");
+        fs::write(&wrapper, "#!/bin/sh\nif [ \"$4\" = 'moving^{commit}' ]; then\n  git \"$@\" || exit\n  git update-ref refs/heads/moving HEAD\nelse\n  exec git \"$@\"\nfi\n")
+            .expect("write Git wrapper");
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
+
+        let resolved = Git::new(wrapper)
+            .resolve_revision(fixture.path(), OsStr::new("moving"))
+            .expect("resolve moving ref");
+        assert_eq!(resolved.commit, original.commit);
+        assert_eq!(resolved.tree, original.tree);
     }
 
     #[test]
