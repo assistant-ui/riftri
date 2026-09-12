@@ -3097,7 +3097,6 @@ fn is_regular_file(path: &Path) -> Result<bool, WorktreeError> {
     Ok(metadata.is_file() && !metadata.file_type().is_symlink())
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn is_regular_file_if_present(path: &Path) -> Result<bool, WorktreeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
@@ -4535,14 +4534,7 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
 fn overlayfs_upper_contains_only_git_pointer(
     layout: &riftri_storage::OverlayFsLayout,
 ) -> Result<bool, WorktreeError> {
-    let mut entries = fs::read_dir(layout.upper())
-        .map_err(|source| io("inspect OverlayFS private upper", layout.upper(), source))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| io("read OverlayFS private upper", layout.upper(), source))?;
-    Ok(entries.len() == 1
-        && entries
-            .pop()
-            .is_some_and(|entry| entry.file_name() == OsStr::new(".git") && entry.path().is_file()))
+    contains_only_git_pointer(layout.upper())
 }
 
 #[cfg(target_os = "linux")]
@@ -4553,13 +4545,10 @@ fn overlayfs_private_layer_is_clean(
         .map_err(|source| io("inspect OverlayFS private upper", layout.upper(), source))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|source| io("read OverlayFS private upper", layout.upper(), source))?;
-    if layout.merged().join(".git").is_file() {
+    if is_regular_file_if_present(&layout.merged().join(".git"))? {
         Ok(entries.is_empty())
     } else {
-        Ok(entries.len() == 1
-            && entries.into_iter().next().is_some_and(|entry| {
-                entry.file_name() == OsStr::new(".git") && entry.path().is_file()
-            }))
+        contains_only_git_pointer(layout.upper())
     }
 }
 
@@ -4568,7 +4557,7 @@ fn restore_overlayfs_pointer(
     layout: &riftri_storage::OverlayFsLayout,
 ) -> Result<(), WorktreeError> {
     let destination_pointer = layout.merged().join(".git");
-    if destination_pointer.is_file() {
+    if is_regular_file_if_present(&destination_pointer)? {
         return Ok(());
     }
     if fs::read_dir(layout.merged())
@@ -4588,7 +4577,7 @@ fn restore_overlayfs_pointer(
         )));
     }
     let upper_pointer = layout.upper().join(".git");
-    if !upper_pointer.is_file() {
+    if !is_regular_file_if_present(&upper_pointer)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "OverlayFS private layer {} has no linked-worktree pointer",
             layout.upper().display()
@@ -4612,11 +4601,11 @@ fn changed_rollback_worktree(journal: &DecodedJournal) -> WorktreeError {
 }
 
 fn restore_pointer_for_rollback(journal: &DecodedJournal) -> Result<(), WorktreeError> {
-    if journal.destination.join(".git").is_file() {
+    if is_regular_file_if_present(&journal.destination.join(".git"))? {
         return Ok(());
     }
     let scratch_pointer = journal.scratch.join(".git");
-    if !scratch_pointer.is_file() {
+    if !is_regular_file_if_present(&scratch_pointer)? {
         return Ok(());
     }
     if !journal.destination.exists() {
@@ -4660,10 +4649,11 @@ fn contains_only_git_pointer(path: &Path) -> Result<bool, WorktreeError> {
         .map_err(|source| io("inspect linked worktree", path, source))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|source| io("read linked-worktree entry", path, source))?;
-    Ok(entries.len() == 1
-        && entries
-            .pop()
-            .is_some_and(|entry| entry.file_name() == OsStr::new(".git") && entry.path().is_file()))
+    if entries.len() != 1 {
+        return Ok(false);
+    }
+    let entry = entries.pop().expect("one directory entry");
+    Ok(entry.file_name() == OsStr::new(".git") && is_regular_file_if_present(&entry.path())?)
 }
 
 fn view_matches_base(base: &Path, view: &Path) -> Result<bool, WorktreeError> {
@@ -4919,6 +4909,29 @@ mod tests {
             Path::new(r"\\server\share\view"),
             Path::new(r"\\?\UNC\SERVER\SHARE\VIEW")
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_pointer_validation_rejects_symlinks_and_special_files() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("fixture");
+        let view = fixture.path().join("view");
+        fs::create_dir(&view).expect("view");
+        let target = fixture.path().join("pointer");
+        fs::write(&target, "gitdir: /repository/.git/worktrees/view\n").expect("pointer target");
+        let pointer = view.join(".git");
+        symlink(&target, &pointer).expect("symlink pointer");
+        assert!(!super::contains_only_git_pointer(&view).expect("inspect symlink"));
+        fs::remove_file(&pointer).expect("remove fixture link");
+        fs::create_dir(&pointer).expect("directory pointer");
+        assert!(!super::contains_only_git_pointer(&view).expect("inspect directory"));
+        fs::remove_dir(&pointer).expect("remove fixture directory");
+        fs::copy(&target, &pointer).expect("regular pointer");
+        assert!(super::contains_only_git_pointer(&view).expect("inspect regular pointer"));
+        fs::write(view.join("private.txt"), "preserve me").expect("private file");
+        assert!(!super::contains_only_git_pointer(&view).expect("inspect extra file"));
     }
 
     #[test]
