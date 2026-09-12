@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use riftri_git::WorktreeHead;
-use riftri_git::{Git, GitAttribute, GitError, ObjectId};
+use riftri_git::{Git, GitAttribute, GitError, ObjectId, ResolvedRevision};
 #[cfg(target_os = "macos")]
 use riftri_storage::ApfsCloner as NativeCowCloner;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -1443,8 +1443,8 @@ fn add_worktree_inner(
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
     let destination = normalize_new_destination(&request.destination)?;
-    let checkout_profile = validate_compatibility(&git, &repository_root, &request.revision)?;
     let resolved = git.resolve_revision(&repository_root, &request.revision)?;
+    let checkout_profile = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
     let selected_backend = supported_worktree_backend(&destination)?;
     let destination_volume = &selected_backend.volume;
 
@@ -1532,7 +1532,7 @@ fn add_worktree_inner(
             &base_path,
             &base_staging,
             &temporary_index,
-            &request.revision,
+            &resolved.commit,
             &request.mode,
             &resolved.tree,
             &repository.identity.common_git_dir,
@@ -1597,7 +1597,7 @@ fn perform_add(
     base_path: &Path,
     base_staging: &Path,
     temporary_index: &Path,
-    revision: &OsStr,
+    commit: &ObjectId,
     mode: &WorktreeMode,
     tree: &ObjectId,
     common_git_dir: &Path,
@@ -1608,7 +1608,7 @@ fn perform_add(
         WorktreeMode::Detached => WorktreeHead::Detached,
     };
     let metadata_lock = acquire_git_worktree_metadata_lock(common_git_dir)?;
-    git.add_worktree_no_checkout(repository, destination, revision, head)?;
+    git.add_worktree_no_checkout(repository, destination, OsStr::new(commit.as_str()), head)?;
     advance(
         store,
         journal,
@@ -1864,12 +1864,12 @@ fn prepare_base(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn validate_compatibility(
+fn validate_resolved_compatibility(
     git: &Git,
     repository: &Path,
-    revision: &OsStr,
+    resolved: &ResolvedRevision,
 ) -> Result<Vec<u8>, WorktreeError> {
-    let analysis = analyze_repository_compatibility(git, repository, revision)?;
+    let analysis = analyze_resolved_repository_compatibility(git, repository, resolved)?;
     if let Some(blocker) = analysis.report.blockers.first() {
         return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
     }
@@ -1890,6 +1890,14 @@ fn analyze_repository_compatibility(
     revision: &OsStr,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let resolved = git.resolve_revision(repository, revision)?;
+    analyze_resolved_repository_compatibility(git, repository, &resolved)
+}
+
+fn analyze_resolved_repository_compatibility(
+    git: &Git,
+    repository: &Path,
+    resolved: &ResolvedRevision,
+) -> Result<CompatibilityAnalysis, WorktreeError> {
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
         .iter()
@@ -2037,8 +2045,8 @@ fn analyze_repository_compatibility(
     }
     Ok(CompatibilityAnalysis {
         report: RepositoryCompatibilityReport {
-            commit: resolved.commit,
-            tree: resolved.tree,
+            commit: resolved.commit.clone(),
+            tree: resolved.tree.clone(),
             compatible: blockers.is_empty(),
             blockers,
         },
