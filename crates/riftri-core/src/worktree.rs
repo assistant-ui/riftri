@@ -2271,7 +2271,7 @@ fn find_managed_add_journal(
         .is_some_and(|journal| pending.contains(journal.operation_id.as_str()))
     {
         return Err(WorktreeError::InvalidRequest(format!(
-            "a removal of {} is already pending; run `riftri recover --state-dir {}`",
+            "a removal of {} is already pending; run `riftri repair --state-dir {}`",
             destination.display(),
             state_directory.display()
         )));
@@ -4406,6 +4406,8 @@ mod tests {
         )
         .expect_err("a pending removal must be recovered instead of duplicated");
         assert!(retry.to_string().contains("already pending"));
+        assert!(retry.to_string().contains("riftri repair --state-dir"));
+        assert!(!retry.to_string().contains("riftri recover"));
 
         let recovered = recover_incomplete_operations(&state).expect("recover removal");
         assert_eq!(recovered.recovered_removals, 1);

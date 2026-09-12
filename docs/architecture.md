@@ -353,9 +353,9 @@ benchmark remains the authoritative sharing check. Bases reaching zero reference
 cached until the explicit garbage collector independently proves deletion is
 safe and records its intent. The collector is never part of normal worktree file
 access or Git command passthrough.
-`riftri repair` resolves the repository's state directory and applies the same
-conservative journal recovery as the explicit-state `riftri recover` command;
-it does not infer or delete unjournaled paths.
+`riftri repair` resolves the repository's state directory by default or accepts
+`--state-dir <path>` to select one explicitly. Both forms apply the same
+conservative journal recovery and do not infer or delete unjournaled paths.
 
 Status also inventories the state layout itself. Valid journals explain their
 temporary, staging, and quarantine paths; completion markers explain retained
