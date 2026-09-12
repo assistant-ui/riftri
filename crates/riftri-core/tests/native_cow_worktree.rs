@@ -8,12 +8,12 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use riftri_core::{AddWorktreeRequest, WorktreeMode, add_worktree};
 
@@ -32,6 +32,45 @@ fn git(path: &Path, arguments: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn git_with_input(path: &Path, arguments: &[&str], input: &[u8]) -> String {
+    let mut child = Command::new("git")
+        .args(arguments)
+        .current_dir(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start Git fixture command");
+    child
+        .stdin
+        .take()
+        .expect("Git stdin")
+        .write_all(input)
+        .expect("write Git fixture input");
+    let output = child
+        .wait_with_output()
+        .expect("finish Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn destination_is_case_sensitive(parent: &Path) -> bool {
+    let probe = tempfile::Builder::new()
+        .prefix(".riftri-test-case-")
+        .tempdir_in(parent)
+        .expect("create case-sensitivity probe");
+    fs::write(probe.path().join("Case"), b"upper").expect("create first case probe");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(probe.path().join("case"))
+        .is_ok()
 }
 
 #[test]
@@ -117,6 +156,81 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
         !fixture_path.exists(),
         "read-only immutable base prevented fixture cleanup"
     );
+}
+
+#[test]
+fn validates_case_colliding_tree_paths_before_durable_mutation() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let destination = fixture.path().join("worktree");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+
+    let upper_blob = git_with_input(&repository, &["hash-object", "-w", "--stdin"], b"upper\n");
+    let lower_blob = git_with_input(&repository, &["hash-object", "-w", "--stdin"], b"lower\n");
+    let tree_input = format!(
+        "100644 blob {}\tCase.txt\0100644 blob {}\tcase.txt\0",
+        upper_blob.trim(),
+        lower_blob.trim()
+    );
+    let tree = git_with_input(&repository, &["mktree", "-z"], tree_input.as_bytes());
+    let commit = git(
+        &repository,
+        &["commit-tree", tree.trim(), "-m", "case-collision fixture"],
+    );
+    let worktrees_before = git(&repository, &["worktree", "list", "--porcelain", "-z"]);
+
+    let result = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        revision: OsString::from(commit.trim()),
+        mode: WorktreeMode::Detached,
+        state_dir: Some(state.clone()),
+    });
+
+    if destination_is_case_sensitive(fixture.path()) {
+        result.expect("case-sensitive destination supports distinct paths");
+        assert_eq!(
+            fs::read_to_string(destination.join("Case.txt")).expect("read upper-case path"),
+            "upper\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("case.txt")).expect("read lower-case path"),
+            "lower\n"
+        );
+        assert!(git(&destination, &["status", "--porcelain=v1"]).is_empty());
+    } else {
+        let error = result.expect_err("case-insensitive destination must reject colliding paths");
+        assert!(
+            error.to_string().contains("cannot coexist"),
+            "unexpected error: {error}"
+        );
+        assert!(!destination.exists());
+        assert!(!state.exists());
+        assert!(
+            fs::read_dir(fixture.path())
+                .expect("read fixture after rejected path probe")
+                .all(|entry| {
+                    !entry
+                        .expect("read fixture entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".riftri-path-probe-")
+                }),
+            "destination path-semantics probe was not cleaned up"
+        );
+        assert_eq!(
+            git(&repository, &["worktree", "list", "--porcelain", "-z"]),
+            worktrees_before,
+        );
+    }
 }
 
 #[test]

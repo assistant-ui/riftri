@@ -386,6 +386,21 @@ profile is persisted in both the pre-mount context and mount identity and must
 be reused during repair. Riftri never remounts an upper under the other
 attribute interpretation.
 
+### D035: potential ASCII case aliases are preflighted on the destination
+
+Git trees can contain path sets that the destination filesystem cannot
+represent independently, including names that differ only by ASCII case.
+Riftri must not discover those aliases after it has created a journal, branch,
+or linked-worktree metadata. An in-memory scan compares every complete path and
+directory prefix without decoding Unix path bytes. When it finds a potential
+alias, an add creates the exact directory and leaf-name structure without file
+contents inside a unique temporary directory next to the requested destination.
+The destination filesystem itself determines whether those names coexist.
+Riftri removes the probe before continuing. Any collision or cleanup failure
+stops the add before durable mutation; case-sensitive destinations continue to
+accept distinct case variants. Trees with no potential ASCII alias avoid the
+per-file probe I/O.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
@@ -398,5 +413,8 @@ attribute interpretation.
   partially written?
 - Should clean-view compaction be manual, idle-time automatic, or policy-based?
 - Which Windows fallback provides acceptable performance on ordinary NTFS?
+- How should non-ASCII case folding and normalization aliases be detected using
+  the destination filesystem's exact comparison rules without adding per-file
+  probe I/O to every worktree creation?
 - What integration is possible for harnesses that use libgit2 or another
   embedded Git implementation instead of spawning `git`?

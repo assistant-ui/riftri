@@ -253,6 +253,10 @@ The helper elevates only validated OverlayFS mount, exact identity-checked
 unmount, and disposable work-directory reset requests for caller-owned paths;
 probe setup, Git, and worktree I/O remain unprivileged. Missing, user-owned,
 writable, or incorrectly installed helpers are rejected before mutation.
+Before any durable add state is created, Riftri checks the exact Git tree for
+ASCII case aliases and verifies potential collisions on the destination
+filesystem. Colliding path sets fail without creating a journal or linked
+worktree, while case-sensitive destinations continue to accept distinct names.
 Automatic orphan-state repair,
 ordinary-NTFS alternatives,
 managed-environment integration, and a daemon are not implemented.

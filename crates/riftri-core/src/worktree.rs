@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 #[cfg(unix)]
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(target_os = "windows")]
 use std::os::windows::fs::OpenOptionsExt;
 
@@ -70,6 +74,8 @@ struct CompatibilityAnalysis {
     report: RepositoryCompatibilityReport,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     checkout_profile: Vec<u8>,
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    checkout_paths: Vec<PathBuf>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1513,7 +1519,9 @@ fn add_worktree_inner(
     })?;
     let destination = normalize_new_destination(&request.destination)?;
     let resolved = git.resolve_revision(&repository_root, &request.revision)?;
-    let checkout_profile = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
+    let compatibility = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
+    validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
+    let checkout_profile = compatibility.checkout_profile;
     let selected_backend = supported_worktree_backend(&destination)?;
     let destination_volume = &selected_backend.volume;
 
@@ -1944,12 +1952,136 @@ fn validate_resolved_compatibility(
     git: &Git,
     repository: &Path,
     resolved: &ResolvedRevision,
-) -> Result<Vec<u8>, WorktreeError> {
+) -> Result<CompatibilityAnalysis, WorktreeError> {
     let analysis = analyze_resolved_repository_compatibility(git, repository, resolved)?;
     if let Some(blocker) = analysis.report.blockers.first() {
         return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
     }
-    Ok(analysis.checkout_profile)
+    Ok(analysis)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn validate_destination_path_semantics(
+    paths: &[PathBuf],
+    destination: &Path,
+) -> Result<(), WorktreeError> {
+    for path in paths {
+        let components = path.components().collect::<Vec<_>>();
+        if components.is_empty()
+            || components
+                .iter()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(WorktreeError::Unsupported(format!(
+                "Git tree path {} is not a relative checkout path",
+                path.display()
+            )));
+        }
+    }
+    if !has_ascii_case_alias(paths) {
+        return Ok(());
+    }
+
+    let parent = destination.expect_parent()?;
+    let probe = tempfile::Builder::new()
+        .prefix(".riftri-path-probe-")
+        .tempdir_in(parent)
+        .map_err(|source| io("create destination path-semantics probe", parent, source))?;
+    let probe_path = probe.path().to_path_buf();
+    let mut directories = HashSet::new();
+
+    let validation = (|| {
+        for path in paths {
+            let components = path.components().collect::<Vec<_>>();
+            let mut relative_parent = PathBuf::new();
+            for component in &components[..components.len() - 1] {
+                let Component::Normal(name) = component else {
+                    unreachable!("checkout path components were validated above");
+                };
+                relative_parent.push(name);
+                if directories.insert(relative_parent.clone()) {
+                    let directory = probe_path.join(&relative_parent);
+                    fs::create_dir(&directory).map_err(|source| {
+                        WorktreeError::Unsupported(format!(
+                            "Git tree path {} cannot coexist on the destination filesystem: {source}",
+                            path.display()
+                        ))
+                    })?;
+                }
+            }
+
+            let candidate = probe_path.join(path);
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+                .map_err(|source| {
+                    WorktreeError::Unsupported(format!(
+                        "Git tree path {} cannot coexist on the destination filesystem: {source}",
+                        path.display()
+                    ))
+                })?;
+        }
+        Ok(())
+    })();
+
+    probe.close().map_err(|source| {
+        io(
+            "remove destination path-semantics probe",
+            &probe_path,
+            source,
+        )
+    })?;
+    validation
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn has_ascii_case_alias(paths: &[PathBuf]) -> bool {
+    let mut seen = BTreeMap::new();
+    for path in paths {
+        let mut prefix = PathBuf::new();
+        for component in path.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            prefix.push(name);
+            let folded = ascii_lowercase_path(&prefix);
+            if let Some(previous) = seen.insert(folded, prefix.clone())
+                && previous != prefix
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn ascii_lowercase_path(path: &Path) -> PathBuf {
+    PathBuf::from(OsString::from_vec(
+        path.as_os_str()
+            .as_bytes()
+            .iter()
+            .map(u8::to_ascii_lowercase)
+            .collect(),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn ascii_lowercase_path(path: &Path) -> PathBuf {
+    PathBuf::from(OsString::from_wide(
+        &path
+            .as_os_str()
+            .encode_wide()
+            .map(|unit| {
+                if (u16::from(b'A')..=u16::from(b'Z')).contains(&unit) {
+                    unit + u16::from(b'a' - b'A')
+                } else {
+                    unit
+                }
+            })
+            .collect::<Vec<_>>(),
+    ))
 }
 
 pub(crate) fn inspect_repository_compatibility(
@@ -2128,6 +2260,8 @@ fn analyze_resolved_repository_compatibility(
         },
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_profile: profile.finalize().to_vec(),
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        checkout_paths: paths,
     })
 }
 
@@ -4869,8 +5003,10 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Arc, Barrier};
     use std::thread;
@@ -4880,7 +5016,7 @@ mod tests {
     use super::{
         AddWorktreeRequest, BackendKind, MoveWorktreeRequest, PruneWorktreesRequest,
         RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, garbage_collect_inner,
-        move_worktree_inner, next_operation_id, prune_worktrees_inner,
+        has_ascii_case_alias, move_worktree_inner, next_operation_id, prune_worktrees_inner,
         recover_incomplete_operations, remove_worktree_inner, storage_accounting,
     };
     #[cfg(unix)]
@@ -4942,6 +5078,27 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(ids.len(), WORKERS);
+    }
+
+    #[test]
+    fn ascii_case_alias_scan_includes_directory_prefixes() {
+        assert!(has_ascii_case_alias(&[
+            PathBuf::from("Docs/one.txt"),
+            PathBuf::from("docs/two.txt"),
+        ]));
+        assert!(!has_ascii_case_alias(&[
+            PathBuf::from("docs/one.txt"),
+            PathBuf::from("docs/two.txt"),
+        ]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ascii_case_alias_scan_preserves_non_utf8_path_bytes() {
+        assert!(has_ascii_case_alias(&[
+            PathBuf::from(OsString::from_vec(b"\xff-Case".to_vec())),
+            PathBuf::from(OsString::from_vec(b"\xff-case".to_vec())),
+        ]));
     }
 
     #[cfg(unix)]
