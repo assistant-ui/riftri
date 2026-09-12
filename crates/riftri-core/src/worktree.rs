@@ -231,6 +231,7 @@ pub struct StorageAccountingReport {
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryReport {
     pub scanned: usize,
+    pub busy_adds: usize,
     pub recovered: usize,
     pub active: usize,
     pub recovered_mounts: usize,
@@ -508,6 +509,18 @@ fn acquire_coordination_lock(
     open_operation: &'static str,
     lock_operation: &'static str,
 ) -> Result<File, WorktreeError> {
+    let lock = open_coordination_lock(lock_path, open_operation)?;
+    lock.lock_exclusive()
+        .map_err(|source| io(lock_operation, lock_path, source))?;
+    validate_coordination_lock(&lock, lock_path)?;
+    Ok(lock)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn open_coordination_lock(
+    lock_path: &Path,
+    operation: &'static str,
+) -> Result<File, WorktreeError> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
@@ -515,14 +528,16 @@ fn acquire_coordination_lock(
     #[cfg(target_os = "windows")]
     options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
 
-    let lock = options
+    options
         .open(lock_path)
-        .map_err(|source| io(open_operation, lock_path, source))?;
+        .map_err(|source| io(operation, lock_path, source))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn validate_coordination_lock(lock: &File, lock_path: &Path) -> Result<(), WorktreeError> {
     let opened_metadata = lock
         .metadata()
         .map_err(|source| io("inspect opened coordination lock", lock_path, source))?;
-    lock.lock_exclusive()
-        .map_err(|source| io(lock_operation, lock_path, source))?;
     let path_metadata = fs::symlink_metadata(lock_path)
         .map_err(|source| io("inspect coordination lock path", lock_path, source))?;
     if !opened_metadata.is_file()
@@ -547,7 +562,38 @@ fn acquire_coordination_lock(
             )));
         }
     }
-    Ok(lock)
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct AddOperationLock(File);
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+impl Drop for AddOperationLock {
+    fn drop(&mut self) {
+        // Explicitly release ownership even if a concurrent fork temporarily
+        // inherited this open-file description before its CLOEXEC took effect.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn try_lock_add_operation(journal_path: &Path) -> Result<Option<AddOperationLock>, WorktreeError> {
+    require_real_state_directory(journal_path.expect_parent()?)?;
+    let path = journal_path.with_extension("lock");
+    let lock = open_coordination_lock(&path, "open add-operation lock")?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            return Ok(None);
+        }
+        Err(error) => return Err(io("lock add operation", &path, error)),
+    }
+    let lock = AddOperationLock(lock);
+    validate_coordination_lock(&lock.0, &path)?;
+    // Never unlink a coordination lock: another opener may already hold the
+    // same inode. Process exit releases ownership without removing the path.
+    Ok(Some(lock))
 }
 
 fn managed_destination_candidates(destination: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -1553,6 +1599,10 @@ fn add_worktree_inner(
     sync_parent(&base_directory)?;
     let operation_id =
         allocate_operation_id(&store, &state_directory, &base_directory, &destination)?;
+    let _operation_lock =
+        try_lock_add_operation(&store.path_for(&operation_id))?.ok_or_else(|| {
+            WorktreeError::InvalidRequest("new add-operation ID is already locked".to_owned())
+        })?;
     let base_path = base_directory.join(resolved.tree.as_str());
     let base_staging = base_directory.join(format!(".riftri-build-{operation_id}"));
     let temporary_index = state_directory
@@ -2674,6 +2724,10 @@ fn allocate_operation_id(
             .join("tmp")
             .join(format!("index-{operation_id}"));
         if !store.path_for(&operation_id).exists()
+            && !store
+                .path_for(&operation_id)
+                .with_extension("lock")
+                .exists()
             && !scratch.exists()
             && !staging.exists()
             && !index.exists()
@@ -2917,7 +2971,12 @@ fn diagnose_state_paths(
         &state_directory.join("operations"),
         add_journals
             .iter()
-            .map(|journal| journal.journal_path.clone())
+            .flat_map(|journal| {
+                [
+                    journal.journal_path.clone(),
+                    journal.journal_path.with_extension("lock"),
+                ]
+            })
             .collect(),
         &mut issues,
     )?;
@@ -2983,6 +3042,11 @@ fn diagnose_state_paths(
         &mut issues,
     )?;
     let mut coordination_locks = 0;
+    for journal in add_journals {
+        if is_regular_file_if_present(&journal.journal_path.with_extension("lock"))? {
+            coordination_locks += 1;
+        }
+    }
     diagnose_base_directories(
         state_directory,
         collection_journals,
@@ -3524,6 +3588,31 @@ pub fn recover_incomplete_operations(
     }
 
     for journal in journals {
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        let _operation_lock = match try_lock_add_operation(&journal.journal_path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                report.busy_adds += 1;
+                continue;
+            }
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("operation {}: {error}", journal.operation_id));
+                continue;
+            }
+        };
+        // The initial inventory may predate the current owner's last write.
+        // Reload only after gaining exclusive ownership, then choose a phase.
+        let journal = match store.load_operation(&journal.operation_id) {
+            Ok(journal) => journal,
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("operation {}: {error}", journal.operation_id));
+                continue;
+            }
+        };
         match journal.phase {
             AddWorktreePhase::Active => {
                 if !completed_adds.contains(journal.operation_id.as_str()) {
@@ -5411,6 +5500,32 @@ mod tests {
     }
 
     #[test]
+    fn add_operation_lock_is_exclusive_and_released_on_drop() {
+        let fixture = tempfile::tempdir().unwrap();
+        let journal = fixture.path().join("operation.json");
+        let owner = super::try_lock_add_operation(&journal).unwrap().unwrap();
+        assert!(super::try_lock_add_operation(&journal).unwrap().is_none());
+        // A transient fork or duplicate can retain the same open-file description.
+        let inherited = owner.0.try_clone().unwrap();
+        drop(owner);
+        assert!(super::try_lock_add_operation(&journal).unwrap().is_some());
+        drop(inherited);
+        assert!(journal.with_extension("lock").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_operation_lock_rejects_a_symlink() {
+        let fixture = tempfile::tempdir().unwrap();
+        let journal = fixture.path().join("operation.json");
+        let external = fixture.path().join("external");
+        fs::write(&external, "preserve").unwrap();
+        std::os::unix::fs::symlink(&external, journal.with_extension("lock")).unwrap();
+        assert!(super::try_lock_add_operation(&journal).is_err());
+        assert_eq!(fs::read(&external).unwrap(), b"preserve");
+    }
+
+    #[test]
     fn prune_recovery_rejects_a_journal_changed_after_validation() {
         use crate::journal::{PruneJournalRecord, PruneJournalStore};
 
@@ -5672,7 +5787,7 @@ mod tests {
             let recovered = recover_incomplete_operations(&state)
                 .unwrap_or_else(|error| panic!("recover after {phase:?}: {error}"));
             assert!(recovered.errors.is_empty(), "phase {phase:?}");
-            assert_eq!(recovered.recovered, 1, "phase {phase:?}");
+            assert_eq!(recovered.recovered, 1, "phase {phase:?}: {recovered:?}");
             assert!(!destination.exists(), "phase {phase:?}");
             assert_eq!(
                 fs::read_dir(state.join("overlays/v1"))
@@ -6303,7 +6418,7 @@ mod tests {
         let report = recover_incomplete_operations(&state).expect("attempt recovery");
 
         assert_eq!(report.recovered, 0);
-        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors.len(), 1, "{report:?}");
         assert!(destination.exists());
         assert_eq!(
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved file"),

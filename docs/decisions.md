@@ -425,6 +425,15 @@ cannot hide changes. This preserves writes that finish between the original
 cleanliness check and unmount; it does not lock out direct tampering with Riftri's
 private state by another same-user process.
 
+### Add-operation ownership during creation and repair
+
+Each add holds a stable per-operation file lock before intent persistence and
+until activation or rollback finishes. Repair skips busy locks and reloads the
+journal under acquired ownership. Journal snapshots detect changed records but
+do not prove that their creator exited. Lock files are retained, never unlinked
+during recovery; process exit releases the lock. All concurrently running
+coordinators must implement this protocol.
+
 ### Immutable-base integrity markers
 
 New base buckets use a versioned SHA-256 completion marker covering every entry's
