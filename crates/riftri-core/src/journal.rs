@@ -85,6 +85,43 @@ pub(crate) fn ensure_real_state_directory(
     require_real_state_directory(directory)
 }
 
+fn journal_paths(directory: &Path) -> Result<Vec<PathBuf>, JournalError> {
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(io("inspect journal directory", directory, source)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(JournalError::InvalidStateDirectory {
+            path: directory.to_path_buf(),
+        });
+    }
+
+    let mut paths = fs::read_dir(directory)
+        .map_err(|source| io("read journal directory", directory, source))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|source| io("read journal entry", directory, source))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.retain(|path| path.extension() == Some(OsStr::new("json")));
+    paths.sort_unstable();
+    Ok(paths)
+}
+
+fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, JournalError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|source| io("inspect journal entry", path, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(JournalError::InvalidRecord {
+            path: path.to_path_buf(),
+            detail: "journal path is not a real file".to_owned(),
+        });
+    }
+    File::open(path).map_err(|source| io(operation, path, source))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "encoding", content = "units", rename_all = "kebab-case")]
 enum NativeOsString {
@@ -801,29 +838,10 @@ impl JournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedJournal>, JournalError> {
-        if !self
-            .directory
-            .try_exists()
-            .map_err(|source| io("inspect journal directory", &self.directory, source))?
-        {
-            return Ok(Vec::new());
-        }
-        let mut paths = fs::read_dir(&self.directory)
-            .map_err(|source| io("read journal directory", &self.directory, source))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|source| io("read journal entry", &self.directory, source))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        paths.retain(|path| path.extension() == Some(OsStr::new("json")));
-        paths.sort_unstable();
-
-        paths
+        journal_paths(&self.directory)?
             .into_iter()
             .map(|path| {
-                let file = File::open(&path)
-                    .map_err(|source| io("open operation journal", &path, source))?;
+                let file = open_real_journal(&path, "open operation journal")?;
                 let record: JournalRecord =
                     serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                         path: path.clone(),
@@ -839,8 +857,7 @@ impl JournalStore {
         journal_path: &Path,
         phase: AddWorktreePhase,
     ) -> Result<(), JournalError> {
-        let file = File::open(journal_path)
-            .map_err(|source| io("open operation journal", journal_path, source))?;
+        let file = open_real_journal(journal_path, "open operation journal")?;
         let mut record: JournalRecord =
             serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                 path: journal_path.to_path_buf(),
@@ -931,8 +948,7 @@ impl JournalStore {
         expected_source: &Path,
         destination: &Path,
     ) -> Result<(), JournalError> {
-        let file = File::open(journal_path)
-            .map_err(|source| io("open operation journal", journal_path, source))?;
+        let file = open_real_journal(journal_path, "open operation journal")?;
         let mut record: JournalRecord =
             serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                 path: journal_path.to_path_buf(),
@@ -1029,29 +1045,10 @@ impl RemovalJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedRemovalJournal>, JournalError> {
-        if !self
-            .directory
-            .try_exists()
-            .map_err(|source| io("inspect removal journal directory", &self.directory, source))?
-        {
-            return Ok(Vec::new());
-        }
-        let mut paths = fs::read_dir(&self.directory)
-            .map_err(|source| io("read removal journal directory", &self.directory, source))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|source| io("read removal journal entry", &self.directory, source))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        paths.retain(|path| path.extension() == Some(OsStr::new("json")));
-        paths.sort_unstable();
-
-        paths
+        journal_paths(&self.directory)?
             .into_iter()
             .map(|path| {
-                let file = File::open(&path)
-                    .map_err(|source| io("open removal journal", &path, source))?;
+                let file = open_real_journal(&path, "open removal journal")?;
                 let record: RemovalJournalRecord =
                     serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                         path: path.clone(),
@@ -1124,29 +1121,10 @@ impl MoveJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedMoveJournal>, JournalError> {
-        if !self
-            .directory
-            .try_exists()
-            .map_err(|source| io("inspect move journal directory", &self.directory, source))?
-        {
-            return Ok(Vec::new());
-        }
-        let mut paths = fs::read_dir(&self.directory)
-            .map_err(|source| io("read move journal directory", &self.directory, source))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|source| io("read move journal entry", &self.directory, source))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        paths.retain(|path| path.extension() == Some(OsStr::new("json")));
-        paths.sort_unstable();
-
-        paths
+        journal_paths(&self.directory)?
             .into_iter()
             .map(|path| {
-                let file =
-                    File::open(&path).map_err(|source| io("open move journal", &path, source))?;
+                let file = open_real_journal(&path, "open move journal")?;
                 let record: MoveJournalRecord =
                     serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                         path: path.clone(),
@@ -1219,29 +1197,10 @@ impl PruneJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedPruneJournal>, JournalError> {
-        if !self
-            .directory
-            .try_exists()
-            .map_err(|source| io("inspect prune journal directory", &self.directory, source))?
-        {
-            return Ok(Vec::new());
-        }
-        let mut paths = fs::read_dir(&self.directory)
-            .map_err(|source| io("read prune journal directory", &self.directory, source))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|source| io("read prune journal entry", &self.directory, source))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        paths.retain(|path| path.extension() == Some(OsStr::new("json")));
-        paths.sort_unstable();
-
-        paths
+        journal_paths(&self.directory)?
             .into_iter()
             .map(|path| {
-                let file =
-                    File::open(&path).map_err(|source| io("open prune journal", &path, source))?;
+                let file = open_real_journal(&path, "open prune journal")?;
                 let record: PruneJournalRecord =
                     serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                         path: path.clone(),
@@ -1314,31 +1273,10 @@ impl CollectionJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedCollectionJournal>, JournalError> {
-        if !self.directory.try_exists().map_err(|source| {
-            io(
-                "inspect collection journal directory",
-                &self.directory,
-                source,
-            )
-        })? {
-            return Ok(Vec::new());
-        }
-        let mut paths = fs::read_dir(&self.directory)
-            .map_err(|source| io("read collection journal directory", &self.directory, source))?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|source| io("read collection journal entry", &self.directory, source))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        paths.retain(|path| path.extension() == Some(OsStr::new("json")));
-        paths.sort_unstable();
-
-        paths
+        journal_paths(&self.directory)?
             .into_iter()
             .map(|path| {
-                let file = File::open(&path)
-                    .map_err(|source| io("open collection journal", &path, source))?;
+                let file = open_real_journal(&path, "open collection journal")?;
                 let record: CollectionJournalRecord =
                     serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                         path: path.clone(),
@@ -1417,10 +1355,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore, JournalPaths,
-        JournalRecord, JournalStore, MoveJournalPaths, MoveJournalRecord, MoveJournalStore,
-        PruneJournalRecord, PruneJournalStore, RemovalJournalPaths, RemovalJournalRecord,
-        RemovalJournalStore,
+        CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore, JournalError,
+        JournalPaths, JournalRecord, JournalStore, MoveJournalPaths, MoveJournalRecord,
+        MoveJournalStore, PruneJournalRecord, PruneJournalStore, RemovalJournalPaths,
+        RemovalJournalRecord, RemovalJournalStore,
     };
     #[cfg(target_os = "linux")]
     use crate::AddWorktreePhase;
@@ -1443,6 +1381,79 @@ mod tests {
                 .next()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn journal_readers_reject_symlinked_directories() {
+        let directory = tempdir().expect("journal fixture");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir(&outside).expect("create outside directory");
+
+        for name in ["operations", "removals", "moves", "prunes", "collections"] {
+            let journal_directory = directory.path().join(name);
+            symlink(&outside, &journal_directory).expect("symlink journal directory");
+
+            let result = match name {
+                "operations" => JournalStore::open(directory.path()).load_all().map(|_| ()),
+                "removals" => RemovalJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "moves" => MoveJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "prunes" => PruneJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "collections" => CollectionJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                _ => unreachable!(),
+            };
+
+            assert!(
+                matches!(result, Err(JournalError::InvalidStateDirectory { path }) if path == journal_directory),
+                "{name} reader followed a symlinked journal directory"
+            );
+            std::fs::remove_file(journal_directory).expect("remove journal symlink");
+        }
+    }
+
+    #[test]
+    fn journal_readers_reject_symlinked_json_entries() {
+        let directory = tempdir().expect("journal fixture");
+        let outside = directory.path().join("outside.json");
+        std::fs::write(&outside, b"{}\n").expect("write outside journal");
+
+        for name in ["operations", "removals", "moves", "prunes", "collections"] {
+            let journal_directory = directory.path().join(name);
+            std::fs::create_dir(&journal_directory).expect("create journal directory");
+            let journal_path = journal_directory.join("linked.json");
+            symlink(&outside, &journal_path).expect("symlink journal entry");
+
+            let result = match name {
+                "operations" => JournalStore::open(directory.path()).load_all().map(|_| ()),
+                "removals" => RemovalJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "moves" => MoveJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "prunes" => PruneJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "collections" => CollectionJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                _ => unreachable!(),
+            };
+
+            assert!(
+                matches!(result, Err(JournalError::InvalidRecord { path, .. }) if path == journal_path),
+                "{name} reader followed a symlinked journal entry"
+            );
+            std::fs::remove_file(journal_path).expect("remove journal symlink");
+            std::fs::remove_dir(journal_directory).expect("remove journal directory");
+        }
     }
 
     #[cfg(unix)]
