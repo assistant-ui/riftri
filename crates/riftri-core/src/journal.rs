@@ -131,7 +131,68 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
             detail: "journal path is not a real file".to_owned(),
         });
     }
-    File::open(path).map_err(|source| io(operation, path, source))
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .map_err(|source| io(operation, path, source))?;
+    let opened = file
+        .metadata()
+        .map_err(|source| io("inspect opened journal", path, source))?;
+    let current =
+        fs::symlink_metadata(path).map_err(|source| io("recheck journal path", path, source))?;
+    let mut valid = opened.is_file() && current.is_file() && !current.file_type().is_symlink();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        valid &= opened.dev() == current.dev() && opened.ino() == current.ino();
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        valid &= opened.file_attributes()
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+            == 0;
+    }
+    if !valid {
+        return Err(JournalError::InvalidRecord {
+            path: path.to_path_buf(),
+            detail: "journal path changed or is not a real file".to_owned(),
+        });
+    }
+    Ok(file)
+}
+
+fn reload_snapshot<R: serde::de::DeserializeOwned + Clone, D: PartialEq>(
+    directory: &Path,
+    path: &Path,
+    operation_id: &str,
+    expected: &D,
+    decode: impl FnOnce(R, PathBuf) -> Result<D, JournalError>,
+) -> Result<R, JournalError> {
+    validate_operation_identity(directory, operation_id, path)?;
+    let file = open_real_journal(path, "reopen operation journal")?;
+    let record: R = serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if decode(record.clone(), path.to_path_buf())? != *expected {
+        return Err(JournalError::InvalidRecord {
+            path: path.to_path_buf(),
+            detail: "journal changed after its recovery snapshot was validated".to_owned(),
+        });
+    }
+    Ok(record)
 }
 
 fn validate_operation_id(operation_id: &str, journal_path: &Path) -> Result<(), JournalError> {
@@ -286,7 +347,7 @@ pub(crate) struct JournalPaths<'a> {
     pub branch: Option<&'a OsStr>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecodedJournal {
     pub journal_path: PathBuf,
     pub operation_id: String,
@@ -304,7 +365,7 @@ pub(crate) struct DecodedJournal {
     pub last_forward_phase: AddWorktreePhase,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecodedOverlayFsJournal {
     pub layout_root: PathBuf,
     pub recovery_token: String,
@@ -373,7 +434,7 @@ pub(crate) struct CollectionJournalPaths<'a> {
     pub marker_path: &'a Path,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecodedRemovalJournal {
     pub journal_path: PathBuf,
     pub operation_id: String,
@@ -384,7 +445,7 @@ pub(crate) struct DecodedRemovalJournal {
     pub phase: RemoveWorktreePhase,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
     allow(dead_code)
@@ -399,7 +460,7 @@ pub(crate) struct DecodedMoveJournal {
     pub phase: MoveWorktreePhase,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(
     not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
     allow(dead_code)
@@ -411,7 +472,7 @@ pub(crate) struct DecodedPruneJournal {
     pub phase: PruneWorktreesPhase,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecodedCollectionJournal {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub journal_path: PathBuf,
@@ -866,6 +927,17 @@ pub(crate) struct JournalStore {
 
 impl JournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn reload(&self, expected: &DecodedJournal) -> Result<JournalRecord, JournalError> {
+        reload_snapshot(
+            &self.directory,
+            &expected.journal_path,
+            &expected.operation_id,
+            expected,
+            JournalRecord::decode,
+        )
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("operations");
         ensure_real_state_directory(&directory, "create journal directory")?;
@@ -938,66 +1010,37 @@ impl JournalStore {
 
     pub fn update_phase(
         &self,
-        journal_path: &Path,
+        expected: &DecodedJournal,
         phase: AddWorktreePhase,
-    ) -> Result<(), JournalError> {
-        let file = open_real_journal(journal_path, "open operation journal")?;
-        let mut record: JournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                path: journal_path.to_path_buf(),
-                source,
-            })?;
-        validate_operation_identity(&self.directory, &record.operation_id, journal_path)?;
+    ) -> Result<DecodedJournal, JournalError> {
+        let mut record = self.reload(expected)?;
         record.phase = phase;
         self.persist(&record)?;
-        Ok(())
+        record.decode(expected.journal_path.clone())
     }
 
     #[cfg(target_os = "linux")]
     pub fn record_overlayfs_mount_identity(
         &self,
-        journal_path: &Path,
+        expected: &DecodedJournal,
         identity: OverlayFsMountIdentity,
     ) -> Result<DecodedJournal, JournalError> {
-        let file = File::open(journal_path)
-            .map_err(|source| io("open operation journal", journal_path, source))?;
-        let mut record: JournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                path: journal_path.to_path_buf(),
-                source,
-            })?;
-        if self.path_for(&record.operation_id) != journal_path {
-            return Err(JournalError::InvalidRecord {
-                path: journal_path.to_path_buf(),
-                detail: "operation ID does not match the journal filename".to_owned(),
-            });
-        }
+        let mut record = self.reload(expected)?;
         record.record_overlayfs_mount_identity(identity)?;
         self.persist(&record)?;
-        record.decode(journal_path.to_path_buf())
+        record.decode(expected.journal_path.clone())
     }
 
     #[cfg(target_os = "linux")]
     pub fn begin_overlayfs_remount(
         &self,
-        journal_path: &Path,
+        expected: &DecodedJournal,
         expected_context: &OverlayFsMountContext,
         expected_identity: Option<&OverlayFsMountIdentity>,
         new_context: OverlayFsMountContext,
     ) -> Result<DecodedJournal, JournalError> {
-        let file = File::open(journal_path)
-            .map_err(|source| io("open operation journal", journal_path, source))?;
-        let mut record: JournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-                path: journal_path.to_path_buf(),
-                source,
-            })?;
-        if self.path_for(&record.operation_id) != journal_path {
-            return Err(JournalError::InvalidRecord {
-                path: journal_path.to_path_buf(),
-                detail: "operation ID does not match the journal filename".to_owned(),
-            });
-        }
+        let journal_path = &expected.journal_path;
+        let mut record = self.reload(expected)?;
         if record.phase != AddWorktreePhase::Active || record.backend != BackendKind::OverlayFs {
             return Err(JournalError::InvalidRecord {
                 path: journal_path.to_path_buf(),
@@ -1072,6 +1115,20 @@ pub(crate) struct RemovalJournalStore {
 }
 
 impl RemovalJournalStore {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn reload(
+        &self,
+        expected: &DecodedRemovalJournal,
+    ) -> Result<RemovalJournalRecord, JournalError> {
+        reload_snapshot(
+            &self.directory,
+            &expected.journal_path,
+            &expected.operation_id,
+            expected,
+            RemovalJournalRecord::decode,
+        )
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("removals");
@@ -1152,6 +1209,17 @@ pub(crate) struct MoveJournalStore {
 }
 
 impl MoveJournalStore {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn reload(&self, expected: &DecodedMoveJournal) -> Result<MoveJournalRecord, JournalError> {
+        reload_snapshot(
+            &self.directory,
+            &expected.journal_path,
+            &expected.operation_id,
+            expected,
+            MoveJournalRecord::decode,
+        )
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("moves");
@@ -1235,6 +1303,20 @@ pub(crate) struct PruneJournalStore {
 
 impl PruneJournalStore {
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn reload(
+        &self,
+        expected: &DecodedPruneJournal,
+    ) -> Result<PruneJournalRecord, JournalError> {
+        reload_snapshot(
+            &self.directory,
+            &expected.journal_path,
+            &expected.operation_id,
+            expected,
+            PruneJournalRecord::decode,
+        )
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("prunes");
         ensure_real_state_directory(&directory, "create prune journal directory")?;
@@ -1316,6 +1398,20 @@ pub(crate) struct CollectionJournalStore {
 }
 
 impl CollectionJournalStore {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn reload(
+        &self,
+        expected: &DecodedCollectionJournal,
+    ) -> Result<CollectionJournalRecord, JournalError> {
+        reload_snapshot(
+            &self.directory,
+            &expected.journal_path,
+            &expected.operation_id,
+            expected,
+            CollectionJournalRecord::decode,
+        )
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
         let directory = state_directory.join("collections");
@@ -1586,6 +1682,10 @@ mod tests {
             riftri_storage::BackendKind::ApfsClone,
         );
         let journal_path = store.persist(&record).expect("persist journal");
+        let snapshot = record
+            .clone()
+            .decode(journal_path.clone())
+            .expect("snapshot");
         let mut tampered = record;
         tampered.operation_id = "replacement".to_owned();
         std::fs::write(
@@ -1594,7 +1694,7 @@ mod tests {
         )
         .expect("tamper operation ID");
 
-        let result = store.update_phase(&journal_path, crate::AddWorktreePhase::BaseReady);
+        let result = store.update_phase(&snapshot, crate::AddWorktreePhase::BaseReady);
 
         assert_invalid_journal(result, &journal_path);
         assert!(
@@ -1937,7 +2037,7 @@ mod tests {
 
         let remount = store
             .begin_overlayfs_remount(
-                &path,
+                &record.decode(path).expect("snapshot"),
                 &previous_context,
                 Some(&previous_identity),
                 new_context.clone(),

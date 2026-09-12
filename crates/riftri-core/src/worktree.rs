@@ -966,13 +966,7 @@ fn resume_decoded_collection(
     journal: &DecodedCollectionJournal,
     fail_after: Option<GarbageCollectionPhase>,
 ) -> Result<bool, WorktreeError> {
-    let file = File::open(&journal.journal_path)
-        .map_err(|source| io("open collection journal", &journal.journal_path, source))?;
-    let mut record: CollectionJournalRecord =
-        serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-            path: journal.journal_path.clone(),
-            source,
-        })?;
+    let mut record = store.reload(journal)?;
     resume_collection(state_directory, store, &mut record, journal, fail_after)
 }
 
@@ -3467,12 +3461,10 @@ pub fn recover_incomplete_operations(
                 if let Err(error) = validate_recovery_paths(&state_directory, &journal)
                     .and_then(|()| adopt_overlayfs_mount_identity(&store, journal.clone()))
                     .and_then(|journal| {
-                        store.update_phase(
-                            &journal.journal_path,
-                            AddWorktreePhase::RollbackPending,
-                        )?;
+                        let pending =
+                            store.update_phase(&journal, AddWorktreePhase::RollbackPending)?;
                         rollback_decoded(&git, &journal)?;
-                        store.update_phase(&journal.journal_path, AddWorktreePhase::RolledBack)?;
+                        store.update_phase(&pending, AddWorktreePhase::RolledBack)?;
                         Ok(())
                     })
                 {
@@ -3647,14 +3639,7 @@ fn resume_removal(
                 journal.journal_path.display()
             ))
         })?;
-    let file = File::open(&journal.journal_path)
-        .map_err(|source| io("open removal journal", &journal.journal_path, source))?;
-    let mut record: RemovalJournalRecord = serde_json::from_reader(file).map_err(|source| {
-        WorktreeError::InvalidRequest(format!(
-            "read removal journal {}: {source}",
-            journal.journal_path.display()
-        ))
-    })?;
+    let mut record = store.reload(&journal)?;
 
     let metadata_lock = if record.phase <= RemoveWorktreePhase::CleanVerified {
         Some(acquire_git_worktree_metadata_lock_for_repository(
@@ -3734,14 +3719,7 @@ fn resume_move(
         )));
     }
     validate_move_paths(&state_directory, &journal)?;
-    let file = File::open(&journal.journal_path)
-        .map_err(|source| io("open move journal", &journal.journal_path, source))?;
-    let mut record: MoveJournalRecord = serde_json::from_reader(file).map_err(|source| {
-        WorktreeError::InvalidRequest(format!(
-            "read move journal {}: {source}",
-            journal.journal_path.display()
-        ))
-    })?;
+    let mut record = store.reload(&journal)?;
 
     if record.phase == MoveWorktreePhase::IntentRecorded {
         let metadata_lock =
@@ -3889,14 +3867,7 @@ fn resume_prune(
             journal.journal_path.display()
         )));
     }
-    let file = File::open(&journal.journal_path)
-        .map_err(|source| io("open prune journal", &journal.journal_path, source))?;
-    let mut record: PruneJournalRecord = serde_json::from_reader(file).map_err(|source| {
-        WorktreeError::InvalidRequest(format!(
-            "read prune journal {}: {source}",
-            journal.journal_path.display()
-        ))
-    })?;
+    let mut record = store.reload(&journal)?;
     if record.phase == PruneWorktreesPhase::IntentRecorded {
         let metadata_lock =
             acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
@@ -4424,7 +4395,7 @@ fn adopt_overlayfs_mount_identity(
         )?;
         match OverlayFsMounter::recover_mount(&layout, context, &overlayfs.recovery_token)? {
             OverlayFsRecoveryState::Mounted(identity) => {
-                Ok(store.record_overlayfs_mount_identity(&journal.journal_path, identity)?)
+                Ok(store.record_overlayfs_mount_identity(&journal, identity)?)
             }
             OverlayFsRecoveryState::Absent | OverlayFsRecoveryState::Prepared => Ok(journal),
             OverlayFsRecoveryState::DifferentNamespace => {
@@ -4480,7 +4451,7 @@ fn recover_active_overlayfs_mount(
                 return Ok(false);
             }
             OverlayFsMountState::Absent => store.begin_overlayfs_remount(
-                &journal.journal_path,
+                journal,
                 persisted_context,
                 Some(identity),
                 current_context,
@@ -4505,8 +4476,7 @@ fn recover_active_overlayfs_mount(
             &overlayfs.recovery_token,
         )? {
             OverlayFsRecoveryState::Mounted(identity) => {
-                let recovered =
-                    store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+                let recovered = store.record_overlayfs_mount_identity(journal, identity)?;
                 let recovered_overlayfs = recovered.overlayfs.as_ref().ok_or_else(|| {
                     WorktreeError::InvalidRequest(format!(
                         "OverlayFS journal {} lost its mount intent during recovery",
@@ -4519,12 +4489,7 @@ fn recover_active_overlayfs_mount(
             OverlayFsRecoveryState::Absent | OverlayFsRecoveryState::Prepared
                 if persisted_context.boot_id != current_context.boot_id =>
             {
-                store.begin_overlayfs_remount(
-                    &journal.journal_path,
-                    persisted_context,
-                    None,
-                    current_context,
-                )?
+                store.begin_overlayfs_remount(journal, persisted_context, None, current_context)?
             }
             OverlayFsRecoveryState::Absent | OverlayFsRecoveryState::Prepared => journal.clone(),
             OverlayFsRecoveryState::DifferentNamespace => {
@@ -4561,16 +4526,16 @@ fn recover_active_overlayfs_mount(
     )?;
     match OverlayFsMounter::recover_mount(&remount_layout, context, &remount.recovery_token)? {
         OverlayFsRecoveryState::Mounted(identity) => {
-            store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+            store.record_overlayfs_mount_identity(&remount_journal, identity)?;
         }
         OverlayFsRecoveryState::Absent => {
             OverlayFsMounter::arm_recovery(&remount_layout, &remount.recovery_token)?;
             let identity = OverlayFsMounter::mount_with_profile(&remount_layout, context.profile)?;
-            store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+            store.record_overlayfs_mount_identity(&remount_journal, identity)?;
         }
         OverlayFsRecoveryState::Prepared => {
             let identity = OverlayFsMounter::mount_with_profile(&remount_layout, context.profile)?;
-            store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+            store.record_overlayfs_mount_identity(&remount_journal, identity)?;
         }
         OverlayFsRecoveryState::DifferentNamespace => {
             return Err(WorktreeError::InvalidRequest(format!(
@@ -5130,6 +5095,26 @@ mod tests {
             PathBuf::from(OsString::from_vec(b"\xff-Case".to_vec())),
             PathBuf::from(OsString::from_vec(b"\xff-case".to_vec())),
         ]));
+    }
+
+    #[test]
+    fn prune_recovery_rejects_a_journal_changed_after_validation() {
+        use crate::journal::{PruneJournalRecord, PruneJournalStore};
+
+        let fixture = tempdir().expect("fixture");
+        let store = PruneJournalStore::create(fixture.path()).expect("store");
+        let mut record = PruneJournalRecord::new("prune-snapshot".to_owned(), fixture.path());
+        store.persist(&record).expect("persist intent");
+        let snapshot = store
+            .load_all()
+            .expect("load snapshot")
+            .pop()
+            .expect("journal");
+        record.phase = PruneWorktreesPhase::Complete;
+        store.persist(&record).expect("concurrent replacement");
+        let error = super::resume_prune(&riftri_git::Git::default(), &store, snapshot, None)
+            .expect_err("recovery must reject a changed snapshot");
+        assert!(error.to_string().contains("changed"), "{error}");
     }
 
     #[cfg(unix)]
