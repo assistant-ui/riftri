@@ -401,6 +401,17 @@ stops the add before durable mutation; case-sensitive destinations continue to
 accept distinct case variants. Trees with no potential ASCII alias avoid the
 per-file probe I/O.
 
+### Immutable-base integrity markers
+
+New base buckets use a versioned SHA-256 completion marker covering every entry's
+native name, kind, file bytes, permissions, and symlink target. Reuse recomputes
+the digest under the base lock and refuses a mismatch without deleting evidence
+or disturbing existing views. This adds a sequential read on cache hits without
+allocating another checkout. An empty marker cannot establish integrity: new
+adds use a new cache namespace, while older bases remain available to their
+existing views and explicit garbage collection. This detects accidental cache
+corruption; it does not make same-user mutable state a security sandbox.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

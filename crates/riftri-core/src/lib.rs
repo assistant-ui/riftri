@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod activation;
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+mod base_integrity;
 mod journal;
 #[cfg(all(
     test,
