@@ -476,6 +476,28 @@ impl OverlayFsMounter {
         })
     }
 
+    /// Reload a durable layout and reset only its disposable work directory
+    /// when no mount occupies the merged destination.
+    #[cfg(target_os = "linux")]
+    pub fn load_for_remount(
+        layout_root: &Path,
+        lower: &Path,
+        merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        overlayfs::load_for_remount(layout_root, lower, merged)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn load_for_remount(
+        _layout_root: &Path,
+        _lower: &Path,
+        _merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
     /// Mount a prepared view in the caller's current mount namespace.
     #[cfg(target_os = "linux")]
     pub fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {

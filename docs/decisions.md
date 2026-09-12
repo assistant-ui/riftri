@@ -328,6 +328,21 @@ mutation until relocation has a dedicated mount transaction. This enables
 containers and already-capable namespaces without pretending that ordinary
 unprivileged shells have the still-planned activation helper.
 
+### D032: explicit repair remounts active OverlayFS views after reboot
+
+An OverlayFS mount cannot survive a Linux reboot, but its immutable lower and
+private upper/work state can. When an active journal's boot identity is stale
+and no current mount occupies the exact destination, `riftri repair` atomically
+replaces the old context and mount ID with new remount intent. The existing
+token-bound marker then protects the crash window around remount and identity
+persistence. Recovery recreates the disposable kernel work directory but reuses
+the private upper, so dirty and untracked work is preserved and repeated repair
+is idempotent. A mount in the current boot, a
+same-boot namespace mismatch, or a foreign destination mount remains a hard
+stop. This is explicit recovery rather than an always-on daemon; making the
+mount available to ordinary unprivileged shells still requires the separate
+least-privilege activation boundary.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

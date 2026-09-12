@@ -123,7 +123,8 @@ ReFS, Riftri supports:
 
 Linux OverlayFS is also available experimentally when the add-time probe proves
 that the current mount namespace can host a persistent view. It supports the
-same real-worktree creation, clean removal, isolation, and crash recovery.
+same real-worktree creation, clean removal, isolation, crash recovery, and
+explicit repair after a reboot.
 Mounted-view moves are rejected before mutation, and ordinary unprivileged
 shells may still need the planned least-privilege activation helper.
 
@@ -166,8 +167,8 @@ details on measuring physical sharing, see
 
 The macOS/APFS, Linux reflink, Linux OverlayFS, and Windows/ReFS implementations include
 worktree creation, process-scoped Git interception, lifecycle recovery, cleanup,
-and disk accounting. OverlayFS least-privilege activation and reboot recovery,
-broader checkout compatibility, ordinary Windows filesystem alternatives, and
+and disk accounting. OverlayFS least-privilege activation, broader checkout
+compatibility, ordinary Windows filesystem alternatives, and
 managed environments remain roadmap work.
 
 Development plans and design details live in:

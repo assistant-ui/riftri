@@ -216,6 +216,7 @@ pub struct RecoveryReport {
     pub scanned: usize,
     pub recovered: usize,
     pub active: usize,
+    pub recovered_mounts: usize,
     pub completed_removals: usize,
     pub recovered_removals: usize,
     pub completed_moves: usize,
@@ -3156,6 +3157,11 @@ pub fn recover_incomplete_operations(
         .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    #[cfg(target_os = "linux")]
+    let removing_adds = removal_journals
+        .iter()
+        .map(|journal| journal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
     let mut report = RecoveryReport {
         scanned: journals
             .len()
@@ -3172,6 +3178,20 @@ pub fn recover_incomplete_operations(
             AddWorktreePhase::Active => {
                 if !completed_adds.contains(journal.operation_id.as_str()) {
                     report.active += 1;
+                    #[cfg(target_os = "linux")]
+                    if journal.backend == BackendKind::OverlayFs
+                        && !removing_adds.contains(journal.operation_id.as_str())
+                    {
+                        match validate_recovery_paths(&state_directory, &journal)
+                            .and_then(|()| recover_active_overlayfs_mount(&store, &journal))
+                        {
+                            Ok(true) => report.recovered_mounts += 1,
+                            Ok(false) => {}
+                            Err(error) => report
+                                .errors
+                                .push(format!("operation {}: {error}", journal.operation_id)),
+                        }
+                    }
                 }
             }
             AddWorktreePhase::RolledBack => {}
@@ -4127,6 +4147,154 @@ fn adopt_overlayfs_mount_identity(
             ))),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn recover_active_overlayfs_mount(
+    store: &JournalStore,
+    journal: &DecodedJournal,
+) -> Result<bool, WorktreeError> {
+    let overlayfs = journal.overlayfs.as_ref().ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "OverlayFS journal {} has no mount intent",
+            journal.journal_path.display()
+        ))
+    })?;
+    let persisted_context = overlayfs.mount_context.as_ref().ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "OverlayFS journal {} predates recoverable mount contexts; recovery preserved its state",
+            journal.journal_path.display()
+        ))
+    })?;
+    let layout = if overlayfs.mount_identity.is_some() {
+        OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )?
+    } else {
+        OverlayFsMounter::load_for_remount(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )?
+    };
+    let current_context = OverlayFsMounter::current_mount_context()?;
+
+    let remount_journal = if let Some(identity) = overlayfs.mount_identity.as_ref() {
+        match OverlayFsMounter::mount_state(&layout, identity)? {
+            OverlayFsMountState::Active => {
+                OverlayFsMounter::clear_recovery(&layout, &overlayfs.recovery_token)?;
+                return Ok(false);
+            }
+            OverlayFsMountState::Absent => store.begin_overlayfs_remount(
+                &journal.journal_path,
+                persisted_context,
+                Some(identity),
+                current_context,
+            )?,
+            OverlayFsMountState::DifferentNamespace => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "OverlayFS worktree {} is mounted in a different namespace; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+            OverlayFsMountState::Foreign => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "a foreign mount occupies {}; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+        }
+    } else {
+        match OverlayFsMounter::recover_mount(
+            &layout,
+            persisted_context,
+            &overlayfs.recovery_token,
+        )? {
+            OverlayFsRecoveryState::Mounted(identity) => {
+                let recovered =
+                    store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+                let recovered_overlayfs = recovered.overlayfs.as_ref().ok_or_else(|| {
+                    WorktreeError::InvalidRequest(format!(
+                        "OverlayFS journal {} lost its mount intent during recovery",
+                        journal.journal_path.display()
+                    ))
+                })?;
+                OverlayFsMounter::clear_recovery(&layout, &recovered_overlayfs.recovery_token)?;
+                return Ok(true);
+            }
+            OverlayFsRecoveryState::Absent | OverlayFsRecoveryState::Prepared
+                if persisted_context.boot_id != current_context.boot_id =>
+            {
+                store.begin_overlayfs_remount(
+                    &journal.journal_path,
+                    persisted_context,
+                    None,
+                    current_context,
+                )?
+            }
+            OverlayFsRecoveryState::Absent | OverlayFsRecoveryState::Prepared => journal.clone(),
+            OverlayFsRecoveryState::DifferentNamespace => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "OverlayFS worktree {} belongs to a different mount namespace; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+            OverlayFsRecoveryState::Foreign => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "a foreign mount occupies {}; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+        }
+    };
+
+    let remount = remount_journal.overlayfs.as_ref().ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "OverlayFS journal {} lost its mount intent during recovery",
+            journal.journal_path.display()
+        ))
+    })?;
+    let context = remount.mount_context.as_ref().ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "OverlayFS journal {} has no remount context",
+            journal.journal_path.display()
+        ))
+    })?;
+    let remount_layout = OverlayFsMounter::load_for_remount(
+        &remount.layout_root,
+        &remount_journal.base_path,
+        &remount_journal.destination,
+    )?;
+    match OverlayFsMounter::recover_mount(&remount_layout, context, &remount.recovery_token)? {
+        OverlayFsRecoveryState::Mounted(identity) => {
+            store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+        }
+        OverlayFsRecoveryState::Absent => {
+            OverlayFsMounter::arm_recovery(&remount_layout, &remount.recovery_token)?;
+            let identity = OverlayFsMounter::mount(&remount_layout)?;
+            store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+        }
+        OverlayFsRecoveryState::Prepared => {
+            let identity = OverlayFsMounter::mount(&remount_layout)?;
+            store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
+        }
+        OverlayFsRecoveryState::DifferentNamespace => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "OverlayFS worktree {} belongs to a different mount namespace; recovery preserved it",
+                journal.destination.display()
+            )));
+        }
+        OverlayFsRecoveryState::Foreign => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "a foreign mount occupies {}; recovery preserved it",
+                journal.destination.display()
+            )));
+        }
+    }
+    OverlayFsMounter::clear_recovery(&remount_layout, &remount.recovery_token)?;
+    Ok(true)
 }
 
 #[cfg(target_os = "linux")]

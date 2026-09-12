@@ -509,6 +509,7 @@ fn print_recovery_report(
     println!("State: {}", state_directory.display());
     println!("Scanned operations: {}", report.scanned);
     println!("Active worktrees: {}", report.active);
+    println!("Recovered mounts: {}", report.recovered_mounts);
     println!("Recovered add operations: {}", report.recovered);
     println!("Completed removals: {}", report.completed_removals);
     println!("Recovered removals: {}", report.recovered_removals);
