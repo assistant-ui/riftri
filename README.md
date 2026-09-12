@@ -62,6 +62,11 @@ Check whether the current repository and destination are compatible:
 $ riftri doctor --destination ../app-auth
 ```
 
+The readiness summary names the backend Riftri would select, confirms whether
+copy-on-write is available, reports OverlayFS helper state when relevant, and
+gives the next command or a concrete remedy. The check does not create Riftri
+state or Git worktree metadata.
+
 Create an optimized worktree explicitly:
 
 ```console

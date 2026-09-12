@@ -839,6 +839,55 @@ fn print_allocation_note() {
 
 fn print_doctor(report: &riftri_core::DoctorReport) {
     println!("Riftri doctor");
+    println!(
+        "Destination readiness: {}",
+        match report.destination_readiness.status {
+            riftri_core::DestinationReadinessStatus::Ready => "ready",
+            riftri_core::DestinationReadinessStatus::NeedsActivation => "needs activation",
+            riftri_core::DestinationReadinessStatus::Blocked => "blocked",
+        }
+    );
+    println!(
+        "Destination: {}",
+        report.destination_readiness.destination.display()
+    );
+    println!(
+        "Selected backend: {}",
+        report
+            .destination_readiness
+            .backend
+            .map_or("none", |backend| backend.display_name())
+    );
+    println!(
+        "Copy-on-write: {}",
+        if report.destination_readiness.copy_on_write {
+            "verified"
+        } else {
+            "unavailable"
+        }
+    );
+    println!(
+        "OverlayFS helper: {}",
+        match report.destination_readiness.overlayfs_helper {
+            riftri_core::OverlayFsHelperReadiness::NotApplicable => "not applicable",
+            riftri_core::OverlayFsHelperReadiness::NotRequired => "not required",
+            riftri_core::OverlayFsHelperReadiness::Ready => "required and verified",
+            riftri_core::OverlayFsHelperReadiness::Unavailable => "required but unavailable",
+        }
+    );
+    if report.destination_readiness.blockers.is_empty() {
+        println!("Readiness blockers: none");
+    } else {
+        println!("Readiness blockers:");
+        for blocker in &report.destination_readiness.blockers {
+            println!("- {}: {}", blocker.kind, blocker.explanation);
+            println!("  Fix: {}", blocker.remedy);
+        }
+    }
+    if let Some(command) = &report.destination_readiness.next_command {
+        println!("Next command: {command}");
+    }
+    println!();
     println!("Project stage: {}", report.project_stage);
     println!(
         "Platform: {} / {}",

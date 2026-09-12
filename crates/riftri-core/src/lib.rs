@@ -4,7 +4,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use riftri_git::{Git, GitInfo, ObjectId, RepositoryIdentity, RepositoryInfo};
-use riftri_storage::{BackendCapability, VolumeIdentity, probe_backends};
+use riftri_storage::{BackendCapability, BackendKind, VolumeIdentity, probe_backends};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -84,7 +84,49 @@ pub struct DoctorReport {
     pub git: Diagnostic<GitInfo>,
     pub repository: Diagnostic<RepositoryInfo>,
     pub repository_compatibility: Diagnostic<RepositoryCompatibilityReport>,
+    pub destination_readiness: DestinationReadiness,
     pub storage_capabilities: Vec<BackendCapability>,
+}
+
+/// Overall result of checking whether an optimized add can target one path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DestinationReadinessStatus {
+    Ready,
+    NeedsActivation,
+    Blocked,
+}
+
+/// Whether Linux OverlayFS needs and can use Riftri's narrow mount helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayFsHelperReadiness {
+    NotApplicable,
+    NotRequired,
+    Ready,
+    Unavailable,
+}
+
+/// One actionable reason a destination is not ready for transparent adds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DestinationReadinessBlocker {
+    pub kind: &'static str,
+    pub explanation: String,
+    pub remedy: String,
+}
+
+/// Destination-specific preflight for the preferred `riftri exec` workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DestinationReadiness {
+    pub destination: PathBuf,
+    pub status: DestinationReadinessStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<riftri_storage::BackendKind>,
+    pub copy_on_write: bool,
+    pub overlayfs_helper: OverlayFsHelperReadiness,
+    pub blockers: Vec<DestinationReadinessBlocker>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_command: Option<String>,
 }
 
 /// One reason an exact Git tree cannot use the current optimized checkout.
@@ -401,18 +443,191 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
         },
         None => Diagnostic::failure("repository inspection did not succeed"),
     };
+    let destination_readiness = destination_readiness(
+        destination,
+        repository_enabled,
+        &git_check,
+        &repository_check,
+        &repository_compatibility,
+    );
+    let cow_backend_active = destination_readiness.copy_on_write;
+    let storage_capabilities = probe_backends(destination);
 
     DoctorReport {
         project_stage: "native-cow-with-repository-activation",
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
-        cow_backend_active: false,
+        cow_backend_active,
         repository_enabled,
         git_shim_active: std::env::var_os(SHIM_ACTIVE_ENV).is_some(),
         git: git_check,
         repository: repository_check,
         repository_compatibility,
-        storage_capabilities: probe_backends(destination),
+        destination_readiness,
+        storage_capabilities,
+    }
+}
+
+fn destination_readiness(
+    destination: &Path,
+    repository_enabled: Option<bool>,
+    git: &Diagnostic<GitInfo>,
+    repository: &Diagnostic<RepositoryInfo>,
+    compatibility: &Diagnostic<RepositoryCompatibilityReport>,
+) -> DestinationReadiness {
+    let backend = worktree::destination_backend_readiness(destination);
+    let selected_backend = backend.as_ref().ok().map(|selection| selection.kind);
+    let mut blockers = Vec::new();
+
+    if let Some(error) = &git.error {
+        blockers.push(DestinationReadinessBlocker {
+            kind: "git",
+            explanation: error.clone(),
+            remedy: "Install Git and ensure the real `git` executable is available on PATH."
+                .to_owned(),
+        });
+    }
+
+    if let Some(error) = &repository.error {
+        blockers.push(DestinationReadinessBlocker {
+            kind: "repository",
+            explanation: error.clone(),
+            remedy: "Run `riftri doctor` from an existing non-bare Git worktree.".to_owned(),
+        });
+    }
+
+    match repository_enabled {
+        Some(false) => blockers.push(DestinationReadinessBlocker {
+            kind: "repository-activation",
+            explanation: "transparent Git interception is disabled for this repository".to_owned(),
+            remedy: "Run `riftri enable` from this repository; activation remains opt-in one repository at a time."
+                .to_owned(),
+        }),
+        None if repository.error.is_none() => blockers.push(DestinationReadinessBlocker {
+            kind: "repository-activation",
+            explanation: "repository-local activation could not be determined".to_owned(),
+            remedy: "Run `riftri enable` from an existing non-bare Git worktree.".to_owned(),
+        }),
+        Some(true) | None => {}
+    }
+
+    match &compatibility.value {
+        Some(report) => {
+            blockers.extend(report.blockers.iter().map(|blocker| DestinationReadinessBlocker {
+                kind: blocker.kind.as_str(),
+                explanation: blocker.explanation.clone(),
+                remedy: compatibility_remedy(blocker.kind).to_owned(),
+            }));
+        }
+        None => blockers.push(DestinationReadinessBlocker {
+            kind: "checkout-compatibility",
+            explanation: compatibility
+                .error
+                .clone()
+                .unwrap_or_else(|| "checkout compatibility could not be established".to_owned()),
+            remedy: "Resolve the repository diagnostic, then rerun `riftri doctor --destination <path>`."
+                .to_owned(),
+        }),
+    }
+
+    if let Err(error) = &backend {
+        blockers.push(DestinationReadinessBlocker {
+            kind: "storage-backend",
+            explanation: error.to_string(),
+            remedy: storage_remedy(&error.to_string()).to_owned(),
+        });
+    }
+
+    let only_activation_blocks = !blockers.is_empty()
+        && blockers
+            .iter()
+            .all(|blocker| blocker.kind == "repository-activation");
+    let status = if blockers.is_empty() {
+        DestinationReadinessStatus::Ready
+    } else if only_activation_blocks {
+        DestinationReadinessStatus::NeedsActivation
+    } else {
+        DestinationReadinessStatus::Blocked
+    };
+    let overlayfs_helper = match backend.as_ref() {
+        Ok(selection) if selection.kind == BackendKind::OverlayFs => {
+            if selection.overlayfs_helper_required {
+                OverlayFsHelperReadiness::Ready
+            } else {
+                OverlayFsHelperReadiness::NotRequired
+            }
+        }
+        Err(error) if error.to_string().contains("helper") => OverlayFsHelperReadiness::Unavailable,
+        Ok(_) | Err(_) => OverlayFsHelperReadiness::NotApplicable,
+    };
+    let next_command = match status {
+        DestinationReadinessStatus::Ready => Some(format!(
+            "riftri worktree add {} --detach HEAD",
+            destination.display()
+        )),
+        DestinationReadinessStatus::NeedsActivation => Some("riftri enable".to_owned()),
+        DestinationReadinessStatus::Blocked
+            if overlayfs_helper == OverlayFsHelperReadiness::Unavailable =>
+        {
+            Some("sudo riftri overlayfs install-helper".to_owned())
+        }
+        DestinationReadinessStatus::Blocked => None,
+    };
+
+    DestinationReadiness {
+        destination: destination.to_path_buf(),
+        status,
+        backend: selected_backend,
+        copy_on_write: selected_backend.is_some(),
+        overlayfs_helper,
+        blockers,
+        next_command,
+    }
+}
+
+fn compatibility_remedy(kind: RepositoryCompatibilityBlockerKind) -> &'static str {
+    match kind {
+        RepositoryCompatibilityBlockerKind::InTreeAttributes => {
+            "Use only Riftri's documented deterministic `text`, `eol`, and `binary` attributes, or use ordinary Git for this worktree."
+        }
+        RepositoryCompatibilityBlockerKind::EffectiveAttributes => {
+            "Remove the external attributes or custom filters affecting tracked paths, or use ordinary Git for this worktree."
+        }
+        RepositoryCompatibilityBlockerKind::Submodules => {
+            "Use ordinary Git for this worktree until Riftri supports submodules."
+        }
+        RepositoryCompatibilityBlockerKind::SparseCheckout => {
+            "Disable sparse checkout for this repository, or use ordinary Git for this worktree."
+        }
+        RepositoryCompatibilityBlockerKind::CheckoutConfiguration => {
+            "Restore a supported checkout configuration shown by the diagnostic, or use ordinary Git for this worktree."
+        }
+    }
+}
+
+fn storage_remedy(error: &str) -> &'static str {
+    #[cfg(target_os = "linux")]
+    if error.contains("helper") {
+        return "Install and validate the narrow helper with `sudo riftri overlayfs install-helper`, then rerun doctor.";
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = error;
+        "Choose a writable APFS destination and rerun `riftri doctor --destination <path>`."
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Choose writable Btrfs, reflink-enabled XFS, or a usable OverlayFS destination and rerun doctor."
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = error;
+        "Choose a writable ReFS destination and rerun `riftri doctor --destination <path>`."
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = error;
+        "No optimized storage backend is available on this platform."
     }
 }
 
