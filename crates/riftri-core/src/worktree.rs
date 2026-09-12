@@ -521,10 +521,27 @@ pub fn storage_accounting(
     let state_directory =
         resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
     let loaded_add_journals = JournalStore::open(&state_directory).load_all()?;
-    let removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
+    let loaded_removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
     let move_journals = MoveJournalStore::open(&state_directory).load_all()?;
     let prune_journals = PruneJournalStore::open(&state_directory).load_all()?;
     let collection_journals = CollectionJournalStore::open(&state_directory).load_all()?;
+    let mut removal_journals = Vec::with_capacity(loaded_removal_journals.len());
+    let mut invalid_removal_journals = Vec::new();
+    for journal in loaded_removal_journals {
+        match validate_removal_against_add_journals(
+            &state_directory,
+            &journal,
+            &loaded_add_journals,
+        ) {
+            Ok(()) => removal_journals.push(journal),
+            Err(error) => invalid_removal_journals.push(StateDiagnosticIssue {
+                path: journal.journal_path.clone(),
+                reason: format!(
+                    "unsafe durable removal journal; Riftri did not trust its lifecycle claim: {error}"
+                ),
+            }),
+        }
+    }
     let completed = removal_journals
         .iter()
         .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
@@ -615,12 +632,14 @@ pub fn storage_accounting(
     )?;
     let invalid_journal_paths = invalid_add_journals
         .iter()
+        .chain(&invalid_removal_journals)
         .map(|issue| issue.path.as_path())
         .collect::<HashSet<_>>();
     state_diagnosis
         .issues
         .retain(|issue| !invalid_journal_paths.contains(issue.path.as_path()));
     state_diagnosis.issues.extend(invalid_add_journals);
+    state_diagnosis.issues.extend(invalid_removal_journals);
     state_diagnosis
         .issues
         .sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -831,18 +850,14 @@ fn garbage_collection_candidates(
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, WorktreeError> {
+    let adds = JournalStore::open(state_directory).load_all()?;
     let removals = RemovalJournalStore::open(state_directory).load_all()?;
-    let completed = removals
-        .iter()
-        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
-        .map(|journal| journal.source_add_operation_id.as_str())
-        .collect::<HashSet<_>>();
-    Ok(JournalStore::open(state_directory)
-        .load_all()?
+    let completed = validated_completed_removal_ids(state_directory, &adds, &removals)?;
+    Ok(adds
         .into_iter()
         .filter(|journal| {
             journal.phase != AddWorktreePhase::RolledBack
-                && !completed.contains(journal.operation_id.as_str())
+                && !completed.contains(&journal.operation_id)
         })
         .map(|journal| journal.base_path)
         .collect())
@@ -2427,24 +2442,20 @@ fn find_managed_add_journal(
     state_directory: &Path,
     destination: &Path,
 ) -> Result<Option<DecodedJournal>, WorktreeError> {
+    let adds = JournalStore::open(state_directory).load_all()?;
     let removals = RemovalJournalStore::open(state_directory).load_all()?;
-    let completed = removals
-        .iter()
-        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
-        .map(|journal| journal.source_add_operation_id.as_str())
-        .collect::<HashSet<_>>();
+    let completed = validated_completed_removal_ids(state_directory, &adds, &removals)?;
     let pending = removals
         .iter()
         .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
-    let mut matches = JournalStore::open(state_directory)
-        .load_all()?
+    let mut matches = adds
         .into_iter()
         .filter(|journal| {
             journal.phase == AddWorktreePhase::Active
                 && journal.destination == destination
-                && !completed.contains(journal.operation_id.as_str())
+                && !completed.contains(&journal.operation_id)
         })
         .collect::<Vec<_>>();
     if matches.len() > 1 {
@@ -3145,13 +3156,21 @@ pub fn recover_incomplete_operations(
     let store = JournalStore::open(&state_directory);
     let journals = store.load_all()?;
     let removal_store = RemovalJournalStore::open(&state_directory);
-    let removal_journals = removal_store.load_all()?;
+    let loaded_removal_journals = removal_store.load_all()?;
     let move_store = MoveJournalStore::open(&state_directory);
     let move_journals = move_store.load_all()?;
     let prune_store = PruneJournalStore::open(&state_directory);
     let prune_journals = prune_store.load_all()?;
     let collection_store = CollectionJournalStore::open(&state_directory);
     let collection_journals = collection_store.load_all()?;
+    let mut removal_journals = Vec::with_capacity(loaded_removal_journals.len());
+    let mut invalid_removal_journals = Vec::new();
+    for journal in loaded_removal_journals {
+        match validate_removal_against_add_journals(&state_directory, &journal, &journals) {
+            Ok(()) => removal_journals.push(journal),
+            Err(error) => invalid_removal_journals.push((journal.operation_id.clone(), error)),
+        }
+    }
     let completed_adds = removal_journals
         .iter()
         .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
@@ -3166,12 +3185,19 @@ pub fn recover_incomplete_operations(
         scanned: journals
             .len()
             .saturating_add(removal_journals.len())
+            .saturating_add(invalid_removal_journals.len())
             .saturating_add(move_journals.len())
             .saturating_add(prune_journals.len())
             .saturating_add(collection_journals.len()),
         ..RecoveryReport::default()
     };
     let git = Git::default();
+
+    for (operation_id, error) in invalid_removal_journals {
+        report
+            .errors
+            .push(format!("removal operation {operation_id}: {error}"));
+    }
 
     for journal in journals {
         match journal.phase {
@@ -3295,6 +3321,30 @@ fn validate_removal_paths(
     state_directory: &Path,
     journal: &DecodedRemovalJournal,
 ) -> Result<(), WorktreeError> {
+    let adds = JournalStore::open(state_directory).load_all()?;
+    validate_removal_against_add_journals(state_directory, journal, &adds)
+}
+
+fn validated_completed_removal_ids(
+    state_directory: &Path,
+    add_journals: &[DecodedJournal],
+    removal_journals: &[DecodedRemovalJournal],
+) -> Result<HashSet<String>, WorktreeError> {
+    let mut completed = HashSet::new();
+    for journal in removal_journals {
+        validate_removal_against_add_journals(state_directory, journal, add_journals)?;
+        if journal.phase == RemoveWorktreePhase::Complete {
+            completed.insert(journal.source_add_operation_id.clone());
+        }
+    }
+    Ok(completed)
+}
+
+fn validate_removal_against_add_journals(
+    state_directory: &Path,
+    journal: &DecodedRemovalJournal,
+    add_journals: &[DecodedJournal],
+) -> Result<(), WorktreeError> {
     let bases = state_directory.join("bases/v1");
     if !journal.repository.is_absolute()
         || !journal.destination.is_absolute()
@@ -3306,9 +3356,8 @@ fn validate_removal_paths(
             journal.journal_path.display()
         )));
     }
-    let source = JournalStore::open(state_directory)
-        .load_all()?
-        .into_iter()
+    let source = add_journals
+        .iter()
         .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
         .ok_or_else(|| {
             WorktreeError::InvalidRequest(format!(
@@ -3326,7 +3375,7 @@ fn validate_removal_paths(
             journal.journal_path.display()
         )));
     }
-    Ok(())
+    validate_recovery_paths(state_directory, source)
 }
 
 fn resume_removal(
@@ -3690,13 +3739,14 @@ fn verify_prune_safe(
         )));
     }
     let adds = JournalStore::open(state_directory).load_all()?;
+    let removals = RemovalJournalStore::open(state_directory).load_all()?;
+    let completed_removals = validated_completed_removal_ids(state_directory, &adds, &removals)?;
     if adds.iter().any(|journal| {
         !matches!(
             journal.phase,
             AddWorktreePhase::Active | AddWorktreePhase::RolledBack
         )
-    }) || RemovalJournalStore::open(state_directory)
-        .load_all()?
+    }) || removals
         .iter()
         .any(|journal| journal.phase != RemoveWorktreePhase::Complete)
         || MoveJournalStore::open(state_directory)
@@ -3716,12 +3766,6 @@ fn verify_prune_safe(
             state_directory.display()
         )));
     }
-    let completed_removals = RemovalJournalStore::open(state_directory)
-        .load_all()?
-        .into_iter()
-        .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
-        .map(|journal| journal.source_add_operation_id)
-        .collect::<HashSet<_>>();
     let inventory = git.list_worktrees(repository)?;
     for journal in adds.iter().filter(|journal| {
         journal.phase == AddWorktreePhase::Active
@@ -4741,7 +4785,10 @@ mod tests {
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
-    use crate::journal::{JournalPaths, JournalRecord, JournalStore};
+    use crate::journal::{
+        JournalPaths, JournalRecord, JournalStore, RemovalJournalPaths, RemovalJournalRecord,
+        RemovalJournalStore,
+    };
     use crate::test_support::writable_tempdir as tempdir;
     use crate::{
         AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
@@ -5236,6 +5283,74 @@ mod tests {
             fs::read_to_string(destination.join("private.txt")).expect("external file remains"),
             "must not be inventoried\n"
         );
+    }
+
+    #[test]
+    fn invalid_completed_removal_does_not_release_an_active_base() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/live-view")),
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+        let add_journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journal")
+            .pop()
+            .expect("active add journal");
+        let state = state.canonicalize().expect("resolve state");
+        let repository = repository.canonicalize().expect("resolve repository");
+        let mut forged = RemovalJournalRecord::new(
+            "forged-removal".to_owned(),
+            RemovalJournalPaths {
+                repository: &repository,
+                destination: &fixture.path().join("different-worktree"),
+                base_path: &added.base_path,
+            },
+            add_journal.operation_id,
+        );
+        forged.phase = RemoveWorktreePhase::Complete;
+        let forged_path = RemovalJournalStore::create(&state)
+            .expect("create removal store")
+            .persist(&forged)
+            .expect("persist forged completed removal");
+
+        let status = storage_accounting(&state).expect("status preserves active view");
+        assert_eq!(status.active_views, 1);
+        assert_eq!(status.bases.len(), 1);
+        assert_eq!(status.bases[0].reference_count, 1);
+        assert!(
+            status.diagnostic_issues.iter().any(|issue| {
+                issue.path == forged_path && issue.reason.contains("does not match")
+            })
+        );
+
+        let collection = garbage_collect_inner(&state, false, None)
+            .expect_err("garbage collection must reject the invalid removal");
+        assert!(collection.to_string().contains("does not match"));
+        assert!(added.base_path.is_dir());
     }
 
     #[test]
