@@ -17,8 +17,9 @@ release scripts, and package tests. The published launcher is still named
 tarball.
 
 Native packages provide a CLI binary for each advertised target. They do not
-claim that every platform has a mutation backend. Until the roadmap says
-otherwise, worktree mutation remains macOS/APFS-only.
+claim that every filesystem has a mutation backend. Optimized worktrees require
+macOS/APFS, supported Linux reflinks or caller-visible OverlayFS, or Windows/ReFS,
+and an active capability probe must succeed before mutation.
 
 ## Before making the repository public
 

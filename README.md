@@ -35,14 +35,14 @@ the filesystem.
 
 ## Installation
 
-After the first public release, install the Rust-powered CLI through npm:
+Install the experimental Rust-powered CLI through npm:
 
 ```console
 $ npm install --global riftri
 $ riftri doctor
 ```
 
-Until then, build it from source:
+Or build it from source:
 
 ```console
 $ cargo build --release -p riftri-cli
