@@ -1,10 +1,14 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 #[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "linux")]
+use std::{fs::File, io};
 
 pub use riftri_git::SHIM_ACTIVE_ENV;
 use riftri_git::{Git, GitError};
@@ -195,6 +199,157 @@ pub fn proxy_git_command(
 
 pub fn execute_scoped_command(command: &[OsString]) -> Result<i32, ActivationError> {
     execute_scoped_command_from(command, None)
+}
+
+/// Install a root-owned, set-user-ID copy of the current Riftri executable
+/// that exposes only the internal OverlayFS mount protocol when elevated.
+#[cfg(target_os = "linux")]
+pub fn install_overlayfs_helper(replace: bool) -> Result<PathBuf, ActivationError> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Err(process_error(
+            "installing the OverlayFS helper requires root; run `sudo riftri overlayfs install-helper`",
+        ));
+    }
+
+    let destination = PathBuf::from(riftri_storage::OverlayFsMounter::DEFAULT_HELPER_PATH);
+    let parent = destination
+        .parent()
+        .ok_or_else(|| process_error("the OverlayFS helper destination has no parent"))?;
+    fs::create_dir_all(parent).map_err(|error| {
+        process_error(format!(
+            "create helper installation directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+    validate_root_install_directory(parent)?;
+
+    match fs::symlink_metadata(&destination) {
+        Ok(_metadata) if !replace => {
+            return Err(process_error(format!(
+                "{} already exists; rerun with --replace after verifying the installed helper",
+                destination.display()
+            )));
+        }
+        Ok(metadata) => {
+            if !metadata.file_type().is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.uid() != 0
+                || metadata.permissions().mode() & 0o022 != 0
+            {
+                return Err(process_error(format!(
+                    "refusing to replace unsafe helper path {}",
+                    destination.display()
+                )));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(process_error(format!(
+                "inspect helper destination {}: {error}",
+                destination.display()
+            )));
+        }
+    }
+
+    let source = env::current_exe()
+        .map_err(|error| process_error(format!("locate the Riftri executable: {error}")))?;
+    let source_metadata = fs::symlink_metadata(&source).map_err(|error| {
+        process_error(format!(
+            "inspect Riftri executable {}: {error}",
+            source.display()
+        ))
+    })?;
+    if !source_metadata.file_type().is_file() || source_metadata.file_type().is_symlink() {
+        return Err(process_error(format!(
+            "Riftri executable is not a regular file: {}",
+            source.display()
+        )));
+    }
+
+    let mut source_file = File::open(&source).map_err(|error| {
+        process_error(format!(
+            "open Riftri executable {}: {error}",
+            source.display()
+        ))
+    })?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        process_error(format!(
+            "create temporary helper in {}: {error}",
+            parent.display()
+        ))
+    })?;
+    io::copy(&mut source_file, temporary.as_file_mut()).map_err(|error| {
+        process_error(format!(
+            "copy Riftri helper into {}: {error}",
+            parent.display()
+        ))
+    })?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o4755))
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| process_error(format!("secure temporary helper: {error}")))?;
+
+    if replace {
+        temporary.persist(&destination)
+    } else {
+        temporary.persist_noclobber(&destination)
+    }
+    .map_err(|error| {
+        process_error(format!(
+            "install helper at {}: {}",
+            destination.display(),
+            error.error
+        ))
+    })?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| process_error(format!("sync helper installation: {error}")))?;
+    Ok(destination)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn install_overlayfs_helper(_replace: bool) -> Result<PathBuf, ActivationError> {
+    Err(process_error(
+        "the OverlayFS helper is available only on Linux",
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn validate_root_install_directory(directory: &Path) -> Result<(), ActivationError> {
+    let canonical = fs::canonicalize(directory).map_err(|error| {
+        process_error(format!(
+            "resolve helper installation directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    if canonical != directory {
+        return Err(process_error(format!(
+            "helper installation directory resolves through another path: {}",
+            directory.display()
+        )));
+    }
+    let mut current = Some(directory);
+    while let Some(path) = current {
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            process_error(format!(
+                "inspect helper directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.uid() != 0
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return Err(process_error(format!(
+                "helper installation path must contain only root-owned, non-writable real directories: {}",
+                path.display()
+            )));
+        }
+        current = path.parent();
+    }
+    Ok(())
 }
 
 /// Run any command from an exact, live Git worktree root while keeping Git

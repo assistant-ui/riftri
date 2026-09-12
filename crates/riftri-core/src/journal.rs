@@ -1762,7 +1762,9 @@ mod tests {
         use std::ffi::OsString;
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
-        use riftri_storage::{BackendKind, OverlayFsMountContext, OverlayFsMountIdentity};
+        use riftri_storage::{
+            BackendKind, OverlayFsMountContext, OverlayFsMountIdentity, OverlayFsMountProfile,
+        };
 
         let directory = tempdir().expect("journal fixture");
         let store = JournalStore::create(directory.path()).expect("create journal store");
@@ -1770,6 +1772,7 @@ mod tests {
             .path()
             .join(OsString::from_vec(b"overlay-\xff".to_vec()));
         let context = OverlayFsMountContext {
+            profile: OverlayFsMountProfile::RootlessUserXattr,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".to_owned(),
             mount_namespace_device: 4,
             mount_namespace_inode: 5,
@@ -1793,6 +1796,7 @@ mod tests {
         .expect("create OverlayFS journal");
         let mut value = serde_json::to_value(record).expect("serialize OverlayFS journal");
         value["overlayfs"]["mount_identity"] = serde_json::to_value(OverlayFsMountIdentity {
+            profile: context.profile,
             boot_id: context.boot_id.clone(),
             mount_namespace_device: context.mount_namespace_device,
             mount_namespace_inode: context.mount_namespace_inode,
@@ -1816,6 +1820,31 @@ mod tests {
         assert_eq!(overlayfs.recovery_token, "ab".repeat(32));
         assert_eq!(overlayfs.mount_context.as_ref(), Some(&context));
         assert_eq!(overlayfs.mount_identity.as_ref().unwrap().mount_id, 6);
+
+        let mut pre_profile =
+            serde_json::to_value(&record).expect("serialize pre-profile OverlayFS journal");
+        pre_profile["overlayfs"]["mount_context"]
+            .as_object_mut()
+            .expect("mount context object")
+            .remove("profile");
+        pre_profile["overlayfs"]["mount_identity"]
+            .as_object_mut()
+            .expect("mount identity object")
+            .remove("profile");
+        let pre_profile: JournalRecord =
+            serde_json::from_value(pre_profile).expect("decode journal without mount profiles");
+        let pre_profile = pre_profile
+            .decode(Path::new("/pre-profile-overlayfs.json").to_path_buf())
+            .expect("accept prior OverlayFS profile shape");
+        let pre_profile = pre_profile.overlayfs.expect("OverlayFS intent");
+        assert_eq!(
+            pre_profile.mount_context.unwrap().profile,
+            OverlayFsMountProfile::RootlessUserXattr
+        );
+        assert_eq!(
+            pre_profile.mount_identity.unwrap().profile,
+            OverlayFsMountProfile::RootlessUserXattr
+        );
 
         let mut legacy = serde_json::to_value(record).expect("serialize legacy OverlayFS journal");
         legacy["overlayfs"]
@@ -1875,16 +1904,20 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn active_overlayfs_remount_atomically_replaces_mount_context() {
-        use riftri_storage::{BackendKind, OverlayFsMountContext, OverlayFsMountIdentity};
+        use riftri_storage::{
+            BackendKind, OverlayFsMountContext, OverlayFsMountIdentity, OverlayFsMountProfile,
+        };
 
         let directory = tempdir().expect("journal fixture");
         let store = JournalStore::create(directory.path()).expect("create journal store");
         let previous_context = OverlayFsMountContext {
+            profile: OverlayFsMountProfile::RootlessUserXattr,
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".to_owned(),
             mount_namespace_device: 4,
             mount_namespace_inode: 5,
         };
         let previous_identity = OverlayFsMountIdentity {
+            profile: previous_context.profile,
             boot_id: previous_context.boot_id.clone(),
             mount_namespace_device: previous_context.mount_namespace_device,
             mount_namespace_inode: previous_context.mount_namespace_inode,
@@ -1915,6 +1948,7 @@ mod tests {
             .expect("record original mount identity");
         let path = store.persist(&record).expect("persist active journal");
         let new_context = OverlayFsMountContext {
+            profile: OverlayFsMountProfile::RootlessUserXattr,
             boot_id: "fedcba98-7654-3210-fedc-ba9876543210".to_owned(),
             mount_namespace_device: 7,
             mount_namespace_inode: 8,

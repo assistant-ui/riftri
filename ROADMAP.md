@@ -153,8 +153,13 @@ probe succeeds, and real linked-worktree add, clean removal, rollback, and
 mount-ID-gap recovery run through the existing journals. Mounted moves fail
 before mutation. Explicit repair now remounts active views after a simulated
 reboot, atomically replaces stale boot/namespace identity, preserves private
-edits, and remains idempotent. Least-privilege activation remains open, so the
-milestone as a whole is not yet complete.
+edits, and remains idempotent. Ordinary unprivileged shells can now use an
+explicitly installed, root-owned helper whose elevated protocol is limited to
+caller-owned OverlayFS mount, identity-checked unmount, and journal-owned
+disposable work reset operations. Probe files and verification stay
+unprivileged. Reflinks and directly mount-capable namespaces remain preferred.
+Missing or unsafe helper setup fails before mutation without a full-copy
+fallback.
 
 The capability contract and remaining lifecycle boundary are documented in
 [`docs/linux-overlayfs.md`](docs/linux-overlayfs.md).
@@ -170,8 +175,10 @@ The capability contract and remaining lifecycle boundary are documented in
   existing add and removal transactions. (complete for mount-capable caller
   namespaces)
 - Add reboot recovery through explicit repair. (complete)
-- Add least-privilege mount activation.
+- Add least-privilege mount activation. (complete)
 - Define fallback behavior when user namespaces or mounts are unavailable.
+  (complete: use a validated installed helper or fail before mutation; never
+  silently create a full copy)
 
 Acceptance criteria:
 

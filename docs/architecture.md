@@ -308,7 +308,11 @@ directory. A separate caller-namespace probe performs the same read, copy-up,
 isolation, and cleanup checks without namespace isolation. Core must require
 that stricter result before selecting a persistent backend, because success in
 an isolated child does not prove that ordinary Git processes can see a durable
-mount. Neither probe activates a persistent worktree.
+mount. Both persistent probe paths protect the lower test file first. A
+rootless mapped-root path must write through that mode directly; the ordinary
+helper path must restore normal checkout permissions through metadata-only
+copy-up before testing a data write. Neither probe activates a persistent
+worktree.
 
 The persistent storage primitive places `upper` and `work` under one
 journal-owned `overlays/v1/<operation-id>` directory and mounts the immutable
@@ -338,7 +342,27 @@ first replacing stale boot/namespace identity with durable remount intent, then
 reusing the token marker around the new mount and identity write. Private upper
 contents survive this remount, including dirty user edits. A mount already
 occupying the destination remains foreign. Mounted moves fail before mutation.
-The narrow least-privilege activation boundary remains open.
+Ordinary unprivileged shells may cross a narrow, explicitly installed helper
+boundary. Riftri first tries the direct caller-namespace operation. If that is
+permission-denied, it accepts only an absolute helper path whose executable and
+every ancestor are root-owned, non-writable by group/others, and whose binary
+has the set-user-ID bit. The elevated executable cannot enter the normal CLI:
+it accepts only mount, exact identity-checked unmount, and journal-owned
+disposable work-directory reset requests, clears its environment, and
+revalidates that the lower, upper, work, layout, and merged directories are real
+paths owned by the requesting UID. Probe setup and copy-up verification remain
+in the unprivileged parent. Mounts use `nodev,nosuid`. Rootless namespaces
+store OverlayFS metadata in `user.overlay.*` with metacopy disabled; the
+elevated helper deliberately uses `trusted.overlay.*`, which the requesting
+user cannot forge, and enables metadata-only copy-up. The selected profile is
+part of the durable mount context and identity. On helper mounts, metadata-only
+copy-up restores checkout write modes while unchanged file data remains shared
+with the read-only base. Git, checkout materialization, agent processes, and
+ordinary reads and writes remain unprivileged. The helper is available
+system-wide once installed, but repository-local `riftri.enabled` consent still
+controls Git interception. If the direct path and helper are both unavailable,
+selection fails before journal or Git mutation and never falls back to a full
+copy.
 
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in

@@ -241,13 +241,18 @@ and guarded prune use recoverable forward-only journals. The Linux reflink and
 OverlayFS slices of Milestone 5 and Windows ReFS slice of Milestone 7 are
 exercised on disposable native volumes in CI. When reflinks are unavailable,
 Linux selects OverlayFS only after proving that the caller's current namespace
-can host a persistent mount. The add transaction places the real
+can host a persistent mount, either directly or through an explicitly installed
+root-owned mount helper. The add transaction places the real
 linked-worktree pointer in a private upper layer, persists exact mount identity,
 verifies clean Git state, and recovers the mount-ID persistence crash gap
 through a private ownership marker. Clean removal revalidates the exact mount,
 unmounts it, restores the pointer for real Git removal, and deletes only the
 journal-owned private layers. Explicit repair can remount an active view after
 a boot change without losing private edits. Mounted moves remain fail-closed.
-Least-privilege activation for ordinary unprivileged shells, automatic
-orphan-state repair, ordinary-NTFS alternatives,
+The helper elevates only validated OverlayFS mount, exact identity-checked
+unmount, and disposable work-directory reset requests for caller-owned paths;
+probe setup, Git, and worktree I/O remain unprivileged. Missing, user-owned,
+writable, or incorrectly installed helpers are rejected before mutation.
+Automatic orphan-state repair,
+ordinary-NTFS alternatives,
 managed-environment integration, and a daemon are not implemented.

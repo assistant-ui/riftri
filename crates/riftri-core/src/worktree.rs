@@ -36,7 +36,7 @@ use riftri_storage::{BackendKind, StorageError};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use riftri_storage::{CapabilityStatus, DestinationVolume};
 #[cfg(target_os = "linux")]
-use riftri_storage::{OverlayFsMountState, OverlayFsRecoveryState};
+use riftri_storage::{OverlayFsMountProfile, OverlayFsMountState, OverlayFsRecoveryState};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -76,6 +76,8 @@ struct CompatibilityAnalysis {
 struct SelectedBackend {
     kind: BackendKind,
     volume: DestinationVolume,
+    #[cfg(target_os = "linux")]
+    overlayfs_profile: Option<OverlayFsMountProfile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1566,7 +1568,13 @@ fn add_worktree_inner(
     let mut journal = if backend == BackendKind::OverlayFs {
         let layout_root = state_directory.join("overlays/v1").join(&operation_id);
         #[cfg(target_os = "linux")]
-        let mount_context = Some(OverlayFsMounter::current_mount_context()?);
+        let mount_context = Some(OverlayFsMounter::current_mount_context_for(
+            selected_backend.overlayfs_profile.ok_or_else(|| {
+                WorktreeError::Unsupported(
+                    "OverlayFS activation did not select a durable mount profile".to_owned(),
+                )
+            })?,
+        )?);
         #[cfg(not(target_os = "linux"))]
         let mount_context = None;
         JournalRecord::new_overlayfs(
@@ -1796,7 +1804,13 @@ fn perform_overlayfs_view(
     OverlayFsMounter::arm_recovery(&layout, &overlayfs.recovery_token)?;
     advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
 
-    let identity = OverlayFsMounter::mount(&layout)?;
+    let context = overlayfs.mount_context.as_ref().ok_or_else(|| {
+        WorktreeError::InvalidRequest("OverlayFS mount intent has no activation profile".to_owned())
+    })?;
+    let identity = OverlayFsMounter::mount_with_profile(&layout, context.profile)?;
+    if identity.profile == OverlayFsMountProfile::PrivilegedTrustedXattr {
+        OverlayFsMounter::make_view_owner_writable(&layout, &identity)?;
+    }
     #[cfg(test)]
     exit_after_overlayfs_mount_for_test();
     journal.record_overlayfs_mount_identity(identity)?;
@@ -2153,10 +2167,10 @@ fn supported_worktree_backend(path: &Path) -> Result<SelectedBackend, WorktreeEr
             )
         })?;
     #[cfg(target_os = "linux")]
-    let capability = {
+    let (capability, overlayfs_profile) = {
         let reflink = riftri_storage::ReflinkCloner::probe(path);
         match reflink.status {
-            CapabilityStatus::Supported => reflink,
+            CapabilityStatus::Supported => (reflink, None),
             CapabilityStatus::Unavailable => {
                 return Err(WorktreeError::Unsupported(format!(
                     "Linux reflink capability could not be established, so Riftri did not downgrade to another backend: {}",
@@ -2164,9 +2178,9 @@ fn supported_worktree_backend(path: &Path) -> Result<SelectedBackend, WorktreeEr
                 )));
             }
             CapabilityStatus::Unsupported => {
-                let overlayfs = OverlayFsMounter::probe_current_namespace(path);
+                let (overlayfs, profile) = OverlayFsMounter::probe_activation(path);
                 if overlayfs.status == CapabilityStatus::Supported {
-                    overlayfs
+                    (overlayfs, profile)
                 } else {
                     return Err(WorktreeError::Unsupported(format!(
                         "no native Linux worktree backend is available: {}; {}",
@@ -2189,6 +2203,8 @@ fn supported_worktree_backend(path: &Path) -> Result<SelectedBackend, WorktreeEr
     Ok(SelectedBackend {
         kind: capability.kind,
         volume,
+        #[cfg(target_os = "linux")]
+        overlayfs_profile,
     })
 }
 
@@ -4304,7 +4320,7 @@ fn recover_active_overlayfs_mount(
             &journal.destination,
         )?
     };
-    let current_context = OverlayFsMounter::current_mount_context()?;
+    let current_context = OverlayFsMounter::current_mount_context_for(persisted_context.profile)?;
 
     let remount_journal = if let Some(identity) = overlayfs.mount_identity.as_ref() {
         match OverlayFsMounter::mount_state(&layout, identity)? {
@@ -4398,11 +4414,11 @@ fn recover_active_overlayfs_mount(
         }
         OverlayFsRecoveryState::Absent => {
             OverlayFsMounter::arm_recovery(&remount_layout, &remount.recovery_token)?;
-            let identity = OverlayFsMounter::mount(&remount_layout)?;
+            let identity = OverlayFsMounter::mount_with_profile(&remount_layout, context.profile)?;
             store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
         }
         OverlayFsRecoveryState::Prepared => {
-            let identity = OverlayFsMounter::mount(&remount_layout)?;
+            let identity = OverlayFsMounter::mount_with_profile(&remount_layout, context.profile)?;
             store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
         }
         OverlayFsRecoveryState::DifferentNamespace => {
@@ -4484,6 +4500,7 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
     };
 
     OverlayFsMounter::clear_recovery(&layout, &overlayfs.recovery_token)?;
+    let mut mounted_view_verified = false;
     if let Some(identity) = identity.as_ref()
         && OverlayFsMounter::mount_state(&layout, identity)? == OverlayFsMountState::Active
     {
@@ -4495,9 +4512,10 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
                 journal.destination.display()
             )));
         }
+        mounted_view_verified = true;
         OverlayFsMounter::unmount(&layout, identity)?;
     }
-    if !overlayfs_upper_contains_only_git_pointer(&layout)? {
+    if !mounted_view_verified && !overlayfs_upper_contains_only_git_pointer(&layout)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "OverlayFS private layer for {} contains changes; recovery preserved it",
             journal.destination.display()

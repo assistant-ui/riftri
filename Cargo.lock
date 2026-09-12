@@ -279,6 +279,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "riftri-core",
  "riftri-storage",
  "serde_json",

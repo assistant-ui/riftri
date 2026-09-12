@@ -43,6 +43,12 @@ enum Command {
         command: Vec<OsString>,
     },
 
+    /// Configure the narrow Linux OverlayFS mount helper.
+    Overlayfs {
+        #[command(subcommand)]
+        command: OverlayFsCommand,
+    },
+
     /// Configure shell-scoped interception for normal Git commands.
     Shell {
         #[command(subcommand)]
@@ -241,6 +247,16 @@ enum ShellCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum OverlayFsCommand {
+    /// Install the root-owned mount helper for unprivileged shells.
+    InstallHelper {
+        /// Atomically replace an existing safe helper during an upgrade.
+        #[arg(long)]
+        replace: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum PosixShell {
     Sh,
@@ -249,6 +265,11 @@ enum PosixShell {
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if invoked_as_overlayfs_helper() {
+        return run_overlayfs_helper();
+    }
+
     if invoked_as_git_shim() {
         std::process::exit(run_git_shim()?);
     }
@@ -284,6 +305,18 @@ fn main() -> Result<()> {
             };
             std::process::exit(status);
         }
+        Command::Overlayfs { command } => match command {
+            OverlayFsCommand::InstallHelper { replace } => {
+                let destination = riftri_core::install_overlayfs_helper(replace)?;
+                println!(
+                    "Installed Riftri OverlayFS helper at {}",
+                    destination.display()
+                );
+                println!(
+                    "The helper is available system-wide; `riftri enable` still opts in one repository at a time."
+                );
+            }
+        },
         Command::Shell { command } => match command {
             ShellCommand::Hook { shell: _ } => {
                 print!("{}", riftri_core::prepare_posix_shell_hook()?);
@@ -435,6 +468,69 @@ fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn invoked_as_overlayfs_helper() -> bool {
+    let elevated = unsafe { libc::geteuid() } != unsafe { libc::getuid() };
+    let installed_name = env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == OsStr::new("riftri-overlayfs-helper"));
+    elevated || installed_name
+}
+
+#[cfg(target_os = "linux")]
+fn run_overlayfs_helper() -> Result<()> {
+    anyhow::ensure!(
+        unsafe { libc::geteuid() } == 0,
+        "the OverlayFS helper is not elevated; reinstall it with `sudo riftri overlayfs install-helper --replace`"
+    );
+    let requester_uid = unsafe { libc::getuid() };
+    let requester_gid = unsafe { libc::getgid() };
+    let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    let Some(operation) = arguments.first().and_then(|value| value.to_str()) else {
+        anyhow::bail!("invalid internal OverlayFS helper request");
+    };
+    match (operation, &arguments[1..]) {
+        ("mount", [layout_root, lower, merged]) => {
+            let identity = riftri_storage::OverlayFsMounter::helper_mount(
+                Path::new(layout_root),
+                Path::new(lower),
+                Path::new(merged),
+                requester_uid,
+            )?;
+            println!("{}", serde_json::to_string(&identity)?);
+        }
+        ("unmount", [layout_root, lower, merged, identity]) => {
+            let identity = identity
+                .to_str()
+                .context("internal mount identity is not UTF-8")?;
+            let identity = serde_json::from_str(identity)
+                .context("decode internal OverlayFS mount identity")?;
+            let unmounted = riftri_storage::OverlayFsMounter::helper_unmount(
+                Path::new(layout_root),
+                Path::new(lower),
+                Path::new(merged),
+                &identity,
+                requester_uid,
+                requester_gid,
+            )?;
+            println!("{unmounted}");
+        }
+        ("reset-work", [layout_root, lower, merged]) => {
+            riftri_storage::OverlayFsMounter::helper_reset_work(
+                Path::new(layout_root),
+                Path::new(lower),
+                Path::new(merged),
+                requester_uid,
+                requester_gid,
+            )?;
+        }
+        _ => anyhow::bail!("invalid internal OverlayFS helper request"),
+    }
     Ok(())
 }
 
@@ -843,7 +939,7 @@ mod tests {
     use clap::Parser;
     use clap::error::ErrorKind;
 
-    use super::{Cli, Command, PosixShell, ShellCommand, WorktreeCommand};
+    use super::{Cli, Command, OverlayFsCommand, PosixShell, ShellCommand, WorktreeCommand};
 
     #[test]
     fn parses_repository_activation_commands() {
@@ -920,6 +1016,19 @@ mod tests {
             panic!("unexpected shell status command");
         };
         assert_eq!(repository, Path::new("../app"));
+    }
+
+    #[test]
+    fn parses_overlayfs_helper_installation() {
+        let cli = Cli::try_parse_from(["riftri", "overlayfs", "install-helper", "--replace"])
+            .expect("parse OverlayFS helper installation");
+        let Command::Overlayfs {
+            command: OverlayFsCommand::InstallHelper { replace },
+        } = cli.command
+        else {
+            panic!("unexpected OverlayFS command");
+        };
+        assert!(replace);
     }
 
     #[test]
