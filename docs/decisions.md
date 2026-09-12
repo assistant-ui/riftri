@@ -398,8 +398,15 @@ contents inside a unique temporary directory next to the requested destination.
 The destination filesystem itself determines whether those names coexist.
 Riftri removes the probe before continuing. Any collision or cleanup failure
 stops the add before durable mutation; case-sensitive destinations continue to
-accept distinct case variants. Trees with no potential ASCII alias avoid the
-per-file probe I/O.
+accept distinct case variants. ASCII-only trees with no potential case alias
+avoid the per-file probe I/O.
+
+Non-ASCII path sets also undergo this probe, even when the in-memory ASCII scan
+finds no pair. The destination is the authority for Unicode normalization and
+non-ASCII case equivalence. This intentionally pays name-only probe I/O for
+international path sets rather than risk a false negative from an approximate
+Unicode folding table. Native Unix bytes remain intact; ASCII-only trees with
+no case alias retain their existing fast path.
 
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 
@@ -451,8 +458,5 @@ so bases built with the older mutable-input path are not reused by new adds.
   partially written?
 - Should clean-view compaction be manual, idle-time automatic, or policy-based?
 - Which Windows fallback provides acceptable performance on ordinary NTFS?
-- How should non-ASCII case folding and normalization aliases be detected using
-  the destination filesystem's exact comparison rules without adding per-file
-  probe I/O to every worktree creation?
 - What integration is possible for harnesses that use libgit2 or another
   embedded Git implementation instead of spawning `git`?

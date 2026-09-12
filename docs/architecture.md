@@ -161,7 +161,7 @@ configuration entry is only a small discovery locator.
 For an enabled `git worktree add <path> <ref>` operation, the intended sequence is:
 
 1. Resolve the requested revision and Git tree using real Git.
-2. Validate potential exact-tree ASCII case aliases at the destination, then
+2. Validate potential exact-tree case and Unicode aliases at the destination, then
    probe its filesystem capabilities.
 3. Create the real linked-worktree metadata with checkout suppressed.
 4. Find or build an immutable base for the exact Git tree.
@@ -175,13 +175,17 @@ Failures are rolled back from an operation journal. Riftri must not silently
 fall back to a full copy unless the user explicitly allows that policy.
 
 An in-memory scan first identifies paths or directory prefixes that differ only
-by ASCII case. Only when such an alias exists does Riftri use an artifact-clean,
+by ASCII case, or any path containing non-ASCII native units. For those trees,
+Riftri uses an artifact-clean,
 metadata-only probe in the destination's existing parent. It creates the tree's
 directory and leaf names inside a unique temporary directory without
 materializing file contents, so the actual filesystem decides whether the
 aliases coexist. A collision is rejected before Riftri creates state, a
 journal, a branch, or linked-worktree metadata. Successful probes are removed
-before backend selection, and ordinary trees pay no per-file probe I/O.
+before backend selection, and ASCII-only trees without case aliases pay no
+per-file probe I/O. Non-ASCII trees incur the name-only probe because filesystem
+Unicode comparison rules cannot safely be approximated by language-level case
+folding or normalization. Unix names are never decoded lossily.
 
 Calls that mutate Git's shared linked-worktree administration are serialized by
 a repository-local Riftri lock. Base construction and native view cloning stay

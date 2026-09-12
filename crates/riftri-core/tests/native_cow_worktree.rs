@@ -159,6 +159,81 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
 }
 
 #[test]
+fn validates_unicode_aliases_before_durable_mutation() {
+    for (first_name, second_name) in [("e\u{301}.txt", "é.txt"), ("Ü.txt", "ü.txt")] {
+        let fixture = tempdir().unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let destination = fixture.path().join("worktree");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Test"]);
+        git(
+            &repository,
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        let first = git_with_input(&repository, &["hash-object", "-w", "--stdin"], b"first\n");
+        let second = git_with_input(&repository, &["hash-object", "-w", "--stdin"], b"second\n");
+        let input = format!(
+            "100644 blob {}\t{first_name}\0100644 blob {}\t{second_name}\0",
+            first.trim(),
+            second.trim()
+        );
+        let tree = git_with_input(&repository, &["mktree", "-z"], input.as_bytes());
+        let commit = git(
+            &repository,
+            &["commit-tree", tree.trim(), "-m", "unicode fixture"],
+        );
+        let probe = tempfile::tempdir_in(fixture.path()).unwrap();
+        fs::write(probe.path().join(first_name), b"first").unwrap();
+        let distinct = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(probe.path().join(second_name))
+        {
+            Ok(_) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => panic!("inspect filesystem names: {error}"),
+        };
+        probe.close().unwrap();
+        let before = git(&repository, &["worktree", "list", "--porcelain", "-z"]);
+        let result = add_worktree(AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: destination.clone(),
+            revision: OsString::from(commit.trim()),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.clone()),
+        });
+        if distinct {
+            result.expect("filesystem represents both Unicode names");
+            assert_eq!(fs::read(destination.join(first_name)).unwrap(), b"first\n");
+            assert_eq!(
+                fs::read(destination.join(second_name)).unwrap(),
+                b"second\n"
+            );
+            assert!(git(&destination, &["status", "--porcelain=v1"]).is_empty());
+        } else {
+            let error = result.expect_err("colliding Unicode names must fail preflight");
+            assert!(error.to_string().contains("cannot coexist"), "{error}");
+            assert!(!state.exists());
+            assert!(!destination.exists());
+            assert_eq!(
+                git(&repository, &["worktree", "list", "--porcelain", "-z"]),
+                before
+            );
+            assert!(fs::read_dir(fixture.path()).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".riftri-path-probe-")
+            }));
+        }
+    }
+}
+
+#[test]
 fn validates_case_colliding_tree_paths_before_durable_mutation() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");
