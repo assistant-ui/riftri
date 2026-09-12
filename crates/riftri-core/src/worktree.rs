@@ -509,7 +509,7 @@ pub fn storage_accounting(
     let state_directory = absolute_path(state_directory)?;
     let state_directory =
         resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
-    let add_journals = JournalStore::open(&state_directory).load_all()?;
+    let loaded_add_journals = JournalStore::open(&state_directory).load_all()?;
     let removal_journals = RemovalJournalStore::open(&state_directory).load_all()?;
     let move_journals = MoveJournalStore::open(&state_directory).load_all()?;
     let prune_journals = PruneJournalStore::open(&state_directory).load_all()?;
@@ -519,7 +519,25 @@ pub fn storage_accounting(
         .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
         .map(|journal| journal.source_add_operation_id.clone())
         .collect::<HashSet<_>>();
-
+    let git = Git::default();
+    let mut add_journals = Vec::with_capacity(loaded_add_journals.len());
+    let mut invalid_add_journals = Vec::new();
+    for journal in loaded_add_journals {
+        match validate_status_add_journal(
+            &git,
+            &state_directory,
+            &journal,
+            completed.contains(&journal.operation_id),
+        ) {
+            Ok(()) => add_journals.push(journal),
+            Err(error) => invalid_add_journals.push(StateDiagnosticIssue {
+                path: journal.journal_path.clone(),
+                reason: format!(
+                    "unsafe durable add journal; Riftri did not inspect its referenced paths: {error}"
+                ),
+            }),
+        }
+    }
     let mut references = BTreeMap::<PathBuf, usize>::new();
     let mut views = Vec::new();
     for journal in add_journals.iter().filter(|journal| {
@@ -567,7 +585,7 @@ pub fn storage_accounting(
         .map(|base| base.allocated_bytes)
         .chain(views.iter().map(|view| view.allocated_bytes))
         .fold(0_u64, u64::saturating_add);
-    let state_diagnosis = diagnose_state_paths(
+    let mut state_diagnosis = diagnose_state_paths(
         &state_directory,
         &add_journals,
         &removal_journals,
@@ -575,6 +593,17 @@ pub fn storage_accounting(
         &prune_journals,
         &collection_journals,
     )?;
+    let invalid_journal_paths = invalid_add_journals
+        .iter()
+        .map(|issue| issue.path.as_path())
+        .collect::<HashSet<_>>();
+    state_diagnosis
+        .issues
+        .retain(|issue| !invalid_journal_paths.contains(issue.path.as_path()));
+    state_diagnosis.issues.extend(invalid_add_journals);
+    state_diagnosis
+        .issues
+        .sort_unstable_by(|left, right| left.path.cmp(&right.path));
 
     Ok(StorageAccountingReport {
         active_views: views.len(),
@@ -635,6 +664,30 @@ pub fn storage_accounting(
         total_logical_bytes,
         total_allocated_bytes,
     })
+}
+
+fn validate_status_add_journal(
+    git: &Git,
+    state_directory: &Path,
+    journal: &DecodedJournal,
+    removal_complete: bool,
+) -> Result<(), WorktreeError> {
+    validate_recovery_paths(state_directory, journal)?;
+    if journal.phase != AddWorktreePhase::Active || removal_complete {
+        return Ok(());
+    }
+    let registered = git
+        .list_worktrees(&journal.repository)?
+        .into_iter()
+        .any(|worktree| paths_match(&worktree.path, &journal.destination));
+    if !registered {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "active destination {} is not registered by Git for {}",
+            journal.destination.display(),
+            journal.repository.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -3960,13 +4013,14 @@ mod tests {
     use std::thread;
 
     use super::{
-        AddWorktreeRequest, MoveWorktreeRequest, PruneWorktreesRequest, RemoveWorktreeRequest,
-        WorktreeMode, add_worktree_inner, garbage_collect_inner, move_worktree_inner,
-        next_operation_id, prune_worktrees_inner, recover_incomplete_operations,
-        remove_worktree_inner, storage_accounting,
+        AddWorktreeRequest, BackendKind, MoveWorktreeRequest, PruneWorktreesRequest,
+        RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, garbage_collect_inner,
+        move_worktree_inner, next_operation_id, prune_worktrees_inner,
+        recover_incomplete_operations, remove_worktree_inner, storage_accounting,
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
+    use crate::journal::{JournalPaths, JournalRecord, JournalStore};
     use crate::test_support::writable_tempdir as tempdir;
     use crate::{
         AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
@@ -4095,6 +4149,64 @@ mod tests {
         assert!(stray_temporary.is_file());
         assert!(stray_overlay.is_dir());
         assert!(unknown_root.is_dir());
+    }
+
+    #[test]
+    fn status_does_not_scan_an_unregistered_journal_destination() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let destination = fixture.path().join("unregistered-directory");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        fs::create_dir(&destination).expect("create unregistered directory");
+        fs::write(destination.join("private.txt"), "must not be inventoried\n")
+            .expect("write external file");
+
+        let base_parent = state.join("bases/v1/repository");
+        let base_path = base_parent.join("0123456789abcdef0123456789abcdef01234567");
+        fs::create_dir_all(&base_path).expect("create base");
+        fs::write(base_path.with_extension("complete"), "").expect("write completion marker");
+        fs::create_dir_all(state.join("tmp")).expect("create temporary directory");
+        let repository = repository.canonicalize().expect("resolve repository");
+        let destination = destination.canonicalize().expect("resolve destination");
+        let state = state.canonicalize().expect("resolve state");
+        let base_parent = state.join("bases/v1/repository");
+        let base_path = base_parent.join("0123456789abcdef0123456789abcdef01234567");
+        let store = JournalStore::create(&state).expect("create journal store");
+        let mut record = JournalRecord::new(
+            "operation".to_owned(),
+            JournalPaths {
+                repository: &repository,
+                destination: &destination,
+                scratch: &fixture.path().join(".riftri-view-operation"),
+                base_staging: &base_parent.join(".riftri-build-operation"),
+                base_path: &base_path,
+                temporary_index: &state.join("tmp/index-operation"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            BackendKind::ApfsClone,
+        );
+        record.phase = AddWorktreePhase::Active;
+        record.last_forward_phase = AddWorktreePhase::Active;
+        let journal_path = store.persist(&record).expect("persist forged journal");
+        let journal_path = journal_path.canonicalize().expect("resolve journal path");
+
+        let report = storage_accounting(&state).expect("status must reject unsafe references");
+
+        assert!(report.views.is_empty());
+        assert!(
+            report.diagnostic_issues.iter().any(|issue| {
+                issue.path == journal_path && issue.reason.contains("not registered by Git")
+            }),
+            "diagnostics: {:?}",
+            report.diagnostic_issues
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("private.txt")).expect("external file remains"),
+            "must not be inventoried\n"
+        );
     }
 
     #[test]
