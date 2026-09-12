@@ -191,6 +191,8 @@ Acceptance criteria:
 
 Outcome: cover real-world repositories and long-lived worktrees.
 
+- Validate potential ASCII case aliases from the exact tree on the destination
+  filesystem before durable state or Git metadata is created. (complete)
 - Git LFS and custom filter compatibility.
 - Sparse-checkout profiles.
 - Submodule policy and support.
