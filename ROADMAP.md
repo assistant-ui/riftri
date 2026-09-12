@@ -205,6 +205,8 @@ Outcome: cover real-world repositories and long-lived worktrees.
 - Clean-worktree compaction onto a new immutable base.
 - Shared dependency and build-cache guidance without sharing unsafe writable
   directories.
+- Repeatable cold/cached creation and allocation benchmark artifacts across the
+  supported native filesystem matrix. (complete)
 
 ## Milestone 7: Windows and managed environments
 

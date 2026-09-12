@@ -8,7 +8,7 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -694,71 +694,5 @@ fn rejects_a_symlinked_lifecycle_lock_before_mutation() {
     assert!(
         !git(&repository, &["branch", "--list", "feature/symlinked-lock"])
             .contains("feature/symlinked-lock")
-    );
-}
-
-#[test]
-#[ignore = "physical allocation benchmark; run explicitly on an otherwise quiet native COW volume"]
-fn cached_view_uses_materially_less_physical_space_than_its_logical_size() {
-    const LOGICAL_BYTES: usize = 32 * 1024 * 1024;
-
-    let fixture = tempdir().expect("fixture directory");
-    let repository = fixture.path().join("repository");
-    let state = fixture.path().join("state");
-    let first = fixture.path().join("first");
-    let second = fixture.path().join("second");
-    fs::create_dir(&repository).expect("create repository");
-    git(&repository, &["init", "--quiet"]);
-    git(&repository, &["config", "user.name", "Riftri Tests"]);
-    git(
-        &repository,
-        &["config", "user.email", "riftri@example.invalid"],
-    );
-    git(&repository, &["config", "core.autocrlf", "false"]);
-
-    let mut file = File::create(repository.join("payload.bin")).expect("create payload");
-    let mut state_word = 0x9e37_79b9_7f4a_7c15_u64;
-    let mut block = [0_u8; 64 * 1024];
-    for _ in 0..(LOGICAL_BYTES / block.len()) {
-        for chunk in block.chunks_exact_mut(8) {
-            state_word ^= state_word << 13;
-            state_word ^= state_word >> 7;
-            state_word ^= state_word << 17;
-            chunk.copy_from_slice(&state_word.to_le_bytes());
-        }
-        file.write_all(&block).expect("write payload block");
-    }
-    file.sync_all().expect("sync payload");
-    git(&repository, &["add", "--", "payload.bin"]);
-    git(&repository, &["commit", "--quiet", "-m", "payload"]);
-
-    add_worktree(AddWorktreeRequest {
-        repository: repository.clone(),
-        destination: first,
-        revision: OsString::from("HEAD"),
-        mode: WorktreeMode::NewBranch(OsString::from("feature/allocation-base")),
-        state_dir: Some(state.clone()),
-    })
-    .expect("prime immutable base");
-    let available_before = fs2::available_space(fixture.path()).expect("space before clone");
-
-    let result = add_worktree(AddWorktreeRequest {
-        repository,
-        destination: second,
-        revision: OsString::from("HEAD"),
-        mode: WorktreeMode::NewBranch(OsString::from("feature/allocation-view")),
-        state_dir: Some(state),
-    })
-    .expect("create cached COW view");
-    let available_after = fs2::available_space(fixture.path()).expect("space after clone");
-    let physical_growth = available_before.saturating_sub(available_after);
-
-    assert!(result.reused_base);
-    eprintln!(
-        "cached view logical bytes: {LOGICAL_BYTES}; measured native COW volume growth: {physical_growth}"
-    );
-    assert!(
-        physical_growth < (LOGICAL_BYTES as u64 / 4),
-        "cached {LOGICAL_BYTES}-byte view consumed {physical_growth} physical bytes"
     );
 }

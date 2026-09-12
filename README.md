@@ -200,6 +200,7 @@ Development plans and design details live in:
 - [Roadmap](ROADMAP.md)
 - [Architecture](docs/architecture.md)
 - [Design decisions](docs/decisions.md)
+- [Native COW benchmark](docs/benchmarks.md)
 - [Release process](RELEASING.md)
 
 ## Contributing
