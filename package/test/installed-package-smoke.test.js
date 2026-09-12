@@ -16,6 +16,7 @@ test(
     const result = await smokeInstalledPackage({ repositoryRoot });
 
     assert.equal(result.version.trim(), `riftri ${manifest.version}`);
+    assert.equal(result.installMode, "isolated-global-prefix");
     assert.equal(result.lifecycleTested, process.platform === "darwin");
   },
 );

@@ -211,6 +211,12 @@ $ cargo fmt --all --check
 $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo test --workspace
 $ npm test
+$ npm run smoke:installed
 ```
+
+The installed-package smoke test packs both npm artifacts, installs them into
+an isolated global prefix without registry access, and exercises the resulting
+`riftri` command. Native-backend CI also runs the complete add, edit, remove,
+status, and collection workflow from that installed command.
 
 Riftri is licensed under the [Apache License 2.0](LICENSE).
