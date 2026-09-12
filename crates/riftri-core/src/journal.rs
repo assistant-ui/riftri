@@ -995,6 +995,13 @@ impl JournalStore {
             .collect()
     }
 
+    pub fn load_operation(&self, operation_id: &str) -> Result<DecodedJournal, JournalError> {
+        let path = self.path_for(operation_id);
+        validate_operation_id(operation_id, &path)?;
+        require_real_state_directory(&self.directory)?;
+        self.load_path(path)
+    }
+
     pub fn load_all_for_status(&self) -> Result<StatusJournalLoad<DecodedJournal>, JournalError> {
         Ok(load_status_journals(
             journal_paths(&self.directory)?,

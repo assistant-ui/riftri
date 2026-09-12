@@ -190,6 +190,16 @@ without racing Git's `worktrees/` metadata.
 
 ## Add-operation journal state machine
 
+An add holds an exclusive `operations/<operation-id>.lock` from before its
+first journal write through activation or rollback. Repair tries this lock
+without waiting, reports busy adds as skipped, and reloads the journal after
+acquiring ownership. This distinguishes a live creator from an interrupted
+operation and serializes competing add-recovery attempts. The lock file remains
+beside its journal to avoid replacing an inode another process has opened;
+closing the handle or process termination releases ownership. Legacy idle
+journals obtain the same lock on first repair. Concurrent coordinators must all
+use the lock-aware protocol; an older running binary cannot honor a new lock.
+
 The version 1 add journal advances through these durable states:
 
 ```text

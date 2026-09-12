@@ -604,6 +604,7 @@ fn print_recovery_report(
     println!("Riftri repair");
     println!("State: {}", state_directory.display());
     println!("Scanned operations: {}", report.scanned);
+    println!("Busy add operations skipped: {}", report.busy_adds);
     println!("Active worktrees: {}", report.active);
     println!("Recovered mounts: {}", report.recovered_mounts);
     println!("Recovered add operations: {}", report.recovered);
