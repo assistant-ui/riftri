@@ -234,6 +234,60 @@ fn validates_case_colliding_tree_paths_before_durable_mutation() {
 }
 
 #[test]
+fn refuses_reuse_of_a_base_with_an_injected_ignored_file() {
+    let fixture = tempdir().expect("fixture");
+    let repository = fixture.path().join("repository");
+    fs::create_dir(&repository).expect("repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("tracked file");
+    fs::write(repository.join(".gitignore"), "ignored.txt\n").expect("ignore rule");
+    git(&repository, &["add", "."]);
+    git(
+        &repository,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "initial",
+        ],
+    );
+    let state = fixture.path().join("state");
+    let request = |name: &str| AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: fixture.path().join(name),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::Detached,
+        state_dir: Some(state.clone()),
+    };
+    let first = add_worktree(request("first")).expect("first view");
+    let original = fs::metadata(&first.base_path)
+        .expect("base metadata")
+        .permissions();
+    let mut writable = original.clone();
+    #[cfg(unix)]
+    writable.set_mode(original.mode() | 0o200);
+    #[cfg(windows)]
+    writable.set_readonly(false);
+    fs::set_permissions(&first.base_path, writable).expect("make fixture base writable");
+    fs::write(first.base_path.join("ignored.txt"), "injected\n").expect("inject ignored file");
+    fs::set_permissions(&first.base_path, original).expect("restore base permissions");
+    let error = add_worktree(request("second")).expect_err("corrupt base must not be reused");
+    assert!(error.to_string().contains("integrity"), "{error}");
+    assert!(!fixture.path().join("second").exists());
+    assert!(!first.destination.join("ignored.txt").exists());
+    assert!(git(&first.destination, &["status", "--porcelain=v1"]).is_empty());
+    assert_eq!(
+        fs::read(first.base_path.join("ignored.txt")).expect("preserve evidence"),
+        b"injected\n"
+    );
+}
+
+#[test]
 fn creates_a_clean_worktree_with_deterministic_in_tree_attributes() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");

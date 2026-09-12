@@ -1914,6 +1914,34 @@ fn prepare_base(
                 base_path.display()
             )));
         }
+        use std::io::Read;
+        let mut stored = Vec::new();
+        crate::base_integrity::open_regular(&complete_path)
+            .map_err(|source| {
+                io(
+                    "open immutable-base integrity marker",
+                    &complete_path,
+                    source,
+                )
+            })?
+            .take(128)
+            .read_to_end(&mut stored)
+            .map_err(|source| {
+                io(
+                    "read immutable-base integrity marker",
+                    &complete_path,
+                    source,
+                )
+            })?;
+        if stored
+            != crate::base_integrity::marker(base_path)
+                .map_err(|source| io("verify immutable-base integrity", base_path, source))?
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "immutable-base integrity check failed for {}; the base was preserved and cannot be reused",
+                base_path.display()
+            )));
+        }
         return Ok(true);
     }
     if base_exists {
@@ -1935,11 +1963,21 @@ fn prepare_base(
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
     NativeCowCloner::make_tree_read_only(base_path)?;
-    let marker = OpenOptions::new()
+    let integrity = crate::base_integrity::marker(base_path)
+        .map_err(|source| io("record immutable-base integrity", base_path, source))?;
+    let mut marker = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(&complete_path)
         .map_err(|source| io("create immutable-base marker", &complete_path, source))?;
+    use std::io::Write;
+    marker.write_all(&integrity).map_err(|source| {
+        io(
+            "write immutable-base integrity marker",
+            &complete_path,
+            source,
+        )
+    })?;
     marker
         .sync_all()
         .map_err(|source| io("sync immutable-base marker", &complete_path, source))?;
@@ -2616,6 +2654,9 @@ fn allocate_operation_id(
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn repository_cache_id(common_git_directory: &Path, checkout_profile: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    // Older buckets have empty completion markers and cannot prove integrity.
+    // Leave them available to existing views and explicit GC; new adds use v2.
+    hasher.update(b"riftri-verified-base-v2\0");
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
