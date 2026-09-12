@@ -307,7 +307,13 @@ garbage collection as APFS.
 
 OverlayFS capability probing creates lower, upper, work, and merged directories
 on the destination volume, then forks a short-lived child into a private mount
-namespace. The child mounts OverlayFS with explicit rootless-compatible options,
+namespace. Before probing, the child closes every inherited descriptor except
+its result pipe and immutable lower payload, including standard streams. The
+fork-only child cannot rely on close-on-exec flags: unrelated descriptors can
+pin another thread's mount or lock. It uses `close_range` where available and a
+raw, allocation-free `/proc/self/fd` scan otherwise; inability to isolate the
+descriptor table fails the probe before any mount. Parent descriptors remain
+untouched. The child mounts OverlayFS with explicit rootless-compatible options,
 verifies lower reads and private copy-up writes, unmounts, and reports the exact
 failing stage and operating-system error. After namespace isolation, the child
 resolves the private probe root as a native byte path in the new namespace and

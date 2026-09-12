@@ -60,6 +60,41 @@ fn caller_namespace_probe_verifies_persistent_mount_permission() {
 }
 
 #[test]
+fn concurrent_isolated_and_caller_probes_release_their_mounts() {
+    if !overlayfs_mounts_required() {
+        return;
+    }
+    let start = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        for worker in 0..4 {
+            let start = &start;
+            scope.spawn(move || {
+                let fixture = tempdir().expect("worker fixture");
+                start.wait();
+                for iteration in 0..16 {
+                    let capability = if (worker + iteration) % 2 == 0 {
+                        OverlayFsMounter::probe(fixture.path())
+                    } else {
+                        OverlayFsMounter::probe_current_namespace(fixture.path())
+                    };
+                    assert_eq!(
+                        capability.status,
+                        CapabilityStatus::Supported,
+                        "worker {worker}, iteration {iteration}: {}",
+                        capability.explanation
+                    );
+                    assert_eq!(
+                        fs::read_dir(fixture.path()).unwrap().count(),
+                        0,
+                        "concurrent probe left an artifact"
+                    );
+                }
+            });
+        }
+    });
+}
+
+#[test]
 fn durable_layout_mounts_directly_at_the_requested_view() {
     if !overlayfs_mounts_required() {
         return;

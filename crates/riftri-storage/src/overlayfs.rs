@@ -1389,7 +1389,7 @@ fn run_probe_child(context: &ProbeContext<'_>) -> Result<(), ProbeFailure> {
 }
 
 fn run_probe_child_with<T>(
-    _retained_fd: RawFd,
+    retained_fd: RawFd,
     context: &T,
     child_entry: unsafe fn(RawFd, libc::pid_t, &T) -> !,
 ) -> Result<(), ProbeFailure> {
@@ -1424,6 +1424,10 @@ fn run_probe_child_with<T>(
         // Rust. All referenced buffers were fully built before `fork`.
         unsafe {
             libc::close(pipe[0]);
+            let error = close_inherited_descriptors(pipe[1], retained_fd);
+            if error != 0 {
+                child_fail(pipe[1], 11, error);
+            }
             child_entry(pipe[1], parent, context);
         }
     }
@@ -1464,6 +1468,7 @@ fn run_probe_child_with<T>(
         8 => "verify immutable lower probe file",
         9 => "verify private upper probe file",
         10 => "unmount probe OverlayFS view",
+        11 => "close unrelated probe descriptors",
         _ => "run isolated OverlayFS probe",
     };
     Err(ProbeFailure::new(
@@ -1474,6 +1479,117 @@ fn run_probe_child_with<T>(
             std::io::Error::from_raw_os_error(result.error)
         },
     ))
+}
+
+// Only the result pipe and immutable payload belong to this probe. CLOEXEC
+// cannot help a child that never execs: another thread's open mount/file/lock
+// would otherwise remain pinned for the child's lifetime. Fork has already
+// given this child a private descriptor table, so the parent's FDs are untouched.
+unsafe fn close_inherited_descriptors(result_fd: RawFd, retained_fd: RawFd) -> i32 {
+    let low = result_fd.min(retained_fd) as u32;
+    let high = result_fd.max(retained_fd) as u32;
+    let mut first = 0_u32;
+    for keep in [low, high] {
+        if first < keep
+            // SAFETY: scalar inclusive bounds; no unsharing or CLOEXEC flags.
+            && unsafe { libc::syscall(libc::SYS_close_range, first, keep - 1, 0_u32) } != 0
+        {
+            return unsafe { close_inherited_descriptors_via_proc(result_fd, retained_fd) };
+        }
+        first = keep + 1;
+    }
+    if unsafe { libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32) } == 0 {
+        0
+    } else {
+        // Older kernels (or syscall filters) may lack close_range. Enumerate
+        // the child's actual table, not a parent snapshot or a lowered rlimit.
+        unsafe { close_inherited_descriptors_via_proc(result_fd, retained_fd) }
+    }
+}
+
+unsafe fn close_inherited_descriptors_via_proc(result_fd: RawFd, retained_fd: RawFd) -> i32 {
+    // SAFETY: fixed NUL-terminated path; open in the child so self refers to
+    // its table, including any descriptors created concurrently before fork.
+    let directory = unsafe {
+        libc::open(
+            c"/proc/self/fd".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if directory == -1 {
+        return last_errno();
+    }
+    let error = unsafe { close_proc_descriptors(directory, result_fd, retained_fd) };
+    unsafe { libc::close(directory) };
+    error
+}
+
+unsafe fn close_proc_descriptors(directory: RawFd, result_fd: RawFd, retained_fd: RawFd) -> i32 {
+    // Raw getdents64 and stack buffers avoid allocator/readdir locks after a
+    // multithreaded fork. Linux's fixed header is ino64, off64, reclen16, type8.
+    let mut bytes = [0_u8; 1024];
+    loop {
+        // SAFETY: valid directory FD and writable buffer, length below INT_MAX.
+        let read = unsafe {
+            libc::syscall(
+                libc::SYS_getdents64,
+                directory,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+            )
+        };
+        if read == -1 {
+            let error = last_errno();
+            if error == libc::EINTR {
+                continue;
+            }
+            return error;
+        }
+        if read == 0 {
+            return 0;
+        }
+        let mut offset = 0;
+        while offset < read as usize {
+            let remaining = &bytes[offset..read as usize];
+            if remaining.len() < 20 {
+                return libc::EIO;
+            }
+            let length = u16::from_ne_bytes([remaining[16], remaining[17]]) as usize;
+            if length < 20 || length > remaining.len() {
+                return libc::EIO;
+            }
+            let name = &remaining[19..length];
+            let Some(end) = name.iter().position(|byte| *byte == 0) else {
+                return libc::EIO;
+            };
+            let name = &name[..end];
+            if name != b"." && name != b".." {
+                let Some(fd) = proc_descriptor_number(name) else {
+                    return libc::EIO;
+                };
+                if fd != directory && fd != result_fd && fd != retained_fd {
+                    // Like close_range, ignore per-FD close errors. Linux has
+                    // already released the descriptor even on EINTR/EIO.
+                    unsafe { libc::close(fd) };
+                }
+            }
+            offset += length;
+        }
+    }
+}
+
+fn proc_descriptor_number(name: &[u8]) -> Option<RawFd> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut fd = 0_i32;
+    for byte in name {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        fd = fd.checked_mul(10)?.checked_add(i32::from(byte - b'0'))?;
+    }
+    Some(fd)
 }
 
 fn wait_for_child(child: libc::pid_t) -> std::io::Result<i32> {
@@ -1700,6 +1816,15 @@ mod tests {
 
     #[test]
     fn probe_child_closes_unrelated_cloexec_descriptors() {
+        check_child_with(check_descriptors);
+    }
+
+    #[test]
+    fn probe_child_proc_fallback_closes_multiple_batches() {
+        check_child_with(check_proc_fallback);
+    }
+
+    fn check_child_with(entry: unsafe fn(RawFd, libc::pid_t, &DescriptorContext) -> !) {
         let mut retained = tempfile::tempfile().unwrap();
         retained.write_all(b"retained").unwrap();
         let unrelated = tempfile::tempfile().unwrap();
@@ -1713,10 +1838,52 @@ mod tests {
             retained: retained.as_raw_fd(),
             unrelated: high.as_raw_fd(),
         };
-        run_probe_child_with(context.retained, &context, check_descriptors).unwrap();
+        run_probe_child_with(context.retained, &context, entry).unwrap();
         // Closing the child's copies must leave the parent's descriptors intact.
         assert!(retained.metadata().is_ok());
         assert!(high.metadata().is_ok());
+    }
+
+    unsafe fn check_proc_fallback(
+        result_fd: RawFd,
+        parent: libc::pid_t,
+        context: &DescriptorContext,
+    ) -> ! {
+        // Populate enough new child-only descriptors to span getdents batches.
+        let mut descriptors = [-1; 128];
+        for fd in &mut descriptors {
+            *fd = unsafe { libc::fcntl(context.retained, libc::F_DUPFD_CLOEXEC, 512) };
+            if *fd == -1 {
+                unsafe { child_fail(result_fd, 11, last_errno()) };
+            }
+        }
+        let error = unsafe { close_inherited_descriptors_via_proc(result_fd, context.retained) };
+        if error != 0 {
+            unsafe { child_fail(result_fd, 11, error) };
+        }
+        for fd in descriptors {
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 || last_errno() != libc::EBADF {
+                unsafe { child_fail(result_fd, 11, libc::EBUSY) };
+            }
+        }
+        unsafe { check_descriptors(result_fd, parent, context) };
+    }
+
+    #[test]
+    fn proc_descriptor_names_are_checked_without_lossy_parsing() {
+        assert_eq!(proc_descriptor_number(b"0"), Some(0));
+        assert_eq!(proc_descriptor_number(b"512"), Some(512));
+        assert_eq!(proc_descriptor_number(b"2147483647"), Some(i32::MAX));
+        for name in [
+            b"".as_slice(),
+            b".",
+            b"-1",
+            b"2x",
+            b"2147483648",
+            b"999999999999",
+        ] {
+            assert_eq!(proc_descriptor_number(name), None);
+        }
     }
 
     unsafe fn check_descriptors(
@@ -1724,7 +1891,7 @@ mod tests {
         _parent: libc::pid_t,
         context: &DescriptorContext,
     ) -> ! {
-        for fd in [0, 1, 2, context.unrelated] {
+        for fd in [context.unrelated, 0, 1, 2] {
             // SAFETY: F_GETFD only queries an integer descriptor.
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 || last_errno() != libc::EBADF {
                 unsafe { child_fail(result_fd, 11, libc::EBUSY) };
