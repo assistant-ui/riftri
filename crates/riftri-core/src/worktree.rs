@@ -2029,7 +2029,7 @@ fn validate_destination_path_semantics(
             )));
         }
     }
-    if !has_ascii_case_alias(paths) {
+    if !needs_destination_path_probe(paths) {
         return Ok(());
     }
 
@@ -2084,6 +2084,17 @@ fn validate_destination_path_semantics(
         )
     })?;
     validation
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn needs_destination_path_probe(paths: &[PathBuf]) -> bool {
+    // Filesystems disagree about Unicode case folding and normalization. Do
+    // not approximate their rules or decode arbitrary native Unix bytes: probe
+    // any non-ASCII path set, retaining the no-I/O fast path for ordinary ASCII.
+    paths
+        .iter()
+        .any(|path| !path.as_os_str().as_encoded_bytes().is_ascii())
+        || has_ascii_case_alias(paths)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -5358,6 +5369,24 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(ids.len(), WORKERS);
+    }
+
+    #[test]
+    fn destination_path_probe_covers_unicode_and_native_bytes() {
+        for path in ["é.txt", "e\u{301}.txt", "Ü/file", "directory/ü.txt"] {
+            assert!(super::needs_destination_path_probe(&[PathBuf::from(path)]));
+        }
+        assert!(!super::needs_destination_path_probe(&[PathBuf::from(
+            "plain/file.txt"
+        )]));
+        assert!(super::needs_destination_path_probe(&[
+            PathBuf::from("Case"),
+            PathBuf::from("case")
+        ]));
+        #[cfg(unix)]
+        assert!(super::needs_destination_path_probe(&[PathBuf::from(
+            OsString::from_vec(b"native-\xff".to_vec())
+        )]));
     }
 
     #[test]
