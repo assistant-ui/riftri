@@ -76,6 +76,8 @@ struct CompatibilityAnalysis {
     checkout_profile: Vec<u8>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     checkout_paths: Vec<PathBuf>,
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    checkout_config: Vec<(String, Vec<u8>)>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1515,7 +1517,6 @@ fn add_worktree_inner(
     let resolved = git.resolve_revision(&repository_root, &request.revision)?;
     let compatibility = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
-    let checkout_profile = compatibility.checkout_profile;
     let selected_backend = supported_worktree_backend(&destination)?;
     let destination_volume = &selected_backend.volume;
 
@@ -1538,7 +1539,7 @@ fn add_worktree_inner(
     let store = JournalStore::create(&state_directory)?;
     let base_directory = state_directory.join("bases/v1").join(repository_cache_id(
         &repository.identity.common_git_dir,
-        &checkout_profile,
+        &compatibility.checkout_profile,
     ));
     ensure_real_state_directory(&base_directory, "create repository base directory")?;
     sync_parent(&base_directory)?;
@@ -1611,6 +1612,7 @@ fn add_worktree_inner(
             &resolved.commit,
             &request.mode,
             &resolved.tree,
+            &compatibility.checkout_config,
             &repository.identity.common_git_dir,
             fail_after,
         )
@@ -1676,6 +1678,7 @@ fn perform_add(
     commit: &ObjectId,
     mode: &WorktreeMode,
     tree: &ObjectId,
+    checkout_config: &[(String, Vec<u8>)],
     common_git_dir: &Path,
     fail_after: Option<AddWorktreePhase>,
 ) -> Result<bool, WorktreeError> {
@@ -1700,6 +1703,7 @@ fn perform_add(
         base_path,
         base_staging,
         temporary_index,
+        checkout_config,
     )?;
     advance(store, journal, AddWorktreePhase::BaseReady, fail_after)?;
 
@@ -1867,6 +1871,7 @@ fn prepare_base(
     base_path: &Path,
     base_staging: &Path,
     temporary_index: &Path,
+    checkout_config: &[(String, Vec<u8>)],
 ) -> Result<bool, WorktreeError> {
     let base_parent = base_path.expect_parent()?;
     let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
@@ -1952,7 +1957,13 @@ fn prepare_base(
             source,
         )
     })?;
-    git.materialize_tree(repository, tree, base_staging, temporary_index)?;
+    git.materialize_tree_with_config(
+        repository,
+        tree,
+        base_staging,
+        temporary_index,
+        checkout_config,
+    )?;
     remove_file_if_present(temporary_index)?;
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
@@ -2233,12 +2244,14 @@ fn analyze_resolved_repository_compatibility(
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut profile = {
         let mut profile = Sha256::new();
-        profile.update(b"riftri-checkout-profile-v1\0");
+        profile.update(b"riftri-checkout-profile-v2-isolated\0");
         let git_version = git.detect()?.version;
         hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
         profile
     };
 
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let mut checkout_config = Vec::new();
     for (key, accepted, kind) in [
         (
             "core.attributesfile",
@@ -2274,6 +2287,10 @@ fn analyze_resolved_repository_compatibility(
         let value = git.config_value(repository, key)?;
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        if let Some(value) = &value {
+            checkout_config.push((key.to_owned(), value.clone()));
+        }
         if let Some(value) = value
             && !accepted
                 .iter()
@@ -2299,6 +2316,9 @@ fn analyze_resolved_repository_compatibility(
         ] {
             let value = git.config_value(repository, key)?;
             hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+            if let Some(value) = value {
+                checkout_config.push((key.to_owned(), value));
+            }
         }
     }
     Ok(CompatibilityAnalysis {
@@ -2312,6 +2332,8 @@ fn analyze_resolved_repository_compatibility(
         checkout_profile: profile.finalize().to_vec(),
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_paths: paths,
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        checkout_config,
     })
 }
 

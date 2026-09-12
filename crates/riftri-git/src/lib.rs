@@ -681,10 +681,131 @@ impl Git {
         destination: &Path,
         temporary_index: &Path,
     ) -> Result<(), GitError> {
+        self.materialize_tree_with_config(repository, tree, destination, temporary_index, &[])
+    }
+
+    /// Materialize using captured checkout configuration and only attributes
+    /// from the exact tree. Mutable repository/global attributes and filters
+    /// cannot enter this private Git administrative directory.
+    pub fn materialize_tree_with_config(
+        &self,
+        repository: &Path,
+        tree: &ObjectId,
+        destination: &Path,
+        temporary_index: &Path,
+        configuration: &[(String, Vec<u8>)],
+    ) -> Result<(), GitError> {
+        let objects = self.run_path(
+            Some(repository),
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "objects",
+            ],
+            "object directory",
+        )?;
+        let format = self.run_text(
+            Some(repository),
+            &["rev-parse", "--show-object-format"],
+            "object format",
+        )?;
+        let isolated = tempfile::Builder::new()
+            .prefix("riftri-checkout-")
+            .tempdir()
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let git_dir = isolated.path().join("git");
+        let template = isolated.path().join("empty-template");
+        std::fs::create_dir(&template).map_err(|source| GitError::TemporaryState { source })?;
         let temporary_index = git_path_argument(temporary_index);
-        let environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
+        let work_tree = git_path_argument(destination);
+        #[cfg(unix)]
+        let null_device = OsStr::new("/dev/null");
+        #[cfg(not(unix))]
+        let null_device = OsStr::new("NUL");
+        let environment = [
+            (OsStr::new("GIT_DIR"), git_dir.as_os_str()),
+            (OsStr::new("GIT_WORK_TREE"), work_tree.as_os_str()),
+            (OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str()),
+            (OsStr::new("GIT_OBJECT_DIRECTORY"), objects.as_os_str()),
+            (OsStr::new("GIT_ATTR_NOSYSTEM"), OsStr::new("1")),
+            (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
+            (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
+            (OsStr::new("GIT_CONFIG_NOSYSTEM"), OsStr::new("1")),
+        ];
+        let mut prefix = Vec::new();
+        for setting in [
+            "core.autocrlf=false",
+            "core.symlinks=true",
+            "core.ignorecase=false",
+            "core.precomposeunicode=false",
+        ] {
+            prefix.extend([OsString::from("-c"), OsString::from(setting)]);
+        }
+        for (key, value) in configuration {
+            let mut setting = OsString::from(format!("{key}="));
+            setting.push(os_string_from_git(
+                value,
+                "captured checkout configuration",
+            )?);
+            prefix.extend([OsString::from("-c"), setting]);
+        }
+        let mut attributes = OsString::from("core.attributesFile=");
+        attributes.push(null_device);
+        prefix.extend([OsString::from("-c"), attributes]);
+        let run = |arguments: &[OsString]| -> Result<(), GitError> {
+            let mut command = Command::new(&self.command);
+            // Remove all inherited Git overrides, including config injection,
+            // worktree/attribute sources, and another repository's common dir.
+            for (name, _) in std::env::vars_os() {
+                if name
+                    .to_string_lossy()
+                    .to_ascii_uppercase()
+                    .starts_with("GIT_")
+                {
+                    command.env_remove(name);
+                }
+            }
+            if let Some(alternates) = std::env::var_os("GIT_ALTERNATE_OBJECT_DIRECTORIES") {
+                command.env("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternates);
+            }
+            command
+                .args(&prefix)
+                .args(arguments)
+                .envs(environment.iter().copied())
+                .current_dir(destination);
+            if arguments.first().is_some_and(|argument| argument == "init") {
+                for name in [
+                    "GIT_DIR",
+                    "GIT_WORK_TREE",
+                    "GIT_INDEX_FILE",
+                    "GIT_OBJECT_DIRECTORY",
+                ] {
+                    command.env_remove(name);
+                }
+            }
+            let output = command.output().map_err(|source| GitError::Start {
+                command: self.command.clone(),
+                source,
+            })?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                Err(command_failed(arguments, &output))
+            }
+        };
+        let mut template_argument = OsString::from("--template=");
+        template_argument.push(git_path_argument(&template));
+        run(&[
+            OsString::from("init"),
+            OsString::from("--bare"),
+            OsString::from("--quiet"),
+            OsString::from(format!("--object-format={format}")),
+            template_argument,
+            git_path_argument(&git_dir),
+        ])?;
         let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
-        self.run_os_with_env(Some(repository), &read_tree, &environment)?;
+        run(&read_tree)?;
 
         let mut prefix = git_path_argument(destination);
         prefix.push(std::path::MAIN_SEPARATOR.to_string());
@@ -695,7 +816,7 @@ impl Git {
             OsString::from("--prefix"),
             prefix,
         ];
-        self.run_os_with_env(Some(repository), &checkout, &environment)?;
+        run(&checkout)?;
         Ok(())
     }
 
@@ -1499,6 +1620,79 @@ mod tests {
             fs::read_to_string(destination.join("nested/file.txt"))
                 .expect("read nested materialized file"),
             "nested\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_ignores_mutable_repository_attributes_and_filters() {
+        let fixture = RepositoryFixture::committed();
+        let git_client = Git::default();
+        let tree = git_client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        // These inputs can appear after core has validated the checkout profile.
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "filter.changed.smudge",
+                "sed s/tracked/poisoned/g",
+            ],
+        );
+        fs::write(
+            fixture.path().join(".git/info/attributes"),
+            "*.txt filter=changed\n",
+        )
+        .unwrap();
+        let output = tempdir().unwrap();
+        let index_dir = tempdir().unwrap();
+        git_client
+            .materialize_tree(
+                fixture.path(),
+                &tree,
+                output.path(),
+                &index_dir.path().join("index"),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(output.path().join("tracked.txt")).unwrap(),
+            b"tracked\n"
+        );
+    }
+
+    #[test]
+    fn materialization_uses_captured_line_endings() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text\n").unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "text attributes"],
+        );
+        let client = Git::default();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let captured = vec![("core.eol".to_owned(), b"lf".to_vec())];
+        git(fixture.path(), &["config", "core.eol", "crlf"]);
+        git(fixture.path(), &["config", "core.autocrlf", "true"]);
+        let output = tempdir().unwrap();
+        let index = tempdir().unwrap();
+        client
+            .materialize_tree_with_config(
+                fixture.path(),
+                &tree,
+                output.path(),
+                &index.path().join("index"),
+                &captured,
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(output.path().join("tracked.txt")).unwrap(),
+            b"tracked\n"
         );
     }
 
