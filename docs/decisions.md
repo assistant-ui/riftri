@@ -258,15 +258,13 @@ read, a private write, the unchanged lower file, and the copied-up upper file,
 then unmounts and removes its paths. The child resolves the probe root after
 entering its new mount namespace, then fixed relative names identify the layers.
 This prevents stale references to the caller's namespace and avoids OverlayFS
-option-delimiter ambiguity. The initial options are
-explicit (`userxattr`, `index=off`, `metacopy=off`, and
-`redirect_dir=nofollow`). The kernel rejects redirect creation together with
-the unprivileged `userxattr` mode, so directory-rename compatibility remains a
-gate for the persistent backend rather than being hidden by this basic copy-up
-probe. A permission failure is `unavailable`, not evidence that the kernel or
-volume is unsupported. This decision authorizes capability detection only;
-persistent views require journaled mount paths, unmount/removal semantics, and
-restart recovery first.
+option-delimiter ambiguity. The initial options were explicit (`userxattr`,
+`index=off`, `metacopy=off`, and `redirect_dir=nofollow`). D034 replaces that
+initial metadata policy so a real ordinary-user checkout can retain a
+permission-protected lower layer. A permission failure is `unavailable`, not
+evidence that the kernel or volume is unsupported. This decision authorizes
+capability detection only; persistent views require journaled mount paths,
+unmount/removal semantics, and restart recovery first.
 
 ### D028: persistent OverlayFS mounts require exact kernel identity
 
@@ -340,8 +338,53 @@ the private upper, so dirty and untracked work is preserved and repeated repair
 is idempotent. A mount in the current boot, a
 same-boot namespace mismatch, or a foreign destination mount remains a hard
 stop. This is explicit recovery rather than an always-on daemon; making the
-mount available to ordinary unprivileged shells still requires the separate
-least-privilege activation boundary.
+mount available to ordinary unprivileged shells requires the separate
+least-privilege activation boundary settled in D033.
+
+### D033: ordinary Linux shells use a narrow installed mount helper
+
+A rootless private user/mount namespace cannot make a persistent mount visible
+back in the shell or editor that launched it, so wrapping only the agent process
+would produce a misleading, session-scoped worktree. Riftri instead offers an
+explicit installer for a root-owned set-user-ID copy of the same release. Any
+elevated invocation is forced into a fixed helper protocol before normal CLI or
+Git-shim dispatch. The protocol clears its environment and permits only a
+mount, an exact journal-identity-checked unmount, or resetting the exact
+journal-owned disposable work directory after unmount. Probe files and copy-up
+verification remain in the unprivileged parent. All participating paths must be
+canonical real directories owned by the requesting UID, and the mount retains
+`nodev,nosuid`.
+
+Direct reflinks and already-capable mount namespaces remain preferred. The
+helper is trusted only when its absolute executable path and every ancestor are
+root-owned and non-writable by group or others, and the executable is
+set-user-ID. Installation is an explicit system-wide capability action, not
+global Git interception: each repository still requires its own `riftri enable`
+consent. If the helper is missing or fails validation, OverlayFS remains
+unavailable and the worktree add stops before mutation without a full-copy
+fallback.
+
+### D034: OverlayFS restores checkout modes with profile-bound metadata copy-up
+
+Permission-protected immutable bases expose regular files without owner-write
+bits. A process mapped to root in a private user namespace can bypass those
+modes, which allowed the original test suite to miss that an ordinary host user
+could not edit a helper-mounted view. Riftri now makes the active probes begin
+with a read-only lower file and restores ordinary checkout modes through the
+merged mount before activation.
+
+On installed-helper mounts, OverlayFS `metacopy=on` makes this permission
+restoration copy only inode metadata into the private upper; unchanged file
+contents remain in the lower until their first data write. Because the kernel
+warns against accepting forged metacopy and redirect attributes from untrusted
+layers, the root helper does not use `userxattr`. Its root-created mount uses
+the protected `trusted.overlay.*` namespace, which the requesting user cannot
+populate. Rootless mounts retain the previously proven `userxattr`,
+`metacopy=off`, and `redirect_dir=nofollow` combination; their mapped-root
+caller needs no permission-copy-up pass. The chosen rootless or privileged
+profile is persisted in both the pre-mount context and mount identity and must
+be reused during repair. Riftri never remounts an upper under the other
+attribute interpretation.
 
 ## Open design questions
 
@@ -353,8 +396,6 @@ least-privilege activation boundary.
   profile without making base reuse ambiguous?
 - How should operation journals and SQLite state reconcile after either one is
   partially written?
-- Can rootless OverlayFS preserve required directory-rename behavior with
-  `redirect_dir=nofollow`, or does mounting require a narrow privileged helper?
 - Should clean-view compaction be manual, idle-time automatic, or policy-based?
 - Which Windows fallback provides acceptable performance on ordinary NTFS?
 - What integration is possible for harnesses that use libgit2 or another

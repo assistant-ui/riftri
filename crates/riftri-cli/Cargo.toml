@@ -17,8 +17,11 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 riftri-core = { path = "../riftri-core" }
+riftri-storage = { path = "../riftri-storage" }
 serde_json.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
-riftri-storage = { path = "../riftri-storage" }
 tempfile.workspace = true

@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,15 +11,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::{
-    OverlayFsLayout, OverlayFsMountContext, OverlayFsMountIdentity, OverlayFsMountState,
-    OverlayFsRecoveryState, StorageError,
+    OverlayFsLayout, OverlayFsMountContext, OverlayFsMountIdentity, OverlayFsMountProfile,
+    OverlayFsMountState, OverlayFsRecoveryState, StorageError,
 };
 
 const PROBE_CONTENTS: &[u8; 4] = b"base";
 const PRIVATE_CONTENTS: &[u8; 4] = b"view";
 static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
 
-const OVERLAY_OPTIONS: &str = "userxattr,index=off,metacopy=off,redirect_dir=nofollow";
+const ROOTLESS_OVERLAY_OPTIONS: &str = "userxattr,index=off,metacopy=off,redirect_dir=nofollow";
+const PRIVILEGED_OVERLAY_OPTIONS: &str = "index=off,metacopy=on";
 const RECOVERY_MARKER_PREFIX: &str = ".riftri-overlayfs-recovery-";
 
 #[derive(Debug, Error)]
@@ -38,6 +39,134 @@ impl ProbeFailure {
     pub(crate) fn raw_os_error(&self) -> Option<i32> {
         self.source.raw_os_error()
     }
+}
+
+pub(crate) fn probe_permission_denied(error: &ProbeFailure) -> bool {
+    matches!(error.raw_os_error(), Some(libc::EACCES | libc::EPERM))
+}
+
+pub(crate) fn storage_permission_denied(error: &StorageError) -> bool {
+    matches!(
+        error,
+        StorageError::Io { source, .. }
+            if matches!(source.raw_os_error(), Some(libc::EACCES | libc::EPERM))
+    )
+}
+
+pub(crate) fn validate_helper_layout_owner(
+    layout: &OverlayFsLayout,
+    requester_uid: u32,
+) -> Result<(), StorageError> {
+    for (name, path) in [
+        ("layout root", &layout.root),
+        ("immutable lower", &layout.lower),
+        ("private upper", &layout.upper),
+        ("private work", &layout.work),
+        ("merged destination", &layout.merged),
+    ] {
+        validate_helper_owned_directory(path, requester_uid, name)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reset_helper_work_directory(
+    layout: &OverlayFsLayout,
+    requester_uid: u32,
+    requester_gid: u32,
+) -> Result<(), StorageError> {
+    validate_helper_layout_owner(layout, requester_uid)?;
+    let entry = current_mount_entry(&layout.merged)?;
+    if entry.mount_point == layout.merged {
+        return Err(mount_conflict(
+            &layout.merged,
+            "cannot reset the private work directory while its view is mounted",
+        ));
+    }
+    fs::remove_dir_all(&layout.work).map_err(|source| {
+        storage_io(
+            "reset helper-owned OverlayFS work directory",
+            &layout.work,
+            source,
+        )
+    })?;
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder.create(&layout.work).map_err(|source| {
+        storage_io(
+            "recreate helper-owned OverlayFS work directory",
+            &layout.work,
+            source,
+        )
+    })?;
+    let directory = File::open(&layout.work).map_err(|source| {
+        storage_io(
+            "open recreated OverlayFS work directory",
+            &layout.work,
+            source,
+        )
+    })?;
+    // SAFETY: the descriptor names the newly created journal-owned work
+    // directory and the IDs are the real caller credentials captured before
+    // any helper operation.
+    if unsafe { libc::fchown(directory.as_raw_fd(), requester_uid, requester_gid) } != 0 {
+        return Err(storage_io(
+            "restore OverlayFS work directory ownership",
+            &layout.work,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    directory
+        .sync_all()
+        .map_err(|source| storage_io("sync OverlayFS work directory", &layout.work, source))?;
+    sync_directory(&layout.root)
+}
+
+fn validate_helper_owned_directory(
+    path: &Path,
+    requester_uid: u32,
+    name: &str,
+) -> Result<(), StorageError> {
+    let canonical = canonical_real_directory(path, name)?;
+    if canonical != path {
+        return Err(invalid_layout(
+            path,
+            format!("{name} resolves through a different path"),
+        ));
+    }
+    let metadata = canonical
+        .metadata()
+        .map_err(|source| storage_io("inspect helper-owned directory", &canonical, source))?;
+    if metadata.uid() != requester_uid {
+        return Err(invalid_layout(
+            &canonical,
+            format!(
+                "{name} is owned by uid {}, not requesting uid {requester_uid}",
+                metadata.uid()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_helper_owned_descriptor(
+    directory: &File,
+    requester_uid: u32,
+    name: &str,
+    error_path: &Path,
+) -> Result<(), StorageError> {
+    let metadata = directory
+        .metadata()
+        .map_err(|source| storage_io("inspect helper-owned descriptor", error_path, source))?;
+    if metadata.uid() != requester_uid {
+        return Err(invalid_layout(
+            error_path,
+            format!(
+                "{name} descriptor is owned by uid {}, not requesting uid {requester_uid}",
+                metadata.uid()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 struct ProbeDirectory {
@@ -128,6 +257,8 @@ pub(crate) fn probe(directory: &Path) -> Result<(), ProbeFailure> {
         .and_then(|()| payload.sync_all())
         .map_err(|error| ProbeFailure::new("write lower probe file", error))?;
     drop(payload);
+    fs::set_permissions(&lower_payload, fs::Permissions::from_mode(0o400))
+        .map_err(|error| ProbeFailure::new("protect lower probe file", error))?;
 
     let lower_payload_file = File::open(&lower_payload)
         .map_err(|error| ProbeFailure::new("open lower probe file", error))?;
@@ -154,6 +285,18 @@ pub(crate) fn probe(directory: &Path) -> Result<(), ProbeFailure> {
 }
 
 pub(crate) fn probe_current_namespace(directory: &Path) -> Result<(), ProbeFailure> {
+    probe_current_namespace_with(directory, mount, unmount)
+}
+
+pub(crate) fn probe_current_namespace_with<Mount, Unmount>(
+    directory: &Path,
+    mount_view: Mount,
+    unmount_view: Unmount,
+) -> Result<(), ProbeFailure>
+where
+    Mount: FnOnce(&OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError>,
+    Unmount: FnOnce(&OverlayFsLayout, &OverlayFsMountIdentity) -> Result<bool, StorageError>,
+{
     let root = ProbeDirectory::create(directory)?;
     let lower = root.path.join("lower");
     let layout_root = root.path.join("layout");
@@ -168,10 +311,12 @@ pub(crate) fn probe_current_namespace(directory: &Path) -> Result<(), ProbeFailu
         .and_then(|()| payload.sync_all())
         .map_err(|error| ProbeFailure::new("write lower probe file", error))?;
     drop(payload);
+    fs::set_permissions(&lower_payload, fs::Permissions::from_mode(0o400))
+        .map_err(|error| ProbeFailure::new("protect lower probe file", error))?;
 
     let layout = prepare(&layout_root, &lower, &merged)
         .map_err(|error| storage_probe_failure("prepare caller-visible probe", error))?;
-    let identity = mount(&layout)
+    let identity = mount_view(&layout)
         .map_err(|error| storage_probe_failure("mount caller-visible probe", error))?;
 
     let verification = (|| {
@@ -182,6 +327,10 @@ pub(crate) fn probe_current_namespace(directory: &Path) -> Result<(), ProbeFailu
                 "read lower file through probe view",
                 std::io::Error::other("probe view returned different lower bytes"),
             ));
+        }
+        if identity.profile == OverlayFsMountProfile::PrivilegedTrustedXattr {
+            crate::reflink::make_tree_owner_writable(&merged)
+                .map_err(|error| storage_probe_failure("prepare writable probe view", error))?;
         }
         fs::write(merged.join("payload"), PRIVATE_CONTENTS)
             .map_err(|error| ProbeFailure::new("copy up private probe write", error))?;
@@ -206,7 +355,7 @@ pub(crate) fn probe_current_namespace(directory: &Path) -> Result<(), ProbeFailu
         Ok(())
     })();
 
-    if let Err(error) = unmount(&layout, &identity) {
+    if let Err(error) = unmount_view(&layout, &identity) {
         root.abandon();
         return Err(storage_probe_failure("unmount caller-visible probe", error));
     }
@@ -419,10 +568,13 @@ pub(crate) fn load_for_remount(
     load(&root, &lower, &merged)
 }
 
-pub(crate) fn current_mount_context() -> Result<OverlayFsMountContext, StorageError> {
+pub(crate) fn current_mount_context(
+    profile: OverlayFsMountProfile,
+) -> Result<OverlayFsMountContext, StorageError> {
     let boot_id = current_boot_id()?;
     let (mount_namespace_device, mount_namespace_inode) = current_mount_namespace()?;
     Ok(OverlayFsMountContext {
+        profile,
         boot_id,
         mount_namespace_device,
         mount_namespace_inode,
@@ -430,11 +582,34 @@ pub(crate) fn current_mount_context() -> Result<OverlayFsMountContext, StorageEr
 }
 
 pub(crate) fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
+    mount_with_profile(layout, OverlayFsMountProfile::RootlessUserXattr)
+}
+
+pub(crate) fn mount_with_profile(
+    layout: &OverlayFsLayout,
+    profile: OverlayFsMountProfile,
+) -> Result<OverlayFsMountIdentity, StorageError> {
+    mount_for_owner(layout, None, profile)
+}
+
+pub(crate) fn mount_for_owner(
+    layout: &OverlayFsLayout,
+    requester_uid: Option<u32>,
+    profile: OverlayFsMountProfile,
+) -> Result<OverlayFsMountIdentity, StorageError> {
+    if requester_uid.is_some() && profile != OverlayFsMountProfile::PrivilegedTrustedXattr {
+        return Err(invalid_layout(
+            &layout.merged,
+            "the elevated helper requires trusted OverlayFS metadata",
+        ));
+    }
     validate_layout(layout)?;
     require_empty_directory(&layout.merged, "merged destination")?;
     require_empty_directory(&layout.work, "private work")?;
-    let context = current_mount_context()?;
-    let current = current_mount_entry(&layout.merged)?;
+    let context = current_mount_context(profile)?;
+    let merged = open_path_directory(&layout.merged, "open OverlayFS merged destination")?;
+    let target_path = PathBuf::from(format!("/proc/self/fd/{}/.", merged.as_raw_fd()));
+    let current = current_mount_entry(&target_path)?;
     if current.mount_point == layout.merged {
         return Err(mount_conflict(
             &layout.merged,
@@ -448,21 +623,37 @@ pub(crate) fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, 
     let lower = open_path_directory(&layout.lower, "open OverlayFS immutable lower")?;
     let upper = open_path_directory(&layout.upper, "open OverlayFS private upper")?;
     let work = open_path_directory(&layout.work, "open OverlayFS private work")?;
+    if let Some(requester_uid) = requester_uid {
+        for (name, directory) in [
+            ("immutable lower", &lower),
+            ("private upper", &upper),
+            ("private work", &work),
+            ("merged destination", &merged),
+        ] {
+            validate_helper_owned_descriptor(directory, requester_uid, name, &layout.merged)?;
+        }
+    }
+    let profile_options = match profile {
+        OverlayFsMountProfile::RootlessUserXattr => ROOTLESS_OVERLAY_OPTIONS,
+        OverlayFsMountProfile::PrivilegedTrustedXattr => PRIVILEGED_OVERLAY_OPTIONS,
+    };
     let options = CString::new(format!(
-        "lowerdir=/proc/self/fd/{},upperdir=/proc/self/fd/{},workdir=/proc/self/fd/{},{OVERLAY_OPTIONS}",
+        "lowerdir=/proc/self/fd/{},upperdir=/proc/self/fd/{},workdir=/proc/self/fd/{},{profile_options}",
         lower.as_raw_fd(),
         upper.as_raw_fd(),
         work.as_raw_fd(),
     ))
     .expect("controlled OverlayFS options contain no NUL");
-    let target = storage_path_c_string(&layout.merged, "encode OverlayFS mountpoint")?;
+    let mount_target =
+        storage_path_c_string(&target_path, "encode OverlayFS mountpoint descriptor")?;
+    let cleanup_target = storage_path_c_string(&layout.merged, "encode OverlayFS mountpoint")?;
     const OVERLAY: &[u8] = b"overlay\0";
     // SAFETY: all strings are NUL-terminated, the directory descriptors stay
     // open for option resolution, and the exact target was validated above.
     if unsafe {
         libc::mount(
             OVERLAY.as_ptr().cast(),
-            target.as_ptr(),
+            mount_target.as_ptr(),
             OVERLAY.as_ptr().cast(),
             (libc::MS_NODEV | libc::MS_NOSUID) as libc::c_ulong,
             options.as_ptr().cast(),
@@ -476,7 +667,8 @@ pub(crate) fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, 
         ));
     }
     let cleanup = MountedViewGuard {
-        target,
+        target: cleanup_target,
+        _target_directory: merged,
         armed: true,
     };
 
@@ -489,11 +681,38 @@ pub(crate) fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, 
     }
     cleanup.disarm();
     Ok(OverlayFsMountIdentity {
+        profile,
         boot_id: context.boot_id,
         mount_namespace_device: context.mount_namespace_device,
         mount_namespace_inode: context.mount_namespace_inode,
         mount_id: entry.mount_id,
     })
+}
+
+pub(crate) fn make_view_owner_writable(
+    layout: &OverlayFsLayout,
+    identity: &OverlayFsMountIdentity,
+) -> Result<(), StorageError> {
+    if identity.profile != OverlayFsMountProfile::PrivilegedTrustedXattr {
+        return Err(invalid_layout(
+            &layout.merged,
+            "metadata-only permission restoration requires the privileged trusted-xattr profile",
+        ));
+    }
+    if mount_state(layout, identity)? != OverlayFsMountState::Active {
+        return Err(mount_conflict(
+            &layout.merged,
+            "cannot prepare checkout permissions without the exact journaled mount",
+        ));
+    }
+    crate::reflink::make_tree_owner_writable(&layout.merged)?;
+    if mount_state(layout, identity)? != OverlayFsMountState::Active {
+        return Err(mount_conflict(
+            &layout.merged,
+            "journaled mount identity changed while preparing checkout permissions",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn arm_recovery(layout: &OverlayFsLayout, token: &str) -> Result<(), StorageError> {
@@ -531,7 +750,7 @@ pub(crate) fn recover_mount(
 ) -> Result<OverlayFsRecoveryState, StorageError> {
     validate_layout(layout)?;
     let marker = recovery_marker_path(layout, token)?;
-    let current_context = current_mount_context()?;
+    let current_context = current_mount_context(context.profile)?;
     let entry = current_mount_entry(&layout.merged)?;
     if current_context.boot_id != context.boot_id {
         if entry.mount_point == layout.merged {
@@ -575,6 +794,7 @@ pub(crate) fn recover_mount(
     }
 
     Ok(OverlayFsRecoveryState::Mounted(OverlayFsMountIdentity {
+        profile: context.profile,
         boot_id: current_context.boot_id,
         mount_namespace_device: current_context.mount_namespace_device,
         mount_namespace_inode: current_context.mount_namespace_inode,
@@ -611,7 +831,7 @@ pub(crate) fn remove_unmounted_private_layers(
     context: &OverlayFsMountContext,
 ) -> Result<(), StorageError> {
     validate_layout(layout)?;
-    let current_context = current_mount_context()?;
+    let current_context = current_mount_context(context.profile)?;
     if current_context.boot_id == context.boot_id && current_context != *context {
         return Err(mount_conflict(
             &layout.merged,
@@ -643,10 +863,18 @@ pub(crate) fn mount_state(
     identity: &OverlayFsMountIdentity,
 ) -> Result<OverlayFsMountState, StorageError> {
     validate_layout(layout)?;
+    mount_state_at(&layout.merged, &layout.merged, identity)
+}
+
+fn mount_state_at(
+    lookup_path: &Path,
+    expected_mountpoint: &Path,
+    identity: &OverlayFsMountIdentity,
+) -> Result<OverlayFsMountState, StorageError> {
     let current_boot = current_boot_id()?;
-    let entry = current_mount_entry(&layout.merged)?;
+    let entry = current_mount_entry(lookup_path)?;
     if current_boot != identity.boot_id {
-        return Ok(if entry.mount_point == layout.merged {
+        return Ok(if entry.mount_point == expected_mountpoint {
             OverlayFsMountState::Foreign
         } else {
             OverlayFsMountState::Absent
@@ -658,7 +886,7 @@ pub(crate) fn mount_state(
     {
         return Ok(OverlayFsMountState::DifferentNamespace);
     }
-    if entry.mount_point != layout.merged {
+    if entry.mount_point != expected_mountpoint {
         return Ok(OverlayFsMountState::Absent);
     }
     if entry.mount_id == identity.mount_id && entry.filesystem_type == "overlay" {
@@ -669,6 +897,75 @@ pub(crate) fn mount_state(
 }
 
 pub(crate) fn unmount(
+    layout: &OverlayFsLayout,
+    identity: &OverlayFsMountIdentity,
+) -> Result<bool, StorageError> {
+    unmount_for_owner(layout, identity, None)
+}
+
+pub(crate) fn unmount_for_owner(
+    layout: &OverlayFsLayout,
+    identity: &OverlayFsMountIdentity,
+    requester_uid: Option<u32>,
+) -> Result<bool, StorageError> {
+    if requester_uid.is_none() {
+        return unmount_direct(layout, identity);
+    }
+    validate_layout(layout)?;
+    let merged = open_path_directory(&layout.merged, "open OverlayFS merged destination")?;
+    if let Some(requester_uid) = requester_uid {
+        validate_helper_owned_descriptor(
+            &merged,
+            requester_uid,
+            "merged destination",
+            &layout.merged,
+        )?;
+    }
+    let target_path = PathBuf::from(format!("/proc/self/fd/{}/.", merged.as_raw_fd()));
+    match mount_state_at(&target_path, &layout.merged, identity)? {
+        OverlayFsMountState::Absent => return Ok(false),
+        OverlayFsMountState::Active => {}
+        OverlayFsMountState::DifferentNamespace => {
+            return Err(mount_conflict(
+                &layout.merged,
+                "journaled mount belongs to a different mount namespace",
+            ));
+        }
+        OverlayFsMountState::Foreign => {
+            return Err(mount_conflict(
+                &layout.merged,
+                "the current mount does not match the journaled boot, namespace, mount ID, and filesystem type",
+            ));
+        }
+    }
+
+    if mount_state(layout, identity)? != OverlayFsMountState::Active {
+        return Err(mount_conflict(
+            &layout.merged,
+            "journaled mount identity changed while preparing to unmount",
+        ));
+    }
+    drop(merged);
+    let target = storage_path_c_string(&layout.merged, "encode OverlayFS mountpoint")?;
+    // SAFETY: mount_state proved that this exact target is the journaled
+    // OverlayFS mount, and UMOUNT_NOFOLLOW rejects a replaced final symlink.
+    if unsafe { libc::umount2(target.as_ptr(), libc::UMOUNT_NOFOLLOW) } != 0 {
+        return Err(storage_io(
+            "unmount durable OverlayFS view",
+            &layout.merged,
+            std::io::Error::last_os_error(),
+        ));
+    }
+    if mount_state(layout, identity)? != OverlayFsMountState::Absent {
+        return Err(mount_conflict(
+            &layout.merged,
+            "journaled mount still appears active after unmount",
+        ));
+    }
+    Ok(true)
+}
+
+fn unmount_direct(
     layout: &OverlayFsLayout,
     identity: &OverlayFsMountIdentity,
 ) -> Result<bool, StorageError> {
@@ -765,6 +1062,7 @@ impl Drop for PreparedLayoutGuard {
 
 struct MountedViewGuard {
     target: CString,
+    _target_directory: File,
     armed: bool,
 }
 

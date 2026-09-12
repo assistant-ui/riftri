@@ -3,8 +3,30 @@
 Riftri has a destination-specific active capability probe and a user-facing,
 journaled persistent mount lifecycle. On Linux it prefers reflinks, then selects
 OverlayFS only when the caller's current mount namespace passes the persistent
-probe. Ordinary unprivileged shells that cannot mount OverlayFS still fail
-before mutation until the least-privilege activation path is implemented.
+probe directly or through Riftri's explicitly installed mount helper.
+
+For a normal shell that cannot mount OverlayFS directly, install the helper
+once from the same Riftri release:
+
+```console
+$ sudo riftri overlayfs install-helper
+```
+
+The installer atomically places a root-owned, non-writable, set-user-ID copy at
+`/usr/local/libexec/riftri-overlayfs-helper`. That copy cannot dispatch normal
+Riftri or Git commands: elevated execution enters a fixed internal protocol
+that permits only a mount, an identity-checked unmount, or resetting the exact
+journal-owned disposable work directory after unmount. Every layer and
+mountpoint must be a real directory owned by the requesting UID, and the helper
+starts with an empty environment. Probe files, copy-up verification, checkout
+work, Git commands, agents, builds, and file access continue as the ordinary
+user.
+`--replace` is required to atomically update an existing safe helper.
+
+Installing the helper makes the capability available system-wide; it does not
+enable interception globally. Explicit Riftri commands remain explicit, and
+normal `git worktree` interception still requires `riftri enable` in each
+repository plus the process or shell hook.
 
 The probe creates temporary lower, upper, work, and merged directories on the
 destination volume. A short-lived child enters a private mount namespace,
@@ -19,10 +41,17 @@ artifact-cleanup checks. User-facing selection must pass this stricter probe;
 the isolated probe alone cannot prove that a long-lived view will be visible to
 ordinary Git and agent processes.
 
-The probe and persistent views use `userxattr`, `index=off`, `metacopy=off`, and
-`redirect_dir=nofollow`. Worktree creation, file copy-up, Git status, and clean
-removal are covered in the dedicated namespace suite. Mounted worktree moves
-remain fail-closed until relocation has its own identity-safe mount transaction.
+Rootless namespace mounts retain `userxattr`, `index=off`, `metacopy=off`, and
+`redirect_dir=nofollow`; their active probe must prove that the mapped-root
+caller can write through a protected lower mode. Helper mounts omit
+`userxattr`, so the kernel stores metadata in the privileged
+`trusted.overlay.*` namespace that an ordinary caller cannot forge. Only that
+helper profile enables `metacopy=on` and restores normal checkout modes through
+the merged view. OverlayFS copies only metadata at that point; file contents
+remain in the read-only base until the user actually edits them. Worktree
+creation, file copy-up, Git status, and clean removal are covered in the
+dedicated namespace suite. Mounted worktree moves remain fail-closed until
+relocation has its own identity-safe mount transaction.
 
 After namespace isolation, the child resolves the private probe root using its
 native byte path in the new namespace. Only fixed relative layer names enter the
@@ -34,8 +63,10 @@ CI requires the positive probe to succeed on a disposable ext4 volume inside an
 unprivileged user and mount namespace; the probe child further isolates its test
 mount from the caller. The ordinary Ubuntu quality job also runs the probe
 without requiring support, which verifies conservative failure and cleanup when
-the current process lacks mount permission. Least-privilege activation for a
-persistent mount remains a separate lifecycle gate.
+the current process lacks mount permission. A separate CI path installs the
+helper on the disposable runner, stays in the ordinary caller namespace, and
+proves transparent add, private writes, Git cleanliness, exact unmount, and
+clean removal.
 
 ## Persistent mount primitive
 
@@ -59,7 +90,10 @@ commas, colons, spaces, long paths, and non-UTF-8 path bytes cannot alter its
 grammar. The merged path is passed as the mount syscall's separate target.
 
 Each successful mount returns an identity containing the current Linux boot
-ID, mount-namespace device and inode, kernel mount ID, and filesystem type.
+ID, mount-namespace device and inode, kernel mount ID, filesystem type, and the
+selected metadata profile. The profile is persisted before mounting and reused
+for every repair remount, so trusted helper metadata is never reopened through
+the rootless `userxattr` interpretation (or vice versa).
 Recovery can reload the durable layout after the creating process exits. It
 will unmount only the exact matching OverlayFS mount and removes private layers
 only after that mount is absent. A different namespace or a foreign mount at
@@ -117,8 +151,9 @@ namespace, or an ownership-marker mismatch fails closed. CI simulates a reboot
 by removing the kernel mount, aging the durable boot identity, and proving that
 repair restores the real dirty Git worktree without changing its base.
 
-A narrow least-privilege mount boundary remains an acceptance gate for ordinary
-unprivileged Linux shells.
+When unprivileged user namespaces, direct mounts, and the installed helper are
+all unavailable, OverlayFS is reported as unavailable before any journal or Git
+mutation. Riftri never silently substitutes a full checkout.
 
 See the Linux kernel's
 [OverlayFS documentation](https://docs.kernel.org/filesystems/overlayfs.html)

@@ -28,8 +28,8 @@ pub use activation::{
     ActivationError, BYPASS_ENV, CACHE_DIR_ENV, GitProxyOutcome, GitProxyPlan,
     RepositoryActivation, SHIM_ACTIVE_ENV, ShellActivationStatus, disable_repository,
     enable_repository, execute_scoped_command, execute_scoped_command_in_worktree,
-    plan_git_command, prepare_posix_shell_deactivation, prepare_posix_shell_hook,
-    proxy_git_command, repository_activation, shell_activation_status,
+    install_overlayfs_helper, plan_git_command, prepare_posix_shell_deactivation,
+    prepare_posix_shell_hook, proxy_git_command, repository_activation, shell_activation_status,
 };
 pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{

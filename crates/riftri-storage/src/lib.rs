@@ -41,6 +41,13 @@ pub enum StorageError {
 
     #[error("refusing to change OverlayFS mount at {path}: {detail}")]
     OverlayFsMountConflict { path: PathBuf, detail: String },
+
+    #[error("OverlayFS mount helper could not {operation} at {path}: {detail}")]
+    OverlayFsHelper {
+        operation: &'static str,
+        path: PathBuf,
+        detail: String,
+    },
 }
 
 /// Native APFS clone operations used by the explicit macOS prototype.
@@ -224,6 +231,20 @@ pub struct OverlayFsLayout {
     merged: PathBuf,
 }
 
+/// Extended-attribute policy used by one OverlayFS mount.
+///
+/// Rootless mounts need `user.overlay.*` metadata inside their private user
+/// namespace. The installed root helper instead uses privileged
+/// `trusted.overlay.*` metadata so an ordinary user cannot forge metacopy or
+/// redirect attributes in a helper-mounted view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OverlayFsMountProfile {
+    #[default]
+    RootlessUserXattr,
+    PrivilegedTrustedXattr,
+}
+
 impl OverlayFsLayout {
     pub fn root(&self) -> &Path {
         &self.root
@@ -249,6 +270,8 @@ impl OverlayFsLayout {
 /// Kernel identity required to recover or unmount one exact OverlayFS mount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayFsMountIdentity {
+    #[serde(default)]
+    pub profile: OverlayFsMountProfile,
     pub boot_id: String,
     pub mount_namespace_device: u64,
     pub mount_namespace_inode: u64,
@@ -258,6 +281,8 @@ pub struct OverlayFsMountIdentity {
 /// Boot and mount-namespace identity persisted before an OverlayFS mount.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverlayFsMountContext {
+    #[serde(default)]
+    pub profile: OverlayFsMountProfile,
     pub boot_id: String,
     pub mount_namespace_device: u64,
     pub mount_namespace_inode: u64,
@@ -266,6 +291,7 @@ pub struct OverlayFsMountContext {
 impl OverlayFsMountIdentity {
     pub fn context(&self) -> OverlayFsMountContext {
         OverlayFsMountContext {
+            profile: self.profile,
             boot_id: self.boot_id.clone(),
             mount_namespace_device: self.mount_namespace_device,
             mount_namespace_inode: self.mount_namespace_inode,
@@ -293,6 +319,13 @@ pub enum OverlayFsRecoveryState {
 }
 
 impl OverlayFsMounter {
+    /// Environment override for the root-owned OverlayFS helper executable.
+    pub const HELPER_ENV: &'static str = "RIFTRI_OVERLAYFS_HELPER";
+
+    /// Default location used by the explicit helper installer.
+    #[cfg(target_os = "linux")]
+    pub const DEFAULT_HELPER_PATH: &'static str = "/usr/local/libexec/riftri-overlayfs-helper";
+
     /// Actively verify mount permission, upper/work compatibility, copy-up,
     /// and private-write isolation against the destination volume.
     #[cfg(target_os = "linux")]
@@ -347,31 +380,89 @@ impl OverlayFsMounter {
     /// mount namespace, rather than only in an isolated probe child.
     #[cfg(target_os = "linux")]
     pub fn probe_current_namespace(destination: &Path) -> BackendCapability {
+        Self::probe_activation(destination).0
+    }
+
+    /// Probe the persistent activation path and return the exact metadata
+    /// policy that a durable journal must reuse for every later remount.
+    #[cfg(target_os = "linux")]
+    pub fn probe_activation(
+        destination: &Path,
+    ) -> (BackendCapability, Option<OverlayFsMountProfile>) {
         let volume = match inspect_destination(destination) {
             Ok(volume) => volume,
-            Err(error) => return unavailable(BackendKind::OverlayFs, &error),
+            Err(error) => return (unavailable(BackendKind::OverlayFs, &error), None),
         };
         if volume.read_only {
-            return BackendCapability {
-                kind: BackendKind::OverlayFs,
-                status: CapabilityStatus::Unsupported,
-                volume: Some(volume),
-                explanation: "OverlayFS needs writable upper and work directories".to_owned(),
-                requires_explicit_fallback: false,
-            };
+            return (
+                BackendCapability {
+                    kind: BackendKind::OverlayFs,
+                    status: CapabilityStatus::Unsupported,
+                    volume: Some(volume),
+                    explanation: "OverlayFS needs writable upper and work directories".to_owned(),
+                    requires_explicit_fallback: false,
+                },
+                None,
+            );
         }
 
         match overlayfs::probe_current_namespace(&volume.probe_path) {
-            Ok(()) => BackendCapability {
-                kind: BackendKind::OverlayFs,
-                status: CapabilityStatus::Supported,
-                explanation: format!(
-                    "caller-visible OverlayFS mount and private copy-up probe succeeded on {}",
-                    volume.identity.filesystem
-                ),
-                volume: Some(volume),
-                requires_explicit_fallback: false,
-            },
+            Ok(()) => (
+                BackendCapability {
+                    kind: BackendKind::OverlayFs,
+                    status: CapabilityStatus::Supported,
+                    explanation: format!(
+                        "caller-visible OverlayFS mount and private copy-up probe succeeded on {}",
+                        volume.identity.filesystem
+                    ),
+                    volume: Some(volume),
+                    requires_explicit_fallback: false,
+                },
+                Some(OverlayFsMountProfile::RootlessUserXattr),
+            ),
+            Err(error) if overlayfs::probe_permission_denied(&error) => {
+                match overlayfs_helper::probe(&volume.probe_path) {
+                    Ok(Some(())) => (
+                        BackendCapability {
+                            kind: BackendKind::OverlayFs,
+                            status: CapabilityStatus::Supported,
+                            explanation: format!(
+                                "root-owned Riftri helper proved a caller-visible OverlayFS mount and private copy-up on {}",
+                                volume.identity.filesystem
+                            ),
+                            volume: Some(volume),
+                            requires_explicit_fallback: false,
+                        },
+                        Some(OverlayFsMountProfile::PrivilegedTrustedXattr),
+                    ),
+                    Ok(None) => (
+                        BackendCapability {
+                            kind: BackendKind::OverlayFs,
+                            status: CapabilityStatus::Unavailable,
+                            explanation: format!(
+                                "caller-visible OverlayFS probe needs mount permission on {}; install the explicit Riftri mount helper or use a mount-capable namespace: {}",
+                                volume.identity.filesystem, error
+                            ),
+                            volume: Some(volume),
+                            requires_explicit_fallback: false,
+                        },
+                        None,
+                    ),
+                    Err(detail) => (
+                        BackendCapability {
+                            kind: BackendKind::OverlayFs,
+                            status: CapabilityStatus::Unavailable,
+                            explanation: format!(
+                                "caller-visible OverlayFS probe needs mount permission on {}, and the configured helper was rejected: {detail}",
+                                volume.identity.filesystem
+                            ),
+                            volume: Some(volume),
+                            requires_explicit_fallback: false,
+                        },
+                        None,
+                    ),
+                }
+            }
             Err(error) => {
                 let status = match error.raw_os_error() {
                     Some(libc::ENODEV | libc::EOPNOTSUPP | libc::EINVAL | libc::EXDEV) => {
@@ -379,16 +470,19 @@ impl OverlayFsMounter {
                     }
                     _ => CapabilityStatus::Unavailable,
                 };
-                BackendCapability {
-                    kind: BackendKind::OverlayFs,
-                    status,
-                    explanation: format!(
-                        "caller-visible OverlayFS probe failed on {} while trying to {}: {}",
-                        volume.identity.filesystem, error.operation, error.source
-                    ),
-                    volume: Some(volume),
-                    requires_explicit_fallback: false,
-                }
+                (
+                    BackendCapability {
+                        kind: BackendKind::OverlayFs,
+                        status,
+                        explanation: format!(
+                            "caller-visible OverlayFS probe failed on {} while trying to {}: {}",
+                            volume.identity.filesystem, error.operation, error.source
+                        ),
+                        volume: Some(volume),
+                        requires_explicit_fallback: false,
+                    },
+                    None,
+                )
             }
         }
     }
@@ -410,7 +504,15 @@ impl OverlayFsMounter {
     /// Capture the boot and mount namespace before any persistent mount.
     #[cfg(target_os = "linux")]
     pub fn current_mount_context() -> Result<OverlayFsMountContext, StorageError> {
-        overlayfs::current_mount_context()
+        Self::current_mount_context_for(OverlayFsMountProfile::RootlessUserXattr)
+    }
+
+    /// Capture durable context together with the selected metadata policy.
+    #[cfg(target_os = "linux")]
+    pub fn current_mount_context_for(
+        profile: OverlayFsMountProfile,
+    ) -> Result<OverlayFsMountContext, StorageError> {
+        overlayfs::current_mount_context(profile)
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -484,7 +586,21 @@ impl OverlayFsMounter {
         lower: &Path,
         merged: &Path,
     ) -> Result<OverlayFsLayout, StorageError> {
-        overlayfs::load_for_remount(layout_root, lower, merged)
+        match overlayfs::load_for_remount(layout_root, lower, merged) {
+            Ok(layout) => Ok(layout),
+            Err(error) if overlayfs::storage_permission_denied(&error) => {
+                match overlayfs_helper::reset_work(layout_root, lower, merged) {
+                    Ok(Some(())) => overlayfs::load_for_remount(layout_root, lower, merged),
+                    Ok(None) => Err(error),
+                    Err(detail) => Err(StorageError::OverlayFsHelper {
+                        operation: "reset a disposable work directory for remount",
+                        path: layout_root.to_path_buf(),
+                        detail,
+                    }),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -501,11 +617,61 @@ impl OverlayFsMounter {
     /// Mount a prepared view in the caller's current mount namespace.
     #[cfg(target_os = "linux")]
     pub fn mount(layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
-        overlayfs::mount(layout)
+        Self::mount_with_profile(layout, OverlayFsMountProfile::RootlessUserXattr)
+    }
+
+    /// Mount with the same metadata policy persisted by the add journal.
+    #[cfg(target_os = "linux")]
+    pub fn mount_with_profile(
+        layout: &OverlayFsLayout,
+        profile: OverlayFsMountProfile,
+    ) -> Result<OverlayFsMountIdentity, StorageError> {
+        match profile {
+            OverlayFsMountProfile::RootlessUserXattr => {
+                overlayfs::mount_with_profile(layout, profile)
+            }
+            OverlayFsMountProfile::PrivilegedTrustedXattr => {
+                match overlayfs_helper::mount(layout) {
+                    Ok(Some(identity)) => Ok(identity),
+                    Ok(None) => Err(StorageError::OverlayFsHelper {
+                        operation: "mount a validated view",
+                        path: layout.merged.clone(),
+                        detail:
+                            "the journal requires the installed helper, but no helper is configured"
+                                .to_owned(),
+                    }),
+                    Err(detail) => Err(StorageError::OverlayFsHelper {
+                        operation: "mount a validated view",
+                        path: layout.merged.clone(),
+                        detail,
+                    }),
+                }
+            }
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
     pub fn mount(_layout: &OverlayFsLayout) -> Result<OverlayFsMountIdentity, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
+    /// Restore normal owner permissions through metadata-only copy-up while
+    /// retaining file contents in the immutable lower layer.
+    #[cfg(target_os = "linux")]
+    pub fn make_view_owner_writable(
+        layout: &OverlayFsLayout,
+        identity: &OverlayFsMountIdentity,
+    ) -> Result<(), StorageError> {
+        overlayfs::make_view_owner_writable(layout, identity)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn make_view_owner_writable(
+        _layout: &OverlayFsLayout,
+        _identity: &OverlayFsMountIdentity,
+    ) -> Result<(), StorageError> {
         Err(StorageError::UnsupportedPlatform {
             backend: "Linux OverlayFS",
         })
@@ -603,7 +769,21 @@ impl OverlayFsMounter {
         layout: &OverlayFsLayout,
         identity: &OverlayFsMountIdentity,
     ) -> Result<bool, StorageError> {
-        overlayfs::unmount(layout, identity)
+        match overlayfs::unmount(layout, identity) {
+            Ok(unmounted) => Ok(unmounted),
+            Err(error) if overlayfs::storage_permission_denied(&error) => {
+                match overlayfs_helper::unmount(layout, identity) {
+                    Ok(Some(unmounted)) => Ok(unmounted),
+                    Ok(None) => Err(error),
+                    Err(detail) => Err(StorageError::OverlayFsHelper {
+                        operation: "unmount an identity-checked view",
+                        path: layout.merged.clone(),
+                        detail,
+                    }),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -634,10 +814,68 @@ impl OverlayFsMounter {
             backend: "Linux OverlayFS",
         })
     }
+
+    /// Privileged helper entry point for one validated mount.
+    #[doc(hidden)]
+    #[cfg(target_os = "linux")]
+    pub fn helper_mount(
+        layout_root: &Path,
+        lower: &Path,
+        merged: &Path,
+        requester_uid: u32,
+    ) -> Result<OverlayFsMountIdentity, StorageError> {
+        let layout = overlayfs::load(layout_root, lower, merged)?;
+        overlayfs::validate_helper_layout_owner(&layout, requester_uid)?;
+        overlayfs::mount_for_owner(
+            &layout,
+            Some(requester_uid),
+            OverlayFsMountProfile::PrivilegedTrustedXattr,
+        )
+    }
+
+    /// Privileged helper entry point for one exact journaled unmount.
+    #[doc(hidden)]
+    #[cfg(target_os = "linux")]
+    pub fn helper_unmount(
+        layout_root: &Path,
+        lower: &Path,
+        merged: &Path,
+        identity: &OverlayFsMountIdentity,
+        requester_uid: u32,
+        requester_gid: u32,
+    ) -> Result<bool, StorageError> {
+        if identity.profile != OverlayFsMountProfile::PrivilegedTrustedXattr {
+            return Err(StorageError::InvalidOverlayFsLayout {
+                path: merged.to_path_buf(),
+                detail: "the elevated helper will unmount only a trusted-metadata view".to_owned(),
+            });
+        }
+        let layout = overlayfs::load(layout_root, lower, merged)?;
+        overlayfs::validate_helper_layout_owner(&layout, requester_uid)?;
+        let unmounted = overlayfs::unmount_for_owner(&layout, identity, Some(requester_uid))?;
+        overlayfs::reset_helper_work_directory(&layout, requester_uid, requester_gid)?;
+        Ok(unmounted)
+    }
+
+    /// Privileged helper entry point for resetting only disposable work state.
+    #[doc(hidden)]
+    #[cfg(target_os = "linux")]
+    pub fn helper_reset_work(
+        layout_root: &Path,
+        lower: &Path,
+        merged: &Path,
+        requester_uid: u32,
+        requester_gid: u32,
+    ) -> Result<(), StorageError> {
+        let layout = overlayfs::load(layout_root, lower, merged)?;
+        overlayfs::reset_helper_work_directory(&layout, requester_uid, requester_gid)
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod overlayfs;
+#[cfg(target_os = "linux")]
+mod overlayfs_helper;
 
 /// Windows ReFS block-clone operations.
 pub struct RefsBlockCloner;

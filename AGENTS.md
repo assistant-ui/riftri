@@ -35,15 +35,22 @@ Managed move and prune now use separate recoverable journals. Linux creation
 actively verifies `FICLONE` with unnamed temporary files and supports Btrfs and
 reflink-enabled XFS without a byte-copy fallback. When reflinks are unsupported,
 Linux can select OverlayFS only after an artifact-clean active probe succeeds in
-the caller's current mount namespace. OverlayFS add and clean removal use the
-same durable transaction, exact private-layer ownership, mount identity, and
-token-bound crash-gap recovery. Explicit repair remounts an active view after a
-boot change while preserving its private upper layer; mounted moves remain
-fail-closed. Windows
+the caller's current mount namespace, either directly or through the explicit
+root-owned helper for ordinary unprivileged shells. The helper accepts only
+caller-owned mount layouts and mount, identity-checked unmount, or disposable
+work reset operations; probe setup stays unprivileged and repository-local
+enablement remains separate. Ordinary-user helper views restore checkout
+permissions through metadata-only copy-up using non-forgeable
+`trusted.overlay.*` metadata; rootless namespaces retain the metacopy-disabled
+`user.overlay.*` path. The selected profile persists for repair. OverlayFS add and
+clean removal use the same durable transaction, exact private-layer ownership,
+mount identity, and token-bound crash-gap recovery. Explicit repair remounts an
+active view after a boot change while preserving its private upper layer;
+mounted moves remain fail-closed. Windows
 creation actively verifies ReFS block cloning and private-write isolation before
 mutation and uses the same journaled lifecycle. Riftri still has no forced
-move/removal lifecycle path, automatic orphan-state repair, least-privilege
-mount helper, ordinary-NTFS backend, managed-environment integration, or daemon.
+move/removal lifecycle path, automatic orphan-state repair, ordinary-NTFS
+backend, managed-environment integration, or daemon.
 The native COW checkout path accepts only an allowlisted deterministic subset of
 in-tree attributes (`text`, `eol`, and `binary` semantics). External attributes,
 Git LFS, custom filters, encodings, ident substitution, legacy attributes, and

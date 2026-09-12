@@ -11,9 +11,10 @@ agents working on several tasks at once.
 > [!WARNING]
 > Riftri is experimental, pre-release software. Keep important work committed
 > or backed up. Optimized worktree operations require a writable APFS volume on
-> macOS, Btrfs/reflink-enabled XFS on Linux, a mount-capable Linux namespace
-> with OverlayFS, or ReFS on Windows. Broader rootless Linux activation and
-> Windows filesystem support are still in development.
+> macOS, Btrfs/reflink-enabled XFS or OverlayFS on Linux, or ReFS on Windows.
+> OverlayFS requires either an already mount-capable namespace or the explicit
+> system helper described below. Broader Windows filesystem support is still in
+> development.
 
 ## Why Riftri?
 
@@ -51,7 +52,7 @@ $ ./target/release/riftri doctor
 The npm package is a small launcher for a prebuilt Rust binary. Builds are
 provided for macOS, Linux, and Windows, but optimized worktree creation is
 currently available on APFS, supported Linux reflink volumes, caller-visible
-OverlayFS mounts in capable Linux namespaces, and ReFS.
+OverlayFS mounts, and ReFS.
 
 ## Quick start
 
@@ -122,11 +123,27 @@ ReFS, Riftri supports:
 - Safe compatibility checks before any worktree is created.
 
 Linux OverlayFS is also available experimentally when the add-time probe proves
-that the current mount namespace can host a persistent view. It supports the
-same real-worktree creation, clean removal, isolation, crash recovery, and
-explicit repair after a reboot.
-Mounted-view moves are rejected before mutation, and ordinary unprivileged
-shells may still need the planned least-privilege activation helper.
+that the current mount namespace can host a persistent view. On a normal Linux
+shell without mount capability, install Riftri's narrow helper once:
+
+```console
+$ sudo riftri overlayfs install-helper
+```
+
+The helper is available system-wide, but it does not intercept Git or enable
+any repository. `riftri enable` remains a separate per-repository choice. The
+root-owned helper accepts only validated OverlayFS mount, exact
+identity-checked unmount, and disposable work-directory reset requests for
+directories owned by the calling user; capability-probe files remain owned and
+verified by that user;
+Git, agents, editors, builds, and normal file access continue to run without
+elevation. Use `--replace` when upgrading an existing helper.
+
+OverlayFS supports the same real-worktree creation, clean removal, isolation,
+crash recovery, and explicit repair after a reboot. Mounted-view moves are
+rejected before mutation. If neither reflinks, a mount-capable namespace, nor a
+valid helper is available, Riftri stops before mutation and never silently
+creates a full-copy worktree.
 
 Riftri deliberately stops with a clear explanation when a checkout cannot yet
 be reproduced safely—for example, repositories using Git LFS, custom filters,
@@ -165,11 +182,10 @@ details on measuring physical sharing, see
 
 ## Project status
 
-The macOS/APFS, Linux reflink, Linux OverlayFS, and Windows/ReFS implementations include
-worktree creation, process-scoped Git interception, lifecycle recovery, cleanup,
-and disk accounting. OverlayFS least-privilege activation, broader checkout
-compatibility, ordinary Windows filesystem alternatives, and
-managed environments remain roadmap work.
+The macOS/APFS, Linux reflink, Linux OverlayFS, and Windows/ReFS implementations
+include worktree creation, process-scoped Git interception, lifecycle recovery,
+cleanup, and disk accounting. Broader checkout compatibility, ordinary Windows
+filesystem alternatives, and managed environments remain roadmap work.
 
 Development plans and design details live in:
 
