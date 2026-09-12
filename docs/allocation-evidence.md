@@ -6,13 +6,18 @@ the APFS implementation. This makes successful view creation itself evidence
 that file data was cloned copy-on-write, but the repository also contains an
 opt-in volume-level allocation check.
 
-Run it on an otherwise quiet writable APFS volume:
+Run the current platform-neutral benchmark on an otherwise quiet writable APFS
+volume:
 
 ```console
-$ cargo test -p riftri-core --test apfs_worktree \
-    cached_view_uses_materially_less_physical_space_than_its_logical_size \
-    -- --ignored --nocapture
+$ RIFTRI_BENCHMARK_OUTPUT=riftri-benchmark.json \
+  cargo test -p riftri-core --test native_cow_benchmark \
+  reports_cold_cached_and_private_write_costs -- \
+  --ignored --exact --nocapture
 ```
+
+See [Native COW benchmark](benchmarks.md) for the JSON fields, Linux and Windows
+commands, CI artifacts, and interpretation guidance.
 
 The fixture writes a 32 MiB pseudo-random tracked file, creates the first
 worktree to prime the immutable base, records available bytes on the APFS

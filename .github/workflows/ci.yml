@@ -50,6 +50,40 @@ jobs:
       - name: Run Rust tests
         run: cargo test --workspace
 
+      - name: Create disposable APFS benchmark volume
+        if: matrix.os == 'macos-15'
+        run: |
+          hdiutil create -size 1g -fs APFS -volname RiftriBenchmark \
+            -type SPARSEBUNDLE "$RUNNER_TEMP/riftri-benchmark"
+          mkdir "$RUNNER_TEMP/riftri-apfs"
+          hdiutil attach "$RUNNER_TEMP/riftri-benchmark.sparsebundle" \
+            -mountpoint "$RUNNER_TEMP/riftri-apfs" -nobrowse
+
+      - name: Record native COW benchmark
+        if: matrix.os == 'macos-15'
+        env:
+          RIFTRI_BENCHMARK_OUTPUT: ${{ runner.temp }}/riftri-native-cow-macos.json
+          TMPDIR: ${{ runner.temp }}/riftri-apfs
+        run: >-
+          cargo test -p riftri-core --test native_cow_benchmark
+          reports_cold_cached_and_private_write_costs
+          -- --ignored --exact --nocapture
+
+      - name: Upload native COW benchmark
+        if: always() && matrix.os == 'macos-15'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-cow-benchmark-macos-apfs
+          path: ${{ runner.temp }}/riftri-native-cow-macos.json
+          if-no-files-found: error
+
+      - name: Detach disposable APFS benchmark volume
+        if: always() && matrix.os == 'macos-15'
+        run: |
+          if mount | grep -q "on $RUNNER_TEMP/riftri-apfs "; then
+            hdiutil detach "$RUNNER_TEMP/riftri-apfs"
+          fi
+
       - name: Run npm launcher tests
         run: npm test
 
@@ -127,16 +161,25 @@ jobs:
           TMPDIR: ${{ runner.temp }}/riftri-reflink
         run: npm run smoke:installed
 
-      - name: Verify cached-view physical allocation
+      - name: Record native COW benchmark
         env:
+          RIFTRI_BENCHMARK_OUTPUT: ${{ runner.temp }}/riftri-native-cow-${{ matrix.filesystem }}.json
           RIFTRI_REQUIRE_REFLINK: "1"
           TMPDIR: ${{ runner.temp }}/riftri-reflink
         run: >-
           cargo test -p riftri-core
           --features native-cow-integration
-          --test native_cow_worktree
-          cached_view_uses_materially_less_physical_space_than_its_logical_size
+          --test native_cow_benchmark
+          reports_cold_cached_and_private_write_costs
           -- --ignored --exact --nocapture
+
+      - name: Upload native COW benchmark
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-cow-benchmark-linux-${{ matrix.filesystem }}
+          path: ${{ runner.temp }}/riftri-native-cow-${{ matrix.filesystem }}.json
+          if-no-files-found: error
 
       - name: Unmount disposable test volume
         if: always()
@@ -210,6 +253,26 @@ jobs:
           TMPDIR: ${{ runner.temp }}/riftri-overlayfs
         run: npm run smoke:installed
 
+      - name: Record native COW benchmark through the OverlayFS helper
+        env:
+          RIFTRI_BENCHMARK_OUTPUT: ${{ runner.temp }}/riftri-native-cow-overlayfs.json
+          RIFTRI_REQUIRE_OVERLAYFS_HELPER: "1"
+          TMPDIR: ${{ runner.temp }}/riftri-overlayfs
+        run: >-
+          cargo test -p riftri-core
+          --features native-cow-integration
+          --test native_cow_benchmark
+          reports_cold_cached_and_private_write_costs
+          -- --ignored --exact --nocapture
+
+      - name: Upload native COW benchmark
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-cow-benchmark-linux-overlayfs
+          path: ${{ runner.temp }}/riftri-native-cow-overlayfs.json
+          if-no-files-found: error
+
       - name: Unmount disposable test volume
         if: always()
         run: |
@@ -270,18 +333,27 @@ jobs:
           TMP: R:\riftri-temp
         run: npm run smoke:installed
 
-      - name: Verify cached-view physical allocation
+      - name: Record native COW benchmark
         shell: pwsh
         env:
+          RIFTRI_BENCHMARK_OUTPUT: ${{ runner.temp }}\riftri-native-cow-refs.json
           RIFTRI_REQUIRE_REFS: "1"
           TEMP: R:\riftri-temp
           TMP: R:\riftri-temp
         run: >-
           cargo test -p riftri-core
           --features native-cow-integration
-          --test native_cow_worktree
-          cached_view_uses_materially_less_physical_space_than_its_logical_size
+          --test native_cow_benchmark
+          reports_cold_cached_and_private_write_costs
           -- --ignored --exact --nocapture
+
+      - name: Upload native COW benchmark
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: native-cow-benchmark-windows-refs
+          path: ${{ runner.temp }}\riftri-native-cow-refs.json
+          if-no-files-found: error
 
       - name: Detach disposable ReFS test volume
         if: always()
