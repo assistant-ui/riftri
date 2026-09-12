@@ -1469,8 +1469,7 @@ fn add_worktree_inner(
         &repository.identity.common_git_dir,
         &checkout_profile,
     ));
-    fs::create_dir_all(&base_directory)
-        .map_err(|source| io("create repository base directory", &base_directory, source))?;
+    ensure_real_state_directory(&base_directory, "create repository base directory")?;
     sync_parent(&base_directory)?;
     let operation_id =
         allocate_operation_id(&store, &state_directory, &base_directory, &destination)?;
