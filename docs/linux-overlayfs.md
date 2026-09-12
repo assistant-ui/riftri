@@ -1,9 +1,10 @@
 # Linux OverlayFS backend
 
-Riftri has a destination-specific active capability probe plus a storage-level
-persistent mount lifecycle. It does not yet select OverlayFS for user-facing
-Git worktree creation because core transaction execution and the
-least-privilege activation path are not wired to that lifecycle.
+Riftri has a destination-specific active capability probe and a user-facing,
+journaled persistent mount lifecycle. On Linux it prefers reflinks, then selects
+OverlayFS only when the caller's current mount namespace passes the persistent
+probe. Ordinary unprivileged shells that cannot mount OverlayFS still fail
+before mutation until the least-privilege activation path is implemented.
 
 The probe creates temporary lower, upper, work, and merged directories on the
 destination volume. A short-lived child enters a private mount namespace,
@@ -18,11 +19,10 @@ artifact-cleanup checks. User-facing selection must pass this stricter probe;
 the isolated probe alone cannot prove that a long-lived view will be visible to
 ordinary Git and agent processes.
 
-The probe uses `userxattr`, `index=off`, `metacopy=off`, and
-`redirect_dir=nofollow`. OverlayFS does not permit redirect creation with the
-unprivileged xattr mode. The later worktree backend must therefore prove that
-normal Git directory operations remain compatible or introduce a narrowly
-scoped mount helper before Riftri can select this backend.
+The probe and persistent views use `userxattr`, `index=off`, `metacopy=off`, and
+`redirect_dir=nofollow`. Worktree creation, file copy-up, Git status, and clean
+removal are covered in the dedicated namespace suite. Mounted worktree moves
+remain fail-closed until relocation has its own identity-safe mount transaction.
 
 After namespace isolation, the child resolves the private probe root using its
 native byte path in the new namespace. Only fixed relative layer names enter the
@@ -89,13 +89,15 @@ Probe results are conservative:
 - `unavailable` means the probe could not prove support, including when the
   current process lacks mount or namespace permission.
 
-The user-facing backend still needs to execute the prepared mount through the
-existing add/removal transactions, restore Git's `.git` pointer in the upper
-layer, validate clean status, and coordinate unmounts for remove and move. It
-also needs a narrow least-privilege mount boundary that
-makes the merged path visible to ordinary Git and agent processes. Reboot
-simulation and explicit fallback policy remain acceptance gates. Riftri will
-not select OverlayFS worktree creation until those guarantees exist.
+The user-facing backend executes the prepared mount through the existing add
+and removal journals. It stages Git's `.git` pointer into the upper layer,
+persists mount identity before clearing the recovery marker, and validates a
+clean Git status before activation. Clean removal unmounts only the matching
+identity, restores the pointer to the underlying directory, removes the exact
+private-layer root, and then delegates removal to real Git. CI covers two-view
+isolation, every persisted add/removal transition, and a creator process exiting
+in the mount-ID gap. A narrow least-privilege mount boundary and reboot
+simulation remain acceptance gates.
 
 See the Linux kernel's
 [OverlayFS documentation](https://docs.kernel.org/filesystems/overlayfs.html)

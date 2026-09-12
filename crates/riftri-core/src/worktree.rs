@@ -25,9 +25,13 @@ use riftri_storage::OverlayFsMounter;
 use riftri_storage::ReflinkCloner as NativeCowCloner;
 #[cfg(target_os = "windows")]
 use riftri_storage::RefsBlockCloner as NativeCowCloner;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use riftri_storage::probe_backends;
 use riftri_storage::{BackendKind, StorageError};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use riftri_storage::{CapabilityStatus, DestinationVolume, probe_backends};
+use riftri_storage::{CapabilityStatus, DestinationVolume};
+#[cfg(target_os = "linux")]
+use riftri_storage::{OverlayFsMountState, OverlayFsRecoveryState};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -59,6 +63,12 @@ struct CompatibilityAnalysis {
     report: RepositoryCompatibilityReport,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     checkout_profile: Vec<u8>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct SelectedBackend {
+    kind: BackendKind,
+    volume: DestinationVolume,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -546,6 +556,15 @@ pub fn storage_accounting(
         *references.entry(journal.base_path.clone()).or_default() += 1;
         if journal.destination.is_dir() {
             let (logical_bytes, allocated_bytes) = tree_usage(&journal.destination)?;
+            #[cfg(target_os = "linux")]
+            let allocated_bytes = if journal.backend == BackendKind::OverlayFs
+                && let Some(overlayfs) = journal.overlayfs.as_ref()
+                && overlayfs.layout_root.exists()
+            {
+                tree_usage(&overlayfs.layout_root)?.1
+            } else {
+                allocated_bytes
+            };
             views.push(ViewStorageAccounting {
                 destination: journal.destination.clone(),
                 base_path: journal.base_path.clone(),
@@ -1191,7 +1210,7 @@ fn remove_worktree_inner(
             destination: &destination,
             base_path: &managed.base_path,
         },
-        managed.operation_id,
+        managed.operation_id.clone(),
     );
     let journal_path = store.persist(&journal)?;
     fail_removal_if_requested(journal.phase, fail_after)?;
@@ -1202,7 +1221,7 @@ fn remove_worktree_inner(
         fail_after,
     )?;
 
-    git.remove_worktree(&repository_root, &destination)?;
+    remove_managed_worktree_files(&git, &repository_root, &destination, &managed)?;
     advance_removal(
         &store,
         &mut journal,
@@ -1257,14 +1276,6 @@ fn move_worktree_inner(
     })?;
     let source = normalize_existing_destination(&request.source)?;
     let destination = normalize_new_destination(&request.destination)?;
-    let source_volume = inspected_native_cow_volume(&source)?;
-    let destination_volume = supported_native_cow_volume(&destination)?;
-    if source_volume.identity != destination_volume.identity {
-        return Err(WorktreeError::Unsupported(
-            "moving an optimized worktree across filesystem volumes is not supported".to_owned(),
-        ));
-    }
-
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
@@ -1277,6 +1288,19 @@ fn move_worktree_inner(
         ))
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
+    if managed.backend == BackendKind::OverlayFs {
+        return Err(WorktreeError::Unsupported(
+            "moving an active OverlayFS worktree is not yet supported; remove and recreate the worktree at its new path"
+                .to_owned(),
+        ));
+    }
+    let source_volume = inspected_native_cow_volume(&source, managed.backend)?;
+    let destination_volume = supported_worktree_backend(&destination)?.volume;
+    if source_volume.identity != destination_volume.identity {
+        return Err(WorktreeError::Unsupported(
+            "moving an optimized worktree across filesystem volumes is not supported".to_owned(),
+        ));
+    }
     let inventory = git.list_worktrees(&repository_root)?;
     if !inventory
         .iter()
@@ -1405,13 +1429,14 @@ fn add_worktree_inner(
     let destination = normalize_new_destination(&request.destination)?;
     let checkout_profile = validate_compatibility(&git, &repository_root, &request.revision)?;
     let resolved = git.resolve_revision(&repository_root, &request.revision)?;
-    let destination_volume = supported_native_cow_volume(&destination)?;
+    let selected_backend = supported_worktree_backend(&destination)?;
+    let destination_volume = &selected_backend.volume;
 
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let state_directory = absolute_path(&requested_state)?;
-    let state_volume = inspected_native_cow_volume(&state_directory)?;
+    let state_volume = inspected_native_cow_volume(&state_directory, selected_backend.kind)?;
     if destination_volume.identity != state_volume.identity {
         return Err(WorktreeError::Unsupported(format!(
             "state directory {} and destination {} are on different volumes; pass --state-dir on the destination filesystem volume",
@@ -1455,7 +1480,7 @@ fn add_worktree_inner(
         temporary_index: &temporary_index,
         branch,
     };
-    let backend = native_backend_kind();
+    let backend = selected_backend.kind;
     let mut journal = if backend == BackendKind::OverlayFs {
         let layout_root = state_directory.join("overlays/v1").join(&operation_id);
         #[cfg(target_os = "linux")]
@@ -1507,7 +1532,7 @@ fn add_worktree_inner(
             base_path,
             journal_path,
             reused_base,
-            backend: native_backend_kind(),
+            backend,
         }),
         Err(operation_error) => {
             if !rollback_on_error {
@@ -1586,30 +1611,39 @@ fn perform_add(
     )?;
     advance(store, journal, AddWorktreePhase::BaseReady, fail_after)?;
 
-    NativeCowCloner::clone_tree(base_path, scratch)?;
-    NativeCowCloner::make_tree_owner_writable(scratch)?;
-    advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
+    if journal.backend == BackendKind::OverlayFs {
+        #[cfg(target_os = "linux")]
+        perform_overlayfs_view(store, journal, destination, scratch, base_path, fail_after)?;
+        #[cfg(not(target_os = "linux"))]
+        return Err(WorktreeError::Unsupported(
+            "OverlayFS worktree execution requires Linux".to_owned(),
+        ));
+    } else {
+        NativeCowCloner::clone_tree(base_path, scratch)?;
+        NativeCowCloner::make_tree_owner_writable(scratch)?;
+        advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
 
-    let git_pointer = destination.join(".git");
-    if !contains_only_git_pointer(destination)? {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "Git created unexpected files in {}; refusing to replace them",
-            destination.display()
-        )));
+        let git_pointer = destination.join(".git");
+        if !contains_only_git_pointer(destination)? {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "Git created unexpected files in {}; refusing to replace them",
+                destination.display()
+            )));
+        }
+        fs::rename(&git_pointer, scratch.join(".git"))
+            .map_err(|source| io("move linked-worktree pointer", &git_pointer, source))?;
+        fs::remove_dir(destination)
+            .map_err(|source| io("remove empty checkout directory", destination, source))?;
+        fs::rename(scratch, destination)
+            .map_err(|source| io("activate native COW worktree view", destination, source))?;
+        sync_parent(destination)?;
+        advance(
+            store,
+            journal,
+            AddWorktreePhase::GitPointerRestored,
+            fail_after,
+        )?;
     }
-    fs::rename(&git_pointer, scratch.join(".git"))
-        .map_err(|source| io("move linked-worktree pointer", &git_pointer, source))?;
-    fs::remove_dir(destination)
-        .map_err(|source| io("remove empty checkout directory", destination, source))?;
-    fs::rename(scratch, destination)
-        .map_err(|source| io("activate native COW worktree view", destination, source))?;
-    sync_parent(destination)?;
-    advance(
-        store,
-        journal,
-        AddWorktreePhase::GitPointerRestored,
-        fail_after,
-    )?;
 
     git.synchronize_worktree_index(destination)?;
     advance(
@@ -1627,6 +1661,81 @@ fn perform_add(
     advance(store, journal, AddWorktreePhase::CleanVerified, fail_after)?;
     advance(store, journal, AddWorktreePhase::Active, fail_after)?;
     Ok(reused_base)
+}
+
+#[cfg(target_os = "linux")]
+fn perform_overlayfs_view(
+    store: &JournalStore,
+    journal: &mut JournalRecord,
+    destination: &Path,
+    scratch: &Path,
+    base_path: &Path,
+    fail_after: Option<AddWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    if !contains_only_git_pointer(destination)? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "Git created unexpected files in {}; refusing to replace them",
+            destination.display()
+        )));
+    }
+    fs::create_dir(scratch).map_err(|source| {
+        io(
+            "create OverlayFS pointer staging directory",
+            scratch,
+            source,
+        )
+    })?;
+    let git_pointer = destination.join(".git");
+    fs::rename(&git_pointer, scratch.join(".git"))
+        .map_err(|source| io("stage linked-worktree pointer", &git_pointer, source))?;
+    fs::remove_dir(destination)
+        .map_err(|source| io("remove empty checkout directory", destination, source))?;
+    fs::create_dir(destination)
+        .map_err(|source| io("create OverlayFS mountpoint", destination, source))?;
+    sync_parent(destination)?;
+
+    let overlayfs = journal.overlayfs_intent()?;
+    let layout = OverlayFsMounter::prepare(&overlayfs.layout_root, base_path, destination)?;
+    let upper_pointer = layout.upper().join(".git");
+    fs::rename(scratch.join(".git"), &upper_pointer).map_err(|source| {
+        io(
+            "place linked-worktree pointer in OverlayFS upper",
+            &upper_pointer,
+            source,
+        )
+    })?;
+    fs::remove_dir(scratch).map_err(|source| {
+        io(
+            "remove OverlayFS pointer staging directory",
+            scratch,
+            source,
+        )
+    })?;
+    OverlayFsMounter::arm_recovery(&layout, &overlayfs.recovery_token)?;
+    advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
+
+    let identity = OverlayFsMounter::mount(&layout)?;
+    #[cfg(test)]
+    exit_after_overlayfs_mount_for_test();
+    journal.record_overlayfs_mount_identity(identity)?;
+    store.persist(journal)?;
+    advance(
+        store,
+        journal,
+        AddWorktreePhase::GitPointerRestored,
+        fail_after,
+    )?;
+    OverlayFsMounter::clear_recovery(&layout, &overlayfs.recovery_token)?;
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+fn exit_after_overlayfs_mount_for_test() {
+    if std::env::var_os("RIFTRI_TEST_EXIT_AFTER_OVERLAYFS_MOUNT").as_deref()
+        == Some(OsStr::new("1"))
+    {
+        std::process::exit(86);
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1947,7 +2056,7 @@ fn hash_profile_input(hasher: &mut Sha256, key: &[u8], value: Option<&[u8]>) {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn supported_native_cow_volume(path: &Path) -> Result<DestinationVolume, WorktreeError> {
+fn supported_worktree_backend(path: &Path) -> Result<SelectedBackend, WorktreeError> {
     #[cfg(target_os = "macos")]
     let capability = probe_backends(path)
         .into_iter()
@@ -1958,22 +2067,53 @@ fn supported_native_cow_volume(path: &Path) -> Result<DestinationVolume, Worktre
             )
         })?;
     #[cfg(target_os = "linux")]
-    let capability = riftri_storage::ReflinkCloner::probe(path);
+    let capability = {
+        let reflink = riftri_storage::ReflinkCloner::probe(path);
+        match reflink.status {
+            CapabilityStatus::Supported => reflink,
+            CapabilityStatus::Unavailable => {
+                return Err(WorktreeError::Unsupported(format!(
+                    "Linux reflink capability could not be established, so Riftri did not downgrade to another backend: {}",
+                    reflink.explanation
+                )));
+            }
+            CapabilityStatus::Unsupported => {
+                let overlayfs = OverlayFsMounter::probe_current_namespace(path);
+                if overlayfs.status == CapabilityStatus::Supported {
+                    overlayfs
+                } else {
+                    return Err(WorktreeError::Unsupported(format!(
+                        "no native Linux worktree backend is available: {}; {}",
+                        reflink.explanation, overlayfs.explanation
+                    )));
+                }
+            }
+        }
+    };
     #[cfg(target_os = "windows")]
     let capability = riftri_storage::RefsBlockCloner::probe(path);
     if capability.status != CapabilityStatus::Supported {
         return Err(WorktreeError::Unsupported(capability.explanation));
     }
-    capability.volume.ok_or_else(|| {
+    let volume = capability.volume.ok_or_else(|| {
         WorktreeError::Unsupported(
             "native COW capability did not include a volume identity".to_owned(),
         )
+    })?;
+    Ok(SelectedBackend {
+        kind: capability.kind,
+        volume,
     })
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn inspected_native_cow_volume(path: &Path) -> Result<DestinationVolume, WorktreeError> {
-    let backend = native_backend_kind();
+fn inspected_native_cow_volume(
+    path: &Path,
+    backend: BackendKind,
+) -> Result<DestinationVolume, WorktreeError> {
+    #[cfg(target_os = "linux")]
+    let capability = riftri_storage::ReflinkCloner::probe(path);
+    #[cfg(not(target_os = "linux"))]
     let capability = probe_backends(path)
         .into_iter()
         .find(|capability| capability.kind == backend)
@@ -1989,6 +2129,15 @@ fn inspected_native_cow_volume(path: &Path) -> Result<DestinationVolume, Worktre
             backend.display_name()
         ))
     })?;
+    #[cfg(target_os = "linux")]
+    if backend == BackendKind::OverlayFs {
+        if volume.read_only {
+            return Err(WorktreeError::Unsupported(
+                "OverlayFS state must be on a writable filesystem".to_owned(),
+            ));
+        }
+        return Ok(volume);
+    }
     #[cfg(target_os = "linux")]
     if capability.status == CapabilityStatus::Unavailable
         && volume.identity.filesystem == "xfs"
@@ -2007,21 +2156,6 @@ fn inspected_native_cow_volume(path: &Path) -> Result<DestinationVolume, Worktre
         return Err(WorktreeError::Unsupported(capability.explanation));
     }
     Ok(volume)
-}
-
-#[cfg(target_os = "macos")]
-const fn native_backend_kind() -> BackendKind {
-    BackendKind::ApfsClone
-}
-
-#[cfg(target_os = "linux")]
-const fn native_backend_kind() -> BackendKind {
-    BackendKind::Reflink
-}
-
-#[cfg(target_os = "windows")]
-const fn native_backend_kind() -> BackendKind {
-    BackendKind::RefsBlockClone
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -3042,8 +3176,9 @@ pub fn recover_incomplete_operations(
             }
             AddWorktreePhase::RolledBack => {}
             _ => {
-                if let Err(error) =
-                    validate_recovery_paths(&state_directory, &journal).and_then(|()| {
+                if let Err(error) = validate_recovery_paths(&state_directory, &journal)
+                    .and_then(|()| adopt_overlayfs_mount_identity(&store, journal.clone()))
+                    .and_then(|journal| {
                         store.update_phase(
                             &journal.journal_path,
                             AddWorktreePhase::RollbackPending,
@@ -3191,6 +3326,16 @@ fn resume_removal(
         })?
         .to_path_buf();
     validate_removal_paths(&state_directory, &journal)?;
+    let managed = JournalStore::open(&state_directory)
+        .load_all()?
+        .into_iter()
+        .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "removal journal {} does not reference a known add operation",
+                journal.journal_path.display()
+            ))
+        })?;
     let file = File::open(&journal.journal_path)
         .map_err(|source| io("open removal journal", &journal.journal_path, source))?;
     let mut record: RemovalJournalRecord = serde_json::from_reader(file).map_err(|source| {
@@ -3210,7 +3355,7 @@ fn resume_removal(
     };
 
     if record.phase == RemoveWorktreePhase::IntentRecorded {
-        verify_recoverable_removal(git, &journal)?;
+        verify_recoverable_removal(git, &journal, &managed)?;
         record.transition(RemoveWorktreePhase::CleanVerified)?;
         store.persist(&record)?;
     }
@@ -3218,13 +3363,18 @@ fn resume_removal(
     if record.phase == RemoveWorktreePhase::CleanVerified {
         let (registered, destination_exists) = removal_presence(git, &journal)?;
         if registered {
-            if destination_exists && !git.worktree_is_clean(&journal.destination)? {
+            if destination_exists && !managed_worktree_is_clean_for_removal(git, &managed, true)? {
                 return Err(WorktreeError::InvalidRequest(format!(
                     "worktree {} has changes; recovery preserved it",
                     journal.destination.display()
                 )));
             }
-            git.remove_worktree(&journal.repository, &journal.destination)?;
+            remove_managed_worktree_files(
+                git,
+                &journal.repository,
+                &journal.destination,
+                &managed,
+            )?;
         } else if destination_exists {
             return Err(WorktreeError::InvalidRequest(format!(
                 "destination {} exists but is not registered by Git; recovery preserved it",
@@ -3639,9 +3789,13 @@ fn fail_prune_if_requested(
 fn verify_recoverable_removal(
     git: &Git,
     journal: &DecodedRemovalJournal,
+    managed: &DecodedJournal,
 ) -> Result<(), WorktreeError> {
     let (registered, destination_exists) = removal_presence(git, journal)?;
-    if registered && destination_exists && !git.worktree_is_clean(&journal.destination)? {
+    if registered
+        && destination_exists
+        && !managed_worktree_is_clean_for_removal(git, managed, false)?
+    {
         return Err(WorktreeError::InvalidRequest(format!(
             "worktree {} has changes; recovery preserved it",
             journal.destination.display()
@@ -3665,6 +3819,131 @@ fn removal_presence(
         .into_iter()
         .any(|worktree| paths_match(&worktree.path, &journal.destination));
     Ok((registered, journal.destination.exists()))
+}
+
+fn managed_worktree_is_clean_for_removal(
+    git: &Git,
+    managed: &DecodedJournal,
+    trust_unmounted_clean_phase: bool,
+) -> Result<bool, WorktreeError> {
+    if managed.backend != BackendKind::OverlayFs {
+        return git
+            .worktree_is_clean(&managed.destination)
+            .map_err(WorktreeError::from);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = trust_unmounted_clean_phase;
+        Err(WorktreeError::Unsupported(
+            "OverlayFS removal recovery requires Linux".to_owned(),
+        ))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let overlayfs = managed.overlayfs.as_ref().ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "OverlayFS journal {} has no mount intent",
+                managed.journal_path.display()
+            ))
+        })?;
+        if !overlayfs.layout_root.exists() {
+            return contains_only_git_pointer(&managed.destination);
+        }
+        let identity = overlayfs.mount_identity.as_ref().ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "active OverlayFS journal {} has no mount identity",
+                managed.journal_path.display()
+            ))
+        })?;
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &managed.base_path,
+            &managed.destination,
+        )?;
+        match OverlayFsMounter::mount_state(&layout, identity)? {
+            OverlayFsMountState::Active => git
+                .worktree_is_clean(&managed.destination)
+                .map_err(WorktreeError::from),
+            OverlayFsMountState::Absent if trust_unmounted_clean_phase => Ok(true),
+            OverlayFsMountState::Absent => overlayfs_private_layer_is_clean(&layout),
+            OverlayFsMountState::DifferentNamespace => Err(WorktreeError::InvalidRequest(format!(
+                "OverlayFS worktree {} belongs to a different mount namespace; removal preserved it",
+                managed.destination.display()
+            ))),
+            OverlayFsMountState::Foreign => Err(WorktreeError::InvalidRequest(format!(
+                "a foreign mount occupies {}; removal preserved it",
+                managed.destination.display()
+            ))),
+        }
+    }
+}
+
+fn remove_managed_worktree_files(
+    git: &Git,
+    repository: &Path,
+    destination: &Path,
+    managed: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    if managed.backend != BackendKind::OverlayFs {
+        return git
+            .remove_worktree(repository, destination)
+            .map_err(WorktreeError::from);
+    }
+    #[cfg(not(target_os = "linux"))]
+    return Err(WorktreeError::Unsupported(
+        "OverlayFS removal requires Linux".to_owned(),
+    ));
+    #[cfg(target_os = "linux")]
+    {
+        let overlayfs = managed.overlayfs.as_ref().ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "OverlayFS journal {} has no mount intent",
+                managed.journal_path.display()
+            ))
+        })?;
+        if !overlayfs.layout_root.exists() {
+            return git
+                .remove_worktree(repository, destination)
+                .map_err(WorktreeError::from);
+        }
+        let identity = overlayfs.mount_identity.as_ref().ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "active OverlayFS journal {} has no mount identity",
+                managed.journal_path.display()
+            ))
+        })?;
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &managed.base_path,
+            &managed.destination,
+        )?;
+        match OverlayFsMounter::mount_state(&layout, identity)? {
+            OverlayFsMountState::Active => {
+                OverlayFsMounter::unmount(&layout, identity)?;
+            }
+            OverlayFsMountState::Absent => {}
+            OverlayFsMountState::DifferentNamespace => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "OverlayFS worktree {} belongs to a different mount namespace; removal preserved it",
+                    destination.display()
+                )));
+            }
+            OverlayFsMountState::Foreign => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "a foreign mount occupies {}; removal preserved it",
+                    destination.display()
+                )));
+            }
+        }
+        restore_overlayfs_pointer(&layout)?;
+        OverlayFsMounter::remove_private_layers(&layout, identity)?;
+        // Riftri already proved the mounted view clean before unmounting it.
+        // The underlying directory now contains only Git's pointer, so normal
+        // Git removal would interpret the intentionally absent lower files as
+        // deletions. Force is safe here only after that durable clean gate.
+        git.remove_worktree_force(repository, destination)?;
+        Ok(())
+    }
 }
 
 fn validate_recovery_paths(
@@ -3750,23 +4029,32 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
         .any(|worktree| paths_match(&worktree.path, &journal.destination));
 
     if registered {
-        restore_pointer_for_rollback(journal)?;
-        if journal.destination.exists() {
-            let safe_to_remove = contains_only_git_pointer(&journal.destination)?
-                || git.worktree_is_clean(&journal.destination)?
-                || view_matches_base(&journal.base_path, &journal.destination)?;
-            if safe_to_remove {
-                git.remove_worktree_force(&journal.repository, &journal.destination)?;
-            } else {
-                return Err(WorktreeError::InvalidRequest(format!(
-                    "worktree {} has changes; recovery preserved it",
-                    journal.destination.display()
-                )));
-            }
+        if journal.backend == BackendKind::OverlayFs {
+            #[cfg(target_os = "linux")]
+            rollback_overlayfs_worktree(git, journal)?;
+            #[cfg(not(target_os = "linux"))]
+            return Err(WorktreeError::Unsupported(
+                "OverlayFS recovery requires Linux".to_owned(),
+            ));
         } else {
-            git.remove_worktree_force(&journal.repository, &journal.destination)?;
+            restore_pointer_for_rollback(journal)?;
+            if journal.destination.exists() {
+                let safe_to_remove = contains_only_git_pointer(&journal.destination)?
+                    || git.worktree_is_clean(&journal.destination)?
+                    || view_matches_base(&journal.base_path, &journal.destination)?;
+                if safe_to_remove {
+                    git.remove_worktree_force(&journal.repository, &journal.destination)?;
+                } else {
+                    return Err(WorktreeError::InvalidRequest(format!(
+                        "worktree {} has changes; recovery preserved it",
+                        journal.destination.display()
+                    )));
+                }
+            } else {
+                git.remove_worktree_force(&journal.repository, &journal.destination)?;
+            }
+            remove_empty_directory_if_present(&journal.destination)?;
         }
-        remove_empty_directory_if_present(&journal.destination)?;
     } else if journal.destination.exists() {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination {} exists but is not registered by Git; recovery preserved it",
@@ -3783,6 +4071,236 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     }
     drop(metadata_lock);
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn adopt_overlayfs_mount_identity(
+    store: &JournalStore,
+    journal: DecodedJournal,
+) -> Result<DecodedJournal, WorktreeError> {
+    if journal.backend != BackendKind::OverlayFs {
+        return Ok(journal);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = store;
+        Err(WorktreeError::Unsupported(
+            "OverlayFS recovery requires Linux".to_owned(),
+        ))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let overlayfs = journal.overlayfs.as_ref().ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "OverlayFS journal {} has no mount intent",
+                journal.journal_path.display()
+            ))
+        })?;
+        if overlayfs.mount_identity.is_some() || !overlayfs.layout_root.exists() {
+            return Ok(journal);
+        }
+        let context = overlayfs.mount_context.as_ref().ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "OverlayFS journal {} predates recoverable mount contexts; recovery preserved its state",
+                journal.journal_path.display()
+            ))
+        })?;
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )?;
+        match OverlayFsMounter::recover_mount(&layout, context, &overlayfs.recovery_token)? {
+            OverlayFsRecoveryState::Mounted(identity) => {
+                Ok(store.record_overlayfs_mount_identity(&journal.journal_path, identity)?)
+            }
+            OverlayFsRecoveryState::Absent | OverlayFsRecoveryState::Prepared => Ok(journal),
+            OverlayFsRecoveryState::DifferentNamespace => {
+                Err(WorktreeError::InvalidRequest(format!(
+                    "OverlayFS worktree {} belongs to a different boot or mount namespace; recovery preserved it",
+                    journal.destination.display()
+                )))
+            }
+            OverlayFsRecoveryState::Foreign => Err(WorktreeError::InvalidRequest(format!(
+                "a foreign mount occupies {}; recovery preserved it",
+                journal.destination.display()
+            ))),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeError> {
+    let overlayfs = journal.overlayfs.as_ref().ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "OverlayFS journal {} has no mount intent",
+            journal.journal_path.display()
+        ))
+    })?;
+    if !overlayfs.layout_root.exists() {
+        restore_pointer_for_rollback(journal)?;
+        if journal.destination.exists()
+            && !contains_only_git_pointer(&journal.destination)?
+            && !git.worktree_is_clean(&journal.destination)?
+            && !view_matches_base(&journal.base_path, &journal.destination)?
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "worktree {} has changes; recovery preserved it",
+                journal.destination.display()
+            )));
+        }
+        git.remove_worktree_force(&journal.repository, &journal.destination)?;
+        remove_empty_directory_if_present(&journal.destination)?;
+        return Ok(());
+    }
+
+    let context = overlayfs.mount_context.as_ref().ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "OverlayFS journal {} predates recoverable mount contexts; recovery preserved its state",
+            journal.journal_path.display()
+        ))
+    })?;
+    let layout = OverlayFsMounter::load(
+        &overlayfs.layout_root,
+        &journal.base_path,
+        &journal.destination,
+    )?;
+    let identity = if let Some(identity) = overlayfs.mount_identity.clone() {
+        match OverlayFsMounter::mount_state(&layout, &identity)? {
+            OverlayFsMountState::Active | OverlayFsMountState::Absent => Some(identity),
+            OverlayFsMountState::DifferentNamespace => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "OverlayFS worktree {} belongs to a different mount namespace; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+            OverlayFsMountState::Foreign => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "a foreign mount occupies {}; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+        }
+    } else {
+        match OverlayFsMounter::recover_mount(&layout, context, &overlayfs.recovery_token)? {
+            OverlayFsRecoveryState::Mounted(identity) => Some(identity),
+            OverlayFsRecoveryState::Absent | OverlayFsRecoveryState::Prepared => None,
+            OverlayFsRecoveryState::DifferentNamespace => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "OverlayFS worktree {} belongs to a different boot or mount namespace; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+            OverlayFsRecoveryState::Foreign => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "a foreign mount occupies {}; recovery preserved it",
+                    journal.destination.display()
+                )));
+            }
+        }
+    };
+
+    OverlayFsMounter::clear_recovery(&layout, &overlayfs.recovery_token)?;
+    if let Some(identity) = identity.as_ref()
+        && OverlayFsMounter::mount_state(&layout, identity)? == OverlayFsMountState::Active
+    {
+        let safe_to_remove = git.worktree_is_clean(&journal.destination)?
+            || view_matches_base(&journal.base_path, &journal.destination)?;
+        if !safe_to_remove {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "worktree {} has changes; recovery preserved it",
+                journal.destination.display()
+            )));
+        }
+        OverlayFsMounter::unmount(&layout, identity)?;
+    }
+    if !overlayfs_upper_contains_only_git_pointer(&layout)? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "OverlayFS private layer for {} contains changes; recovery preserved it",
+            journal.destination.display()
+        )));
+    }
+    restore_overlayfs_pointer(&layout)?;
+    match identity.as_ref() {
+        Some(identity) => OverlayFsMounter::remove_private_layers(&layout, identity)?,
+        None => OverlayFsMounter::remove_unmounted_private_layers(&layout, context)?,
+    }
+    git.remove_worktree_force(&journal.repository, &journal.destination)?;
+    remove_empty_directory_if_present(&journal.destination)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn overlayfs_upper_contains_only_git_pointer(
+    layout: &riftri_storage::OverlayFsLayout,
+) -> Result<bool, WorktreeError> {
+    let mut entries = fs::read_dir(layout.upper())
+        .map_err(|source| io("inspect OverlayFS private upper", layout.upper(), source))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| io("read OverlayFS private upper", layout.upper(), source))?;
+    Ok(entries.len() == 1
+        && entries
+            .pop()
+            .is_some_and(|entry| entry.file_name() == OsStr::new(".git") && entry.path().is_file()))
+}
+
+#[cfg(target_os = "linux")]
+fn overlayfs_private_layer_is_clean(
+    layout: &riftri_storage::OverlayFsLayout,
+) -> Result<bool, WorktreeError> {
+    let entries = fs::read_dir(layout.upper())
+        .map_err(|source| io("inspect OverlayFS private upper", layout.upper(), source))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|source| io("read OverlayFS private upper", layout.upper(), source))?;
+    if layout.merged().join(".git").is_file() {
+        Ok(entries.is_empty())
+    } else {
+        Ok(entries.len() == 1
+            && entries.into_iter().next().is_some_and(|entry| {
+                entry.file_name() == OsStr::new(".git") && entry.path().is_file()
+            }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn restore_overlayfs_pointer(
+    layout: &riftri_storage::OverlayFsLayout,
+) -> Result<(), WorktreeError> {
+    let destination_pointer = layout.merged().join(".git");
+    if destination_pointer.is_file() {
+        return Ok(());
+    }
+    if fs::read_dir(layout.merged())
+        .map_err(|source| {
+            io(
+                "inspect unmounted OverlayFS destination",
+                layout.merged(),
+                source,
+            )
+        })?
+        .next()
+        .is_some()
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "unmounted OverlayFS destination {} is not empty; recovery preserved it",
+            layout.merged().display()
+        )));
+    }
+    let upper_pointer = layout.upper().join(".git");
+    if !upper_pointer.is_file() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "OverlayFS private layer {} has no linked-worktree pointer",
+            layout.upper().display()
+        )));
+    }
+    fs::rename(&upper_pointer, &destination_pointer).map_err(|source| {
+        io(
+            "restore linked-worktree pointer",
+            &destination_pointer,
+            source,
+        )
+    })?;
+    sync_parent(&destination_pointer)
 }
 
 fn restore_pointer_for_rollback(journal: &DecodedJournal) -> Result<(), WorktreeError> {
@@ -4215,6 +4733,237 @@ mod tests {
             fs::read_to_string(protected).expect("read protected file"),
             "must remain unchanged\n"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn require_overlayfs_test_namespace(path: &Path) -> bool {
+        if std::env::var_os("RIFTRI_REQUIRE_OVERLAYFS").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return false;
+        }
+        let capability = riftri_storage::OverlayFsMounter::probe_current_namespace(path);
+        assert_eq!(
+            capability.status,
+            riftri_storage::CapabilityStatus::Supported,
+            "required OverlayFS namespace is unavailable: {}",
+            capability.explanation
+        );
+        true
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_overlayfs_repository(repository: &Path) {
+        fs::create_dir(repository).expect("create repository");
+        git(repository, &["init", "--quiet"]);
+        git(repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(repository, &["add", "--", "tracked.txt"]);
+        git(repository, &["commit", "--quiet", "-m", "initial"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlayfs_recovery_is_idempotent_after_every_add_transition() {
+        let probe = tempdir().expect("probe fixture");
+        if !require_overlayfs_test_namespace(probe.path()) {
+            return;
+        }
+        drop(probe);
+        let phases = [
+            AddWorktreePhase::IntentRecorded,
+            AddWorktreePhase::GitMetadataCreated,
+            AddWorktreePhase::BaseReady,
+            AddWorktreePhase::ViewCreated,
+            AddWorktreePhase::GitPointerRestored,
+            AddWorktreePhase::IndexSynchronized,
+            AddWorktreePhase::CleanVerified,
+        ];
+
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            let branch = format!("feature/overlay-recover-{index}");
+            create_overlayfs_repository(&repository);
+
+            let error = add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(&branch)),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+                false,
+            )
+            .expect_err("simulate interrupted OverlayFS add");
+            assert!(error.to_string().contains("injected failure"));
+
+            let recovered = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("recover after {phase:?}: {error}"));
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert_eq!(recovered.recovered, 1, "phase {phase:?}");
+            assert!(!destination.exists(), "phase {phase:?}");
+            assert_eq!(
+                fs::read_dir(state.join("overlays/v1"))
+                    .expect("read OverlayFS roots")
+                    .count(),
+                0,
+                "phase {phase:?}"
+            );
+
+            let repeated = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("repeat recovery after {phase:?}: {error}"));
+            assert_eq!(repeated.recovered, 0, "phase {phase:?}");
+            assert!(repeated.errors.is_empty(), "phase {phase:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlayfs_recovery_adopts_the_mount_identity_gap_after_process_exit() {
+        let fixture = tempdir().expect("fixture");
+        if !require_overlayfs_test_namespace(fixture.path()) {
+            return;
+        }
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        create_overlayfs_repository(&repository);
+
+        let status = Command::new(std::env::current_exe().expect("unit test executable"))
+            .arg("--exact")
+            .arg("worktree::tests::overlayfs_mount_gap_helper")
+            .arg("--nocapture")
+            .env("RIFTRI_OVERLAYFS_CORE_HELPER", "1")
+            .env("RIFTRI_TEST_EXIT_AFTER_OVERLAYFS_MOUNT", "1")
+            .env("RIFTRI_OVERLAYFS_CORE_REPOSITORY", &repository)
+            .env("RIFTRI_OVERLAYFS_CORE_DESTINATION", &destination)
+            .env("RIFTRI_OVERLAYFS_CORE_STATE", &state)
+            .status()
+            .expect("run mount-gap helper");
+        assert_eq!(status.code(), Some(86));
+        assert!(
+            Command::new("mountpoint")
+                .arg("--quiet")
+                .arg(&destination)
+                .status()
+                .expect("inspect interrupted mount")
+                .success()
+        );
+
+        let recovered = recover_incomplete_operations(&state).expect("recover mount gap");
+        assert_eq!(recovered.recovered, 1);
+        assert!(recovered.errors.is_empty());
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read_dir(state.join("overlays/v1"))
+                .expect("read OverlayFS roots")
+                .count(),
+            0
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlayfs_mount_gap_helper() {
+        if std::env::var_os("RIFTRI_OVERLAYFS_CORE_HELPER").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+        let required_path = |name| {
+            std::env::var_os(name)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| panic!("missing {name}"))
+        };
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: required_path("RIFTRI_OVERLAYFS_CORE_REPOSITORY"),
+                destination: required_path("RIFTRI_OVERLAYFS_CORE_DESTINATION"),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/overlay-gap")),
+                state_dir: Some(required_path("RIFTRI_OVERLAYFS_CORE_STATE")),
+            },
+            None,
+            false,
+        )
+        .expect("the helper exits from the post-mount test hook");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlayfs_removal_recovers_after_every_persisted_transition() {
+        let probe = tempdir().expect("probe fixture");
+        if !require_overlayfs_test_namespace(probe.path()) {
+            return;
+        }
+        drop(probe);
+        let phases = [
+            RemoveWorktreePhase::IntentRecorded,
+            RemoveWorktreePhase::CleanVerified,
+            RemoveWorktreePhase::WorktreeRemoved,
+            RemoveWorktreePhase::BaseReleased,
+            RemoveWorktreePhase::Complete,
+        ];
+
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            create_overlayfs_repository(&repository);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(format!(
+                        "feature/overlay-remove-{index}"
+                    ))),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+                true,
+            )
+            .expect("create OverlayFS worktree");
+
+            let error = remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("simulate interrupted OverlayFS removal");
+            assert!(error.to_string().contains("injected removal failure"));
+
+            let recovered = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("recover removal after {phase:?}: {error}"));
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert!(!destination.exists(), "phase {phase:?}");
+            assert_eq!(
+                fs::read_dir(state.join("overlays/v1"))
+                    .expect("read OverlayFS roots")
+                    .count(),
+                0,
+                "phase {phase:?}"
+            );
+
+            let repeated = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("repeat removal after {phase:?}: {error}"));
+            assert_eq!(repeated.recovered_removals, 0, "phase {phase:?}");
+            assert!(repeated.errors.is_empty(), "phase {phase:?}");
+        }
     }
 
     #[test]

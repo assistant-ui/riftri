@@ -484,9 +484,24 @@ pub(crate) fn recover_mount(
 pub(crate) fn clear_recovery(layout: &OverlayFsLayout, token: &str) -> Result<(), StorageError> {
     validate_layout(layout)?;
     let marker = recovery_marker_path(layout, token)?;
-    require_recovery_marker(&marker, token)?;
-    fs::remove_file(&marker)
-        .map_err(|source| storage_io("remove OverlayFS recovery marker", &marker, source))?;
+    match require_recovery_marker(&marker, token) {
+        Ok(()) => {}
+        Err(StorageError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    }
+    match fs::remove_file(&marker) {
+        Ok(()) => {}
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(storage_io(
+                "remove OverlayFS recovery marker",
+                &marker,
+                source,
+            ));
+        }
+    }
     sync_directory(&layout.upper)
 }
 

@@ -237,18 +237,16 @@ Repository-aware repair resumes incomplete journals, and explicit journaled
 garbage collection can remove independently revalidated zero-reference bases.
 Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
 missing paths referenced by active journals without deleting them. Managed move
-and guarded prune use recoverable forward-only journals. The Linux reflink slice
-of Milestone 5 and Windows ReFS slice of Milestone 7 are exercised on disposable
-native volumes in CI. Linux can actively verify destination-specific OverlayFS
-mount and copy-up support in an isolated namespace, but does not yet create
-persistent OverlayFS worktrees. Its storage layer can prepare durable private
-layers, mount a requested view, and recover or reject that mount by exact
-kernel identity after the creator exits. It can also prove mount capability in
-the caller's current namespace and recover the mount-ID persistence crash gap
-through a private ownership marker. Add journals can encode validated
-OverlayFS layout intent, a recovery token, pre-mount namespace context, and the
-eventual mount identity; status diagnoses unowned private-layer roots without
-deleting them. Executing those mounts through the core worktree transaction,
-least-privilege activation, reboot recovery, automatic orphan-state repair,
-ordinary-NTFS alternatives, managed-environment integration, and a daemon are
-not implemented.
+and guarded prune use recoverable forward-only journals. The Linux reflink and
+OverlayFS slices of Milestone 5 and Windows ReFS slice of Milestone 7 are
+exercised on disposable native volumes in CI. When reflinks are unavailable,
+Linux selects OverlayFS only after proving that the caller's current namespace
+can host a persistent mount. The add transaction places the real
+linked-worktree pointer in a private upper layer, persists exact mount identity,
+verifies clean Git state, and recovers the mount-ID persistence crash gap
+through a private ownership marker. Clean removal revalidates the exact mount,
+unmounts it, restores the pointer for real Git removal, and deletes only the
+journal-owned private layers. Mounted moves remain fail-closed.
+Least-privilege activation for ordinary unprivileged shells, reboot recovery,
+automatic orphan-state repair, ordinary-NTFS alternatives,
+managed-environment integration, and a daemon are not implemented.

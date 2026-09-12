@@ -313,6 +313,21 @@ or foreign-filesystem state fails closed. A caller-namespace active probe is a
 separate selection gate because the isolated capability probe does not prove
 that a persistent mount will be visible to ordinary Git processes.
 
+### D031: Linux prefers reflinks and selects OverlayFS only in a proven caller namespace
+
+Linux probes reflinks first because they require no long-lived mount. When that
+probe is not supported, Riftri may select OverlayFS only after an active mount,
+copy-up, lower-isolation, unmount, and cleanup cycle succeeds in the caller's
+current mount namespace. Add intent and namespace context are durable before
+mounting; exact mount identity is durable before the private recovery marker is
+removed. Clean removal unmounts only that identity, restores Git's pointer from
+the upper layer, removes only the journal-owned private layers, and invokes the
+installed Git executable for metadata removal. Recovery adopts only a
+token-proven mount in the original namespace. Mounted moves fail before
+mutation until relocation has a dedicated mount transaction. This enables
+containers and already-capable namespaces without pretending that ordinary
+unprivileged shells have the still-planned activation helper.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
@@ -323,7 +338,6 @@ that a persistent mount will be visible to ordinary Git processes.
   profile without making base reuse ambiguous?
 - How should operation journals and SQLite state reconcile after either one is
   partially written?
-- What is the safest removal transaction for a mounted OverlayFS worktree?
 - Can rootless OverlayFS preserve required directory-rename behavior with
   `redirect_dir=nofollow`, or does mounting require a narrow privileged helper?
 - Should clean-view compaction be manual, idle-time automatic, or policy-based?

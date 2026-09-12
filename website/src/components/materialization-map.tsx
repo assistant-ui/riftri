@@ -30,7 +30,7 @@ const platforms = [
   {
     name: "Linux",
     backend: "reflink / OverlayFS",
-    status: "reflink · experimental",
+    status: "experimental · current",
   },
   {
     name: "Windows",
@@ -51,8 +51,8 @@ function BackendCycle() {
         ))}
       </span>
       <span className="visually-hidden">
-        Native copy-on-write view. APFS clone on macOS, Linux reflinks, and Windows ReFS block
-        clones are current. Linux OverlayFS remains planned for milestone 5.
+        Native copy-on-write view. APFS clone on macOS, Linux reflinks and mount-capable OverlayFS,
+        and Windows ReFS block clones are current experimental backends.
       </span>
     </>
   );

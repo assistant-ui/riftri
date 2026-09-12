@@ -156,13 +156,19 @@ jobs:
           sudo mount --options loop "$RUNNER_TEMP/riftri-overlayfs.img" "$RUNNER_TEMP/riftri-overlayfs"
           sudo chown "$(id --user):$(id --group)" "$RUNNER_TEMP/riftri-overlayfs"
 
-      - name: Run OverlayFS capability and mount lifecycle suite
+      - name: Run OverlayFS capability and worktree lifecycle suite
         env:
           RIFTRI_REQUIRE_OVERLAYFS: "1"
           TMPDIR: ${{ runner.temp }}/riftri-overlayfs
         run: |
           if unshare --user --map-root-user --mount --propagation private \
-            cargo test -p riftri-storage --test linux_overlayfs -- --nocapture; then
+            sh -c 'cargo test -p riftri-storage --test linux_overlayfs -- --nocapture &&
+              cargo test -p riftri-core --features native-cow-integration \
+                --test linux_overlayfs_worktree -- --nocapture &&
+              cargo test -p riftri-core --features native-cow-integration --lib \
+                overlayfs_ -- --nocapture --test-threads=1 &&
+              cargo test -p riftri-cli --test linux_cli \
+                overlayfs_ -- --nocapture --test-threads=1'; then
             exit 0
           fi
           sudo dmesg | grep --ignore-case overlay | tail --lines=50 || true

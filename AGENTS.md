@@ -33,17 +33,15 @@ recoverable journal and revalidates references under the immutable-base lock.
 Status reports unexplained or inconsistent state paths but never deletes them.
 Managed move and prune now use separate recoverable journals. Linux creation
 actively verifies `FICLONE` with unnamed temporary files and supports Btrfs and
-reflink-enabled XFS without a byte-copy fallback. Windows creation actively
-verifies ReFS block cloning and private-write isolation before mutation, and
-uses the same journaled lifecycle. Linux also has an artifact-clean active
-OverlayFS probe that isolates its test mount in a private mount namespace; it
-does not yet use OverlayFS for persistent worktrees. Its add-journal extension
-can describe the exact private-layer root, recovery token, pre-mount namespace
-context, and eventual kernel mount identity. A caller-namespace probe and a
-token-bound private marker make the mount-ID persistence gap recoverable.
-Riftri still has no forced move/removal lifecycle path,
-automatic orphan-state repair, user-facing OverlayFS mutation backend,
-ordinary-NTFS backend, managed-environment integration, or daemon.
+reflink-enabled XFS without a byte-copy fallback. When reflinks are unsupported,
+Linux can select OverlayFS only after an artifact-clean active probe succeeds in
+the caller's current mount namespace. OverlayFS add and clean removal use the
+same durable transaction, exact private-layer ownership, mount identity, and
+token-bound crash-gap recovery; mounted moves remain fail-closed. Windows
+creation actively verifies ReFS block cloning and private-write isolation before
+mutation and uses the same journaled lifecycle. Riftri still has no forced
+move/removal lifecycle path, automatic orphan-state repair, least-privilege
+mount helper, ordinary-NTFS backend, managed-environment integration, or daemon.
 The native COW checkout path accepts only an allowlisted deterministic subset of
 in-tree attributes (`text`, `eol`, and `binary` semantics). External attributes,
 Git LFS, custom filters, encodings, ident substitution, legacy attributes, and

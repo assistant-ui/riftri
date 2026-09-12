@@ -281,6 +281,8 @@ fn recovery_marker_adopts_a_mount_after_creator_exit() {
     );
 
     OverlayFsMounter::clear_recovery(&layout, &token).expect("clear recovery marker");
+    OverlayFsMounter::clear_recovery(&layout, &token)
+        .expect("repeated recovery-marker cleanup is idempotent");
     OverlayFsMounter::unmount(&layout, &identity).expect("unmount recovered view");
     OverlayFsMounter::remove_private_layers(&layout, &identity).expect("remove recovered layers");
 }

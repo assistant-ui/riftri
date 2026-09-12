@@ -146,9 +146,13 @@ carry validated OverlayFS layout intent, a recovery token, the pre-mount boot
 and namespace context, and an optional exact mount identity without breaking
 older journals. A second active probe proves that the caller's current
 namespace can host a persistent view, and a private recovery marker closes the
-crash window between the mount syscall and mount-ID persistence. Transaction
-execution and least-privilege activation remain open, so the milestone as a
-whole is not yet complete.
+crash window between the mount syscall and mount-ID persistence. Core
+transaction execution is now implemented for mount-capable caller namespaces:
+reflinks remain preferred, OverlayFS is selected only after the caller-visible
+probe succeeds, and real linked-worktree add, clean removal, rollback, and
+mount-ID-gap recovery run through the existing journals. Mounted moves fail
+before mutation. Least-privilege activation and reboot recovery remain open,
+so the milestone as a whole is not yet complete.
 
 The capability contract and remaining lifecycle boundary are documented in
 [`docs/linux-overlayfs.md`](docs/linux-overlayfs.md).
@@ -161,15 +165,17 @@ The capability contract and remaining lifecycle boundary are documented in
   journals and diagnose unowned private-layer roots. (complete)
 - Add caller-namespace preflight and crash-safe mount adoption. (complete)
 - Execute immutable lower, private upper/work, and merged mounts through the
-  existing add and removal transactions.
+  existing add and removal transactions. (complete for mount-capable caller
+  namespaces)
 - Add least-privilege mount activation and reboot recovery.
 - Define fallback behavior when user namespaces or mounts are unavailable.
 
 Acceptance criteria:
 
-- The same Git correctness suite passes for reflink and OverlayFS views.
+- The same Git cleanliness and isolation suite passes for reflink and
+  OverlayFS views. (complete)
 - Mount recovery survives process termination and reboot simulation.
-- Backend choice is visible and never silently downgraded.
+- Backend choice is visible and never silently downgraded. (complete)
 
 ## Milestone 6: compatibility and lifecycle efficiency
 

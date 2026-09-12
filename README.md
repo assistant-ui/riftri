@@ -11,8 +11,9 @@ agents working on several tasks at once.
 > [!WARNING]
 > Riftri is experimental, pre-release software. Keep important work committed
 > or backed up. Optimized worktree operations require a writable APFS volume on
-> macOS, Btrfs/reflink-enabled XFS on Linux, or ReFS on Windows. OverlayFS and
-> broader Windows filesystem support are still in development.
+> macOS, Btrfs/reflink-enabled XFS on Linux, a mount-capable Linux namespace
+> with OverlayFS, or ReFS on Windows. Broader rootless Linux activation and
+> Windows filesystem support are still in development.
 
 ## Why Riftri?
 
@@ -49,7 +50,8 @@ $ ./target/release/riftri doctor
 
 The npm package is a small launcher for a prebuilt Rust binary. Builds are
 provided for macOS, Linux, and Windows, but optimized worktree creation is
-currently available on APFS, supported Linux reflink volumes, and ReFS.
+currently available on APFS, supported Linux reflink volumes, caller-visible
+OverlayFS mounts in capable Linux namespaces, and ReFS.
 
 ## Quick start
 
@@ -119,6 +121,12 @@ ReFS, Riftri supports:
 - Journaled recovery, repair, and garbage collection.
 - Safe compatibility checks before any worktree is created.
 
+Linux OverlayFS is also available experimentally when the add-time probe proves
+that the current mount namespace can host a persistent view. It supports the
+same real-worktree creation, clean removal, isolation, and crash recovery.
+Mounted-view moves are rejected before mutation, and ordinary unprivileged
+shells may still need the planned least-privilege activation helper.
+
 Riftri deliberately stops with a clear explanation when a checkout cannot yet
 be reproduced safely—for example, repositories using Git LFS, custom filters,
 sparse checkout, submodules, or external attributes. It never silently replaces
@@ -142,11 +150,11 @@ never accepted by this command.
 
 ## How disk sharing works
 
-Riftri prepares one immutable base for an exact Git tree and creates native APFS
-clones, Linux reflinks, or ReFS block clones from it. Those views initially
-share physical blocks. Editing a file allocates new blocks only for that
-worktree, so worktrees are lightweight—not free—and their disk use grows as
-they diverge.
+Riftri prepares one immutable base for an exact Git tree. It creates native
+APFS clones, Linux reflinks, or ReFS block clones from it, or exposes it as an
+OverlayFS lower layer with a private writable upper. Unchanged contents are not
+materialized again; worktrees are lightweight—not free—and private disk use
+grows as they diverge.
 
 `riftri status` reports managed views and filesystem-accounted allocation. For
 details on measuring physical sharing, see
@@ -156,10 +164,11 @@ details on measuring physical sharing, see
 
 ## Project status
 
-The macOS/APFS, Linux reflink, and Windows/ReFS implementations include
+The macOS/APFS, Linux reflink, Linux OverlayFS, and Windows/ReFS implementations include
 worktree creation, process-scoped Git interception, lifecycle recovery, cleanup,
-and disk accounting. Linux OverlayFS, broader checkout compatibility, ordinary
-Windows filesystem alternatives, and managed environments remain roadmap work.
+and disk accounting. OverlayFS least-privilege activation and reboot recovery,
+broader checkout compatibility, ordinary Windows filesystem alternatives, and
+managed environments remain roadmap work.
 
 Development plans and design details live in:
 
