@@ -843,6 +843,22 @@ impl CollectionJournalRecord {
     }
 }
 
+// Random, exclusively created names let retries proceed past crash leftovers.
+// The guard removes this attempt's file if writing or replacement fails.
+fn journal_temporary(
+    directory: &Path,
+    operation_id: &str,
+) -> Result<(File, tempfile::TempPath), JournalError> {
+    tempfile::Builder::new()
+        .prefix(&format!(".{operation_id}."))
+        .suffix(".tmp")
+        .make_in(directory, |path| {
+            OpenOptions::new().create_new(true).write(true).open(path)
+        })
+        .map(tempfile::NamedTempFile::into_parts)
+        .map_err(|source| io("create temporary journal", directory, source))
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct JournalStore {
     directory: PathBuf,
@@ -870,20 +886,11 @@ impl JournalStore {
     pub fn persist(&self, record: &JournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let temporary = self.directory.join(format!(
-            ".{}.{}.tmp",
-            record.operation_id,
-            std::process::id()
-        ));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|source| io("create temporary journal", &temporary, source))?;
+        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
-                path: temporary.clone(),
+                path: temporary.to_path_buf(),
                 source,
             }
         })?;
@@ -897,7 +904,9 @@ impl JournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync operation journal", &temporary, source))?;
+        drop(writer);
         atomic_replace(&temporary, &path)?;
+        temporary.disable_cleanup(true);
         sync_parent(&path)?;
         Ok(path)
     }
@@ -1084,20 +1093,11 @@ impl RemovalJournalStore {
     pub fn persist(&self, record: &RemovalJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let temporary = self.directory.join(format!(
-            ".{}.{}.tmp",
-            record.operation_id,
-            std::process::id()
-        ));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|source| io("create temporary removal journal", &temporary, source))?;
+        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
-                path: temporary.clone(),
+                path: temporary.to_path_buf(),
                 source,
             }
         })?;
@@ -1111,7 +1111,9 @@ impl RemovalJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync removal journal", &temporary, source))?;
+        drop(writer);
         atomic_replace(&temporary, &path)?;
+        temporary.disable_cleanup(true);
         sync_parent(&path)?;
         Ok(path)
     }
@@ -1173,20 +1175,11 @@ impl MoveJournalStore {
     pub fn persist(&self, record: &MoveJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let temporary = self.directory.join(format!(
-            ".{}.{}.tmp",
-            record.operation_id,
-            std::process::id()
-        ));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|source| io("create temporary move journal", &temporary, source))?;
+        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
-                path: temporary.clone(),
+                path: temporary.to_path_buf(),
                 source,
             }
         })?;
@@ -1200,7 +1193,9 @@ impl MoveJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync move journal", &temporary, source))?;
+        drop(writer);
         atomic_replace(&temporary, &path)?;
+        temporary.disable_cleanup(true);
         sync_parent(&path)?;
         Ok(path)
     }
@@ -1262,20 +1257,11 @@ impl PruneJournalStore {
     pub fn persist(&self, record: &PruneJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let temporary = self.directory.join(format!(
-            ".{}.{}.tmp",
-            record.operation_id,
-            std::process::id()
-        ));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|source| io("create temporary prune journal", &temporary, source))?;
+        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
-                path: temporary.clone(),
+                path: temporary.to_path_buf(),
                 source,
             }
         })?;
@@ -1289,7 +1275,9 @@ impl PruneJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync prune journal", &temporary, source))?;
+        drop(writer);
         atomic_replace(&temporary, &path)?;
+        temporary.disable_cleanup(true);
         sync_parent(&path)?;
         Ok(path)
     }
@@ -1351,20 +1339,11 @@ impl CollectionJournalStore {
     pub fn persist(&self, record: &CollectionJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let temporary = self.directory.join(format!(
-            ".{}.{}.tmp",
-            record.operation_id,
-            std::process::id()
-        ));
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|source| io("create temporary collection journal", &temporary, source))?;
+        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
-                path: temporary.clone(),
+                path: temporary.to_path_buf(),
                 source,
             }
         })?;
@@ -1378,7 +1357,9 @@ impl CollectionJournalStore {
             .get_ref()
             .sync_all()
             .map_err(|source| io("sync collection journal", &temporary, source))?;
+        drop(writer);
         atomic_replace(&temporary, &path)?;
+        temporary.disable_cleanup(true);
         sync_parent(&path)?;
         Ok(path)
     }
@@ -2093,6 +2074,31 @@ mod tests {
     }
 
     #[test]
+    fn failed_journal_replacement_cleans_its_temporary_and_can_retry() {
+        let directory = tempdir().expect("fixture");
+        let store = PruneJournalStore::create(directory.path()).expect("store");
+        let record = PruneJournalRecord::new("retry".to_owned(), Path::new("/repository"));
+        let path = store.path_for("retry");
+        std::fs::create_dir(&path).expect("block replacement");
+        store.persist(&record).expect_err("replacement fails");
+        assert_eq!(
+            std::fs::read_dir(&store.directory)
+                .expect("entries")
+                .count(),
+            1
+        );
+        std::fs::remove_dir(&path).expect("remove fixture blocker");
+        store.persist(&record).expect("retry succeeds");
+        assert_eq!(store.load_all().expect("load retried record").len(), 1);
+        assert_eq!(
+            std::fs::read_dir(&store.directory)
+                .expect("entries")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn journal_stores_do_not_write_through_temporary_file_symlinks() {
         fn plant_symlink(state: &Path, directory: &str, operation_id: &str, target: &Path) {
             let temporary = state
@@ -2123,7 +2129,7 @@ mod tests {
         plant_symlink(directory.path(), "operations", "add-operation", &protected);
         add_store
             .persist(&add)
-            .expect_err("add journal must reject the symlink");
+            .expect("add journal must ignore the stale temporary symlink");
 
         let removal_store =
             RemovalJournalStore::create(directory.path()).expect("create removal store");
@@ -2144,7 +2150,7 @@ mod tests {
         );
         removal_store
             .persist(&removal)
-            .expect_err("removal journal must reject the symlink");
+            .expect("removal journal must ignore the stale temporary symlink");
 
         let move_store = MoveJournalStore::create(directory.path()).expect("create move store");
         let move_record = MoveJournalRecord::new(
@@ -2159,14 +2165,14 @@ mod tests {
         plant_symlink(directory.path(), "moves", "move-operation", &protected);
         move_store
             .persist(&move_record)
-            .expect_err("move journal must reject the symlink");
+            .expect("move journal must ignore the stale temporary symlink");
 
         let prune_store = PruneJournalStore::create(directory.path()).expect("create prune store");
         let prune = PruneJournalRecord::new("prune-operation".to_owned(), Path::new("/repository"));
         plant_symlink(directory.path(), "prunes", "prune-operation", &protected);
         prune_store
             .persist(&prune)
-            .expect_err("prune journal must reject the symlink");
+            .expect("prune journal must ignore the stale temporary symlink");
 
         let collection_store =
             CollectionJournalStore::create(directory.path()).expect("create collection store");
@@ -2186,7 +2192,7 @@ mod tests {
         );
         collection_store
             .persist(&collection)
-            .expect_err("collection journal must reject the symlink");
+            .expect("collection journal must ignore the stale temporary symlink");
 
         assert_eq!(
             std::fs::read_to_string(protected).expect("read protected file"),
