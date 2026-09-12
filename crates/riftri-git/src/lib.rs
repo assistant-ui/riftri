@@ -525,16 +525,14 @@ impl Git {
     /// Resolve the repository-specific attributes file through Git so linked
     /// worktrees use the correct common Git directory.
     pub fn info_attributes_path(&self, path: &Path) -> Result<PathBuf, GitError> {
-        self.run_path(
+        let common_git_dir = self.run_path(
             Some(path),
-            &[
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-path",
-                "info/attributes",
-            ],
-            "repository attributes path",
-        )
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            "common Git directory",
+        )?;
+        // Git's absolute --git-path can resolve a symlink at the final path,
+        // hiding it from callers that need to inspect attributes without following it.
+        Ok(common_git_dir.join("info/attributes"))
     }
 
     /// Return every attribute Git resolves for the supplied tree paths.

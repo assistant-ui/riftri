@@ -1995,13 +1995,31 @@ fn analyze_resolved_repository_compatibility(
     }
 
     let info_attributes_path = git.info_attributes_path(repository)?;
-    let info_attributes_safe = match fs::read(&info_attributes_path) {
-        Ok(contents) if contents.is_empty() => true,
+    // Only an absent or empty regular file is supported. Inspect its metadata
+    // without reading contents: FIFOs must not block, symlinks must not escape
+    // this path, and a large unsupported file needs no memory allocation.
+    let info_metadata = fs::symlink_metadata(
+        info_attributes_path.parent().expect("info directory"),
+    )
+    .and_then(|metadata| {
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(std::io::Error::other(
+                "attributes parent is not a real directory",
+            ));
+        }
+        fs::symlink_metadata(&info_attributes_path)
+    });
+    let info_attributes_safe = match info_metadata {
+        Ok(metadata)
+            if metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() == 0 =>
+        {
+            true
+        }
         Ok(_) => {
             blockers.push(RepositoryCompatibilityBlocker {
                 kind: RepositoryCompatibilityBlockerKind::EffectiveAttributes,
                 explanation: format!(
-                    "repository attributes file {} is not empty; external attributes are not part of the immutable tree and are not supported yet",
+                    "repository attributes file {} is not an empty regular file; external attributes are not part of the immutable tree and are not supported yet",
                     info_attributes_path.display()
                 ),
             });
@@ -4942,6 +4960,67 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(ids.len(), WORKERS);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attributes_inspection_rejects_symlinks_fifos_and_large_files() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("fixture");
+        git(fixture.path(), &["init", "--quiet"]);
+        git(
+            fixture.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        let attributes = fixture.path().join(".git/info/attributes");
+        let empty = fixture.path().join("empty");
+        fs::write(&empty, "").expect("empty file");
+        symlink(&empty, &attributes).expect("symlink attributes");
+        let inspect = || {
+            super::inspect_repository_compatibility(
+                &Git::default(),
+                fixture.path(),
+                std::ffi::OsStr::new("HEAD"),
+            )
+            .expect("compatibility report")
+        };
+        assert!(
+            !inspect().compatible,
+            "symlinks must fail closed even when empty"
+        );
+        fs::remove_file(&attributes).expect("remove fixture link");
+        let large = fs::File::create(&attributes).expect("large attributes file");
+        large
+            .set_len(4 * 1024 * 1024 * 1024)
+            .expect("sparse file length");
+        drop(large);
+        assert!(!inspect().compatible, "large files require no allocation");
+        fs::remove_file(&attributes).expect("remove fixture file");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&attributes)
+                .status()
+                .expect("create FIFO")
+                .success()
+        );
+        assert!(
+            !inspect().compatible,
+            "FIFO inspection must not wait for a writer"
+        );
+        fs::remove_file(&attributes).expect("remove fixture FIFO");
+        fs::write(&attributes, "").expect("empty regular attributes");
+        assert!(inspect().compatible);
     }
 
     #[cfg(unix)]
