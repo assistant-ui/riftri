@@ -5,6 +5,46 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## 0.1.1 - 2026-09-12
+
+The first public distribution includes the 0.1.0 foundation and the following
+platform, lifecycle, and safety improvements.
+
+### Added
+
+- Native Linux reflink worktrees on Btrfs and reflink-enabled XFS, plus Windows
+  ReFS block-clone worktrees with real-filesystem CI and allocation checks.
+- Linux OverlayFS worktrees with caller-namespace capability checks, an
+  explicitly installed least-privilege helper, crash-gap mount adoption, and
+  explicit reboot recovery that preserves private changes.
+- Repository compatibility preflight, custom state-directory discovery, and
+  conservative repair of stale state registrations.
+- Deterministic in-tree text, line-ending, and binary attribute support;
+  unsupported filters, encodings, and external attributes remain fail-closed.
+
+### Fixed
+
+- Interrupted-add recovery preserves detached commits and other changed HEADs
+  instead of removing a worktree whose files happen to be clean (#90).
+- Repair skips live adds under per-operation locks and reloads journals after
+  acquiring ownership, preventing concurrent rollback of an active creator (#93).
+- Unicode normalization and case collisions are checked on the destination
+  filesystem before durable state or Git metadata is created (#91).
+- Fork-only OverlayFS probes release unrelated inherited file descriptors,
+  preventing leaked mount and lock references (#92).
+- Immutable bases are verified before reuse, checkout inputs stay pinned to
+  the resolved tree, and cleanup preserves writes racing with Git removal.
+- Journal snapshots, temporary files, state paths, Git pointers, and storage
+  accounting reject unsafe or inconsistent inputs without deleting user data.
+
+### Compatibility
+
+- Concurrent add and repair processes must all use the lock-aware version.
+  An older running binary cannot participate in the new ownership protocol.
+- New verified base-cache buckets do not reuse bases from the older checkout
+  profile. Important work should still be committed or backed up: Riftri remains
+  experimental, and unsupported filesystems never silently fall back to copies.
+
 ## 0.1.0 - 2026-09-09
 
 ### Added

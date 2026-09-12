@@ -6,6 +6,7 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 const { access, mkdtemp, readFile, rm } = require("node:fs/promises");
 const { test } = require("node:test");
+const { version } = require("../../package.json");
 
 const {
   detectLinuxLibc,
@@ -67,7 +68,7 @@ test("launcher delegates to the locally built Rust executable", () => {
   });
 
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^riftri 0\.1\.0\s*$/);
+  assert.equal(result.stdout.trim(), `riftri ${version}`);
 });
 
 test("launcher preserves process-scoped Rust Git execution", () => {

@@ -275,7 +275,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "riftri-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "riftri-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fs2",
  "libc",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "riftri-git"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "tempfile",
@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "riftri-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fs2",
  "libc",
