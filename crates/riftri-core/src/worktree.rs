@@ -4498,9 +4498,25 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     let registered = git
         .list_worktrees(&journal.repository)?
         .into_iter()
-        .any(|worktree| paths_match(&worktree.path, &journal.destination));
+        .find(|worktree| paths_match(&worktree.path, &journal.destination));
 
-    if registered {
+    if let Some(worktree) = registered {
+        let expected = ObjectId::parse(journal.expected_commit.clone())?;
+        let expected_branch = journal.branch.as_ref().map(|branch| {
+            let mut reference = b"refs/heads/".to_vec();
+            reference.extend_from_slice(branch.as_encoded_bytes());
+            reference
+        });
+        if worktree.head.as_ref() != Some(&expected)
+            || worktree.branch != expected_branch
+            || worktree.detached != journal.branch.is_none()
+            || worktree.bare
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "worktree HEAD changed after creation; recovery preserved {}",
+                journal.destination.display()
+            )));
+        }
         restore_staged_git_pointer(journal)?;
         if journal.backend == BackendKind::OverlayFs {
             #[cfg(target_os = "linux")]
@@ -6389,6 +6405,81 @@ mod tests {
                 assert!(destination.join(".git").is_file());
             } else {
                 assert!(!destination.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_preserves_an_interrupted_view_whose_head_changed() {
+        for (detached, change) in [
+            (true, "commit"),
+            (true, "switch"),
+            (false, "switch"),
+            (false, "detach"),
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+            git(&repository, &["add", "."]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: if detached {
+                        WorktreeMode::Detached
+                    } else {
+                        WorktreeMode::NewBranch(OsString::from("feature/interrupted"))
+                    },
+                    state_dir: Some(state.clone()),
+                },
+                Some(AddWorktreePhase::IndexSynchronized),
+                false,
+            )
+            .expect_err("simulate process termination");
+            match change {
+                "commit" => {
+                    fs::write(destination.join("tracked.txt"), "committed change\n").unwrap();
+                    git(&destination, &["add", "."]);
+                    git(&destination, &["commit", "--quiet", "-m", "preserve me"]);
+                }
+                "switch" => {
+                    git(
+                        &destination,
+                        &["switch", "--quiet", "-c", "feature/private"],
+                    );
+                }
+                "detach" => {
+                    git(&destination, &["switch", "--quiet", "--detach"]);
+                }
+                _ => unreachable!(),
+            }
+            let head = riftri_git::Git::default()
+                .resolve_revision(&destination, std::ffi::OsStr::new("HEAD"))
+                .unwrap();
+            for _ in 0..2 {
+                let report = recover_incomplete_operations(&state).expect("repair report");
+                assert_eq!(report.recovered, 0, "{detached}/{change}: {report:?}");
+                assert_eq!(report.errors.len(), 1, "{report:?}");
+                assert!(report.errors[0].contains("HEAD"), "{report:?}");
+                assert!(destination.exists());
+                assert_eq!(
+                    riftri_git::Git::default()
+                        .resolve_revision(&destination, std::ffi::OsStr::new("HEAD"))
+                        .unwrap(),
+                    head
+                );
             }
         }
     }
