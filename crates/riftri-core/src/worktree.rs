@@ -557,7 +557,7 @@ pub fn storage_accounting(
     }
     views.sort_unstable_by(|left, right| left.destination.cmp(&right.destination));
 
-    for base_path in retained_base_paths(&state_directory)? {
+    for base_path in retained_base_paths(&state_directory, UnsafeBaseInventory::Ignore)? {
         references.entry(base_path).or_default();
     }
     let mut bases = Vec::with_capacity(references.len());
@@ -791,7 +791,7 @@ fn garbage_collection_candidates(
         .map(|journal| journal.base_path)
         .collect::<HashSet<_>>();
     let mut candidates = Vec::new();
-    for base_path in retained_base_paths(state_directory)? {
+    for base_path in retained_base_paths(state_directory, UnsafeBaseInventory::Reject)? {
         if protected.contains(&base_path) || pending.contains(&base_path) {
             continue;
         }
@@ -2648,8 +2648,18 @@ fn diagnose_base_directories(
     }
 
     let root = bases.join("v1");
-    if !is_real_directory_if_present(&root)? {
-        return Ok(());
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            add_state_issue(
+                issues,
+                root,
+                "immutable-base layout root must be a real directory",
+            );
+            return Ok(());
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io("inspect immutable-base root", &root, source)),
     }
     let pending_staging = pending_base_builds
         .iter()
@@ -2864,10 +2874,28 @@ fn looks_like_object_id(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn retained_base_paths(state_directory: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum UnsafeBaseInventory {
+    Ignore,
+    Reject,
+}
+
+fn retained_base_paths(
+    state_directory: &Path,
+    unsafe_inventory: UnsafeBaseInventory,
+) -> Result<Vec<PathBuf>, WorktreeError> {
     let root = state_directory.join("bases/v1");
-    if !root.exists() {
-        return Ok(Vec::new());
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) if unsafe_inventory == UnsafeBaseInventory::Ignore => return Ok(Vec::new()),
+        Ok(_) => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "immutable-base root {} is not a real directory",
+                root.display()
+            )));
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(io("inspect immutable-base root", &root, source)),
     }
     let mut bases = Vec::new();
     for repository_entry in
@@ -2892,8 +2920,15 @@ fn retained_base_paths(state_directory: &Path) -> Result<Vec<PathBuf>, WorktreeE
             let entry = entry
                 .map_err(|source| io("read immutable-base marker", &repository_path, source))?;
             let marker = entry.path();
-            if marker.extension() == Some(OsStr::new("complete")) && marker.is_file() {
-                bases.push(marker.with_extension(""));
+            if marker.extension() == Some(OsStr::new("complete")) {
+                if is_regular_file(&marker)? {
+                    bases.push(marker.with_extension(""));
+                } else if unsafe_inventory == UnsafeBaseInventory::Reject {
+                    return Err(WorktreeError::InvalidRequest(format!(
+                        "immutable-base completion marker {} is not a real file",
+                        marker.display()
+                    )));
+                }
             }
         }
     }
@@ -4103,6 +4138,83 @@ mod tests {
         ] {
             assert!(error.to_string().contains("not a real directory"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_and_gc_do_not_inventory_through_a_symlinked_base_root() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("fixture");
+        let state = fixture.path().join("state");
+        let outside = fixture.path().join("outside");
+        let outside_base = outside
+            .join("repository")
+            .join("0123456789abcdef0123456789abcdef01234567");
+        fs::create_dir_all(state.join("bases")).expect("create state base directory");
+        fs::create_dir_all(&outside_base).expect("create outside base");
+        fs::write(outside_base.join("private.txt"), "outside\n").expect("write outside file");
+        fs::write(outside_base.with_extension("complete"), "").expect("write outside marker");
+        let state = state.canonicalize().expect("resolve state");
+        let root = state.join("bases/v1");
+        symlink(&outside, &root).expect("symlink immutable-base root");
+
+        let status = storage_accounting(&state).expect("diagnose symlinked base root");
+        let collection_error = garbage_collect_inner(&state, false, None)
+            .expect_err("collection must reject symlinked base root");
+
+        assert!(status.bases.is_empty());
+        assert!(
+            collection_error
+                .to_string()
+                .contains("not a real directory")
+        );
+        assert!(status.diagnostic_issues.iter().any(|issue| {
+            issue.path == root && issue.reason.contains("must be a real directory")
+        }));
+        assert_eq!(
+            fs::read_to_string(outside_base.join("private.txt")).expect("read outside file"),
+            "outside\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_and_gc_ignore_symlinked_base_completion_markers() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("fixture");
+        let state = fixture.path().join("state");
+        let base = state
+            .join("bases/v1/repository")
+            .join("0123456789abcdef0123456789abcdef01234567");
+        let protected = fixture.path().join("protected-marker-target");
+        fs::create_dir_all(&base).expect("create base");
+        fs::write(base.join("tracked.txt"), "base\n").expect("write base file");
+        fs::write(&protected, "must remain unchanged\n").expect("write protected file");
+        let state = state.canonicalize().expect("resolve state");
+        let base = state
+            .join("bases/v1/repository")
+            .join("0123456789abcdef0123456789abcdef01234567");
+        let marker = base.with_extension("complete");
+        symlink(&protected, &marker).expect("symlink completion marker");
+
+        let status = storage_accounting(&state).expect("diagnose symlinked marker");
+        let collection_error = garbage_collect_inner(&state, false, None)
+            .expect_err("collection must reject symlinked marker");
+
+        assert!(status.bases.is_empty());
+        assert!(collection_error.to_string().contains("not a real file"));
+        assert!(
+            status
+                .diagnostic_issues
+                .iter()
+                .any(|issue| issue.path == marker)
+        );
+        assert_eq!(
+            fs::read_to_string(protected).expect("read protected file"),
+            "must remain unchanged\n"
+        );
     }
 
     #[test]
