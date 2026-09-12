@@ -106,7 +106,9 @@ active journal from a prior boot only when no current mount occupies the exact
 worktree path. It atomically replaces the stale boot and namespace identity
 with remount intent, arms the existing private token marker, remounts in the
 caller's current namespace, persists the new kernel identity, and then clears
-the marker. A crash anywhere in this remount sequence can be retried.
+the marker. Before mounting, Riftri recreates only OverlayFS's disposable work
+directory; the private upper is never rebuilt. A crash anywhere in this
+remount sequence can be retried.
 
 Private upper contents are reused rather than reconstructed, so tracked,
 untracked, and dirty changes survive. Repeated repair is a no-op once the mount

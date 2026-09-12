@@ -335,8 +335,9 @@ private upper/work state can. When an active journal's boot identity is stale
 and no current mount occupies the exact destination, `riftri repair` atomically
 replaces the old context and mount ID with new remount intent. The existing
 token-bound marker then protects the crash window around remount and identity
-persistence. Recovery reuses the private upper so dirty and untracked work is
-preserved, and repeated repair is idempotent. A mount in the current boot, a
+persistence. Recovery recreates the disposable kernel work directory but reuses
+the private upper, so dirty and untracked work is preserved and repeated repair
+is idempotent. A mount in the current boot, a
 same-boot namespace mismatch, or a foreign destination mount remains a hard
 stop. This is explicit recovery rather than an always-on daemon; making the
 mount available to ordinary unprivileged shells still requires the separate

@@ -345,6 +345,36 @@ fn prior_boot_prepared_layers_are_recoverable_when_no_mount_exists() {
 }
 
 #[test]
+fn remount_loader_resets_only_disposable_work_state() {
+    let fixture = tempdir().expect("fixture directory");
+    let lower = fixture.path().join("lower");
+    let layout_root = fixture.path().join("layout");
+    let merged = fixture.path().join("merged");
+    fs::create_dir(&lower).expect("lower directory");
+    fs::create_dir(&merged).expect("merged directory");
+    let layout =
+        OverlayFsMounter::prepare(&layout_root, &lower, &merged).expect("prepare durable layout");
+    fs::write(layout.upper().join("private-change"), b"preserve")
+        .expect("write private upper fixture");
+    fs::create_dir(layout.work().join("kernel-work")).expect("create stale work state");
+    fs::write(layout.work().join("kernel-work/temporary"), b"discard")
+        .expect("write stale work state");
+
+    let reloaded = OverlayFsMounter::load_for_remount(&layout_root, &lower, &merged)
+        .expect("reload layout for remount");
+    assert_eq!(
+        fs::read(reloaded.upper().join("private-change")).expect("read preserved upper state"),
+        b"preserve"
+    );
+    assert_eq!(
+        fs::read_dir(reloaded.work())
+            .expect("read reset work directory")
+            .count(),
+        0
+    );
+}
+
+#[test]
 fn recovery_token_is_validated_before_a_marker_is_created() {
     let fixture = tempdir().expect("fixture directory");
     let lower = fixture.path().join("lower");

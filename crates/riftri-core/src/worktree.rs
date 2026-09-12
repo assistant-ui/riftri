@@ -4166,11 +4166,19 @@ fn recover_active_overlayfs_mount(
             journal.journal_path.display()
         ))
     })?;
-    let layout = OverlayFsMounter::load(
-        &overlayfs.layout_root,
-        &journal.base_path,
-        &journal.destination,
-    )?;
+    let layout = if overlayfs.mount_identity.is_some() {
+        OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )?
+    } else {
+        OverlayFsMounter::load_for_remount(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )?
+    };
     let current_context = OverlayFsMounter::current_mount_context()?;
 
     let remount_journal = if let Some(identity) = overlayfs.mount_identity.as_ref() {
@@ -4254,17 +4262,22 @@ fn recover_active_overlayfs_mount(
             journal.journal_path.display()
         ))
     })?;
-    match OverlayFsMounter::recover_mount(&layout, context, &remount.recovery_token)? {
+    let remount_layout = OverlayFsMounter::load_for_remount(
+        &remount.layout_root,
+        &remount_journal.base_path,
+        &remount_journal.destination,
+    )?;
+    match OverlayFsMounter::recover_mount(&remount_layout, context, &remount.recovery_token)? {
         OverlayFsRecoveryState::Mounted(identity) => {
             store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
         }
         OverlayFsRecoveryState::Absent => {
-            OverlayFsMounter::arm_recovery(&layout, &remount.recovery_token)?;
-            let identity = OverlayFsMounter::mount(&layout)?;
+            OverlayFsMounter::arm_recovery(&remount_layout, &remount.recovery_token)?;
+            let identity = OverlayFsMounter::mount(&remount_layout)?;
             store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
         }
         OverlayFsRecoveryState::Prepared => {
-            let identity = OverlayFsMounter::mount(&layout)?;
+            let identity = OverlayFsMounter::mount(&remount_layout)?;
             store.record_overlayfs_mount_identity(&journal.journal_path, identity)?;
         }
         OverlayFsRecoveryState::DifferentNamespace => {
@@ -4280,7 +4293,7 @@ fn recover_active_overlayfs_mount(
             )));
         }
     }
-    OverlayFsMounter::clear_recovery(&layout, &remount.recovery_token)?;
+    OverlayFsMounter::clear_recovery(&remount_layout, &remount.recovery_token)?;
     Ok(true)
 }
 

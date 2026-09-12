@@ -334,6 +334,91 @@ pub(crate) fn load(
     })
 }
 
+pub(crate) fn load_for_remount(
+    layout_root: &Path,
+    lower: &Path,
+    merged: &Path,
+) -> Result<OverlayFsLayout, StorageError> {
+    let root = canonical_real_directory(layout_root, "layout root")?;
+    if root != layout_root {
+        return Err(invalid_layout(
+            layout_root,
+            format!(
+                "layout root resolves through a different path: {}",
+                root.display()
+            ),
+        ));
+    }
+    let lower = canonical_real_directory(lower, "immutable lower")?;
+    let merged = canonical_real_directory(merged, "merged destination")?;
+    let upper = canonical_real_directory(&root.join("upper"), "private upper")?;
+    let work = root.join("work");
+    let entry = current_mount_entry(&merged)?;
+    if entry.mount_point == merged {
+        return load(&root, &lower, &merged);
+    }
+
+    let mut entries = fs::read_dir(&root)
+        .map_err(|source| storage_io("read OverlayFS layout root", &root, source))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.file_name())
+                .map_err(|source| storage_io("read OverlayFS layout entry", &root, source))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    entries.sort_unstable();
+    if entries != [OsString::from("upper")]
+        && entries != [OsString::from("upper"), OsString::from("work")]
+    {
+        return Err(invalid_layout(
+            &root,
+            "remount layout root must contain only the journal-owned upper and optional work directory",
+        ));
+    }
+
+    match fs::symlink_metadata(&work) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+            if metadata.dev()
+                != upper
+                    .metadata()
+                    .map_err(|source| {
+                        storage_io("inspect OverlayFS private upper", &upper, source)
+                    })?
+                    .dev()
+            {
+                return Err(invalid_layout(
+                    &root,
+                    "private upper and work directories are on different filesystems",
+                ));
+            }
+            fs::remove_dir_all(&work).map_err(|source| {
+                storage_io("reset OverlayFS remount work directory", &work, source)
+            })?;
+        }
+        Ok(_) => {
+            return Err(invalid_layout(
+                &work,
+                "private work must be a real directory",
+            ));
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(storage_io(
+                "inspect OverlayFS remount work directory",
+                &work,
+                source,
+            ));
+        }
+    }
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    builder
+        .create(&work)
+        .map_err(|source| storage_io("recreate OverlayFS remount work directory", &work, source))?;
+    sync_directory(&root)?;
+    load(&root, &lower, &merged)
+}
+
 pub(crate) fn current_mount_context() -> Result<OverlayFsMountContext, StorageError> {
     let boot_id = current_boot_id()?;
     let (mount_namespace_device, mount_namespace_inode) = current_mount_namespace()?;

@@ -251,7 +251,11 @@ fn repair_remounts_an_active_view_after_a_simulated_reboot() {
     .expect("persist simulated prior-boot journal");
 
     let recovered = recover_incomplete_operations(&state).expect("repair after simulated reboot");
-    assert!(recovered.errors.is_empty());
+    assert!(
+        recovered.errors.is_empty(),
+        "reboot repair errors: {:?}",
+        recovered.errors
+    );
     assert_eq!(recovered.active, 1);
     assert_eq!(recovered.recovered_mounts, 1);
     assert!(

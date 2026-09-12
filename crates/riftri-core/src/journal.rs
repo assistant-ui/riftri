@@ -1422,7 +1422,9 @@ mod tests {
         PruneJournalRecord, PruneJournalStore, RemovalJournalPaths, RemovalJournalRecord,
         RemovalJournalStore,
     };
-    use crate::{AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase};
+    #[cfg(target_os = "linux")]
+    use crate::AddWorktreePhase;
+    use crate::{GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase};
 
     #[test]
     fn journal_store_rejects_a_symlinked_state_directory() {
