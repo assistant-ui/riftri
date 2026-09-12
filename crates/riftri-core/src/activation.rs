@@ -317,12 +317,7 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     let current_executable = env::current_exe()
         .map_err(|error| shell_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = shell_shim_directory()?;
-    fs::create_dir_all(&shim_directory).map_err(|error| {
-        shell_error(format!(
-            "create shell shim directory {}: {error}",
-            shim_directory.display()
-        ))
-    })?;
+    ensure_real_shell_shim_directory(&shim_directory)?;
     set_private_directory_permissions(&shim_directory)?;
     install_durable_git_shim(&shim_directory, &current_executable)?;
 
@@ -444,6 +439,57 @@ fn set_private_directory_permissions(directory: &Path) -> Result<(), ActivationE
             directory.display()
         ))
     })
+}
+
+#[cfg(unix)]
+fn ensure_real_shell_shim_directory(directory: &Path) -> Result<(), ActivationError> {
+    let shims = directory
+        .parent()
+        .ok_or_else(|| shell_error("shell shim directory has no parent"))?;
+    let cache_root = shims
+        .parent()
+        .ok_or_else(|| shell_error("shell shim cache root has no parent"))?;
+    fs::create_dir_all(cache_root).map_err(|error| {
+        shell_error(format!(
+            "create shell shim cache root {}: {error}",
+            cache_root.display()
+        ))
+    })?;
+    require_real_shell_directory(cache_root)?;
+    ensure_real_shell_directory(shims)?;
+    ensure_real_shell_directory(directory)
+}
+
+#[cfg(unix)]
+fn ensure_real_shell_directory(directory: &Path) -> Result<(), ActivationError> {
+    match fs::create_dir(directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(shell_error(format!(
+                "create shell shim directory {}: {error}",
+                directory.display()
+            )));
+        }
+    }
+    require_real_shell_directory(directory)
+}
+
+#[cfg(unix)]
+fn require_real_shell_directory(directory: &Path) -> Result<(), ActivationError> {
+    let metadata = fs::symlink_metadata(directory).map_err(|error| {
+        shell_error(format!(
+            "inspect shell shim directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(shell_error(format!(
+            "shell shim path {} is not a real directory",
+            directory.display()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

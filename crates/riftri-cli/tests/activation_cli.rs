@@ -569,6 +569,32 @@ fn shell_hook_places_a_durable_riftri_git_shim_first_on_path() {
 
 #[cfg(unix)]
 #[test]
+fn shell_hook_rejects_a_symlinked_shim_directory() {
+    let cache = tempdir().expect("shell hook cache");
+    let cache_root = cache.path().join("cache");
+    let outside = cache.path().join("outside");
+    fs::create_dir_all(cache_root.join("shims")).expect("create cache parent");
+    fs::create_dir(&outside).expect("create outside directory");
+    fs::write(outside.join("git"), "protected\n").expect("write protected Git file");
+    std::os::unix::fs::symlink(&outside, cache_root.join("shims/v1"))
+        .expect("symlink shim directory");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["shell", "hook", "sh"])
+        .env("RIFTRI_CACHE_DIR", &cache_root)
+        .output()
+        .expect("render shell hook");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("real directory"));
+    assert_eq!(
+        fs::read_to_string(outside.join("git")).expect("read protected Git file"),
+        "protected\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn shell_status_explains_global_scope_and_deactivation_restores_git() {
     let fixture = RepositoryFixture::new();
     let cache = tempdir().expect("shell hook cache");
