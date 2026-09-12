@@ -429,6 +429,16 @@ adds use a new cache namespace, while older bases remain available to their
 existing views and explicit garbage collection. This detects accidental cache
 corruption; it does not make same-user mutable state a security sandbox.
 
+### Captured checkout inputs during materialization
+
+Compatibility analysis captures the exact configuration bytes used in its cache
+profile. Base materialization uses those captured values in a private temporary
+Git administrative directory, reads the source object store without copying it,
+and takes attributes only from the requested tree. Inherited Git overrides,
+repository `info/attributes`, global/system attributes, and later configuration
+changes cannot change the cached bytes. The checkout-profile namespace changes
+so bases built with the older mutable-input path are not reused by new adds.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
