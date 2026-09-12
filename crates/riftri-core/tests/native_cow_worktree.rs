@@ -272,7 +272,11 @@ fn refuses_reuse_of_a_base_with_an_injected_ignored_file() {
     #[cfg(unix)]
     writable.set_mode(original.mode() | 0o200);
     #[cfg(windows)]
-    writable.set_readonly(false);
+    #[allow(clippy::permissions_set_readonly_false)]
+    // Windows clears an attribute, not Unix mode bits.
+    {
+        writable.set_readonly(false);
+    }
     fs::set_permissions(&first.base_path, writable).expect("make fixture base writable");
     fs::write(first.base_path.join("ignored.txt"), "injected\n").expect("inject ignored file");
     fs::set_permissions(&first.base_path, original).expect("restore base permissions");
