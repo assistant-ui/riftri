@@ -37,7 +37,9 @@ reflink-enabled XFS without a byte-copy fallback. When reflinks are unsupported,
 Linux can select OverlayFS only after an artifact-clean active probe succeeds in
 the caller's current mount namespace. OverlayFS add and clean removal use the
 same durable transaction, exact private-layer ownership, mount identity, and
-token-bound crash-gap recovery; mounted moves remain fail-closed. Windows
+token-bound crash-gap recovery. Explicit repair remounts an active view after a
+boot change while preserving its private upper layer; mounted moves remain
+fail-closed. Windows
 creation actively verifies ReFS block cloning and private-write isolation before
 mutation and uses the same journaled lifecycle. Riftri still has no forced
 move/removal lifecycle path, automatic orphan-state repair, least-privilege

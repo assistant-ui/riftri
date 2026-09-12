@@ -333,8 +333,12 @@ rechecks Git cleanliness, unmounts only that identity, restores the pointer to
 the underlying destination, removes journal-owned private layers, and lets real
 Git remove the linked worktree. A crash at any persisted add or removal phase
 is recoverable in the same namespace, including the gap after `mount(2)` and
-before identity persistence. Mounted moves fail before mutation. The narrow
-least-privilege activation boundary and reboot recovery remain open.
+before identity persistence. Explicit repair handles a missing active mount by
+first replacing stale boot/namespace identity with durable remount intent, then
+reusing the token marker around the new mount and identity write. Private upper
+contents survive this remount, including dirty user edits. A mount already
+occupying the destination remains foreign. Mounted moves fail before mutation.
+The narrow least-privilege activation boundary remains open.
 
 On Windows, Riftri accepts ReFS only after an active
 `FSCTL_DUPLICATE_EXTENTS_TO_FILE` check succeeds on two delete-on-close files in

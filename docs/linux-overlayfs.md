@@ -96,8 +96,27 @@ clean Git status before activation. Clean removal unmounts only the matching
 identity, restores the pointer to the underlying directory, removes the exact
 private-layer root, and then delegates removal to real Git. CI covers two-view
 isolation, every persisted add/removal transition, and a creator process exiting
-in the mount-ID gap. A narrow least-privilege mount boundary and reboot
-simulation remain acceptance gates.
+in the mount-ID gap.
+
+## Reboot recovery
+
+Kernel OverlayFS mounts disappear at reboot while the immutable lower and
+private upper/work directories remain durable. `riftri repair` recognizes an
+active journal from a prior boot only when no current mount occupies the exact
+worktree path. It atomically replaces the stale boot and namespace identity
+with remount intent, arms the existing private token marker, remounts in the
+caller's current namespace, persists the new kernel identity, and then clears
+the marker. A crash anywhere in this remount sequence can be retried.
+
+Private upper contents are reused rather than reconstructed, so tracked,
+untracked, and dirty changes survive. Repeated repair is a no-op once the mount
+is active. A current mount at the destination, a same-boot mount in another
+namespace, or an ownership-marker mismatch fails closed. CI simulates a reboot
+by removing the kernel mount, aging the durable boot identity, and proving that
+repair restores the real dirty Git worktree without changing its base.
+
+A narrow least-privilege mount boundary remains an acceptance gate for ordinary
+unprivileged Linux shells.
 
 See the Linux kernel's
 [OverlayFS documentation](https://docs.kernel.org/filesystems/overlayfs.html)

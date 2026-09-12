@@ -320,6 +320,31 @@ fn prepared_layers_require_the_original_mount_namespace_for_cleanup() {
 }
 
 #[test]
+fn prior_boot_prepared_layers_are_recoverable_when_no_mount_exists() {
+    let fixture = tempdir().expect("fixture directory");
+    let lower = fixture.path().join("lower");
+    let layout_root = fixture.path().join("layout");
+    let merged = fixture.path().join("merged");
+    fs::create_dir(&lower).expect("lower directory");
+    fs::create_dir(&merged).expect("merged directory");
+    let layout =
+        OverlayFsMounter::prepare(&layout_root, &lower, &merged).expect("prepare durable layout");
+    let mut context = OverlayFsMounter::current_mount_context().expect("capture mount context");
+    context.boot_id = "00000000-0000-0000-0000-000000000000".to_owned();
+    let token = "ba".repeat(32);
+    OverlayFsMounter::arm_recovery(&layout, &token).expect("arm recovery marker");
+
+    assert_eq!(
+        OverlayFsMounter::recover_mount(&layout, &context, &token)
+            .expect("inspect prior-boot prepared layout"),
+        OverlayFsRecoveryState::Prepared
+    );
+    OverlayFsMounter::remove_unmounted_private_layers(&layout, &context)
+        .expect("remove prior-boot prepared layers");
+    assert!(!layout_root.exists());
+}
+
+#[test]
 fn recovery_token_is_validated_before_a_marker_is_created() {
     let fixture = tempdir().expect("fixture directory");
     let lower = fixture.path().join("lower");

@@ -447,11 +447,27 @@ pub(crate) fn recover_mount(
     validate_layout(layout)?;
     let marker = recovery_marker_path(layout, token)?;
     let current_context = current_mount_context()?;
-    if current_context != *context {
+    let entry = current_mount_entry(&layout.merged)?;
+    if current_context.boot_id != context.boot_id {
+        if entry.mount_point == layout.merged {
+            return Ok(OverlayFsRecoveryState::Foreign);
+        }
+        return match require_recovery_marker(&marker, token) {
+            Ok(()) => Ok(OverlayFsRecoveryState::Prepared),
+            Err(StorageError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(OverlayFsRecoveryState::Absent)
+            }
+            Err(error) => Err(error),
+        };
+    }
+    if current_context.mount_namespace_device != context.mount_namespace_device
+        || current_context.mount_namespace_inode != context.mount_namespace_inode
+    {
         return Ok(OverlayFsRecoveryState::DifferentNamespace);
     }
 
-    let entry = current_mount_entry(&layout.merged)?;
     if entry.mount_point != layout.merged {
         return match require_recovery_marker(&marker, token) {
             Ok(()) => Ok(OverlayFsRecoveryState::Prepared),
@@ -510,10 +526,11 @@ pub(crate) fn remove_unmounted_private_layers(
     context: &OverlayFsMountContext,
 ) -> Result<(), StorageError> {
     validate_layout(layout)?;
-    if current_mount_context()? != *context {
+    let current_context = current_mount_context()?;
+    if current_context.boot_id == context.boot_id && current_context != *context {
         return Err(mount_conflict(
             &layout.merged,
-            "prepared layers belong to a different boot or mount namespace",
+            "prepared layers belong to a different mount namespace in the current boot",
         ));
     }
     let entry = current_mount_entry(&layout.merged)?;

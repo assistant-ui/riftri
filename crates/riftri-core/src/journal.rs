@@ -875,6 +875,55 @@ impl JournalStore {
         record.decode(journal_path.to_path_buf())
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn begin_overlayfs_remount(
+        &self,
+        journal_path: &Path,
+        expected_context: &OverlayFsMountContext,
+        expected_identity: Option<&OverlayFsMountIdentity>,
+        new_context: OverlayFsMountContext,
+    ) -> Result<DecodedJournal, JournalError> {
+        let file = File::open(journal_path)
+            .map_err(|source| io("open operation journal", journal_path, source))?;
+        let mut record: JournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: journal_path.to_path_buf(),
+                source,
+            })?;
+        if self.path_for(&record.operation_id) != journal_path {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "operation ID does not match the journal filename".to_owned(),
+            });
+        }
+        if record.phase != AddWorktreePhase::Active || record.backend != BackendKind::OverlayFs {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "only an active OverlayFS journal can begin a remount".to_owned(),
+            });
+        }
+        let overlayfs = record
+            .overlayfs
+            .as_mut()
+            .ok_or_else(|| JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "OverlayFS journal is missing its durable mount intent".to_owned(),
+            })?;
+        if overlayfs.mount_context.as_ref() != Some(expected_context)
+            || overlayfs.mount_identity.as_ref() != expected_identity
+        {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "OverlayFS mount identity changed before remount intent was persisted"
+                    .to_owned(),
+            });
+        }
+        overlayfs.mount_context = Some(new_context);
+        overlayfs.mount_identity = None;
+        self.persist(&record)?;
+        record.decode(journal_path.to_path_buf())
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     pub fn update_active_destination(
         &self,
@@ -1373,7 +1422,7 @@ mod tests {
         PruneJournalRecord, PruneJournalStore, RemovalJournalPaths, RemovalJournalRecord,
         RemovalJournalStore,
     };
-    use crate::{GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase};
+    use crate::{AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase};
 
     #[test]
     fn journal_store_rejects_a_symlinked_state_directory() {
@@ -1558,6 +1607,68 @@ mod tests {
         )
         .expect_err("short recovery token must fail closed");
         assert!(error.to_string().contains("32 bytes"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn active_overlayfs_remount_atomically_replaces_mount_context() {
+        use riftri_storage::{BackendKind, OverlayFsMountContext, OverlayFsMountIdentity};
+
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let previous_context = OverlayFsMountContext {
+            boot_id: "01234567-89ab-cdef-0123-456789abcdef".to_owned(),
+            mount_namespace_device: 4,
+            mount_namespace_inode: 5,
+        };
+        let previous_identity = OverlayFsMountIdentity {
+            boot_id: previous_context.boot_id.clone(),
+            mount_namespace_device: previous_context.mount_namespace_device,
+            mount_namespace_inode: previous_context.mount_namespace_inode,
+            mount_id: 6,
+        };
+        let mut record = JournalRecord::new_overlayfs(
+            "operation".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            Path::new("/state/overlays/v1/operation"),
+            "ab".repeat(32),
+            Some(previous_context.clone()),
+        )
+        .expect("create OverlayFS journal");
+        record.backend = BackendKind::OverlayFs;
+        record.phase = AddWorktreePhase::Active;
+        record.last_forward_phase = AddWorktreePhase::Active;
+        record
+            .record_overlayfs_mount_identity(previous_identity.clone())
+            .expect("record original mount identity");
+        let path = store.persist(&record).expect("persist active journal");
+        let new_context = OverlayFsMountContext {
+            boot_id: "fedcba98-7654-3210-fedc-ba9876543210".to_owned(),
+            mount_namespace_device: 7,
+            mount_namespace_inode: 8,
+        };
+
+        let remount = store
+            .begin_overlayfs_remount(
+                &path,
+                &previous_context,
+                Some(&previous_identity),
+                new_context.clone(),
+            )
+            .expect("persist remount intent");
+        let overlayfs = remount.overlayfs.expect("decoded OverlayFS remount intent");
+        assert_eq!(overlayfs.mount_context, Some(new_context));
+        assert!(overlayfs.mount_identity.is_none());
+        assert_eq!(remount.phase, AddWorktreePhase::Active);
     }
 
     #[cfg(unix)]

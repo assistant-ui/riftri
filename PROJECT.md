@@ -246,7 +246,8 @@ linked-worktree pointer in a private upper layer, persists exact mount identity,
 verifies clean Git state, and recovers the mount-ID persistence crash gap
 through a private ownership marker. Clean removal revalidates the exact mount,
 unmounts it, restores the pointer for real Git removal, and deletes only the
-journal-owned private layers. Mounted moves remain fail-closed.
-Least-privilege activation for ordinary unprivileged shells, reboot recovery,
-automatic orphan-state repair, ordinary-NTFS alternatives,
+journal-owned private layers. Explicit repair can remount an active view after
+a boot change without losing private edits. Mounted moves remain fail-closed.
+Least-privilege activation for ordinary unprivileged shells, automatic
+orphan-state repair, ordinary-NTFS alternatives,
 managed-environment integration, and a daemon are not implemented.
