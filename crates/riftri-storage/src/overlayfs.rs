@@ -1385,6 +1385,14 @@ fn path_c_string(path: &Path) -> Result<CString, ProbeFailure> {
 }
 
 fn run_probe_child(context: &ProbeContext<'_>) -> Result<(), ProbeFailure> {
+    run_probe_child_with(context.lower_payload_fd, context, child_probe)
+}
+
+fn run_probe_child_with<T>(
+    _retained_fd: RawFd,
+    context: &T,
+    child_entry: unsafe fn(RawFd, libc::pid_t, &T) -> !,
+) -> Result<(), ProbeFailure> {
     let mut pipe = [-1; 2];
     // SAFETY: `pipe` points to two writable file-descriptor slots.
     if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
@@ -1416,7 +1424,7 @@ fn run_probe_child(context: &ProbeContext<'_>) -> Result<(), ProbeFailure> {
         // Rust. All referenced buffers were fully built before `fork`.
         unsafe {
             libc::close(pipe[0]);
-            child_probe(pipe[1], parent, context);
+            child_entry(pipe[1], parent, context);
         }
     }
 
@@ -1679,4 +1687,63 @@ unsafe fn child_report(result_fd: RawFd, result: ChildResult) {
 fn last_errno() -> i32 {
     // SAFETY: Linux exposes the calling thread's errno through this pointer.
     unsafe { *libc::__errno_location() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct DescriptorContext {
+        retained: RawFd,
+        unrelated: RawFd,
+    }
+
+    #[test]
+    fn probe_child_closes_unrelated_cloexec_descriptors() {
+        let mut retained = tempfile::tempfile().unwrap();
+        retained.write_all(b"retained").unwrap();
+        let unrelated = tempfile::tempfile().unwrap();
+        // A high, close-on-exec FD models a concurrent mount's open payload.
+        // The probe never execs, so CLOEXEC alone cannot release its reference.
+        let high_fd = unsafe { libc::fcntl(unrelated.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 512) };
+        assert!(high_fd >= 512);
+        // SAFETY: fcntl returned a new owned descriptor.
+        let high = unsafe { File::from_raw_fd(high_fd) };
+        let context = DescriptorContext {
+            retained: retained.as_raw_fd(),
+            unrelated: high.as_raw_fd(),
+        };
+        run_probe_child_with(context.retained, &context, check_descriptors).unwrap();
+        // Closing the child's copies must leave the parent's descriptors intact.
+        assert!(retained.metadata().is_ok());
+        assert!(high.metadata().is_ok());
+    }
+
+    unsafe fn check_descriptors(
+        result_fd: RawFd,
+        _parent: libc::pid_t,
+        context: &DescriptorContext,
+    ) -> ! {
+        for fd in [0, 1, 2, context.unrelated] {
+            // SAFETY: F_GETFD only queries an integer descriptor.
+            if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 || last_errno() != libc::EBADF {
+                unsafe { child_fail(result_fd, 11, libc::EBUSY) };
+            }
+        }
+        let mut payload = [0_u8; 8];
+        // SAFETY: the retained descriptor and stack buffer are valid.
+        let read = unsafe {
+            libc::pread(
+                context.retained,
+                payload.as_mut_ptr().cast(),
+                payload.len(),
+                0,
+            )
+        };
+        if read != 8 || payload != *b"retained" {
+            unsafe { child_fail(result_fd, 11, libc::EBADF) };
+        }
+        unsafe { child_report(result_fd, ChildResult { stage: 0, error: 0 }) };
+        unsafe { libc::_exit(0) };
+    }
 }
