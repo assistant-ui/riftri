@@ -4109,21 +4109,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
             ));
         } else {
             restore_pointer_for_rollback(journal)?;
-            if journal.destination.exists() {
-                let safe_to_remove = contains_only_git_pointer(&journal.destination)?
-                    || git.worktree_is_clean(&journal.destination)?
-                    || view_matches_base(&journal.base_path, &journal.destination)?;
-                if safe_to_remove {
-                    git.remove_worktree_force(&journal.repository, &journal.destination)?;
-                } else {
-                    return Err(WorktreeError::InvalidRequest(format!(
-                        "worktree {} has changes; recovery preserved it",
-                        journal.destination.display()
-                    )));
-                }
-            } else {
-                git.remove_worktree_force(&journal.repository, &journal.destination)?;
-            }
+            remove_registered_worktree_for_rollback(git, journal)?;
             remove_empty_directory_if_present(&journal.destination)?;
         }
     } else if journal.destination.exists() {
@@ -4141,6 +4127,26 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
         git.delete_branch_force(&journal.repository, branch)?;
     }
     drop(metadata_lock);
+    Ok(())
+}
+
+fn remove_registered_worktree_for_rollback(
+    git: &Git,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    if !journal.destination.exists() || contains_only_git_pointer(&journal.destination)? {
+        git.remove_worktree_force(&journal.repository, &journal.destination)?;
+    } else if git.worktree_is_clean(&journal.destination)? {
+        git.remove_worktree(&journal.repository, &journal.destination)?;
+    } else if view_matches_base(&journal.base_path, &journal.destination)? {
+        git.synchronize_worktree_index(&journal.destination)?;
+        if !git.worktree_is_clean(&journal.destination)? {
+            return Err(changed_rollback_worktree(journal));
+        }
+        git.remove_worktree(&journal.repository, &journal.destination)?;
+    } else {
+        return Err(changed_rollback_worktree(journal));
+    }
     Ok(())
 }
 
@@ -4358,17 +4364,7 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
     })?;
     if !overlayfs.layout_root.exists() {
         restore_pointer_for_rollback(journal)?;
-        if journal.destination.exists()
-            && !contains_only_git_pointer(&journal.destination)?
-            && !git.worktree_is_clean(&journal.destination)?
-            && !view_matches_base(&journal.base_path, &journal.destination)?
-        {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "worktree {} has changes; recovery preserved it",
-                journal.destination.display()
-            )));
-        }
-        git.remove_worktree_force(&journal.repository, &journal.destination)?;
+        remove_registered_worktree_for_rollback(git, journal)?;
         remove_empty_directory_if_present(&journal.destination)?;
         return Ok(());
     }
@@ -4520,6 +4516,13 @@ fn restore_overlayfs_pointer(
         )
     })?;
     sync_parent(&destination_pointer)
+}
+
+fn changed_rollback_worktree(journal: &DecodedJournal) -> WorktreeError {
+    WorktreeError::InvalidRequest(format!(
+        "worktree {} has changes; recovery preserved it",
+        journal.destination.display()
+    ))
 }
 
 fn restore_pointer_for_rollback(journal: &DecodedJournal) -> Result<(), WorktreeError> {
@@ -4779,11 +4782,15 @@ mod tests {
     use std::collections::HashSet;
     use std::ffi::OsString;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
     use std::process::Command;
     use std::sync::{Arc, Barrier};
     use std::thread;
 
+    #[cfg(unix)]
+    use super::Git;
     use super::{
         AddWorktreeRequest, BackendKind, MoveWorktreeRequest, PruneWorktreesRequest,
         RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, garbage_collect_inner,
@@ -5568,6 +5575,65 @@ mod tests {
         assert_eq!(
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved file"),
             "user change\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_preserves_a_write_that_races_with_git_removal() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/raced-rollback")),
+                state_dir: Some(state.clone()),
+            },
+            Some(AddWorktreePhase::GitPointerRestored),
+            false,
+        )
+        .expect_err("simulate process termination");
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journal")
+            .pop()
+            .expect("incomplete add journal");
+
+        let wrapper = fixture.path().join("racing-git");
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = remove ]; then\n  printf 'raced write\\n' > \"$(dirname \"$0\")/worktree/raced.txt\"\nfi\nexec git \"$@\"\n",
+        )
+        .expect("write racing Git wrapper");
+        let mut permissions = fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+
+        let error = super::rollback_decoded(&Git::new(wrapper), &journal)
+            .expect_err("rollback must preserve the concurrent write");
+
+        assert!(error.to_string().contains("Git command failed"));
+        assert_eq!(
+            fs::read_to_string(destination.join("raced.txt")).expect("read preserved write"),
+            "raced write\n"
         );
     }
 
