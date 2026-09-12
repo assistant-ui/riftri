@@ -3,6 +3,11 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::fs::OpenOptionsExt;
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::fs::OpenOptions;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -35,6 +40,8 @@ use riftri_storage::{OverlayFsMountState, OverlayFsRecoveryState};
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::journal::{
@@ -478,15 +485,58 @@ fn register_state_directory(
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn acquire_state_directory_locator_lock(common_git_dir: &Path) -> Result<File, WorktreeError> {
     let lock_path = common_git_dir.join("riftri-state-directory.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|source| io("open state-directory locator lock", &lock_path, source))?;
+    acquire_coordination_lock(
+        &lock_path,
+        "open state-directory locator lock",
+        "lock state-directory locators",
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn acquire_coordination_lock(
+    lock_path: &Path,
+    open_operation: &'static str,
+    lock_operation: &'static str,
+) -> Result<File, WorktreeError> {
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    #[cfg(target_os = "windows")]
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+
+    let lock = options
+        .open(lock_path)
+        .map_err(|source| io(open_operation, lock_path, source))?;
+    let opened_metadata = lock
+        .metadata()
+        .map_err(|source| io("inspect opened coordination lock", lock_path, source))?;
     lock.lock_exclusive()
-        .map_err(|source| io("lock state-directory locators", &lock_path, source))?;
+        .map_err(|source| io(lock_operation, lock_path, source))?;
+    let path_metadata = fs::symlink_metadata(lock_path)
+        .map_err(|source| io("inspect coordination lock path", lock_path, source))?;
+    if !opened_metadata.is_file()
+        || !path_metadata.is_file()
+        || path_metadata.file_type().is_symlink()
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "coordination lock {} is not a real file",
+            lock_path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if opened_metadata.dev() != path_metadata.dev()
+            || opened_metadata.ino() != path_metadata.ino()
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "coordination lock {} changed while it was opened",
+                lock_path.display()
+            )));
+        }
+    }
     Ok(lock)
 }
 
@@ -907,15 +957,11 @@ fn resume_collection(
 ) -> Result<bool, WorktreeError> {
     validate_collection_paths(state_directory, journal)?;
     let lock_path = journal.base_path.with_extension("lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|source| io("open immutable-base lock", &lock_path, source))?;
-    lock.lock_exclusive()
-        .map_err(|source| io("lock immutable base", &lock_path, source))?;
+    let _lock = acquire_coordination_lock(
+        &lock_path,
+        "open immutable-base lock",
+        "lock immutable base",
+    )?;
 
     if record.phase == GarbageCollectionPhase::IntentRecorded {
         if journal.quarantine_path.exists() {
@@ -1788,15 +1834,11 @@ fn prepare_base(
     let base_parent = base_path.expect_parent()?;
     let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
     let complete_path = base_parent.join(format!("{}.complete", tree.as_str()));
-    let lock = OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|source| io("open immutable-base lock", &lock_path, source))?;
-    lock.lock_exclusive()
-        .map_err(|source| io("lock immutable base", &lock_path, source))?;
+    let _lock = acquire_coordination_lock(
+        &lock_path,
+        "open immutable-base lock",
+        "lock immutable base",
+    )?;
 
     let base_exists = base_path
         .try_exists()
@@ -2332,16 +2374,11 @@ fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn acquire_git_worktree_metadata_lock(common_git_dir: &Path) -> Result<File, WorktreeError> {
     let lock_path = common_git_dir.join("riftri-worktree-metadata.lock");
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|source| io("open Git worktree metadata lock", &lock_path, source))?;
-    lock.lock_exclusive()
-        .map_err(|source| io("lock Git worktree metadata", &lock_path, source))?;
-    Ok(lock)
+    acquire_coordination_lock(
+        &lock_path,
+        "open Git worktree metadata lock",
+        "lock Git worktree metadata",
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]

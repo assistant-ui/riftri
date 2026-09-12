@@ -325,6 +325,53 @@ fn rejects_a_symlinked_repository_base_bucket_without_writing_through_it() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn rejects_a_symlinked_lifecycle_lock_before_mutation() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let destination = fixture.path().join("worktree");
+    let protected = fixture.path().join("protected-lock-target");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+    fs::write(&protected, "protected\n").expect("write protected lock target");
+    symlink(
+        &protected,
+        repository.join(".git/riftri-state-directory.lock"),
+    )
+    .expect("symlink lifecycle lock");
+
+    let error = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/symlinked-lock")),
+        state_dir: Some(state),
+    })
+    .expect_err("symlinked lifecycle lock must be rejected");
+
+    assert!(error.to_string().contains("lock"));
+    assert!(!destination.exists());
+    assert_eq!(
+        fs::read_to_string(protected).expect("read protected lock target"),
+        "protected\n"
+    );
+    assert!(
+        !git(&repository, &["branch", "--list", "feature/symlinked-lock"])
+            .contains("feature/symlinked-lock")
+    );
+}
+
 #[test]
 #[ignore = "physical allocation benchmark; run explicitly on an otherwise quiet native COW volume"]
 fn cached_view_uses_materially_less_physical_space_than_its_logical_size() {
