@@ -315,12 +315,16 @@ fn installed_helper_manages_overlayfs_from_an_ordinary_shell() {
         0,
         "helper-backed checkout did not restore the owner's write bit"
     );
-    let journal_path = fs::read_dir(repository.join(".git/riftri/operations"))
+    let mut journal_paths = fs::read_dir(repository.join(".git/riftri/operations"))
         .expect("read add journals")
-        .next()
-        .expect("one add journal")
-        .expect("read add journal entry")
-        .path();
+        .map(|entry| entry.expect("read add journal entry").path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        });
+    let journal_path = journal_paths.next().expect("one add journal");
+    assert!(journal_paths.next().is_none(), "only one add journal");
+    assert!(journal_path.with_extension("lock").is_file());
     let journal: serde_json::Value =
         serde_json::from_slice(&fs::read(&journal_path).expect("read helper-backed add journal"))
             .expect("decode helper-backed add journal");
