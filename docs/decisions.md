@@ -401,6 +401,23 @@ stops the add before durable mutation; case-sensitive destinations continue to
 accept distinct case variants. Trees with no potential ASCII alias avoid the
 per-file probe I/O.
 
+### Cleanup checks survive pointer removal and OverlayFS unmount
+
+Pointer-only worktree cleanup stages the real `.git` pointer at a journal-derived
+path and uses a nonrecursive empty-directory removal. Real Git then removes the
+registration without force. A concurrent directory recreation goes through
+Git's normal dirty-state checks, and failed cleanup restores the pointer without
+replacing new files. Repair recognizes interrupted pointer staging.
+
+OverlayFS removal journals also retain a private-layer snapshot captured before
+the clean check. After exact unmount, Riftri verifies the snapshot before deleting
+the private layers. A change or an unprovable legacy checkpoint preserves the
+layers and reports an error. Rollback uses the same before/after snapshot gate.
+The snapshot includes inode change times and content so metadata-only copy-up
+cannot hide changes. This preserves writes that finish between the original
+cleanliness check and unmount; it does not lock out direct tampering with Riftri's
+private state by another same-user process.
+
 ### Immutable-base integrity markers
 
 New base buckets use a versioned SHA-256 completion marker covering every entry's

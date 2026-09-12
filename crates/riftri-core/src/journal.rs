@@ -382,6 +382,8 @@ pub(crate) struct RemovalJournalRecord {
     base_path: NativeOsString,
     pub source_add_operation_id: String,
     pub phase: RemoveWorktreePhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlayfs_clean_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -443,6 +445,7 @@ pub(crate) struct DecodedRemovalJournal {
     pub base_path: PathBuf,
     pub source_add_operation_id: String,
     pub phase: RemoveWorktreePhase,
+    pub overlayfs_clean_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -709,6 +712,7 @@ impl RemovalJournalRecord {
             base_path: NativeOsString::encode(paths.base_path.as_os_str()),
             source_add_operation_id,
             phase: RemoveWorktreePhase::IntentRecorded,
+            overlayfs_clean_snapshot: None,
         }
     }
 
@@ -740,6 +744,7 @@ impl RemovalJournalRecord {
             base_path: PathBuf::from(self.base_path.decode(&journal_path)?),
             source_add_operation_id: self.source_add_operation_id,
             phase: self.phase,
+            overlayfs_clean_snapshot: self.overlayfs_clean_snapshot,
             journal_path,
         })
     }

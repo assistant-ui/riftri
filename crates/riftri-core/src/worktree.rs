@@ -1279,6 +1279,7 @@ fn remove_worktree_inner(
             destination.display()
         )));
     }
+    let overlayfs_clean_snapshot = snapshot_overlayfs_private_layer(&managed)?;
     if !git.worktree_is_clean(&destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "worktree {} has changes; commit, stash, or remove them before retrying",
@@ -1297,6 +1298,7 @@ fn remove_worktree_inner(
         },
         managed.operation_id.clone(),
     );
+    journal.overlayfs_clean_snapshot = overlayfs_clean_snapshot;
     let journal_path = store.persist(&journal)?;
     fail_removal_if_requested(journal.phase, fail_after)?;
     advance_removal(
@@ -1306,7 +1308,13 @@ fn remove_worktree_inner(
         fail_after,
     )?;
 
-    remove_managed_worktree_files(&git, &repository_root, &destination, &managed)?;
+    remove_managed_worktree_files(
+        &git,
+        &repository_root,
+        &destination,
+        &managed,
+        journal.overlayfs_clean_snapshot.as_deref(),
+    )?;
     advance_removal(
         &store,
         &mut journal,
@@ -2932,6 +2940,12 @@ fn diagnose_state_paths(
         pending_base_builds
             .iter()
             .map(|journal| journal.temporary_index.clone())
+            .chain(
+                add_journals
+                    .iter()
+                    .filter(|journal| journal.phase != AddWorktreePhase::RolledBack)
+                    .map(pointer_staging_path),
+            )
             .collect(),
         &mut issues,
     )?;
@@ -3691,6 +3705,8 @@ fn resume_removal(
         None
     };
 
+    restore_staged_git_pointer(&managed)?;
+
     if record.phase == RemoveWorktreePhase::IntentRecorded {
         verify_recoverable_removal(git, &journal, &managed)?;
         record.transition(RemoveWorktreePhase::CleanVerified)?;
@@ -3700,7 +3716,13 @@ fn resume_removal(
     if record.phase == RemoveWorktreePhase::CleanVerified {
         let (registered, destination_exists) = removal_presence(git, &journal)?;
         if registered {
-            if destination_exists && !managed_worktree_is_clean_for_removal(git, &managed, true)? {
+            if destination_exists
+                && !managed_worktree_is_clean_for_removal(
+                    git,
+                    &managed,
+                    journal.overlayfs_clean_snapshot.as_deref(),
+                )?
+            {
                 return Err(WorktreeError::InvalidRequest(format!(
                     "worktree {} has changes; recovery preserved it",
                     journal.destination.display()
@@ -3711,6 +3733,7 @@ fn resume_removal(
                 &journal.repository,
                 &journal.destination,
                 &managed,
+                journal.overlayfs_clean_snapshot.as_deref(),
             )?;
         } else if destination_exists {
             return Err(WorktreeError::InvalidRequest(format!(
@@ -3735,6 +3758,7 @@ fn resume_removal(
     }
 
     if record.phase == RemoveWorktreePhase::WorktreeRemoved {
+        remove_file_if_present(&pointer_staging_path(&managed))?;
         record.transition(RemoveWorktreePhase::BaseReleased)?;
         store.persist(&record)?;
     }
@@ -4112,7 +4136,7 @@ fn verify_recoverable_removal(
     let (registered, destination_exists) = removal_presence(git, journal)?;
     if registered
         && destination_exists
-        && !managed_worktree_is_clean_for_removal(git, managed, false)?
+        && !managed_worktree_is_clean_for_removal(git, managed, None)?
     {
         return Err(WorktreeError::InvalidRequest(format!(
             "worktree {} has changes; recovery preserved it",
@@ -4139,10 +4163,105 @@ fn removal_presence(
     Ok((registered, journal.destination.exists()))
 }
 
+fn snapshot_overlayfs_private_layer(
+    managed: &DecodedJournal,
+) -> Result<Option<String>, WorktreeError> {
+    if managed.backend != BackendKind::OverlayFs {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let overlayfs = managed
+            .overlayfs
+            .as_ref()
+            .ok_or_else(|| changed_rollback_worktree(managed))?;
+        overlayfs_layer_snapshot(&overlayfs.layout_root.join("upper")).map(Some)
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err(WorktreeError::Unsupported(
+        "OverlayFS snapshots require Linux".to_owned(),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
+    use std::io::Read;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    fn visit(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|source| io("inspect OverlayFS removal snapshot", path, source))?;
+        // Inode and ctime also detect metadata-only copy-up/xattr changes that
+        // could change the merged data without changing raw upper file bytes.
+        for value in [
+            metadata.dev(),
+            metadata.ino(),
+            metadata.mode() as u64,
+            metadata.rdev(),
+            metadata.size(),
+            metadata.mtime() as u64,
+            metadata.mtime_nsec() as u64,
+            metadata.ctime() as u64,
+            metadata.ctime_nsec() as u64,
+        ] {
+            digest.update(value.to_le_bytes());
+        }
+        if metadata.is_dir() {
+            let mut entries = fs::read_dir(path)
+                .map_err(|source| io("read OverlayFS removal snapshot", path, source))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|source| io("read OverlayFS snapshot entry", path, source))?;
+            entries.sort_unstable_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let name = entry.file_name();
+                digest.update((name.as_bytes().len() as u64).to_le_bytes());
+                digest.update(name.as_bytes());
+                visit(&entry.path(), digest)?;
+            }
+        } else if metadata.file_type().is_symlink() {
+            let target = fs::read_link(path)
+                .map_err(|source| io("read OverlayFS snapshot symlink", path, source))?;
+            digest.update(target.as_os_str().as_bytes());
+        } else if metadata.is_file() {
+            let mut file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(path)
+                .map_err(|source| io("open OverlayFS snapshot file", path, source))?;
+            if !file
+                .metadata()
+                .map_err(|source| io("inspect opened OverlayFS snapshot", path, source))?
+                .is_file()
+            {
+                return Err(WorktreeError::InvalidRequest(
+                    "OverlayFS snapshot entry changed type".to_owned(),
+                ));
+            }
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                let count = file
+                    .read(&mut buffer)
+                    .map_err(|source| io("read OverlayFS snapshot file", path, source))?;
+                if count == 0 {
+                    break;
+                }
+                digest.update(&buffer[..count]);
+            }
+        }
+        // Special entries such as kernel whiteouts are represented by metadata;
+        // never open a FIFO or device while inspecting the upper layer.
+        Ok(())
+    }
+    let mut digest = Sha256::new();
+    visit(root, &mut digest)?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
 fn managed_worktree_is_clean_for_removal(
     git: &Git,
     managed: &DecodedJournal,
-    trust_unmounted_clean_phase: bool,
+    expected_snapshot: Option<&str>,
 ) -> Result<bool, WorktreeError> {
     if managed.backend != BackendKind::OverlayFs {
         return git
@@ -4151,7 +4270,7 @@ fn managed_worktree_is_clean_for_removal(
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = trust_unmounted_clean_phase;
+        let _ = expected_snapshot;
         Err(WorktreeError::Unsupported(
             "OverlayFS removal recovery requires Linux".to_owned(),
         ))
@@ -4182,7 +4301,9 @@ fn managed_worktree_is_clean_for_removal(
             OverlayFsMountState::Active => git
                 .worktree_is_clean(&managed.destination)
                 .map_err(WorktreeError::from),
-            OverlayFsMountState::Absent if trust_unmounted_clean_phase => Ok(true),
+            OverlayFsMountState::Absent if expected_snapshot.is_some() => {
+                Ok(Some(overlayfs_layer_snapshot(layout.upper())?.as_str()) == expected_snapshot)
+            }
             OverlayFsMountState::Absent => overlayfs_private_layer_is_clean(&layout),
             OverlayFsMountState::DifferentNamespace => Err(WorktreeError::InvalidRequest(format!(
                 "OverlayFS worktree {} belongs to a different mount namespace; removal preserved it",
@@ -4201,7 +4322,10 @@ fn remove_managed_worktree_files(
     repository: &Path,
     destination: &Path,
     managed: &DecodedJournal,
+    expected_snapshot: Option<&str>,
 ) -> Result<(), WorktreeError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = expected_snapshot;
     if managed.backend != BackendKind::OverlayFs {
         return git
             .remove_worktree(repository, destination)
@@ -4220,9 +4344,7 @@ fn remove_managed_worktree_files(
             ))
         })?;
         if !overlayfs.layout_root.exists() {
-            return git
-                .remove_worktree(repository, destination)
-                .map_err(WorktreeError::from);
+            return remove_pointer_only_worktree(git, repository, managed);
         }
         let identity = overlayfs.mount_identity.as_ref().ok_or_else(|| {
             WorktreeError::InvalidRequest(format!(
@@ -4235,11 +4357,21 @@ fn remove_managed_worktree_files(
             &managed.base_path,
             &managed.destination,
         )?;
+        // For legacy journals, snapshot before rechecking the still-mounted
+        // view. If already unmounted, require the conservative pointer-only gate.
+        let local_snapshot = overlayfs_layer_snapshot(layout.upper())?;
         match OverlayFsMounter::mount_state(&layout, identity)? {
             OverlayFsMountState::Active => {
+                if !git.worktree_is_clean(destination)? {
+                    return Err(changed_rollback_worktree(managed));
+                }
                 OverlayFsMounter::unmount(&layout, identity)?;
             }
-            OverlayFsMountState::Absent => {}
+            OverlayFsMountState::Absent => {
+                if expected_snapshot.is_none() && !overlayfs_private_layer_is_clean(&layout)? {
+                    return Err(changed_rollback_worktree(managed));
+                }
+            }
             OverlayFsMountState::DifferentNamespace => {
                 return Err(WorktreeError::InvalidRequest(format!(
                     "OverlayFS worktree {} belongs to a different mount namespace; removal preserved it",
@@ -4253,13 +4385,13 @@ fn remove_managed_worktree_files(
                 )));
             }
         }
+        if overlayfs_layer_snapshot(layout.upper())? != expected_snapshot.unwrap_or(&local_snapshot)
+        {
+            return Err(changed_rollback_worktree(managed));
+        }
         restore_overlayfs_pointer(&layout)?;
         OverlayFsMounter::remove_private_layers(&layout, identity)?;
-        // Riftri already proved the mounted view clean before unmounting it.
-        // The underlying directory now contains only Git's pointer, so normal
-        // Git removal would interpret the intentionally absent lower files as
-        // deletions. Force is safe here only after that durable clean gate.
-        git.remove_worktree_force(repository, destination)?;
+        remove_pointer_only_worktree(git, repository, managed)?;
         Ok(())
     }
 }
@@ -4347,6 +4479,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
         .any(|worktree| paths_match(&worktree.path, &journal.destination));
 
     if registered {
+        restore_staged_git_pointer(journal)?;
         if journal.backend == BackendKind::OverlayFs {
             #[cfg(target_os = "linux")]
             rollback_overlayfs_worktree(git, journal)?;
@@ -4369,6 +4502,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     remove_tree_if_present(&journal.scratch)?;
     remove_tree_if_present(&journal.base_staging)?;
     remove_file_if_present(&journal.temporary_index)?;
+    remove_file_if_present(&pointer_staging_path(journal))?;
 
     if let Some((branch, Some(_))) = expected_branch_target {
         git.delete_branch_force(&journal.repository, branch)?;
@@ -4382,7 +4516,7 @@ fn remove_registered_worktree_for_rollback(
     journal: &DecodedJournal,
 ) -> Result<(), WorktreeError> {
     if !journal.destination.exists() || contains_only_git_pointer(&journal.destination)? {
-        git.remove_worktree_force(&journal.repository, &journal.destination)?;
+        remove_pointer_only_worktree(git, &journal.repository, journal)?;
     } else if git.worktree_is_clean(&journal.destination)? {
         git.remove_worktree(&journal.repository, &journal.destination)?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
@@ -4395,6 +4529,73 @@ fn remove_registered_worktree_for_rollback(
         return Err(changed_rollback_worktree(journal));
     }
     Ok(())
+}
+
+fn pointer_staging_path(journal: &DecodedJournal) -> PathBuf {
+    journal.temporary_index.with_extension("git-pointer")
+}
+
+fn move_pointer_without_replacement(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), WorktreeError> {
+    let mut pointer = tempfile::TempPath::try_from_path(source.to_path_buf())
+        .map_err(|error| io("stage linked-worktree pointer", source, error))?;
+    // A failed move must leave this journal-owned pointer available to repair.
+    pointer.disable_cleanup(true);
+    pointer.persist_noclobber(destination).map_err(|error| {
+        io(
+            "move linked-worktree pointer without replacement",
+            destination,
+            error.error,
+        )
+    })?;
+    sync_parent(source)?;
+    sync_parent(destination)
+}
+
+fn restore_staged_git_pointer(journal: &DecodedJournal) -> Result<(), WorktreeError> {
+    let staged = pointer_staging_path(journal);
+    if !is_regular_file_if_present(&staged)? || !journal.destination.exists() {
+        return Ok(());
+    }
+    let pointer = journal.destination.join(".git");
+    if is_regular_file_if_present(&pointer)? && files_equal(&staged, &pointer)? {
+        // A crash may leave both links during the no-replace move.
+        return remove_file_if_present(&staged);
+    }
+    move_pointer_without_replacement(&staged, &pointer)
+}
+
+fn remove_pointer_only_worktree(
+    git: &Git,
+    repository: &Path,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    restore_staged_git_pointer(journal)?;
+    let staged = pointer_staging_path(journal);
+    if journal.destination.exists() {
+        if !contains_only_git_pointer(&journal.destination)? {
+            return Err(changed_rollback_worktree(journal));
+        }
+        move_pointer_without_replacement(&journal.destination.join(".git"), &staged)?;
+        if let Err(source) = fs::remove_dir(&journal.destination) {
+            restore_staged_git_pointer(journal)?;
+            return Err(io(
+                "remove empty pointer-only worktree",
+                &journal.destination,
+                source,
+            ));
+        }
+        sync_parent(&journal.destination)?;
+    }
+    // Git can remove a missing directory without force. If a writer recreates
+    // it first, Git's ordinary safety checks apply to that new directory.
+    if let Err(error) = git.remove_worktree(repository, &journal.destination) {
+        restore_staged_git_pointer(journal)?;
+        return Err(error.into());
+    }
+    remove_file_if_present(&staged)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -4661,6 +4862,7 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
     if let Some(identity) = identity.as_ref()
         && OverlayFsMounter::mount_state(&layout, identity)? == OverlayFsMountState::Active
     {
+        let clean_snapshot = overlayfs_layer_snapshot(layout.upper())?;
         let safe_to_remove = git.worktree_is_clean(&journal.destination)?
             || view_matches_base(&journal.base_path, &journal.destination)?;
         if !safe_to_remove {
@@ -4671,6 +4873,9 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
         }
         mounted_view_verified = true;
         OverlayFsMounter::unmount(&layout, identity)?;
+        if overlayfs_layer_snapshot(layout.upper())? != clean_snapshot {
+            return Err(changed_rollback_worktree(journal));
+        }
     }
     if !mounted_view_verified && !overlayfs_upper_contains_only_git_pointer(&layout)? {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -4683,7 +4888,7 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
         Some(identity) => OverlayFsMounter::remove_private_layers(&layout, identity)?,
         None => OverlayFsMounter::remove_unmounted_private_layers(&layout, context)?,
     }
-    git.remove_worktree_force(&journal.repository, &journal.destination)?;
+    remove_pointer_only_worktree(git, &journal.repository, journal)?;
     remove_empty_directory_if_present(&journal.destination)?;
     Ok(())
 }
@@ -5556,6 +5761,72 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlayfs_removal_preserves_a_write_after_the_clean_checkpoint_and_unmount() {
+        let fixture = tempdir().expect("fixture");
+        if !require_overlayfs_test_namespace(fixture.path()) {
+            return;
+        }
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        create_overlayfs_repository(&repository);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create view");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(RemoveWorktreePhase::CleanVerified),
+        )
+        .expect_err("interrupt after clean checkpoint");
+        fs::write(
+            destination.join("tracked.txt"),
+            "write after clean checkpoint\n",
+        )
+        .expect("concurrent edit");
+        let managed = JournalStore::open(&state)
+            .load_all()
+            .unwrap()
+            .pop()
+            .unwrap();
+        let overlay = managed.overlayfs.as_ref().unwrap();
+        let layout = riftri_storage::OverlayFsMounter::load(
+            &overlay.layout_root,
+            &managed.base_path,
+            &managed.destination,
+        )
+        .unwrap();
+        riftri_storage::OverlayFsMounter::unmount(
+            &layout,
+            overlay.mount_identity.as_ref().unwrap(),
+        )
+        .expect("simulate crash after unmount");
+        let report = recover_incomplete_operations(&state).expect("recovery report");
+        assert!(
+            !report.errors.is_empty(),
+            "changed upper must not be released"
+        );
+        assert_eq!(
+            fs::read(layout.upper().join("tracked.txt")).expect("retained edit"),
+            b"write after clean checkpoint\n"
+        );
+        assert!(destination.exists());
+    }
+
     #[test]
     fn status_reports_unexplained_state_without_removing_it() {
         let fixture = tempdir().expect("fixture");
@@ -5976,60 +6247,128 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rollback_preserves_a_write_that_races_with_git_removal() {
-        let fixture = tempdir().expect("fixture");
-        let repository = fixture.path().join("repository");
-        let destination = fixture.path().join("worktree");
-        let state = fixture.path().join("state");
-        fs::create_dir(&repository).expect("create repository");
-        git(&repository, &["init", "--quiet"]);
-        git(&repository, &["config", "user.name", "Riftri Tests"]);
-        git(
-            &repository,
-            &["config", "user.email", "riftri@example.invalid"],
-        );
-        git(&repository, &["config", "core.autocrlf", "false"]);
-        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
-        git(&repository, &["add", "--", "tracked.txt"]);
-        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        for phase in [
+            AddWorktreePhase::GitMetadataCreated,
+            AddWorktreePhase::GitPointerRestored,
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
 
-        add_worktree_inner(
-            AddWorktreeRequest {
-                repository: repository.clone(),
-                destination: destination.clone(),
-                revision: OsString::from("HEAD"),
-                mode: WorktreeMode::NewBranch(OsString::from("feature/raced-rollback")),
-                state_dir: Some(state.clone()),
-            },
-            Some(AddWorktreePhase::GitPointerRestored),
-            false,
-        )
-        .expect_err("simulate process termination");
-        let journal = JournalStore::open(&state)
-            .load_all()
-            .expect("load add journal")
-            .pop()
-            .expect("incomplete add journal");
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from("feature/raced-rollback")),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+                false,
+            )
+            .expect_err("simulate process termination");
+            let journal = JournalStore::open(&state)
+                .load_all()
+                .expect("load add journal")
+                .pop()
+                .expect("incomplete add journal");
 
-        let wrapper = fixture.path().join("racing-git");
-        fs::write(
+            let wrapper = fixture.path().join("racing-git");
+            fs::write(
             &wrapper,
-            "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = remove ]; then\n  printf 'raced write\\n' > \"$(dirname \"$0\")/worktree/raced.txt\"\nfi\nexec git \"$@\"\n",
+            "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = remove ]; then\n  mkdir -p \"$(dirname \"$0\")/worktree\"\n  printf 'raced write\\n' > \"$(dirname \"$0\")/worktree/raced.txt\"\nfi\nexec git \"$@\"\n",
         )
         .expect("write racing Git wrapper");
-        let mut permissions = fs::metadata(&wrapper)
-            .expect("wrapper metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+            let mut permissions = fs::metadata(&wrapper)
+                .expect("wrapper metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
 
-        let error = super::rollback_decoded(&Git::new(wrapper), &journal)
-            .expect_err("rollback must preserve the concurrent write");
+            let error = super::rollback_decoded(&Git::new(wrapper), &journal)
+                .expect_err("rollback must preserve the concurrent write");
 
-        assert!(error.to_string().contains("Git command failed"));
-        assert_eq!(
-            fs::read_to_string(destination.join("raced.txt")).expect("read preserved write"),
-            "raced write\n"
-        );
+            assert!(error.to_string().contains("Git command failed"));
+            assert_eq!(
+                fs::read_to_string(destination.join("raced.txt")).expect("read preserved write"),
+                "raced write\n"
+            );
+        }
+    }
+
+    #[test]
+    fn rollback_recovers_staged_pointers_and_preserves_new_files() {
+        for (missing, changed) in [(false, false), (true, false), (false, true)] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+            git(&repository, &["add", "."]);
+            git(
+                &repository,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "initial",
+                ],
+            );
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                },
+                Some(AddWorktreePhase::GitMetadataCreated),
+                false,
+            )
+            .expect_err("interrupted add");
+            let journal = JournalStore::open(&state)
+                .load_all()
+                .unwrap()
+                .pop()
+                .unwrap();
+            let staged = super::pointer_staging_path(&journal);
+            super::move_pointer_without_replacement(&destination.join(".git"), &staged)
+                .expect("stage pointer before simulated crash");
+            if missing {
+                fs::remove_dir(&destination).unwrap();
+            }
+            if changed {
+                fs::write(destination.join("new.txt"), "private\n").unwrap();
+            }
+            let report = recover_incomplete_operations(&state).expect("recovery");
+            assert_eq!(report.errors.is_empty(), !changed, "{report:?}");
+            assert!(!staged.exists());
+            if changed {
+                assert_eq!(fs::read(destination.join("new.txt")).unwrap(), b"private\n");
+                assert!(destination.join(".git").is_file());
+            } else {
+                assert!(!destination.exists());
+            }
+        }
     }
 
     #[test]
