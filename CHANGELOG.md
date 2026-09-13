@@ -5,6 +5,17 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- Standalone direct-download installation guidance for all six native targets,
+  with SHA-256 verification before extraction and no Node.js requirement.
+
+### Fixed
+
+- GitHub native-archive releases publish independently of npm after shared
+  staging checks. Exact asset and checksum validation rejects incomplete or
+  changed downloads; release retries never overwrite published assets.
+
 ## 0.1.1 - 2026-09-12
 
 The first public distribution includes the 0.1.0 foundation and the following

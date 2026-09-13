@@ -2,11 +2,56 @@
 
 Riftri publishes one synchronized version across the Cargo workspace, the
 `riftri` npm launcher, and six platform-native npm packages. A tag-driven GitHub
-workflow builds native binaries, inspects every tarball, publishes the native
-packages before the launcher, and creates a GitHub release with SHA-256 sums.
+workflow builds native binaries and inspects every tarball, then independently
+publishes npm packages and a GitHub release with SHA-256 sums. The npm job
+publishes native packages before the launcher. A failure in that job does not
+prevent the GitHub direct downloads from being released.
 
-Only the npm packages are public distribution artifacts. The Rust crates are
-internal implementation units and are marked `publish = false`.
+Both standalone native archives and npm packages are public distribution
+artifacts. Direct downloads require neither Node.js nor npm; installation and
+checksum verification are documented in [docs/install.md](docs/install.md).
+The Rust crates are internal implementation units and are marked
+`publish = false`.
+
+## Publication channels and retries
+
+The six-platform build matrix feeds one read-only staging job. It validates
+versions, prepares and verifies the native archives, and uploads those exact
+archives plus `SHA256SUMS` as the distinct `github-release-assets` workflow
+artifact (retained for seven days). After all staging checks pass:
+
+- `publish` publishes npm packages with `contents: read` and `id-token: write`.
+- `github-release` downloads the staged assets, verifies the exact six-archive
+  set and every checksum, and creates the GitHub release with `contents: write`.
+  It has no npm token or OIDC publishing permission and does not depend on npm.
+
+Both publishing jobs are restricted to tag pushes. `workflow_dispatch` builds,
+checks, and stages artifacts as a rehearsal; it never publishes either channel.
+An overall workflow failure can therefore coexist with a successful GitHub
+release. Inspect the individual jobs and report each channel's status.
+
+The GitHub job uses `--verify-tag`: it never creates or moves a tag. If a release
+already exists, creation fails safely rather than replacing any existing asset.
+On a retry, inspect the existing release and compare all seven asset names and
+checksums with the staged artifact. Do not delete, clobber, or silently replace
+published assets to make a rerun pass. If assets differ, investigate and issue a
+new version. A partial existing release needs deliberate maintainer review.
+
+The npm publisher skips exact versions already on the registry. Resume a failed
+npm job only after resolving its actual failure; an explicit registry security
+rejection requires registry review, not package renaming or blind retries.
+GitHub release availability does not imply that `npm install riftri` or
+`npx riftri` is available for the same version.
+
+As of September 12, 2026, the initial `v0.1.1` npm publication stopped at
+`riftri-win32-arm64` with `E403: Package name triggered spam detection` after
+publishing the four macOS/Linux native packages. The Windows x64 package and
+main launcher were not attempted. The `v0.1.1` tag predates these independent
+jobs; rerunning that old tag uses its original workflow, not the workflow on
+`main`. If publishing its direct downloads separately, use binaries from its
+successful tag-build jobs and stage them from the exact tagged source, verify
+all six archives and checksums, and create the release without changing the
+tag or npm versions. Do not substitute binaries from a newer `main` build.
 
 ## Package layout
 
@@ -36,8 +81,8 @@ merged and before publishing anything:
    owner action and should not be automated by a release script.
 4. Protect `main`, require a pull request, and require every `Quality` CI matrix
    job before merge.
-5. Keep default GitHub Actions permissions read-only and allow write or OIDC
-   permissions only on the release job that needs them.
+5. Keep default GitHub Actions permissions read-only and allow contents-write
+   only on the GitHub release job and OIDC only on the npm publishing job.
 6. Enable private vulnerability reporting and confirm the link in
    [SECURITY.md](SECURITY.md) opens the private report form.
 7. Confirm `@assistant-ui/engineering` resolves as the repository code owner.
@@ -111,12 +156,20 @@ marked as prereleases on GitHub; stable versions use npm's `latest` tag.
 
 ## Verifying a release
 
-After the workflow succeeds:
+Verify each publication channel separately:
 
 1. Confirm the GitHub release contains all six native archives and
-   `SHA256SUMS`.
-2. Confirm npm shows provenance for the launcher and all native packages.
-3. Test `npx --yes riftri@<version> doctor` on at least one supported target.
+   `SHA256SUMS`. Download a native archive through its public release URL,
+   verify its checksum before extraction or execution, then check `riftri
+   --version` and `riftri doctor` without the npm launcher.
+2. If the npm job succeeded, confirm npm shows provenance for the launcher and
+   all native packages. Test `npx --yes riftri@<version> doctor` on at least one
+   supported target. If it failed, report the incomplete npm publication
+   explicitly instead of advertising the launcher as available. Update dated
+   npm-availability notices in `README.md` and `docs/install.md` once the main
+   launcher is actually published and verified.
+3. Check the user-facing [installation guide](docs/install.md) against the
+   downloaded asset names and installed executable.
 4. On at least one supported native COW filesystem, create an enabled disposable
    repository, add and remove a managed worktree, run `riftri status`, and
    verify Git reports clean state.
