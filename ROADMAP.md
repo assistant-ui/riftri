@@ -130,7 +130,7 @@ Acceptance criteria:
 The repeatable matrix and global-activation boundaries are documented in
 [`docs/global-activation.md`](docs/global-activation.md).
 
-## Milestone 5: Linux native backends
+## Milestone 5: Linux native backends — complete
 
 Outcome: support common Linux development environments without putting FUSE on
 the hot path.

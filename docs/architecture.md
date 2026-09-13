@@ -144,8 +144,10 @@ valid only when the selected backend is OverlayFS. It records the exact
 token before mount mutation, and the boot/namespace/mount identity after a
 mount succeeds. Older journals omit this extension and continue to decode with
 their existing backend semantics.
-SQLite remains the planned Milestone 3 registry for bases, views, mounts, and
-reference counts.
+The journals and immutable-base completion markers are the current durable
+registry for bases, views, and mounts. Reference counts and storage accounting
+are derived from them. Any future indexed registry must be rebuildable from
+this state rather than becoming a competing recovery authority.
 
 The default state directory remains `<common-git-dir>/riftri`. When an explicit
 operation places state elsewhere, Riftri records the canonical absolute path as
@@ -296,8 +298,8 @@ the intent first and replace each state atomically using a temporary file,
 The persisted path encoding must round-trip platform-native paths, including
 non-UTF-8 Unix bytes. Recovery may repeat the cleanup associated with a recorded
 state, so every rollback action must be idempotent and validate its exact target.
-SQLite registration remains a Milestone 3 concern; the per-operation journal is
-the crash-recovery authority while an add is incomplete.
+The per-operation journal remains the crash-recovery authority while an add is
+incomplete and the durable lifecycle record after activation.
 
 The APFS prototype builds bases only from exact Git objects through an isolated
 temporary index. A SHA-256 repository bucket, tree object ID, restricted checkout
@@ -464,7 +466,7 @@ concurrent worktree requests.
 - Never delete a worktree without respecting Git's dirty-worktree safeguards.
 - Never silently create a full copy when the selected policy requires COW.
 - Never run the complete Riftri process as root.
-- Never place local state or writable SQLite WAL files on a network filesystem.
+- Never place writable Riftri lifecycle state on a network filesystem.
 - Treat submodules, sparse checkout, filters, and Git LFS as explicit
   compatibility features with safe fallback behavior.
 
@@ -472,8 +474,8 @@ concurrent worktree requests.
 
 1. Read-only diagnostics and storage capability model. (complete)
 2. Explicit APFS worktree creation on macOS. (complete)
-3. Removal, recovery inventory, and disk accounting. (initial slice complete)
-4. Process-scoped Git shim. (add/clean-remove slice complete)
-5. Linux reflink and OverlayFS backends.
+3. Removal, recovery inventory, and disk accounting. (complete)
+4. Process-scoped Git shim. (complete)
+5. Linux reflink and OverlayFS backends. (complete)
 6. Compaction and compatibility expansion.
 7. Windows ReFS block cloning. (initial slice complete)
