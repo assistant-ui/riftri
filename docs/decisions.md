@@ -445,6 +445,28 @@ adds use a new cache namespace, while older bases remain available to their
 existing views and explicit garbage collection. This detects accidental cache
 corruption; it does not make same-user mutable state a security sandbox.
 
+### Existing-base readers share coordination ownership
+
+Cache-hit integrity verification takes a shared lock on the existing stable
+per-base lock file. Every add still recomputes the full integrity marker; no
+digest cache or weaker validation is introduced. Independent readers can run
+together, while base construction, incomplete-base cleanup, and garbage
+collection retain exclusive ownership of the same file.
+
+A cache miss releases shared ownership before requesting exclusive ownership;
+in-place lock upgrades are not used. The creator repeats all base and marker
+checks under the exclusive lock because a builder or collector may have run in
+that gap. The read guard explicitly unlocks on drop so a concurrent Unix fork's
+inherited descriptor cannot retain ownership while the parent waits to build.
+Durable add references continue to protect the base after preparation, including
+during view cloning. Git-metadata and operation locks remain unchanged.
+
+This is compatible with older coordinators that take the same base lock
+exclusively: they still exclude new readers. It changes neither cache keys nor
+journal formats and requires no migration. Advisory locks do not protect against
+uncooperative same-user modification, and no cross-platform lock fairness or
+universal latency improvement is promised.
+
 ### Captured checkout inputs during materialization
 
 Compatibility analysis captures the exact configuration bytes used in its cache

@@ -1,0 +1,1107 @@
+{
+  "baseline": {
+    "pr": "https://github.com/assistant-ui/riftri/pull/97",
+    "commit": "cde51fe4a044d13ee52ca0b1b786e80b8da25471"
+  },
+  "candidate": {
+    "change": "shared immutable-base reader locks",
+    "worktreeSourceSha256": "9be383208838e83125ed53c5f95f3bd301ad7482a928db2cec421107bfe86fb8"
+  },
+  "environment": {
+    "os": "macOS 26.2 (25C56)",
+    "architecture": "arm64",
+    "filesystem": "APFS, ordinary host volume",
+    "git": "git version 2.50.1 (Apple Git-155)",
+    "caveat": "Shared busy host with about 2 GiB free; uncontrolled host load and filesystem caches."
+  },
+  "source": {
+    "commit": "ab7b0184985f8bd742f0d4636961ec90c355cbd9",
+    "tree": "aa5966b43f429773a941fd65dcbbce8bf2575a5a",
+    "files": 2005,
+    "logicalBytes": 13781534
+  },
+  "startedAt": "2026-09-13T18:33:56.319Z",
+  "completedAt": "2026-09-13T18:38:27.643Z",
+  "sampling": {
+    "singleRounds": 4,
+    "batchRounds": 6,
+    "concurrentWorkers": 9,
+    "alternatingOrder": true
+  },
+  "verification": {
+    "cases": 125,
+    "allViewsVerifiedAndRemoved": true,
+    "sameBaselineCreatedBase": true,
+    "fullTrackedContentAndExecutableModeChecks": true,
+    "concurrentPrivateWriteChecks": 12
+  },
+  "summary": {
+    "explicit": {
+      "before": {
+        "n": 4,
+        "min": 1.732246875,
+        "median": 1.985159063,
+        "mean": 2.39456782325,
+        "max": 3.875706292
+      },
+      "after": {
+        "n": 4,
+        "min": 1.733920875,
+        "median": 2.027849917,
+        "mean": 2.0414344272499996,
+        "max": 2.376117
+      },
+      "medianReductionPercent": -2.150500420630541
+    },
+    "shim": {
+      "before": {
+        "n": 4,
+        "min": 1.582835375,
+        "median": 1.9555721665,
+        "mean": 2.0057582395,
+        "max": 2.52905325
+      },
+      "after": {
+        "n": 4,
+        "min": 1.566237875,
+        "median": 1.80556475,
+        "mean": 1.80590334375,
+        "max": 2.046246
+      },
+      "medianReductionPercent": 7.670768640999681
+    },
+    "concurrent": {
+      "before": {
+        "n": 6,
+        "min": 4.730213958,
+        "median": 5.956018541500001,
+        "mean": 6.600693388833332,
+        "max": 11.481994958
+      },
+      "after": {
+        "n": 6,
+        "min": 4.550350042,
+        "median": 5.5178454795,
+        "mean": 5.790616465500001,
+        "max": 7.596112625
+      },
+      "medianReductionPercent": 7.356811583894906,
+      "meanReductionPercent": 12.272603431387552
+    }
+  },
+  "pairs": [
+    {
+      "round": 0,
+      "before": 4.730213958,
+      "after": 4.550350042,
+      "reductionPercent": 3.8024477877116825
+    },
+    {
+      "round": 1,
+      "before": 5.12833675,
+      "after": 5.338026334,
+      "reductionPercent": -4.0888419427604905
+    },
+    {
+      "round": 2,
+      "before": 5.921361625,
+      "after": 5.080662125,
+      "reductionPercent": 14.19773952751957
+    },
+    {
+      "round": 3,
+      "before": 5.990675458,
+      "after": 7.596112625,
+      "reductionPercent": -26.798934081065685
+    },
+    {
+      "round": 4,
+      "before": 6.351577584,
+      "after": 5.697664625,
+      "reductionPercent": 10.295284129839576
+    },
+    {
+      "round": 5,
+      "before": 11.481994958,
+      "after": 6.480883042,
+      "reductionPercent": 43.55612360302866
+    }
+  ],
+  "singles": [
+    {
+      "label": "single-0-explicit-before",
+      "version": "before",
+      "mode": "explicit",
+      "seconds": 1.732246875,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-0-explicit-after",
+      "version": "after",
+      "mode": "explicit",
+      "seconds": 1.733920875,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-0-shim-before",
+      "version": "before",
+      "mode": "shim",
+      "seconds": 1.582835375,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-0-shim-after",
+      "version": "after",
+      "mode": "shim",
+      "seconds": 1.566237875,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-1-explicit-after",
+      "version": "after",
+      "mode": "explicit",
+      "seconds": 2.224750917,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-1-explicit-before",
+      "version": "before",
+      "mode": "explicit",
+      "seconds": 2.045074917,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-1-shim-after",
+      "version": "after",
+      "mode": "shim",
+      "seconds": 2.046246,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-1-shim-before",
+      "version": "before",
+      "mode": "shim",
+      "seconds": 2.52905325,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-2-explicit-before",
+      "version": "before",
+      "mode": "explicit",
+      "seconds": 3.875706292,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-2-explicit-after",
+      "version": "after",
+      "mode": "explicit",
+      "seconds": 2.376117,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-2-shim-before",
+      "version": "before",
+      "mode": "shim",
+      "seconds": 2.026475167,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-2-shim-after",
+      "version": "after",
+      "mode": "shim",
+      "seconds": 1.866944125,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-3-explicit-after",
+      "version": "after",
+      "mode": "explicit",
+      "seconds": 1.830948917,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-3-explicit-before",
+      "version": "before",
+      "mode": "explicit",
+      "seconds": 1.925243209,
+      "gitStarts": 20,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-3-shim-after",
+      "version": "after",
+      "mode": "shim",
+      "seconds": 1.744185375,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "single-3-shim-before",
+      "version": "before",
+      "mode": "shim",
+      "seconds": 1.884669166,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    }
+  ],
+  "batches": [
+    {
+      "round": 0,
+      "version": "before",
+      "workers": 9,
+      "seconds": 4.730213958
+    },
+    {
+      "round": 0,
+      "version": "after",
+      "workers": 9,
+      "seconds": 4.550350042
+    },
+    {
+      "round": 1,
+      "version": "after",
+      "workers": 9,
+      "seconds": 5.338026334
+    },
+    {
+      "round": 1,
+      "version": "before",
+      "workers": 9,
+      "seconds": 5.12833675
+    },
+    {
+      "round": 2,
+      "version": "before",
+      "workers": 9,
+      "seconds": 5.921361625
+    },
+    {
+      "round": 2,
+      "version": "after",
+      "workers": 9,
+      "seconds": 5.080662125
+    },
+    {
+      "round": 3,
+      "version": "after",
+      "workers": 9,
+      "seconds": 7.596112625
+    },
+    {
+      "round": 3,
+      "version": "before",
+      "workers": 9,
+      "seconds": 5.990675458
+    },
+    {
+      "round": 4,
+      "version": "before",
+      "workers": 9,
+      "seconds": 6.351577584
+    },
+    {
+      "round": 4,
+      "version": "after",
+      "workers": 9,
+      "seconds": 5.697664625
+    },
+    {
+      "round": 5,
+      "version": "after",
+      "workers": 9,
+      "seconds": 6.480883042
+    },
+    {
+      "round": 5,
+      "version": "before",
+      "workers": 9,
+      "seconds": 11.481994958
+    }
+  ],
+  "allocation": {
+    "schema_version": 1,
+    "operating_system": "macos",
+    "architecture": "aarch64",
+    "backend": "apfs-clone",
+    "logical_payload_bytes": 33554432,
+    "cold_add_microseconds": 4704174,
+    "cached_add_microseconds": 3776617,
+    "cold_volume_growth_bytes": 33599488,
+    "cached_volume_growth_bytes": 53248,
+    "private_write_bytes": 4194304,
+    "private_write_volume_growth_bytes": 4177920,
+    "cached_view_allocated_before_write_bytes": 33558528,
+    "cached_view_allocated_after_write_bytes": 33558528
+  },
+  "concurrentCases": [
+    {
+      "label": "parallel-0-before-3",
+      "version": "before",
+      "seconds": 3.401196792,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-6",
+      "version": "before",
+      "seconds": 3.588325958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-1",
+      "version": "before",
+      "seconds": 3.82041675,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-4",
+      "version": "before",
+      "seconds": 4.096712,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-8",
+      "version": "before",
+      "seconds": 4.226089792,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-0",
+      "version": "before",
+      "seconds": 4.381684208,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-2",
+      "version": "before",
+      "seconds": 4.624351208,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-7",
+      "version": "before",
+      "seconds": 4.694377459,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-before-5",
+      "version": "before",
+      "seconds": 4.723414083,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-7",
+      "version": "after",
+      "seconds": 4.209211667,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-1",
+      "version": "after",
+      "seconds": 4.254056084,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-3",
+      "version": "after",
+      "seconds": 4.257995375,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-8",
+      "version": "after",
+      "seconds": 4.305345042,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-6",
+      "version": "after",
+      "seconds": 4.314425625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-4",
+      "version": "after",
+      "seconds": 4.434239459,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-0",
+      "version": "after",
+      "seconds": 4.505278084,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-5",
+      "version": "after",
+      "seconds": 4.518123292,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-0-after-2",
+      "version": "after",
+      "seconds": 4.547652042,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-3",
+      "version": "after",
+      "seconds": 4.262813625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-5",
+      "version": "after",
+      "seconds": 4.282637583,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-6",
+      "version": "after",
+      "seconds": 5.209196667,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-8",
+      "version": "after",
+      "seconds": 5.213239334,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-0",
+      "version": "after",
+      "seconds": 5.22194275,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-2",
+      "version": "after",
+      "seconds": 5.297603625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-4",
+      "version": "after",
+      "seconds": 5.319031417,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-1",
+      "version": "after",
+      "seconds": 5.327959375,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-after-7",
+      "version": "after",
+      "seconds": 5.331467417,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-2",
+      "version": "before",
+      "seconds": 4.738408708,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-7",
+      "version": "before",
+      "seconds": 4.745730583,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-3",
+      "version": "before",
+      "seconds": 4.99768625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-5",
+      "version": "before",
+      "seconds": 5.01737675,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-1",
+      "version": "before",
+      "seconds": 5.034989875,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-4",
+      "version": "before",
+      "seconds": 5.038408833,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-8",
+      "version": "before",
+      "seconds": 5.105781417,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-6",
+      "version": "before",
+      "seconds": 5.121123292,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-1-before-0",
+      "version": "before",
+      "seconds": 5.126045667,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-5",
+      "version": "before",
+      "seconds": 4.414951375,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-0",
+      "version": "before",
+      "seconds": 4.591359666,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-2",
+      "version": "before",
+      "seconds": 4.86906775,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-6",
+      "version": "before",
+      "seconds": 5.114473958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-3",
+      "version": "before",
+      "seconds": 5.268978417,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-4",
+      "version": "before",
+      "seconds": 5.38622,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-1",
+      "version": "before",
+      "seconds": 5.668541208,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-7",
+      "version": "before",
+      "seconds": 5.784334625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-before-8",
+      "version": "before",
+      "seconds": 5.897857667,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-0",
+      "version": "after",
+      "seconds": 4.601289625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-2",
+      "version": "after",
+      "seconds": 4.615647042,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-4",
+      "version": "after",
+      "seconds": 4.648208458,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-8",
+      "version": "after",
+      "seconds": 4.700788125,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-3",
+      "version": "after",
+      "seconds": 4.75432825,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-1",
+      "version": "after",
+      "seconds": 4.811676709,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-7",
+      "version": "after",
+      "seconds": 4.924443167,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-6",
+      "version": "after",
+      "seconds": 5.001381833,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-2-after-5",
+      "version": "after",
+      "seconds": 5.069970459,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-3",
+      "version": "after",
+      "seconds": 7.328694583,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-1",
+      "version": "after",
+      "seconds": 7.412198208,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-6",
+      "version": "after",
+      "seconds": 7.432003917,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-4",
+      "version": "after",
+      "seconds": 7.458082875,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-5",
+      "version": "after",
+      "seconds": 7.467021791,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-2",
+      "version": "after",
+      "seconds": 7.473649958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-0",
+      "version": "after",
+      "seconds": 7.482202584,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-7",
+      "version": "after",
+      "seconds": 7.485415958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-after-8",
+      "version": "after",
+      "seconds": 7.586586,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-4",
+      "version": "before",
+      "seconds": 4.659834375,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-6",
+      "version": "before",
+      "seconds": 4.674508125,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-2",
+      "version": "before",
+      "seconds": 4.87672675,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-7",
+      "version": "before",
+      "seconds": 5.026112,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-1",
+      "version": "before",
+      "seconds": 5.298296041,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-8",
+      "version": "before",
+      "seconds": 5.42935525,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-0",
+      "version": "before",
+      "seconds": 5.587642875,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-5",
+      "version": "before",
+      "seconds": 5.822380459,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-3-before-3",
+      "version": "before",
+      "seconds": 5.979908458,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-8",
+      "version": "before",
+      "seconds": 4.750777375,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-6",
+      "version": "before",
+      "seconds": 4.767181834,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-3",
+      "version": "before",
+      "seconds": 5.055622084,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-1",
+      "version": "before",
+      "seconds": 5.340996791,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-4",
+      "version": "before",
+      "seconds": 5.786517833,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-2",
+      "version": "before",
+      "seconds": 5.978608,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-7",
+      "version": "before",
+      "seconds": 6.151149209,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-0",
+      "version": "before",
+      "seconds": 6.285978833,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-before-5",
+      "version": "before",
+      "seconds": 6.343935916,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-1",
+      "version": "after",
+      "seconds": 5.284562584,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-2",
+      "version": "after",
+      "seconds": 5.311399792,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-0",
+      "version": "after",
+      "seconds": 5.324617958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-6",
+      "version": "after",
+      "seconds": 5.425601166,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-7",
+      "version": "after",
+      "seconds": 5.467284042,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-5",
+      "version": "after",
+      "seconds": 5.581748958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-8",
+      "version": "after",
+      "seconds": 5.589737166,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-4",
+      "version": "after",
+      "seconds": 5.625988791,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-4-after-3",
+      "version": "after",
+      "seconds": 5.690493667,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-2",
+      "version": "after",
+      "seconds": 5.732241875,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-5",
+      "version": "after",
+      "seconds": 5.752441166,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-4",
+      "version": "after",
+      "seconds": 5.919901958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-7",
+      "version": "after",
+      "seconds": 6.288007958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-6",
+      "version": "after",
+      "seconds": 6.346946416,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-3",
+      "version": "after",
+      "seconds": 6.360542625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-1",
+      "version": "after",
+      "seconds": 6.36856625,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-8",
+      "version": "after",
+      "seconds": 6.371229958,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-after-0",
+      "version": "after",
+      "seconds": 6.47483675,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-5",
+      "version": "before",
+      "seconds": 11.203688583,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-2",
+      "version": "before",
+      "seconds": 11.304748584,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-7",
+      "version": "before",
+      "seconds": 11.400847417,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-8",
+      "version": "before",
+      "seconds": 11.42378875,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-1",
+      "version": "before",
+      "seconds": 11.441706833,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-6",
+      "version": "before",
+      "seconds": 11.444110834,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-4",
+      "version": "before",
+      "seconds": 11.456274458,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-3",
+      "version": "before",
+      "seconds": 11.463746458,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    },
+    {
+      "label": "parallel-5-before-0",
+      "version": "before",
+      "seconds": 11.474668708,
+      "gitStarts": 27,
+      "verifiedAndRemoved": true
+    }
+  ]
+}
