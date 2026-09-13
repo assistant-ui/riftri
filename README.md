@@ -190,6 +190,11 @@ $ riftri gc --apply
 $ riftri state forget-missing /absolute/path/to/removed-state
 ```
 
+Automation can add `--json-errors` anywhere in a command. A failure is then
+written to stderr as one versioned JSON receipt with a stable code, category,
+operation, optional durable phase, cleanup disposition, and recovery guidance.
+Normal successful output and default human-readable errors are unchanged.
+
 If a custom state directory was removed outside Riftri, lifecycle interception
 continues to fail closed. Remove that exact stale repository-local registration
 explicitly with `riftri state forget-missing`; existing state directories are
