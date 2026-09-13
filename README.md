@@ -35,7 +35,19 @@ the filesystem.
 
 ## Installation
 
-Download the standalone native CLI from
+On macOS or Linux with glibc, install the standalone native CLI with Bash:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh | bash
+```
+
+The installer verifies SHA-256, checks the binary version, and installs to
+`~/.local/bin`. Follow its printed PATH command to use it in your current shell.
+It does not edit shell profiles, use sudo, or activate Git interception.
+[Read the script](package/install.sh) before running it, or download it for review
+first as described in the [installation guide](docs/install.md#bash-installer).
+
+For Windows or manual installation, download the standalone native CLI from
 [GitHub Releases](https://github.com/assistant-ui/riftri/releases). Choose your
 OS and architecture, verify the archive against `SHA256SUMS`, and install it in
 a per-user directory. **Node.js and npm are not required.** See the

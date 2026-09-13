@@ -133,9 +133,9 @@ function Overview() {
 const startSteps = [
   {
     index: "01",
-    title: "Install Riftri",
-    description: "The npm launcher installs the matching Rust binary.",
-    command: "npm install --global riftri",
+    title: "Install on macOS or Linux",
+    description: "Downloads the native CLI and verifies SHA-256. No Node.js required.",
+    command: "curl -fsSL https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh | bash",
   },
   {
     index: "02",
@@ -160,7 +160,7 @@ function GetStarted() {
           <h2>Create a Riftri worktree</h2>
         </div>
         <p>
-          Run these commands from a Git repository. Riftri checks the destination first and stops
+          Install the CLI, then run the support check from a Git repository. Riftri stops
           unless a supported native storage backend is available.
         </p>
       </div>
@@ -177,6 +177,17 @@ function GetStarted() {
           </li>
         ))}
       </ol>
+      <div className="install-notes">
+        <p>
+          Installs to <code>~/.local/bin</code>. Follow the printed PATH command before step 02.
+          Shell profiles and Git activation stay unchanged. Linux requires glibc.
+        </p>
+        <div className="install-links">
+          <a href="/install.sh">Read the installer</a>
+          <a href={`${githubUrl}/blob/main/docs/install.md#windows-powershell`}>Windows &amp; manual install</a>
+          <a href={`${githubUrl}/releases`}>Release downloads</a>
+        </div>
+      </div>
     </section>
   );
 }

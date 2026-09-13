@@ -7,6 +7,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- A checksum-verified Bash installer for macOS and glibc Linux, with pinned
+  versions, atomic per-user upgrades, and a copyable command on the website.
 - Standalone direct-download installation guidance for all six native targets,
   with SHA-256 verification before extraction and no Node.js requirement.
 
