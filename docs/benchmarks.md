@@ -5,6 +5,10 @@ For a real-project, ten-agent run using the public direct-download CLI, see
 It records both allocation savings and slower creation, along with the
 repository compatibility adjustment and workload limitations.
 
+For the narrower checkout-configuration optimization, see
+[the batching comparison](benchmarks/checkout-config-batching-2026-09-13.md).
+It includes process counts, paired timings, correctness checks, and raw samples.
+
 Riftri includes one ignored integration benchmark for comparing worktree
 creation and physical allocation on a real supported destination filesystem.
 It exercises the same public core transaction used by the CLI; no synthetic

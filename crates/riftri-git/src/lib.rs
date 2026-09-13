@@ -1,5 +1,6 @@
 //! Interaction with the user's installed Git executable.
 
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
@@ -187,7 +188,7 @@ impl Git {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     fn process_attempts(&self) -> usize {
         self.process_attempts.load(Ordering::Relaxed)
     }
@@ -368,6 +369,71 @@ impl Git {
             ))
         } else if output.status.code() == Some(1) {
             Ok(None)
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
+    }
+
+    /// Read simple `section.variable` keys in one Git process, with normal
+    /// configuration precedence and the same raw values as `config_value`.
+    ///
+    /// Keys are case-insensitive and returned lowercase; subsection keys are
+    /// deliberately unsupported. Missing keys are absent, while empty values
+    /// and implicit booleans are present with empty bytes, as with `--get`.
+    /// The result is operation-local: no answers are cached between calls.
+    pub fn config_values(
+        &self,
+        path: &Path,
+        keys: &[&str],
+    ) -> Result<BTreeMap<String, Vec<u8>>, GitError> {
+        if keys.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let keys = keys
+            .iter()
+            .map(|key| {
+                let valid = key.split_once('.').is_some_and(|(section, variable)| {
+                    !section.is_empty()
+                        && section
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                        && variable
+                            .as_bytes()
+                            .first()
+                            .is_some_and(u8::is_ascii_alphabetic)
+                        && variable
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                });
+                if !valid {
+                    return Err(GitError::InvalidOutput {
+                        context: "configuration keys",
+                        detail: "batch reads require simple section.variable keys".to_owned(),
+                    });
+                }
+                Ok(key.to_ascii_lowercase())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // Validation above excludes regexp metacharacters other than the one
+        // separating dot. Anchor the allowlist so unrelated settings cannot match.
+        let pattern = format!(
+            "^({})$",
+            keys.iter()
+                .map(|key| key.replace('.', r"\."))
+                .collect::<Vec<_>>()
+                .join("|")
+        );
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--null"),
+            OsString::from("--get-regexp"),
+            OsString::from(pattern),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            parse_config_values(&output.stdout, &keys)
+        } else if output.status.code() == Some(1) && output.stdout.is_empty() {
+            Ok(BTreeMap::new())
         } else {
             Err(command_failed(&arguments, &output))
         }
@@ -1412,6 +1478,37 @@ fn os_string_from_git(bytes: &[u8], context: &'static str) -> Result<OsString, G
         })
 }
 
+fn parse_config_values(
+    output: &[u8],
+    keys: &[String],
+) -> Result<BTreeMap<String, Vec<u8>>, GitError> {
+    let invalid = || GitError::InvalidOutput {
+        context: "configuration values",
+        detail: "expected NUL-terminated records for the requested keys".to_owned(),
+    };
+    let mut values = BTreeMap::new();
+    if output.is_empty() {
+        return Ok(values);
+    }
+    let records = output.strip_suffix(&[0]).ok_or_else(invalid)?;
+    for record in records.split(|byte| *byte == 0) {
+        // Git emits key\nvalue\0, or key\0 for an implicit boolean. Split only
+        // the first newline: values may themselves contain newlines or non-UTF-8.
+        let (name, value) = match record.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (&record[..index], &record[index + 1..]),
+            None => (record, &[][..]),
+        };
+        let key = keys
+            .iter()
+            .find(|key| key.as_bytes() == name)
+            .ok_or_else(invalid)?;
+        // --get-regexp returns all occurrences in Git's precedence order;
+        // --get returns the last one. Preserve that exact behavior.
+        values.insert(key.clone(), value.to_vec());
+    }
+    Ok(values)
+}
+
 fn display_arguments(arguments: &[OsString]) -> String {
     arguments
         .iter()
@@ -1767,6 +1864,328 @@ mod tests {
             git.config_value(fixture.path(), "filter.missing.clean")
                 .expect("read missing config"),
             None
+        );
+    }
+
+    #[test]
+    fn batches_configuration_in_one_process_without_changing_values() {
+        let fixture = RepositoryFixture::unborn();
+        let keys = [
+            "riftri-test.one",
+            "riftri-test.two",
+            "riftri-test.three",
+            "riftri-test.four",
+            "riftri-test.five",
+            "riftri-test.six",
+            "riftri-test.seven",
+            "riftri-test.eight",
+            "riftri-test.nine",
+            "riftri-test.ten",
+            "riftri-test.eleven",
+        ];
+        for key in keys {
+            git(fixture.path(), &["config", key, "same answer"]);
+        }
+        let git = Git::default();
+        let before = git.process_attempts();
+        let values = git
+            .config_values(fixture.path(), &keys)
+            .expect("batch config");
+        assert_eq!(git.process_attempts() - before, 1);
+        for key in keys {
+            assert_eq!(
+                values.get(key).cloned(),
+                git.config_value(fixture.path(), key).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release-mode benchmark; reports timings without a host-load-sensitive threshold"]
+    fn reports_batched_configuration_read_latency() {
+        let fixture = RepositoryFixture::unborn();
+        let git = Git::default();
+        let keys = [
+            "core.attributesfile",
+            "core.sparsecheckout",
+            "core.sparsecheckoutcone",
+            "core.autocrlf",
+            "core.eol",
+            "core.symlinks",
+            "core.filemode",
+            "core.ignorecase",
+            "core.precomposeunicode",
+            "core.protecthfs",
+            "core.protectntfs",
+        ];
+        let expected = keys
+            .iter()
+            .filter_map(|key| {
+                git.config_value(fixture.path(), key)
+                    .unwrap()
+                    .map(|value| (key.to_string(), value))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(git.config_values(fixture.path(), &keys).unwrap(), expected);
+        let mut individual_seconds = Vec::new();
+        let mut batched_seconds = Vec::new();
+        for round in 0..30 {
+            for batched in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let attempts = git.process_attempts();
+                let started = std::time::Instant::now();
+                let values = if batched {
+                    git.config_values(fixture.path(), &keys).unwrap()
+                } else {
+                    keys.iter()
+                        .filter_map(|key| {
+                            git.config_value(fixture.path(), key)
+                                .unwrap()
+                                .map(|value| (key.to_string(), value))
+                        })
+                        .collect()
+                };
+                let seconds = started.elapsed().as_secs_f64();
+                assert_eq!(values, expected);
+                assert_eq!(
+                    git.process_attempts() - attempts,
+                    if batched { 1 } else { keys.len() }
+                );
+                if batched {
+                    batched_seconds.push(seconds);
+                } else {
+                    individual_seconds.push(seconds);
+                }
+            }
+        }
+        println!(
+            "{{\"individual_seconds\":{individual_seconds:?},\"batched_seconds\":{batched_seconds:?}}}"
+        );
+    }
+
+    #[test]
+    fn batched_configuration_preserves_raw_empty_implicit_and_duplicate_values() {
+        let fixture = RepositoryFixture::unborn();
+        let config = fixture.path().join(".git/config");
+        let mut bytes = fs::read(&config).unwrap();
+        bytes.extend_from_slice(b"\n[Riftri-Test]\n duplicate = first\n DUPLICATE = last\n empty =\n implicit\n multiline = \"one\\ntwo\\tthree\"\n raw = \"raw-\xff\"\n false = false\n");
+        fs::write(&config, bytes).unwrap();
+        let before = fs::read(&config).unwrap();
+        let keys = [
+            "RIFTRI-TEST.DUPLICATE",
+            "riftri-test.empty",
+            "riftri-test.implicit",
+            "riftri-test.multiline",
+            "riftri-test.raw",
+            "riftri-test.false",
+            "riftri-test.missing",
+        ];
+        let git = Git::default();
+        let values = git.config_values(fixture.path(), &keys).unwrap();
+        for key in keys {
+            assert_eq!(
+                values.get(&key.to_ascii_lowercase()).cloned(),
+                git.config_value(fixture.path(), key).unwrap(),
+                "{key}"
+            );
+        }
+        assert_eq!(values["riftri-test.duplicate"], b"last");
+        assert_eq!(values["riftri-test.empty"], b"");
+        assert_eq!(values["riftri-test.implicit"], b"");
+        assert_eq!(values["riftri-test.multiline"], b"one\ntwo\tthree");
+        assert_eq!(values["riftri-test.raw"], b"raw-\xff");
+        assert_eq!(values["riftri-test.false"], b"false");
+        assert!(!values.contains_key("riftri-test.missing"));
+        assert_eq!(
+            fs::read(config).unwrap(),
+            before,
+            "read must not alter config"
+        );
+    }
+
+    #[test]
+    fn batched_configuration_handles_missing_exact_keys_and_fresh_reads() {
+        let fixture = RepositoryFixture::unborn();
+        let git = Git::default();
+        assert!(git.config_values(fixture.path(), &[]).unwrap().is_empty());
+        assert_eq!(git.process_attempts(), 0);
+        git.set_local_config(fixture.path(), "riftri-test.other", OsStr::new("unrelated"))
+            .unwrap();
+        git.set_local_config(
+            fixture.path(),
+            "riftri-test.valueExtra",
+            OsStr::new("unrelated"),
+        )
+        .unwrap();
+        let values = git
+            .config_values(fixture.path(), &["riftri-test.value"])
+            .unwrap();
+        assert!(values.is_empty());
+        git.set_local_config(fixture.path(), "riftri-test.value", OsStr::new("first"))
+            .unwrap();
+        let first = git
+            .config_values(fixture.path(), &["riftri-test.value"])
+            .unwrap();
+        git.set_local_config(fixture.path(), "riftri-test.value", OsStr::new("changed"))
+            .unwrap();
+        let next = git
+            .config_values(fixture.path(), &["riftri-test.value"])
+            .unwrap();
+        assert_eq!(first["riftri-test.value"], b"first");
+        assert_eq!(next["riftri-test.value"], b"changed");
+    }
+
+    #[test]
+    fn batched_configuration_rejects_invalid_selectors_and_git_failures() {
+        let fixture = RepositoryFixture::unborn();
+        let git = Git::default();
+        for key in [
+            "",
+            "core",
+            "core.",
+            ".value",
+            "core.*",
+            "core.value|user.name",
+            "filter.subsection.clean",
+            "core.1value",
+        ] {
+            assert!(
+                git.config_values(fixture.path(), &[key]).is_err(),
+                "{key:?}"
+            );
+        }
+        assert_eq!(git.process_attempts(), 0);
+        fs::write(fixture.path().join(".git/config"), "[broken\n").unwrap();
+        assert!(git.config_value(fixture.path(), "core.filemode").is_err());
+        assert!(
+            git.config_values(fixture.path(), &["core.filemode"])
+                .is_err()
+        );
+        let unavailable = Git::new(fixture.path().join("missing-git"));
+        assert!(matches!(
+            unavailable.config_values(fixture.path(), &["core.filemode"]),
+            Err(super::GitError::Start { .. })
+        ));
+    }
+
+    #[test]
+    fn batched_configuration_parser_rejects_incomplete_or_unrequested_records() {
+        let keys = ["core.eol".to_owned()];
+        for output in [
+            b"core.eol\nlf".as_slice(),
+            b"\0",
+            b"core.eol\nlf\0\0",
+            b"user.name\nvalue\0",
+            b"core.eol\nlf\0broken\0",
+        ] {
+            assert!(
+                super::parse_config_values(output, &keys).is_err(),
+                "{output:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batched_configuration_preserves_scope_include_and_worktree_precedence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = RepositoryFixture::committed();
+        fs::write(
+            fixture.path().join("global-config"),
+            "[riftri-test]\n scope = global\n global = yes\n[riftri]\n enabled = true\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("included-config"),
+            "[riftri-test]\n included = yes\n order = included\n",
+        )
+        .unwrap();
+        git(fixture.path(), &["config", "riftri-test.scope", "local"]);
+        git(
+            fixture.path(),
+            &["config", "riftri-test.order", "before-include"],
+        );
+        git(
+            fixture.path(),
+            &["config", "include.path", "../included-config"],
+        );
+        // `git config --add` inserts into the existing section, which is still
+        // before the include. Append explicitly to exercise a later override.
+        let config_path = fixture.path().join(".git/config");
+        let config = fs::read_to_string(&config_path).unwrap();
+        fs::write(
+            &config_path,
+            format!("{config}\n[riftri-test]\n order = after-include\n"),
+        )
+        .unwrap();
+        git(
+            fixture.path(),
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        let linked = fixture.path().join("linked");
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        git(
+            &linked,
+            &["config", "--worktree", "riftri-test.scope", "worktree"],
+        );
+        let wrapper = fixture.path().join("scoped-git");
+        fs::write(&wrapper, "#!/bin/sh\nfixture=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd) || exit\nexport GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL=\"$fixture/global-config\"\nexport GIT_CONFIG_COUNT=1\nexport GIT_CONFIG_KEY_0=riftri-test.command\nexport GIT_CONFIG_VALUE_0=environment\nexec git -c riftri-test.command=command-line \"$@\"\n").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let scoped = Git::new(wrapper);
+        let keys = [
+            "riftri-test.scope",
+            "riftri-test.global",
+            "riftri-test.included",
+            "riftri-test.order",
+            "riftri-test.command",
+            "riftri.enabled",
+        ];
+        for repository in [fixture.path(), linked.as_path()] {
+            let values = scoped.config_values(repository, &keys).unwrap();
+            for key in keys {
+                assert_eq!(
+                    values.get(key).cloned(),
+                    scoped.config_value(repository, key).unwrap(),
+                    "{key}"
+                );
+            }
+            assert_eq!(values["riftri-test.global"], b"yes");
+            assert_eq!(values["riftri-test.included"], b"yes");
+            assert_eq!(values["riftri-test.order"], b"after-include");
+            assert_eq!(values["riftri-test.command"], b"command-line");
+            assert_eq!(values["riftri.enabled"], b"true");
+            assert_eq!(
+                scoped
+                    .local_config_bool(repository, "riftri.enabled")
+                    .unwrap(),
+                None,
+                "global consent must not become local consent"
+            );
+        }
+        assert_eq!(
+            scoped.config_values(fixture.path(), &keys).unwrap()["riftri-test.scope"],
+            b"local"
+        );
+        assert_eq!(
+            scoped.config_values(&linked, &keys).unwrap()["riftri-test.scope"],
+            b"worktree"
+        );
+        git(
+            fixture.path(),
+            &["worktree", "remove", linked.to_str().unwrap()],
         );
     }
 
