@@ -19,10 +19,21 @@ use windows_sys::Win32::System::Ioctl::{
 };
 
 use crate::StorageError;
+use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
 
 const PROBE_BYTES: usize = 64 * 1024;
 const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
 static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+struct FileClone {
+    source: PathBuf,
+    destination: PathBuf,
+}
+
+struct DirectoryClone {
+    destination: PathBuf,
+    permissions: fs::Permissions,
+}
 
 pub(crate) fn probe(directory: &Path) -> std::io::Result<()> {
     let source_path = probe_path(directory, "source")?;
@@ -89,7 +100,32 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Storag
     let cluster_size = cluster_size(source)
         .map_err(|source_error| io("determine ReFS block-clone alignment", source, source_error))?;
 
-    let result = clone_directory(source, destination, cluster_size);
+    let result = (|| {
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        prepare_clone_directory(
+            source,
+            destination,
+            metadata.permissions(),
+            &mut files,
+            &mut directories,
+        )?;
+        try_for_each_bounded(files, file_clone_parallelism(), |file| {
+            clone_file(&file.source, &file.destination, cluster_size)
+        })?;
+        for directory in directories.into_iter().rev() {
+            fs::set_permissions(&directory.destination, directory.permissions).map_err(
+                |source_error| {
+                    io(
+                        "restore clone directory permissions",
+                        &directory.destination,
+                        source_error,
+                    )
+                },
+            )?;
+        }
+        Ok(())
+    })();
     if result.is_err() && destination.exists() {
         let _ = make_tree_owner_writable(destination);
         let _ = fs::remove_dir_all(destination);
@@ -97,13 +133,19 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Storag
     result
 }
 
-fn clone_directory(
+fn prepare_clone_directory(
     source: &Path,
     destination: &Path,
-    cluster_size: u64,
+    permissions: fs::Permissions,
+    files: &mut Vec<FileClone>,
+    directories: &mut Vec<DirectoryClone>,
 ) -> Result<(), StorageError> {
     fs::create_dir(destination)
         .map_err(|source_error| io("create clone directory", destination, source_error))?;
+    directories.push(DirectoryClone {
+        destination: destination.to_path_buf(),
+        permissions,
+    });
 
     for entry in fs::read_dir(source)
         .map_err(|source_error| io("read clone source directory", source, source_error))?
@@ -117,9 +159,18 @@ fn clone_directory(
         let file_type = metadata.file_type();
 
         if file_type.is_dir() {
-            clone_directory(&source_path, &destination_path, cluster_size)?;
+            prepare_clone_directory(
+                &source_path,
+                &destination_path,
+                metadata.permissions(),
+                files,
+                directories,
+            )?;
         } else if file_type.is_file() {
-            clone_file(&source_path, &destination_path, cluster_size)?;
+            files.push(FileClone {
+                source: source_path,
+                destination: destination_path,
+            });
         } else if file_type.is_symlink() {
             clone_symlink(&source_path, &destination_path)?;
         } else {
@@ -127,16 +178,6 @@ fn clone_directory(
         }
     }
 
-    let permissions = fs::metadata(source)
-        .map_err(|source_error| io("inspect source directory permissions", source, source_error))?
-        .permissions();
-    fs::set_permissions(destination, permissions).map_err(|source_error| {
-        io(
-            "restore clone directory permissions",
-            destination,
-            source_error,
-        )
-    })?;
     Ok(())
 }
 

@@ -1,9 +1,16 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::StorageError;
+use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
+
+struct FileClone {
+    source: PathBuf,
+    destination: PathBuf,
+    mode: u32,
+}
 
 pub(crate) fn probe(directory: &Path) -> std::io::Result<()> {
     let mut source = unnamed_file(directory)?;
@@ -48,7 +55,25 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Storag
         return Err(StorageError::DestinationExists(destination.to_path_buf()));
     }
 
-    let result = clone_directory(source, destination, metadata.permissions().mode());
+    let result = (|| {
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        prepare_clone_directory(
+            source,
+            destination,
+            metadata.permissions().mode(),
+            &mut files,
+            &mut directories,
+        )?;
+        try_for_each_bounded(files, file_clone_parallelism(), |file| {
+            clone_file(&file.source, &file.destination, file.mode)
+        })?;
+        for (path, mode) in directories.into_iter().rev() {
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode))
+                .map_err(|source_error| io("restore clone directory mode", &path, source_error))?;
+        }
+        Ok(())
+    })();
     if result.is_err() && destination.exists() {
         let _ = make_tree_owner_writable(destination);
         let _ = fs::remove_dir_all(destination);
@@ -56,11 +81,18 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Storag
     result
 }
 
-fn clone_directory(source: &Path, destination: &Path, final_mode: u32) -> Result<(), StorageError> {
+fn prepare_clone_directory(
+    source: &Path,
+    destination: &Path,
+    final_mode: u32,
+    files: &mut Vec<FileClone>,
+    directories: &mut Vec<(PathBuf, u32)>,
+) -> Result<(), StorageError> {
     fs::create_dir(destination)
         .map_err(|source_error| io("create clone directory", destination, source_error))?;
     fs::set_permissions(destination, fs::Permissions::from_mode(final_mode | 0o700))
         .map_err(|source_error| io("prepare clone directory mode", destination, source_error))?;
+    directories.push((destination.to_path_buf(), final_mode));
 
     for entry in fs::read_dir(source)
         .map_err(|source_error| io("read clone source directory", source, source_error))?
@@ -74,17 +106,19 @@ fn clone_directory(source: &Path, destination: &Path, final_mode: u32) -> Result
         let file_type = metadata.file_type();
 
         if file_type.is_dir() {
-            clone_directory(
+            prepare_clone_directory(
                 &source_path,
                 &destination_path,
                 metadata.permissions().mode(),
+                files,
+                directories,
             )?;
         } else if file_type.is_file() {
-            clone_file(
-                &source_path,
-                &destination_path,
-                metadata.permissions().mode(),
-            )?;
+            files.push(FileClone {
+                source: source_path,
+                destination: destination_path,
+                mode: metadata.permissions().mode(),
+            });
         } else if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
                 .map_err(|source_error| io("read source symlink", &source_path, source_error))?;
@@ -96,8 +130,6 @@ fn clone_directory(source: &Path, destination: &Path, final_mode: u32) -> Result
         }
     }
 
-    fs::set_permissions(destination, fs::Permissions::from_mode(final_mode))
-        .map_err(|source_error| io("restore clone directory mode", destination, source_error))?;
     Ok(())
 }
 

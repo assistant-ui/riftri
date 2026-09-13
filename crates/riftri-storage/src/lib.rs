@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+mod parallel;
+
 /// Errors from concrete native storage operations.
 #[derive(Debug, Error)]
 pub enum StorageError {
