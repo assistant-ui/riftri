@@ -12,6 +12,8 @@ mod activation;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod base_integrity;
 mod journal;
+#[cfg(test)]
+mod test_hooks;
 #[cfg(all(
     test,
     any(
