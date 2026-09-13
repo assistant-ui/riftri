@@ -12,6 +12,10 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Copy-on-write acceleration for real Git worktrees"
 )]
 struct Cli {
+    /// Emit command failures as one machine-readable JSON receipt on stderr.
+    #[arg(long, global = true)]
+    json_errors: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -136,6 +140,30 @@ enum Command {
         #[arg(long)]
         state_dir: PathBuf,
     },
+}
+
+impl Command {
+    fn operation_name(&self) -> &'static str {
+        match self {
+            Self::Enable { .. } => "enable",
+            Self::Disable { .. } => "disable",
+            Self::Exec { .. } => "exec",
+            Self::Overlayfs { .. } => "overlayfs-helper-install",
+            Self::Shell { .. } => "shell",
+            Self::Doctor { .. } => "doctor",
+            Self::Backends { .. } => "backends",
+            Self::Status { .. } => "status",
+            Self::Repair { .. } | Self::Recover { .. } => "repair",
+            Self::Gc { .. } => "garbage-collection",
+            Self::State { .. } => "state",
+            Self::Worktree { command } => match command {
+                WorktreeCommand::Add { .. } => "worktree-add",
+                WorktreeCommand::Remove { .. } => "worktree-remove",
+                WorktreeCommand::Move { .. } => "worktree-move",
+                WorktreeCommand::Prune { .. } => "worktree-prune",
+            },
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -275,7 +303,23 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    let json_errors = cli.json_errors;
+    let operation = cli.command.operation_name();
 
+    match run(cli) {
+        Ok(()) => Ok(()),
+        Err(error) if json_errors => {
+            eprintln!(
+                "{}",
+                serde_json::to_string(&failure_receipt(operation, &error))?
+            );
+            std::process::exit(1);
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Enable { path } => {
             let activation = riftri_core::enable_repository(&path)?;
@@ -469,6 +513,193 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {
+    let (code, category, phase, cleanup, recovery) = error
+        .downcast_ref::<riftri_core::WorktreeError>()
+        .map(worktree_failure_fields)
+        .unwrap_or((
+            "command-failed",
+            "operational",
+            None,
+            "unknown",
+            recovery_for_operation(operation),
+        ));
+    let next_command = match recovery {
+        "required" => Some("riftri repair"),
+        "inspect" => Some("riftri status"),
+        _ => None,
+    };
+
+    serde_json::json!({
+        "schemaVersion": 1,
+        "outcome": "failed",
+        "operation": operation,
+        "code": code,
+        "category": category,
+        "message": error.to_string(),
+        "phase": phase,
+        "cleanup": cleanup,
+        "recovery": recovery,
+        "nextCommand": next_command,
+    })
+}
+
+fn worktree_failure_fields(
+    error: &riftri_core::WorktreeError,
+) -> (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    &'static str,
+    &'static str,
+) {
+    use riftri_core::WorktreeError;
+
+    match error {
+        WorktreeError::Git(_) => ("git-failed", "operational", None, "unknown", "inspect"),
+        WorktreeError::Storage(_) => ("storage-failed", "operational", None, "unknown", "inspect"),
+        WorktreeError::Journal(_) => ("journal-failed", "operational", None, "unknown", "required"),
+        WorktreeError::JournalTransition(_)
+        | WorktreeError::RemoveJournalTransition(_)
+        | WorktreeError::MoveJournalTransition(_)
+        | WorktreeError::PruneJournalTransition(_) => (
+            "journal-transition-failed",
+            "operational",
+            None,
+            "unknown",
+            "required",
+        ),
+        WorktreeError::Unsupported(_) => (
+            "unsupported-checkout",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
+        WorktreeError::InvalidRequest(_) => (
+            "invalid-request",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
+        WorktreeError::Io { .. } => (
+            "filesystem-io-failed",
+            "operational",
+            None,
+            "unknown",
+            "inspect",
+        ),
+        WorktreeError::OperationAndRollback { .. } => (
+            "rollback-failed",
+            "operational",
+            Some("rollback"),
+            "unknown",
+            "required",
+        ),
+        WorktreeError::InjectedFailure(phase) => (
+            "injected-failure",
+            "operational",
+            Some(add_phase_name(*phase)),
+            "rolled-back",
+            "not-required",
+        ),
+        WorktreeError::InjectedRemovalFailure(phase) => (
+            "injected-failure",
+            "operational",
+            Some(remove_phase_name(*phase)),
+            "unknown",
+            "inspect",
+        ),
+        WorktreeError::InjectedMoveFailure(phase) => (
+            "injected-failure",
+            "operational",
+            Some(move_phase_name(*phase)),
+            "unknown",
+            "inspect",
+        ),
+        WorktreeError::InjectedPruneFailure(phase) => (
+            "injected-failure",
+            "operational",
+            Some(prune_phase_name(*phase)),
+            "unknown",
+            "inspect",
+        ),
+        WorktreeError::InjectedCollectionFailure(phase) => (
+            "injected-failure",
+            "operational",
+            Some(collection_phase_name(*phase)),
+            "unknown",
+            "inspect",
+        ),
+    }
+}
+
+fn recovery_for_operation(operation: &str) -> &'static str {
+    match operation {
+        "worktree-add" | "worktree-remove" | "worktree-move" | "worktree-prune"
+        | "garbage-collection" | "repair" => "inspect",
+        _ => "unknown",
+    }
+}
+
+fn add_phase_name(phase: riftri_core::AddWorktreePhase) -> &'static str {
+    use riftri_core::AddWorktreePhase::*;
+    match phase {
+        IntentRecorded => "intent-recorded",
+        GitMetadataCreated => "git-metadata-created",
+        BaseReady => "base-ready",
+        ViewCreated => "view-created",
+        GitPointerRestored => "git-pointer-restored",
+        IndexSynchronized => "index-synchronized",
+        CleanVerified => "clean-verified",
+        Active => "active",
+        RollbackPending => "rollback-pending",
+        RolledBack => "rolled-back",
+    }
+}
+
+fn remove_phase_name(phase: riftri_core::RemoveWorktreePhase) -> &'static str {
+    use riftri_core::RemoveWorktreePhase::*;
+    match phase {
+        IntentRecorded => "intent-recorded",
+        CleanVerified => "clean-verified",
+        WorktreeRemoved => "worktree-removed",
+        BaseReleased => "base-released",
+        Complete => "complete",
+    }
+}
+
+fn move_phase_name(phase: riftri_core::MoveWorktreePhase) -> &'static str {
+    use riftri_core::MoveWorktreePhase::*;
+    match phase {
+        IntentRecorded => "intent-recorded",
+        WorktreeMoved => "worktree-moved",
+        AddJournalUpdated => "add-journal-updated",
+        Complete => "complete",
+    }
+}
+
+fn prune_phase_name(phase: riftri_core::PruneWorktreesPhase) -> &'static str {
+    use riftri_core::PruneWorktreesPhase::*;
+    match phase {
+        IntentRecorded => "intent-recorded",
+        GitMetadataPruned => "git-metadata-pruned",
+        Complete => "complete",
+    }
+}
+
+fn collection_phase_name(phase: riftri_core::GarbageCollectionPhase) -> &'static str {
+    use riftri_core::GarbageCollectionPhase::*;
+    match phase {
+        IntentRecorded => "intent-recorded",
+        MarkerRemoved => "marker-removed",
+        BaseQuarantined => "base-quarantined",
+        Complete => "complete",
+        Cancelled => "cancelled",
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -989,7 +1220,44 @@ mod tests {
     use clap::Parser;
     use clap::error::ErrorKind;
 
-    use super::{Cli, Command, OverlayFsCommand, PosixShell, ShellCommand, WorktreeCommand};
+    use super::{
+        Cli, Command, OverlayFsCommand, PosixShell, ShellCommand, WorktreeCommand, failure_receipt,
+    };
+
+    #[test]
+    fn parses_machine_readable_failure_output_globally() {
+        let cli = Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "add",
+            "../app-auth",
+            "-b",
+            "feature/auth",
+            "--json-errors",
+        ])
+        .expect("parse global JSON failure flag after subcommands");
+
+        assert!(cli.json_errors);
+        assert_eq!(cli.command.operation_name(), "worktree-add");
+    }
+
+    #[test]
+    fn failure_receipt_has_a_stable_policy_shape() {
+        let error = anyhow::Error::new(riftri_core::WorktreeError::InvalidRequest(
+            "destination already exists".to_owned(),
+        ));
+        let receipt = failure_receipt("worktree-add", &error);
+
+        assert_eq!(receipt["schemaVersion"], 1);
+        assert_eq!(receipt["outcome"], "failed");
+        assert_eq!(receipt["operation"], "worktree-add");
+        assert_eq!(receipt["code"], "invalid-request");
+        assert_eq!(receipt["category"], "policy");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "not-required");
+        assert!(receipt["phase"].is_null());
+        assert!(receipt["nextCommand"].is_null());
+    }
 
     #[test]
     fn parses_repository_activation_commands() {
