@@ -6,6 +6,7 @@ import { StorageMap } from "../components/storage-map";
 
 const githubUrl = "https://github.com/assistant-ui/riftri";
 const agentbaseUrl = "https://agentbase.dev";
+const installCommand = "curl -fsSL https://riftri.vercel.app/install.sh | bash";
 
 export const metadata: Metadata = {
   title: "Riftri — Lightweight Git workspaces for parallel development",
@@ -79,6 +80,10 @@ function Hero() {
             <GitHubIcon /> View GitHub <ArrowUpRightIcon />
           </a>
         </div>
+        <div className="hero-install">
+          <p>Install on macOS or Linux (glibc)</p>
+          <CopyCommand command={installCommand} compact />
+        </div>
       </div>
       <div className="hero-graph">
         <StorageMap />
@@ -133,9 +138,9 @@ function Overview() {
 const startSteps = [
   {
     index: "01",
-    title: "Install Riftri",
-    description: "The npm launcher installs the matching Rust binary.",
-    command: "npm install --global riftri",
+    title: "Install on macOS or Linux",
+    description: "Downloads the native CLI and verifies SHA-256. No Node.js required.",
+    command: installCommand,
   },
   {
     index: "02",
@@ -160,7 +165,7 @@ function GetStarted() {
           <h2>Create a Riftri worktree</h2>
         </div>
         <p>
-          Run these commands from a Git repository. Riftri checks the destination first and stops
+          Install the CLI, then run the support check from a Git repository. Riftri stops
           unless a supported native storage backend is available.
         </p>
       </div>
@@ -177,6 +182,17 @@ function GetStarted() {
           </li>
         ))}
       </ol>
+      <div className="install-notes">
+        <p>
+          Installs to <code>~/.local/bin</code>. Follow the printed PATH command before step 02.
+          Shell profiles and Git activation stay unchanged. Linux requires glibc.
+        </p>
+        <div className="install-links">
+          <a href="/install.sh">Read the installer</a>
+          <a href={`${githubUrl}/blob/c462a27e55ea1fce08e6ceedf50b0bc5be89a4b9/docs/install.md#windows-powershell`}>Windows &amp; manual install</a>
+          <a href={`${githubUrl}/releases`}>Release downloads</a>
+        </div>
+      </div>
     </section>
   );
 }

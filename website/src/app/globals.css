@@ -141,6 +141,9 @@ code, pre { font-family: var(--font-mono); }
 }
 
 .hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1.5rem; margin-top: 2rem; }
+.hero-install { width: min(100%, 540px); margin-top: 1.5rem; }
+.hero-install p { margin: 0 0 0.65rem; color: var(--ink-muted); font-size: 0.6rem; line-height: 1.5; }
+.hero-install .command code { white-space: normal; overflow-wrap: anywhere; }
 
 .button {
   position: relative;
@@ -514,6 +517,11 @@ code, pre { font-family: var(--font-mono); }
 .start-copy { min-width: 0; }
 .start-copy strong { font-family: var(--font-sans); font-size: 0.9rem; font-weight: 500; }
 .start-copy p { margin: 0.35rem 0 0; color: var(--ink-faint); font-family: var(--font-sans); font-size: 0.7rem; line-height: 1.5; }
+.install-notes { margin: 1.5rem 0 0 4.5rem; color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.75rem; line-height: 1.6; }
+.install-notes p { margin: 0; }
+.install-notes code { font-size: 0.7rem; }
+.install-links { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; margin-top: 0.75rem; }
+.install-links a { text-decoration: underline; text-underline-offset: 0.2em; }
 
 .command {
   display: grid;
@@ -551,6 +559,7 @@ code, pre { font-family: var(--font-mono); }
 
 .copy-button:active { transform: scale(0.97); }
 .copy-button.is-copied { background: var(--accent); color: var(--canvas-deep); }
+.copy-error { grid-column: 1 / -1; padding: 0.65rem 1rem; color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.75rem; }
 
 .site-footer {
   display: grid;
@@ -585,6 +594,7 @@ code, pre { font-family: var(--font-mono); }
   .split-heading { grid-template-columns: 1fr; gap: 1.25rem; }
   .split-heading > p { margin-top: 0; }
   .start-list li { grid-template-columns: 2.5rem minmax(12rem, 0.8fr) minmax(18rem, 1.2fr); gap: 1rem; }
+  .install-notes { margin-left: 3.5rem; }
 }
 
 @media (max-width: 760px) {
@@ -612,6 +622,7 @@ code, pre { font-family: var(--font-mono); }
   .essential-grid h3 { margin-top: 1.2rem; }
   .start-list li { grid-template-columns: 2rem minmax(0, 1fr); padding: 0.75rem 0; }
   .start-list .command { grid-column: 1 / -1; width: 100%; margin-top: 0.4rem; }
+  .install-notes { margin-left: 0; }
   .site-footer { grid-template-columns: 1fr; }
   .site-footer > * { min-height: 58px; justify-content: flex-start !important; border-left: 0 !important; }
   .site-footer > * + * { border-top: 1px solid var(--line); }

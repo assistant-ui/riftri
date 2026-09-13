@@ -111,6 +111,14 @@ jobs:
         working-directory: dist/release
         run: sha256sum --check SHA256SUMS
 
+      - name: Upload GitHub release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: github-release-assets
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Inspect all npm tarballs
         shell: bash
         run: |
@@ -125,12 +133,12 @@ jobs:
         run: echo "Release rehearsal completed without publishing npm packages or a GitHub release."
 
   publish:
-    name: Publish tagged release
+    name: Publish npm packages
     if: github.event_name == 'push'
     needs: stage
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
+      contents: read
       id-token: write
 
     steps:
@@ -177,17 +185,73 @@ jobs:
       - name: Publish npm packages
         run: node package/scripts/publish-packages.mjs
 
-      - name: Create or update GitHub release
+  github-release:
+    name: Publish direct downloads
+    if: github.event_name == 'push'
+    needs: stage
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Download inspected GitHub release assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: github-release-assets
+          path: dist/release
+
+      - name: Verify exact GitHub release assets
+        working-directory: dist/release
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { createHash } = require('node:crypto');
+          const { lstatSync, readFileSync, readdirSync } = require('node:fs');
+          const tag = process.env.GITHUB_REF_NAME;
+          assert.match(tag, /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+          const archives = [
+            'riftri-darwin-arm64', 'riftri-darwin-x64',
+            'riftri-linux-arm64-gnu', 'riftri-linux-x64-gnu',
+            'riftri-win32-arm64', 'riftri-win32-x64',
+          ].map(name => `${name}-${tag}.tar.gz`).sort();
+          const expected = ['SHA256SUMS', ...archives].sort();
+          assert.deepEqual(readdirSync('.').sort(), expected, 'unexpected release asset set');
+          for (const name of expected) {
+            assert.ok(lstatSync(name).isFile(), `${name} is not a regular file`);
+          }
+          const checksums = readFileSync('SHA256SUMS', 'utf8').trimEnd().split('\n');
+          assert.equal(checksums.length, archives.length, 'expected one checksum per archive');
+          const verified = [];
+          for (const line of checksums) {
+            const match = /^([0-9a-f]{64})  ([^/\\]+)$/.exec(line);
+            assert.ok(match, 'invalid checksum line');
+            const [, checksum, name] = match;
+            assert.ok(archives.includes(name), `unexpected checksum target: ${name}`);
+            assert.equal(createHash('sha256').update(readFileSync(name)).digest('hex'), checksum,
+              `checksum mismatch: ${name}`);
+            verified.push(name);
+          }
+          assert.deepEqual(verified.sort(), archives, 'missing or duplicate archive checksum');
+          console.log(`Verified all ${archives.length} native archives for ${tag}`);
+          NODE
+
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/release/* --clobber
-          else
-            release_options=(--verify-tag --generate-notes)
-            if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
-              release_options+=(--prerelease)
-            fi
-            gh release create "${GITHUB_REF_NAME}" dist/release/* "${release_options[@]}"
+          release_options=(--verify-tag --generate-notes)
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            release_options+=(--prerelease)
           fi
+          # An existing release fails safely: never replace published assets.
+          gh release create "${GITHUB_REF_NAME}" dist/release/SHA256SUMS dist/release/*.tar.gz "${release_options[@]}"

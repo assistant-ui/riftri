@@ -9,20 +9,21 @@ type CopyCommandProps = {
 };
 
 export function CopyCommand({ command, label = "COPY", compact = false }: CopyCommandProps) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const copied = state === "copied";
 
   useEffect(() => {
     if (!copied) return;
-    const timeout = window.setTimeout(() => setCopied(false), 1800);
+    const timeout = window.setTimeout(() => setState("idle"), 1800);
     return () => window.clearTimeout(timeout);
   }, [copied]);
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(command);
-      setCopied(true);
+      setState("copied");
     } catch {
-      setCopied(false);
+      setState("failed");
     }
   }
 
@@ -30,9 +31,12 @@ export function CopyCommand({ command, label = "COPY", compact = false }: CopyCo
     <div className={`command ${compact ? "command-compact" : ""}`} aria-label={`Command: ${command}`}>
       <span className="command-prompt" aria-hidden="true">$</span>
       <code>{command}</code>
-      <button className={`copy-button${copied ? " is-copied" : ""}`} type="button" onClick={copy} aria-live="polite">
-        {copied ? "COPIED" : label}
+      <button className={`copy-button${copied ? " is-copied" : ""}`} type="button" onClick={copy} aria-label={`${copied ? "Copied" : "Copy"} command: ${command}`} aria-live="polite">
+        {copied ? "COPIED" : state === "failed" ? "RETRY" : label}
       </button>
+      {state === "failed" ? (
+        <span className="copy-error" role="status">Copy unavailable. Select the command to copy it manually.</span>
+      ) : null}
     </div>
   );
 }

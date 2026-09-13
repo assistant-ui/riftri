@@ -35,7 +35,30 @@ the filesystem.
 
 ## Installation
 
-Install the experimental Rust-powered CLI through npm:
+On macOS or Linux with glibc, install the standalone native CLI with Bash:
+
+```sh
+curl -fsSL https://riftri.vercel.app/install.sh | bash
+```
+
+The installer verifies SHA-256, checks the binary version, and installs to
+`~/.local/bin`. Follow its printed PATH command to use it in your current shell.
+It does not edit shell profiles, use sudo, or activate Git interception.
+[Read the script](package/install.sh) before running it, or download it for review
+first as described in the [installation guide](docs/install.md#bash-installer).
+
+For Windows or manual installation, download the standalone native CLI from
+[GitHub Releases](https://github.com/assistant-ui/riftri/releases). Choose your
+OS and architecture, verify the archive against `SHA256SUMS`, and install it in
+a per-user directory. **Node.js and npm are not required.** See the
+[direct-download installation guide](docs/install.md) for all six targets and
+copyable checksum-verification commands.
+
+The npm launcher is a separate distribution channel. As of September 12, 2026,
+`riftri@0.1.1` is not published: npm rejected its Windows ARM64 dependency during
+the initial release. The four published macOS/Linux native packages do not make
+the launcher available. Use direct downloads while npm publication is pending.
+For a version whose launcher has been published, npm installation is:
 
 ```console
 $ npm install --global riftri
@@ -49,10 +72,11 @@ $ cargo build --release -p riftri-cli
 $ ./target/release/riftri doctor
 ```
 
-The npm package is a small launcher for a prebuilt Rust binary. Builds are
-provided for macOS, Linux, and Windows, but optimized worktree creation is
+The npm package is a small launcher for the same prebuilt Rust binary. Builds
+are provided for macOS, Linux, and Windows, but optimized worktree creation is
 currently available on APFS, supported Linux reflink volumes, caller-visible
-OverlayFS mounts, and ReFS.
+OverlayFS mounts, and ReFS, subject to the selected release's capabilities.
+Installing the Windows CLI on NTFS does not add an NTFS worktree backend.
 
 ## Quick start
 

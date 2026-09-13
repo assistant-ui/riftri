@@ -4,6 +4,7 @@
 /website/node_modules/
 /website/.farm/
 /website/.vercel/
+/website/public/install.sh
 /package/platforms/*/bin/
 *.tgz
 .DS_Store
