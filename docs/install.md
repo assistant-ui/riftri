@@ -8,7 +8,7 @@ release you intend to install; do not mix files from different versions.
 
 ## Bash installer
 
-On macOS (Apple Silicon or Intel) and Linux with glibc (ARM64 or x64):
+On macOS (Apple Silicon or Intel) and Linux with glibc or musl (ARM64 or x64):
 
 ```sh
 curl -fsSL https://riftri.vercel.app/install.sh | bash
@@ -58,9 +58,9 @@ curl -fsSL https://riftri.vercel.app/install.sh | RIFTRI_INSTALL_DIR="$HOME/tool
 
 Follow the PATH command printed by the installer, then check `riftri --version`.
 It never changes your current or future shells automatically. The Bash installer
-does not support Windows shells or musl/Alpine; use the manual instructions below
-for Windows. If the executable cannot run because of OS, runtime, or security
-policy requirements, installation stops without bypassing that policy.
+does not support Windows shells; use the manual instructions below for Windows.
+If the executable cannot run because of OS, runtime, or security policy
+requirements, installation stops without bypassing that policy.
 
 ## Choose a native archive
 
@@ -72,13 +72,15 @@ For `v0.1.1`, the release assets are:
 | macOS | Intel / x64 | `riftri-darwin-x64-v0.1.1.tar.gz` |
 | Linux with glibc | ARM64 / aarch64 | `riftri-linux-arm64-gnu-v0.1.1.tar.gz` |
 | Linux with glibc | x64 / x86_64 | `riftri-linux-x64-gnu-v0.1.1.tar.gz` |
+| Linux with musl | ARM64 / aarch64 | `riftri-linux-arm64-musl-v0.1.1.tar.gz` |
+| Linux with musl | x64 / x86_64 | `riftri-linux-x64-musl-v0.1.1.tar.gz` |
 | Windows | ARM64 | `riftri-win32-arm64-v0.1.1.tar.gz` |
 | Windows | x64 | `riftri-win32-x64-v0.1.1.tar.gz` |
 
 Each archive contains only `riftri` on macOS/Linux or `riftri.exe` on Windows.
-Linux archives target GNU/glibc, not musl/Alpine. If the executable reports a
-missing runtime or incompatible glibc version, build from source in a supported
-environment instead of treating it as a filesystem capability failure.
+Linux downloads select separate GNU/glibc and musl builds. If the executable
+reports a missing or incompatible runtime, choose the matching libc archive or
+build from source instead of treating it as a filesystem capability failure.
 
 The checksum detects corrupted or mismatched downloads; it is not a separate
 signature or a notarization claim. Obtain both files over HTTPS from the

@@ -9,6 +9,7 @@ const { test } = require("node:test");
 const { version } = require("../../package.json");
 
 const {
+  assertCompatiblePackageManifest,
   detectLinuxLibc,
   packageNameForPlatform,
   platformKey,
@@ -28,14 +29,45 @@ test("selects packages from platform, architecture, and libc", () => {
     packageNameForPlatform("linux", "x64", glibcReport),
     "riftri-linux-x64-gnu",
   );
-  assert.equal(packageNameForPlatform("linux", "x64", muslReport), null);
+  assert.equal(
+    packageNameForPlatform("linux", "x64", muslReport),
+    "riftri-linux-x64-musl",
+  );
   assert.equal(packageNameForPlatform("freebsd", "x64", glibcReport), null);
 });
 
-test("detects GNU libc without treating musl as compatible", () => {
+test("distinguishes GNU libc and musl", () => {
   assert.equal(detectLinuxLibc(glibcReport), "gnu");
   assert.equal(detectLinuxLibc(muslReport), "musl");
   assert.equal(platformKey("linux", "arm64", muslReport), "linux-arm64-musl");
+});
+
+test("rejects mismatched native package manifests", () => {
+  assert.doesNotThrow(() =>
+    assertCompatiblePackageManifest(
+      { name: "riftri-linux-x64-musl", version },
+      "riftri-linux-x64-musl",
+      version,
+    ),
+  );
+  assert.throws(
+    () =>
+      assertCompatiblePackageManifest(
+        { name: "riftri-linux-x64-gnu", version },
+        "riftri-linux-x64-musl",
+        version,
+      ),
+    /does not match/,
+  );
+  assert.throws(
+    () =>
+      assertCompatiblePackageManifest(
+        { name: "riftri-linux-x64-musl", version: "0.0.0" },
+        "riftri-linux-x64-musl",
+        version,
+      ),
+    /does not match/,
+  );
 });
 
 test("stages the public package with conventional root directories", async (t) => {

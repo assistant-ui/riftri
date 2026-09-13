@@ -18,7 +18,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 
-test("stages all six native release packages and checksums offline", async (t) => {
+test("stages all eight native release packages and checksums offline", async (t) => {
   const repositoryRoot = path.resolve(__dirname, "..", "..");
   const temporary = await mkdtemp(path.join(os.tmpdir(), "riftri-release-"));
   t.after(() => rm(temporary, { recursive: true, force: true }));
@@ -53,8 +53,8 @@ test("stages all six native release packages and checksums offline", async (t) =
     rootPackageDirectory,
   });
 
-  assert.equal(packageNames.length, 6);
-  assert.equal(result.nativePackageCount, 6);
+  assert.equal(packageNames.length, 8);
+  assert.equal(result.nativePackageCount, 8);
   assert.equal(result.releaseDirectory, releaseDirectory);
   assert.equal(result.rootPackageDirectory, rootPackageDirectory);
   assert.deepEqual(
