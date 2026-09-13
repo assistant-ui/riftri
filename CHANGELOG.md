@@ -5,6 +5,25 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## 0.2.1 - 2026-09-13
+
+### Fixed
+
+- OverlayFS unmounts retry transient busy results with bounded backoff while
+  revalidating the exact journaled mount identity before every retry.
+- Rollback race coverage now synchronizes directly at Git's removal boundary
+  and asserts structured failures while proving concurrent writes are preserved.
+
+### Release
+
+- Partial npm publications safely skip completed exact versions, keep the
+  launcher last, and verify all nine packages after bounded registry retries.
+
+### Documentation
+
+- Project, roadmap, architecture, and agent guidance now consistently record
+  the completed Linux milestone and the journal-backed lifecycle registry.
+
 ## 0.2.0 - 2026-09-13
 
 ### Added
