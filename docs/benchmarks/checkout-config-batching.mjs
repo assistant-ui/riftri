@@ -1,5 +1,7 @@
 // Manual benchmark: node checkout-config-batching.mjs BEFORE AFTER SOURCE COMMIT NEW_OUTPUT_DIR
 // Uses an independent exact-tree snapshot; never creates worktrees in SOURCE.
+// Optional RIFTRI_BENCH_SINGLE_ROUNDS, RIFTRI_BENCH_BATCH_ROUNDS, and
+// RIFTRI_BENCH_WORKERS also support follow-up creation optimizations.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -8,6 +10,14 @@ import path from 'node:path';
 
 const [before, after, source, revision, outputArgument] = process.argv.slice(2);
 assert.ok(before && after && source && revision && outputArgument, 'Expected BEFORE AFTER SOURCE COMMIT NEW_OUTPUT_DIR');
+function count(name, fallback, maximum) {
+  const value = Number(process.env[name] ?? fallback);
+  assert.ok(Number.isInteger(value) && value >= 1 && value <= maximum, `${name} must be 1..${maximum}`);
+  return value;
+}
+const singleRounds = count('RIFTRI_BENCH_SINGLE_ROUNDS', 8, 30);
+const batchRounds = count('RIFTRI_BENCH_BATCH_ROUNDS', 2, 30);
+const workers = count('RIFTRI_BENCH_WORKERS', 9, 16);
 const binaries = { before: path.resolve(before), after: path.resolve(after) };
 const output = path.resolve(outputArgument);
 assert.ok(!fs.existsSync(output), 'Output directory must not already exist');
@@ -44,7 +54,7 @@ function fingerprint(directory, name) {
   return { name, symlink, executable: stat.mode & 0o111, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 const manifest = names.map(name => fingerprint(repository, name));
-const result = { commit, tree, files: names.length, logicalBytes: manifest.reduce((sum, file) => sum + file.size, 0), binaries, startedAt: new Date().toISOString(), git: exec('git', ['--version']).toString().trim(), cases: [], batches: [] };
+const result = { commit, tree, files: names.length, logicalBytes: manifest.reduce((sum, file) => sum + file.size, 0), binaries, singleRounds, batchRounds, workers, startedAt: new Date().toISOString(), git: exec('git', ['--version']).toString().trim(), cases: [], batches: [] };
 function save() { fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2)); }
 function verify(directory) {
   assert.equal(exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], directory).length, 0);
@@ -95,7 +105,7 @@ function remove(record) {
 // Keep a baseline-created anchor alive: both versions must reuse its exact base.
 const anchor = await create('before', 'explicit', 'anchor', false);
 verify(anchor.destination);
-for (let round = 0; round < 8; round++) {
+for (let round = 0; round < singleRounds; round++) {
   for (const mode of ['explicit', 'shim']) {
     for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
       const record = await create(version, mode, `single-${round}-${mode}-${version}`);
@@ -105,12 +115,12 @@ for (let round = 0; round < 8; round++) {
     }
   }
 }
-for (let round = 0; round < 2; round++) {
+for (let round = 0; round < batchRounds; round++) {
   for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
     const started = process.hrtime.bigint();
-    const records = await Promise.all(Array.from({ length: 9 }, (_, worker) => create(version, 'shim', `parallel-${round}-${version}-${worker}`)));
+    const records = await Promise.all(Array.from({ length: workers }, (_, worker) => create(version, 'shim', `parallel-${round}-${version}-${worker}`)));
     const seconds = Number(process.hrtime.bigint() - started) / 1e9;
-    result.batches.push({ round, version, workers: 9, seconds }); save();
+    result.batches.push({ round, version, workers, seconds }); save();
     for (const record of records) assert.equal(record.base, anchor.base);
     // Private-write test is outside the timed region. Verify all peers and base.
     const file = manifest.find(entry => !entry.symlink && entry.size > 0).name;
