@@ -11,7 +11,7 @@ release you intend to install; do not mix files from different versions.
 On macOS (Apple Silicon or Intel) and Linux with glibc (ARM64 or x64):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh | bash
+curl -fsSL https://riftri.vercel.app/install.sh | bash
 ```
 
 This selects the latest stable GitHub release once, downloads the matching
@@ -26,7 +26,7 @@ are involved. Git is still needed to use Riftri.
 To pin a release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh | bash -s -- v0.1.1
+curl -fsSL https://riftri.vercel.app/install.sh | bash -s -- v0.1.1
 ```
 
 Piping a script to Bash executes code from that URL. To inspect it first,
@@ -35,23 +35,25 @@ download to a new directory, review it, and then run the saved file:
 ```sh
 installer_dir=$(mktemp -d "${TMPDIR:-/tmp}/riftri-installer-review.XXXXXX")
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh \
+  https://riftri.vercel.app/install.sh \
   --output "$installer_dir/install.sh"
 less "$installer_dir/install.sh"
 # Run only after reviewing the downloaded script:
 bash "$installer_dir/install.sh" v0.1.1
 ```
 
-The script on `main` can change independently of the selected binary release.
-For a reproducible script, use its reviewed full Git commit ID in place of
-`main` in the URL. SHA-256 checks detect corruption, not a separate signature
-or notarization; trust still rests on the repository and HTTPS downloads.
+The website serves the canonical `package/install.sh` from its deployed source;
+the script can change independently of the selected binary release. For a
+reproducible script, download it from GitHub using a reviewed full Git commit ID:
+`https://raw.githubusercontent.com/assistant-ui/riftri/<full-commit-id>/package/install.sh`.
+SHA-256 checks detect corruption, not a separate signature or notarization;
+trust still rests on the website, repository, and HTTPS downloads.
 
 An absolute `RIFTRI_INSTALL_DIR` overrides the destination. Set it on **Bash**,
 not on the `curl` side of the pipe:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh | RIFTRI_INSTALL_DIR="$HOME/tools/bin" bash
+curl -fsSL https://riftri.vercel.app/install.sh | RIFTRI_INSTALL_DIR="$HOME/tools/bin" bash
 ```
 
 Follow the PATH command printed by the installer, then check `riftri --version`.

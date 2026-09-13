@@ -5,9 +5,9 @@ const path = require("node:path");
 const { test } = require("node:test");
 
 const root = path.resolve(__dirname, "../..");
-const url = "https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh";
+const url = "https://riftri.vercel.app/install.sh";
 
-test("website and guides expose the same canonical Bash installer", () => {
+test("website and guides use the public Vercel installer URL", () => {
   for (const file of ["website/src/app/page.tsx", "README.md", "docs/install.md"]) {
     const source = fs.readFileSync(path.join(root, file), "utf8");
     assert.ok(source.includes(`curl -fsSL ${url} | bash`), file);

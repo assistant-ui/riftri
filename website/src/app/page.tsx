@@ -135,7 +135,7 @@ const startSteps = [
     index: "01",
     title: "Install on macOS or Linux",
     description: "Downloads the native CLI and verifies SHA-256. No Node.js required.",
-    command: "curl -fsSL https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh | bash",
+    command: "curl -fsSL https://riftri.vercel.app/install.sh | bash",
   },
   {
     index: "02",
@@ -184,7 +184,7 @@ function GetStarted() {
         </p>
         <div className="install-links">
           <a href="/install.sh">Read the installer</a>
-          <a href={`${githubUrl}/blob/main/docs/install.md#windows-powershell`}>Windows &amp; manual install</a>
+          <a href={`${githubUrl}/blob/c462a27e55ea1fce08e6ceedf50b0bc5be89a4b9/docs/install.md#windows-powershell`}>Windows &amp; manual install</a>
           <a href={`${githubUrl}/releases`}>Release downloads</a>
         </div>
       </div>

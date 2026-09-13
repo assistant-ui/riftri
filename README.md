@@ -38,7 +38,7 @@ the filesystem.
 On macOS or Linux with glibc, install the standalone native CLI with Bash:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/assistant-ui/riftri/main/package/install.sh | bash
+curl -fsSL https://riftri.vercel.app/install.sh | bash
 ```
 
 The installer verifies SHA-256, checks the binary version, and installs to
