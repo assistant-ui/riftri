@@ -5369,6 +5369,11 @@ fn remove_file_if_present(path: &Path) -> Result<(), WorktreeError> {
 }
 
 fn remove_empty_directory_if_present(path: &Path) -> Result<(), WorktreeError> {
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::BeforeEmptyDirectoryRemoval,
+        path,
+    );
     match fs::remove_dir(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -5440,7 +5445,8 @@ mod tests {
         AddWorktreeRequest, BackendKind, MoveWorktreeRequest, PruneWorktreesRequest,
         RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, garbage_collect_inner,
         has_ascii_case_alias, move_worktree_inner, next_operation_id, prune_worktrees_inner,
-        recover_incomplete_operations, remove_worktree_inner, storage_accounting,
+        recover_incomplete_operations, remove_empty_directory_if_present, remove_worktree_inner,
+        storage_accounting,
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
@@ -5464,6 +5470,30 @@ mod tests {
             output.status.success(),
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn empty_directory_cleanup_preserves_a_file_created_at_the_remove_boundary() {
+        let fixture = tempdir().expect("cleanup race fixture");
+        let destination = fixture.path().join("worktree");
+        fs::create_dir(&destination).expect("create empty destination");
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::BeforeEmptyDirectoryRemoval,
+            |path| fs::write(path.join("raced.txt"), b"preserve\n").expect("race cleanup"),
+        );
+
+        let error = remove_empty_directory_if_present(&destination)
+            .expect_err("concurrent file must make nonrecursive cleanup fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("remove empty linked-worktree directory")
+        );
+        assert_eq!(
+            fs::read(destination.join("raced.txt")).expect("raced file is preserved"),
+            b"preserve\n"
         );
     }
 

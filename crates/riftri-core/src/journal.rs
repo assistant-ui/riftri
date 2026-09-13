@@ -131,6 +131,11 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
             detail: "journal path is not a real file".to_owned(),
         });
     }
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::BeforeJournalOpen,
+        path,
+    );
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1666,6 +1671,53 @@ mod tests {
             std::fs::remove_file(journal_path).expect("remove journal symlink");
             std::fs::remove_dir(journal_directory).expect("remove journal directory");
         }
+    }
+
+    #[test]
+    fn journal_open_rejects_a_symlink_swap_after_initial_inspection() {
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let record = JournalRecord::new(
+            "raced-open".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        let journal_path = store.persist(&record).expect("persist journal");
+        let outside = directory.path().join("outside.json");
+        std::fs::write(&outside, b"outside\n").expect("write outside file");
+        let outside_for_hook = outside.clone();
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::BeforeJournalOpen,
+            move |path| {
+                std::fs::remove_file(path).expect("remove inspected journal");
+                symlink(&outside_for_hook, path).expect("replace journal with symlink");
+            },
+        );
+
+        let error = store
+            .load_operation("raced-open")
+            .expect_err("raced journal open must fail closed");
+
+        assert!(matches!(error, JournalError::Io { .. }));
+        assert_eq!(
+            std::fs::read(&outside).expect("outside file remains readable"),
+            b"outside\n"
+        );
+        assert!(
+            std::fs::symlink_metadata(&journal_path)
+                .expect("raced path remains for inspection")
+                .file_type()
+                .is_symlink()
+        );
     }
 
     fn assert_invalid_journal<T>(result: Result<T, JournalError>, expected_path: &Path) {
