@@ -9,6 +9,11 @@ For the narrower checkout-configuration optimization, see
 [the batching comparison](benchmarks/checkout-config-batching-2026-09-13.md).
 It includes process counts, paired timings, correctness checks, and raw samples.
 
+For the follow-up shared-reader base-lock change, see
+[the concurrent verification comparison](benchmarks/shared-base-readers-2026-09-13.md).
+It measures the incremental change on top of configuration batching and records
+both the median improvement and slower individual pairs.
+
 Riftri includes one ignored integration benchmark for comparing worktree
 creation and physical allocation on a real supported destination filesystem.
 It exercises the same public core transaction used by the CLI; no synthetic

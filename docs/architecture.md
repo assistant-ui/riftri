@@ -306,6 +306,15 @@ boundaries. A per-base file lock serializes construction, atomic rename exposes
 the finished tree, and a synced completion marker prevents reuse of a partially
 prepared base.
 
+Existing-base verification uses shared ownership of that same stable per-base
+lock. Each reader still recomputes the integrity digest, but concurrent cache
+hits no longer serialize their reads. A missing or incomplete base releases the
+read lock, obtains exclusive ownership, and revalidates all state before reuse
+or rebuilding. It never upgrades a held read lock in place. Collection remains
+exclusive and rechecks durable references, which protect live and incomplete
+adds after the preparation lock is released. No cache format, integrity check,
+or journal durability step changes.
+
 Native `clonefile` is used for every regular file in an APFS view. An error is
 returned if APFS cannot clone; there is no byte-copy path. Directory structure,
 symlinks, and executable modes are preserved. The base is made read-only and the

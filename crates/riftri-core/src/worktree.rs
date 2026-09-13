@@ -1927,28 +1927,11 @@ fn fail_add_if_requested(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn prepare_base(
-    git: &Git,
-    repository: &Path,
-    tree: &ObjectId,
-    base_path: &Path,
-    base_staging: &Path,
-    temporary_index: &Path,
-    checkout_config: &[(String, Vec<u8>)],
-) -> Result<bool, WorktreeError> {
-    let base_parent = base_path.expect_parent()?;
-    let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
-    let complete_path = base_parent.join(format!("{}.complete", tree.as_str()));
-    let _lock = acquire_coordination_lock(
-        &lock_path,
-        "open immutable-base lock",
-        "lock immutable base",
-    )?;
-
+fn verify_existing_base(base_path: &Path, complete_path: &Path) -> Result<bool, WorktreeError> {
     let base_exists = base_path
         .try_exists()
         .map_err(|source| io("inspect immutable base", base_path, source))?;
-    let complete_exists = match fs::symlink_metadata(&complete_path) {
+    let complete_exists = match fs::symlink_metadata(complete_path) {
         Ok(metadata) => {
             if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(WorktreeError::InvalidRequest(format!(
@@ -1962,7 +1945,7 @@ fn prepare_base(
         Err(source) => {
             return Err(io(
                 "inspect immutable-base completion marker",
-                &complete_path,
+                complete_path,
                 source,
             ));
         }
@@ -1978,11 +1961,11 @@ fn prepare_base(
         }
         use std::io::Read;
         let mut stored = Vec::new();
-        crate::base_integrity::open_regular(&complete_path)
+        crate::base_integrity::open_regular(complete_path)
             .map_err(|source| {
                 io(
                     "open immutable-base integrity marker",
-                    &complete_path,
+                    complete_path,
                     source,
                 )
             })?
@@ -1991,7 +1974,7 @@ fn prepare_base(
             .map_err(|source| {
                 io(
                     "read immutable-base integrity marker",
-                    &complete_path,
+                    complete_path,
                     source,
                 )
             })?;
@@ -2006,12 +1989,69 @@ fn prepare_base(
         }
         return Ok(true);
     }
-    if base_exists {
-        remove_tree_if_present(base_path)?;
+    Ok(false)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct BaseReadLock(File);
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[path = "base_read_lock_tests.rs"]
+mod base_read_lock_tests;
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+impl Drop for BaseReadLock {
+    fn drop(&mut self) {
+        // A concurrent fork can inherit the descriptor before CLOEXEC. Release
+        // ownership explicitly before opening the exclusive slow-path lock.
+        let _ = FileExt::unlock(&self.0);
     }
-    if complete_exists {
-        remove_file_if_present(&complete_path)?;
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn acquire_base_read_lock(lock_path: &Path) -> Result<BaseReadLock, WorktreeError> {
+    let lock = open_coordination_lock(lock_path, "open immutable-base lock")?;
+    FileExt::lock_shared(&lock)
+        .map_err(|source| io("read-lock immutable base", lock_path, source))?;
+    let lock = BaseReadLock(lock);
+    validate_coordination_lock(&lock.0, lock_path)?;
+    Ok(lock)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn prepare_base(
+    git: &Git,
+    repository: &Path,
+    tree: &ObjectId,
+    base_path: &Path,
+    base_staging: &Path,
+    temporary_index: &Path,
+    checkout_config: &[(String, Vec<u8>)],
+) -> Result<bool, WorktreeError> {
+    let base_parent = base_path.expect_parent()?;
+    let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
+    let complete_path = base_parent.join(format!("{}.complete", tree.as_str()));
+    let read_lock = acquire_base_read_lock(&lock_path)?;
+    if verify_existing_base(base_path, &complete_path)? {
+        return Ok(true);
     }
+    // Never upgrade a held shared lock: concurrent cold callers could deadlock.
+    // Another builder or collector may run in the gap, so revalidate all state
+    // after acquiring the same stable lock file exclusively.
+    drop(read_lock);
+    let _write_lock = acquire_coordination_lock(
+        &lock_path,
+        "open immutable-base lock",
+        "lock immutable base",
+    )?;
+    if verify_existing_base(base_path, &complete_path)? {
+        return Ok(true);
+    }
+    remove_tree_if_present(base_path)?;
+    remove_file_if_present(&complete_path)?;
 
     fs::create_dir(base_staging).map_err(|source| {
         io(
