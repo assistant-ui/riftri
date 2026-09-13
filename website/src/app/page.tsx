@@ -81,7 +81,6 @@ function Hero() {
           </a>
         </div>
         <div className="hero-install">
-          <p>Install on macOS or Linux (glibc)</p>
           <CopyCommand command={installCommand} compact />
         </div>
       </div>
