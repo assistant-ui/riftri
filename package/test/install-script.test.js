@@ -108,14 +108,16 @@ test("Bash installer is syntactically valid", { skip: !unix }, () => {
   assert.equal(result.status, 0, result.stderr);
 });
 
-for (const [system, arch, platform] of [
+for (const [system, arch, platform, musl = false] of [
   ["Darwin", "arm64", "darwin-arm64"],
   ["Darwin", "x86_64", "darwin-x64"],
   ["Linux", "aarch64", "linux-arm64-gnu"],
   ["Linux", "x86_64", "linux-x64-gnu"],
+  ["Linux", "aarch64", "linux-arm64-musl", true],
+  ["Linux", "x86_64", "linux-x64-musl", true],
 ]) {
   test(`piped installer selects ${platform}, pins latest, and leaves profiles alone`, { skip: !unix }, (t) => {
-    const f = fixture(t, { os: system, arch, platform });
+    const f = fixture(t, { os: system, arch, platform, musl });
     const result = f.run();
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Installed Riftri v0\.1\.1/);
@@ -159,7 +161,6 @@ for (const [label, options, message] of [
   ["failed download", { networkFail: true }, /download|release/i],
   ["unsupported OS", { os: "MINGW64_NT" }, /unsupported|Windows/i],
   ["unsupported architecture", { arch: "riscv64" }, /architecture/i],
-  ["musl host", { os: "Linux", musl: true }, /glibc/i],
   ["unexpected latest redirect", { latest: "https://example.org/tag/v0.1.1" }, /release/i],
   ["invalid latest tag", { latest: `${release}/tag/v0.1.1/../../oops` }, /version/i],
 ]) {

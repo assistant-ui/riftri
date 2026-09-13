@@ -102,7 +102,9 @@ test("direct-download validation rejects missing, extra, corrupt, and unsafe ass
     "riftri-darwin-arm64",
     "riftri-darwin-x64",
     "riftri-linux-arm64-gnu",
+    "riftri-linux-arm64-musl",
     "riftri-linux-x64-gnu",
+    "riftri-linux-x64-musl",
     "riftri-win32-arm64",
     "riftri-win32-x64",
   ].map((name) => `${name}-${tag}.tar.gz`);

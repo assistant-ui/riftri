@@ -7,7 +7,9 @@ const PLATFORM_PACKAGES = Object.freeze({
   "darwin-arm64": "riftri-darwin-arm64",
   "darwin-x64": "riftri-darwin-x64",
   "linux-arm64-gnu": "riftri-linux-arm64-gnu",
+  "linux-arm64-musl": "riftri-linux-arm64-musl",
   "linux-x64-gnu": "riftri-linux-x64-gnu",
+  "linux-x64-musl": "riftri-linux-x64-musl",
   "win32-arm64": "riftri-win32-arm64",
   "win32-x64": "riftri-win32-x64",
 });
@@ -52,6 +54,31 @@ function assertUsableBinary(candidate, source) {
   return candidate;
 }
 
+function launcherVersion() {
+  for (const candidate of [
+    path.join(__dirname, "..", "package.json"),
+    path.join(__dirname, "..", "..", "package.json"),
+  ]) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      if (manifest.name === "riftri" && typeof manifest.version === "string") {
+        return manifest.version;
+      }
+    } catch {
+      // The source and staged package layouts put the root manifest at different depths.
+    }
+  }
+  throw new Error("could not read the riftri launcher version");
+}
+
+function assertCompatiblePackageManifest(manifest, packageName, expectedVersion) {
+  if (manifest.name !== packageName || manifest.version !== expectedVersion) {
+    throw new Error(
+      `the optional native package ${packageName} does not match riftri ${expectedVersion}; reinstall riftri and its optional dependencies together`,
+    );
+  }
+}
+
 function resolveBinary(options = {}) {
   const environment = options.environment ?? process.env;
   const platform = options.platform ?? process.platform;
@@ -80,12 +107,25 @@ function resolveBinary(options = {}) {
     );
   }
 
+  let packageManifest;
+  try {
+    packageManifest = JSON.parse(fs.readFileSync(packageJson, "utf8"));
+  } catch {
+    throw new Error(`the optional native package ${packageName} has an invalid manifest`);
+  }
+  assertCompatiblePackageManifest(
+    packageManifest,
+    packageName,
+    options.expectedVersion ?? launcherVersion(),
+  );
+
   const candidate = path.join(path.dirname(packageJson), "bin", binaryName(platform));
   return assertUsableBinary(candidate, packageName);
 }
 
 module.exports = {
   PLATFORM_PACKAGES,
+  assertCompatiblePackageManifest,
   binaryName,
   detectLinuxLibc,
   packageNameForPlatform,

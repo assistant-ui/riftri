@@ -35,7 +35,7 @@ the filesystem.
 
 ## Installation
 
-On macOS or Linux with glibc, install the standalone native CLI with Bash:
+On macOS or Linux, install the standalone native CLI with Bash:
 
 ```sh
 curl -fsSL https://riftri.vercel.app/install.sh | bash
@@ -51,13 +51,13 @@ For Windows or manual installation, download the standalone native CLI from
 [GitHub Releases](https://github.com/assistant-ui/riftri/releases). Choose your
 OS and architecture, verify the archive against `SHA256SUMS`, and install it in
 a per-user directory. **Node.js and npm are not required.** See the
-[direct-download installation guide](docs/install.md) for all six targets and
+[direct-download installation guide](docs/install.md) for all eight targets and
 copyable checksum-verification commands.
 
 The npm launcher is a separate distribution channel. As of September 12, 2026,
 `riftri@0.1.1` is not published: npm rejected its Windows ARM64 dependency during
-the initial release. The four published macOS/Linux native packages do not make
-the launcher available. Use direct downloads while npm publication is pending.
+the initial release. Published native platform packages do not make the launcher
+available on their own. Use direct downloads while npm publication is pending.
 For a version whose launcher has been published, npm installation is:
 
 ```console

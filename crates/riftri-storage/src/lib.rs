@@ -1248,11 +1248,12 @@ fn filesystem_name(stats: &libc::statfs) -> String {
 
 #[cfg(target_os = "linux")]
 fn filesystem_name(stats: &libc::statfs) -> String {
-    const BTRFS_SUPER_MAGIC: libc::c_long = 0x9123_683e;
-    const XFS_SUPER_MAGIC: libc::c_long = 0x5846_5342;
-    const OVERLAYFS_SUPER_MAGIC: libc::c_long = 0x794c_7630;
+    const BTRFS_SUPER_MAGIC: u64 = 0x9123_683e;
+    const XFS_SUPER_MAGIC: u64 = 0x5846_5342;
+    const OVERLAYFS_SUPER_MAGIC: u64 = 0x794c_7630;
+    let filesystem_magic = stats.f_type as u64;
 
-    match stats.f_type {
+    match filesystem_magic {
         BTRFS_SUPER_MAGIC => "btrfs".to_owned(),
         XFS_SUPER_MAGIC => "xfs".to_owned(),
         OVERLAYFS_SUPER_MAGIC => "overlayfs".to_owned(),

@@ -53,10 +53,11 @@ main() (
   case "$system" in
     Darwin) platform="darwin-$architecture" ;;
     Linux)
-      libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) ||
-        fail 'Linux downloads require glibc; musl/Alpine is unsupported. See docs/install.md.'
-      [[ $libc == glibc\ * ]] || fail 'Linux downloads require glibc.'
-      platform="linux-$architecture-gnu"
+      if libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) && [[ $libc == glibc\ * ]]; then
+        platform="linux-$architecture-gnu"
+      else
+        platform="linux-$architecture-musl"
+      fi
       ;;
     *) fail "Unsupported system: $system. Windows users: use the PowerShell direct-download guide."
       ;;

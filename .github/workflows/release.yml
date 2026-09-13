@@ -30,9 +30,17 @@ jobs:
             target: aarch64-unknown-linux-gnu
             package: riftri-linux-arm64-gnu
             executable: riftri
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            package: riftri-linux-arm64-musl
+            executable: riftri
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             package: riftri-linux-x64-gnu
+            executable: riftri
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            package: riftri-linux-x64-musl
             executable: riftri
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
@@ -49,6 +57,10 @@ jobs:
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
+
+      - name: Install musl linker
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }} -p riftri-cli
@@ -220,7 +232,8 @@ jobs:
           assert.match(tag, /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
           const archives = [
             'riftri-darwin-arm64', 'riftri-darwin-x64',
-            'riftri-linux-arm64-gnu', 'riftri-linux-x64-gnu',
+            'riftri-linux-arm64-gnu', 'riftri-linux-arm64-musl',
+            'riftri-linux-x64-gnu', 'riftri-linux-x64-musl',
             'riftri-win32-arm64', 'riftri-win32-x64',
           ].map(name => `${name}-${tag}.tar.gz`).sort();
           const expected = ['SHA256SUMS', ...archives].sort();
