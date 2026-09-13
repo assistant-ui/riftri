@@ -37,9 +37,11 @@ checksums with the staged artifact. Do not delete, clobber, or silently replace
 published assets to make a rerun pass. If assets differ, investigate and issue a
 new version. A partial existing release needs deliberate maintainer review.
 
-The npm publisher skips exact versions already on the registry. Resume a failed
-npm job only after resolving its actual failure; an explicit registry security
-rejection requires registry review, not package renaming or blind retries.
+The npm publisher skips exact versions already on the registry, publishes the
+launcher last, and verifies the complete set of nine exact versions before the
+job can succeed. Resume a failed npm job only after resolving its actual
+failure; an explicit registry security rejection requires registry review, not
+package renaming or blind retries.
 GitHub release availability does not imply that `npm install riftri` or
 `npx riftri` is available for the same version.
 
