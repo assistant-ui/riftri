@@ -323,8 +323,8 @@ the upper layer, removes only the journal-owned private layers, and invokes the
 installed Git executable for metadata removal. Recovery adopts only a
 token-proven mount in the original namespace. Mounted moves fail before
 mutation until relocation has a dedicated mount transaction. This enables
-containers and already-capable namespaces without pretending that ordinary
-unprivileged shells have the still-planned activation helper.
+containers and already-capable namespaces, while ordinary unprivileged shells
+use the explicit least-privilege helper defined in D033.
 
 ### D032: explicit repair remounts active OverlayFS views after reboot
 
@@ -485,8 +485,8 @@ so bases built with the older mutable-input path are not reused by new adds.
   worktree without weakening D016's correctness guarantee?
 - Which Git filter and LFS configurations can be added to a versioned checkout
   profile without making base reuse ambiguous?
-- How should operation journals and SQLite state reconcile after either one is
-  partially written?
+- If scale requires an indexed registry, how can it remain a rebuildable cache of
+  journal and completion-marker state rather than a second recovery authority?
 - Should clean-view compaction be manual, idle-time automatic, or policy-based?
 - Which Windows fallback provides acceptable performance on ordinary NTFS?
 - What integration is possible for harnesses that use libgit2 or another

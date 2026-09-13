@@ -14,12 +14,13 @@ commands. Riftri changes only how worktree files are materialized and stored.
 
 ## Current stage
 
-The repository has completed Milestones 1 through 4: the capability/Git-semantics
-foundation, explicit APFS prototype, recoverable storage lifecycle, and
-process-scoped transparent Git compatibility. On macOS, supported Linux
-volumes, and Windows ReFS it can create real linked worktrees from strict native
-APFS clones, Linux reflinks, or ReFS block clones, reuse exact-tree immutable
-bases, persist atomic add journals, roll back failures, and recover interrupted
+The repository has completed Milestones 1 through 5: the capability/Git-semantics
+foundation, explicit APFS prototype, recoverable storage lifecycle,
+process-scoped transparent Git compatibility, and Linux native backends. On
+macOS, supported Linux volumes, and Windows ReFS, Riftri creates real linked
+worktrees from strict native APFS clones, Linux reflinks, or ReFS block clones,
+reuses exact-tree immutable bases, persists atomic add journals, rolls back
+failures, and recovers interrupted
 adds without deleting a changed view. Repository-local activation, the
 process-scoped Git shim, and an
 explicitly evaluated sh/bash/zsh hook can route supported adds through the same

@@ -157,9 +157,11 @@ must never silently fall back to duplicating a full worktree.
 
 ### State and recovery
 
-Tracks bases, worktree views, reference counts, mounts, and incomplete
-operations. The intended implementation is local SQLite plus small operation
-journals. State is coordination metadata, not source control.
+Versioned operation journals and immutable-base completion markers track bases,
+worktree views, mounts, and incomplete operations. Reference counts and storage
+accounting are derived from that durable state. A future indexed registry may
+be added as a rebuildable optimization, but it must not become a second
+recovery authority. State is coordination metadata, not source control.
 
 ### Optional Git shim
 
@@ -219,7 +221,7 @@ Riftri should eventually report and benchmark:
 
 ## Current state
 
-The Rust workspace and Milestones 1 through 4 are complete. On writable APFS,
+The Rust workspace and Milestones 1 through 5 are complete. On writable APFS,
 Btrfs, reflink-enabled XFS, and ReFS volumes, `riftri worktree add` builds or
 reuses an exact-tree immutable base, creates real linked-worktree metadata with
 checkout suppressed, activates a native COW view, synchronizes the index, and
