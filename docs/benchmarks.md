@@ -14,6 +14,11 @@ For the follow-up shared-reader base-lock change, see
 It measures the incremental change on top of configuration batching and records
 both the median improvement and slower individual pairs.
 
+For the test-only APFS directory-clone candidate, see
+[the bulk directory evaluation](benchmarks/apfs-bulk-directory-clone-2026-09-13.md).
+It records behavioral parity, a directory-metadata difference, allocation, and
+five local timing samples. The candidate is deliberately not used in production.
+
 Riftri includes one ignored integration benchmark for comparing worktree
 creation and physical allocation on a real supported destination filesystem.
 It exercises the same public core transaction used by the CLI; no synthetic
