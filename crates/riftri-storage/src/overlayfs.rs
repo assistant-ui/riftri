@@ -6,7 +6,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
@@ -22,6 +22,13 @@ static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
 const ROOTLESS_OVERLAY_OPTIONS: &str = "userxattr,index=off,metacopy=off,redirect_dir=nofollow";
 const PRIVILEGED_OVERLAY_OPTIONS: &str = "index=off,metacopy=on";
 const RECOVERY_MARKER_PREFIX: &str = ".riftri-overlayfs-recovery-";
+const BUSY_UNMOUNT_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(1),
+    Duration::from_millis(2),
+    Duration::from_millis(4),
+    Duration::from_millis(8),
+    Duration::from_millis(16),
+];
 
 #[derive(Debug, Error)]
 #[error("{operation}: {source}")]
@@ -947,15 +954,7 @@ pub(crate) fn unmount_for_owner(
     }
     drop(merged);
     let target = storage_path_c_string(&layout.merged, "encode OverlayFS mountpoint")?;
-    // SAFETY: mount_state proved that this exact target is the journaled
-    // OverlayFS mount, and UMOUNT_NOFOLLOW rejects a replaced final symlink.
-    if unsafe { libc::umount2(target.as_ptr(), libc::UMOUNT_NOFOLLOW) } != 0 {
-        return Err(storage_io(
-            "unmount durable OverlayFS view",
-            &layout.merged,
-            std::io::Error::last_os_error(),
-        ));
-    }
+    unmount_exact_with_retry(layout, identity, &target)?;
     if mount_state(layout, identity)? != OverlayFsMountState::Absent {
         return Err(mount_conflict(
             &layout.merged,
@@ -987,15 +986,7 @@ fn unmount_direct(
     }
 
     let target = storage_path_c_string(&layout.merged, "encode OverlayFS mountpoint")?;
-    // SAFETY: mount_state proved that this exact target is the journaled
-    // OverlayFS mount, and UMOUNT_NOFOLLOW rejects a replaced final symlink.
-    if unsafe { libc::umount2(target.as_ptr(), libc::UMOUNT_NOFOLLOW) } != 0 {
-        return Err(storage_io(
-            "unmount durable OverlayFS view",
-            &layout.merged,
-            std::io::Error::last_os_error(),
-        ));
-    }
+    unmount_exact_with_retry(layout, identity, &target)?;
     if mount_state(layout, identity)? != OverlayFsMountState::Absent {
         return Err(mount_conflict(
             &layout.merged,
@@ -1003,6 +994,43 @@ fn unmount_direct(
         ));
     }
     Ok(true)
+}
+
+fn unmount_exact_with_retry(
+    layout: &OverlayFsLayout,
+    identity: &OverlayFsMountIdentity,
+    target: &CString,
+) -> Result<(), StorageError> {
+    for delay in BUSY_UNMOUNT_RETRY_DELAYS
+        .iter()
+        .copied()
+        .map(Some)
+        .chain(std::iter::once(None))
+    {
+        // SAFETY: the caller proved that this exact target is the journaled
+        // OverlayFS mount, and UMOUNT_NOFOLLOW rejects a replaced final
+        // symlink. The identity is revalidated before every retry.
+        if unsafe { libc::umount2(target.as_ptr(), libc::UMOUNT_NOFOLLOW) } == 0 {
+            return Ok(());
+        }
+
+        let source = std::io::Error::last_os_error();
+        if source.raw_os_error() != Some(libc::EBUSY) || delay.is_none() {
+            return Err(storage_io(
+                "unmount durable OverlayFS view",
+                &layout.merged,
+                source,
+            ));
+        }
+        if mount_state(layout, identity)? != OverlayFsMountState::Active {
+            return Err(mount_conflict(
+                &layout.merged,
+                "journaled mount identity changed while retrying a busy unmount",
+            ));
+        }
+        std::thread::sleep(delay.expect("busy retry has a delay"));
+    }
+    unreachable!("the final unmount attempt returns on success or error")
 }
 
 pub(crate) fn remove_private_layers(
