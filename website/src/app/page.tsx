@@ -6,6 +6,7 @@ import { StorageMap } from "../components/storage-map";
 
 const githubUrl = "https://github.com/assistant-ui/riftri";
 const agentbaseUrl = "https://agentbase.dev";
+const installCommand = "curl -fsSL https://riftri.vercel.app/install.sh | bash";
 
 export const metadata: Metadata = {
   title: "Riftri — Lightweight Git workspaces for parallel development",
@@ -79,6 +80,10 @@ function Hero() {
             <GitHubIcon /> View GitHub <ArrowUpRightIcon />
           </a>
         </div>
+        <div className="hero-install">
+          <p>Install on macOS or Linux (glibc)</p>
+          <CopyCommand command={installCommand} compact />
+        </div>
       </div>
       <div className="hero-graph">
         <StorageMap />
@@ -135,7 +140,7 @@ const startSteps = [
     index: "01",
     title: "Install on macOS or Linux",
     description: "Downloads the native CLI and verifies SHA-256. No Node.js required.",
-    command: "curl -fsSL https://riftri.vercel.app/install.sh | bash",
+    command: installCommand,
   },
   {
     index: "02",

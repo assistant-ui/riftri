@@ -27,3 +27,14 @@ test("website stages the canonical installer without maintaining another copy", 
   const { scripts } = JSON.parse(fs.readFileSync(path.join(root, "website/package.json"), "utf8"));
   for (const name of ["dev", "build"]) assert.match(scripts[name], /stage-website-installer\.mjs && farm/);
 });
+
+test("hero and quick start reuse one install command and the same quick-start column styling", () => {
+  const page = fs.readFileSync(path.join(root, "website/src/app/page.tsx"), "utf8");
+  const css = fs.readFileSync(path.join(root, "website/src/app/globals.css"), "utf8");
+  const hero = page.slice(page.indexOf("function Hero()"), page.indexOf("const essentials"));
+  const steps = page.slice(page.indexOf("const startSteps"), page.indexOf("function GetStarted()"));
+  assert.ok(page.includes(`const installCommand = "curl -fsSL ${url} | bash";`));
+  assert.match(hero, /<CopyCommand command=\{installCommand\}/);
+  assert.match(steps, /command: installCommand/);
+  assert.doesNotMatch(css, /\.start-list li:first-child \.command/);
+});
