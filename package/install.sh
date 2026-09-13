@@ -12,7 +12,7 @@ main() (
   usage() {
     printf '%s\n' \
       'Usage: bash install.sh [VERSION]' \
-      'Install the latest stable release, or pin a version such as v0.1.1.' \
+      'Install the latest stable release, or pin a version such as v0.2.0.' \
       'RIFTRI_INSTALL_DIR: absolute destination directory (default: ~/.local/bin).' \
       'No sudo, shell profile edits, or Git activation. Requires curl, tar, and SHA-256 tooling.'
   }
@@ -21,7 +21,7 @@ main() (
   version=${1:-}
   validate_version() {
     [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]] ||
-      fail 'Invalid version; expected a release version such as v0.1.1.'
+      fail 'Invalid version; expected a release version such as v0.2.0.'
   }
   if [[ $# -eq 1 ]]; then version=${version#v}; validate_version "$version"; fi
   install_dir=${RIFTRI_INSTALL_DIR:-${HOME:?HOME is required}/.local/bin}

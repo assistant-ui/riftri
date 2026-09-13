@@ -26,7 +26,7 @@ are involved. Git is still needed to use Riftri.
 To pin a release:
 
 ```sh
-curl -fsSL https://riftri.vercel.app/install.sh | bash -s -- v0.1.1
+curl -fsSL https://riftri.vercel.app/install.sh | bash -s -- v0.2.0
 ```
 
 Piping a script to Bash executes code from that URL. To inspect it first,
@@ -39,7 +39,7 @@ curl --fail --location --proto '=https' --proto-redir '=https' \
   --output "$installer_dir/install.sh"
 less "$installer_dir/install.sh"
 # Run only after reviewing the downloaded script:
-bash "$installer_dir/install.sh" v0.1.1
+bash "$installer_dir/install.sh" v0.2.0
 ```
 
 The website serves the canonical `package/install.sh` from its deployed source;
@@ -64,18 +64,18 @@ requirements, installation stops without bypassing that policy.
 
 ## Choose a native archive
 
-For `v0.1.1`, the release assets are:
+For `v0.2.0`, the release assets are:
 
 | System | Architecture | Archive |
 | --- | --- | --- |
-| macOS | Apple Silicon / ARM64 | `riftri-darwin-arm64-v0.1.1.tar.gz` |
-| macOS | Intel / x64 | `riftri-darwin-x64-v0.1.1.tar.gz` |
-| Linux with glibc | ARM64 / aarch64 | `riftri-linux-arm64-gnu-v0.1.1.tar.gz` |
-| Linux with glibc | x64 / x86_64 | `riftri-linux-x64-gnu-v0.1.1.tar.gz` |
-| Linux with musl | ARM64 / aarch64 | `riftri-linux-arm64-musl-v0.1.1.tar.gz` |
-| Linux with musl | x64 / x86_64 | `riftri-linux-x64-musl-v0.1.1.tar.gz` |
-| Windows | ARM64 | `riftri-win32-arm64-v0.1.1.tar.gz` |
-| Windows | x64 | `riftri-win32-x64-v0.1.1.tar.gz` |
+| macOS | Apple Silicon / ARM64 | `riftri-darwin-arm64-v0.2.0.tar.gz` |
+| macOS | Intel / x64 | `riftri-darwin-x64-v0.2.0.tar.gz` |
+| Linux with glibc | ARM64 / aarch64 | `riftri-linux-arm64-gnu-v0.2.0.tar.gz` |
+| Linux with glibc | x64 / x86_64 | `riftri-linux-x64-gnu-v0.2.0.tar.gz` |
+| Linux with musl | ARM64 / aarch64 | `riftri-linux-arm64-musl-v0.2.0.tar.gz` |
+| Linux with musl | x64 / x86_64 | `riftri-linux-x64-musl-v0.2.0.tar.gz` |
+| Windows | ARM64 | `riftri-win32-arm64-v0.2.0.tar.gz` |
+| Windows | x64 | `riftri-win32-x64-v0.2.0.tar.gz` |
 
 Each archive contains only `riftri` on macOS/Linux or `riftri.exe` on Windows.
 Linux downloads select separate GNU/glibc and musl builds. If the executable
@@ -96,7 +96,7 @@ replace only your per-user `~/.local/bin/riftri` executable. They do not use
 ```sh
 (
   set -eu
-  version=0.1.1
+  version=0.2.0
   platform=riftri-darwin-arm64 # Change for your OS and architecture.
   archive="${platform}-v${version}.tar.gz"
   release_url="https://github.com/assistant-ui/riftri/releases/download/v${version}"
@@ -143,7 +143,7 @@ administrator access or persistent `PATH` changes.
 ```powershell
 & {
   $ErrorActionPreference = 'Stop'
-  $Version = '0.1.1'
+  $Version = '0.2.0'
   $Platform = 'riftri-win32-x64' # Use riftri-win32-arm64 for Windows ARM64.
   $Archive = "$Platform-v$Version.tar.gz"
   $ReleaseUrl = "https://github.com/assistant-ui/riftri/releases/download/v$Version"
@@ -207,11 +207,9 @@ process-scoped or explicitly evaluated shell activation remain separate choices.
 ## npm is a separate channel
 
 GitHub downloads and npm packages contain the same native CLI for a given tag,
-but publication status is independent. As of September 12, 2026, the main
-`riftri@0.1.1` npm launcher is not published: npm rejected its Windows ARM64
-dependency after four macOS/Linux native packages were published. Use the
-direct archive while that publication remains incomplete. A GitHub release
-does not by itself mean `npx riftri` works.
+but publication status is independent. Confirm the requested version exists in
+the npm registry before using `npx riftri`; a GitHub release does not by itself
+mean the corresponding npm launcher finished publishing.
 
 ## Updating and uninstalling
 

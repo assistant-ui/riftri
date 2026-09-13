@@ -5,18 +5,47 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## 0.2.0 - 2026-09-13
+
 ### Added
 
-- A checksum-verified Bash installer for macOS and glibc Linux, with pinned
-  versions, atomic per-user upgrades, and a copyable command on the website.
-- Standalone direct-download installation guidance for all six native targets,
-  with SHA-256 verification before extraction and no Node.js requirement.
+- A checksum-verified Bash installer for macOS and Linux, with pinned versions,
+  atomic per-user upgrades, and a copyable command on the website.
+- Standalone direct downloads and npm packages for eight native targets,
+  including ARM64 and x64 Linux builds for both glibc and musl.
+- Destination-readiness diagnostics that explain the selected backend and give
+  a concrete next command or remedy.
+- Stable JSON lifecycle failure receipts for automation, including the failure
+  category, transaction phase, cleanup result, recovery state, and next command.
+- A documented cross-backend guarantee contract and versioned checkout metadata
+  profile for APFS, Linux reflink and OverlayFS, and Windows ReFS.
+
+### Changed
+
+- Native reflink and ReFS tree cloning now processes independent regular files
+  concurrently with a bounded worker pool while preserving ordered metadata and
+  cleanup behavior.
+- Exact immutable-base verification can run concurrently for readers, reducing
+  contention between parallel worktree creations.
+- Checkout configuration is read in batches instead of starting Git once per
+  setting.
 
 ### Fixed
 
 - GitHub native-archive releases publish independently of npm after shared
   staging checks. Exact asset and checksum validation rejects incomplete or
   changed downloads; release retries never overwrite published assets.
+- Linux filesystem detection now uses a libc-independent representation, so
+  both GNU and musl builds compile and select backends consistently.
+
+### Testing
+
+- Installed-package lifecycle tests now exercise real APFS, Btrfs,
+  reflink-enabled XFS, helper-backed OverlayFS, and ReFS environments.
+- Deterministic race hooks verify that cleanup preserves concurrent files and
+  rejects path substitution without modifying data outside managed state.
+- Native allocation benchmarks cover normal checkout comparisons, concurrent
+  shared-base readers, and an evaluation-only APFS bulk-clone candidate.
 
 ## 0.1.1 - 2026-09-12
 

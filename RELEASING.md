@@ -1,7 +1,7 @@
 # Releasing Riftri
 
 Riftri publishes one synchronized version across the Cargo workspace, the
-`riftri` npm launcher, and six platform-native npm packages. A tag-driven GitHub
+`riftri` npm launcher, and eight platform-native npm packages. A tag-driven GitHub
 workflow builds native binaries and inspects every tarball, then independently
 publishes npm packages and a GitHub release with SHA-256 sums. The npm job
 publishes native packages before the launcher. A failure in that job does not
@@ -15,13 +15,13 @@ The Rust crates are internal implementation units and are marked
 
 ## Publication channels and retries
 
-The six-platform build matrix feeds one read-only staging job. It validates
+The eight-platform build matrix feeds one read-only staging job. It validates
 versions, prepares and verifies the native archives, and uploads those exact
 archives plus `SHA256SUMS` as the distinct `github-release-assets` workflow
 artifact (retained for seven days). After all staging checks pass:
 
 - `publish` publishes npm packages with `contents: read` and `id-token: write`.
-- `github-release` downloads the staged assets, verifies the exact six-archive
+- `github-release` downloads the staged assets, verifies the exact eight-archive
   set and every checksum, and creates the GitHub release with `contents: write`.
   It has no npm token or OIDC publishing permission and does not depend on npm.
 
@@ -32,7 +32,7 @@ release. Inspect the individual jobs and report each channel's status.
 
 The GitHub job uses `--verify-tag`: it never creates or moves a tag. If a release
 already exists, creation fails safely rather than replacing any existing asset.
-On a retry, inspect the existing release and compare all seven asset names and
+On a retry, inspect the existing release and compare all nine asset names and
 checksums with the staged artifact. Do not delete, clobber, or silently replace
 published assets to make a rerun pass. If assets differ, investigate and issue a
 new version. A partial existing release needs deliberate maintainer review.
@@ -86,9 +86,10 @@ merged and before publishing anything:
 6. Enable private vulnerability reporting and confirm the link in
    [SECURITY.md](SECURITY.md) opens the private report form.
 7. Confirm `@assistant-ui/engineering` resolves as the repository code owner.
-8. Confirm all seven npm names are still available immediately before the first
+8. Confirm all nine npm names are still available immediately before the first
    release: `riftri`, `riftri-darwin-arm64`, `riftri-darwin-x64`,
-   `riftri-linux-arm64-gnu`, `riftri-linux-x64-gnu`, `riftri-win32-arm64`, and
+   `riftri-linux-arm64-gnu`, `riftri-linux-arm64-musl`,
+   `riftri-linux-x64-gnu`, `riftri-linux-x64-musl`, `riftri-win32-arm64`, and
    `riftri-win32-x64`.
 
 Public visibility is required for npm provenance from this repository.
@@ -99,7 +100,7 @@ The first publication needs a short-lived, least-privilege npm token because a
 trusted publisher can only be attached after each package exists. Add it as the
 `NPM_TOKEN` GitHub Actions secret immediately before the bootstrap release.
 
-After all seven packages exist, configure the same GitHub Actions trusted
+After all nine packages exist, configure the same GitHub Actions trusted
 publisher on each npm package:
 
 - organization or user: `assistant-ui`
@@ -158,7 +159,7 @@ marked as prereleases on GitHub; stable versions use npm's `latest` tag.
 
 Verify each publication channel separately:
 
-1. Confirm the GitHub release contains all six native archives and
+1. Confirm the GitHub release contains all eight native archives and
    `SHA256SUMS`. Download a native archive through its public release URL,
    verify its checksum before extraction or execution, then check `riftri
    --version` and `riftri doctor` without the npm launcher.
