@@ -2326,7 +2326,7 @@ fn analyze_resolved_repository_compatibility(
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut checkout_config = Vec::new();
-    for (key, accepted, kind) in [
+    let checked_config = [
         (
             "core.attributesfile",
             &[][..],
@@ -2357,8 +2357,27 @@ fn analyze_resolved_repository_compatibility(
             &[b"true".as_slice()][..],
             RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
         ),
-    ] {
-        let value = git.config_value(repository, key)?;
+    ];
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let profile_keys = &[
+        "core.filemode",
+        "core.ignorecase",
+        "core.precomposeunicode",
+        "core.protecthfs",
+        "core.protectntfs",
+    ][..];
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let profile_keys: &[&str] = &[];
+    let keys = checked_config
+        .iter()
+        .map(|(key, _, _)| *key)
+        .chain(profile_keys.iter().copied())
+        .collect::<Vec<_>>();
+    // Keep the same key order and raw values in the checkout profile, but obtain
+    // all configuration from one operation-local Git snapshot.
+    let mut values = git.config_values(repository, &keys)?.into_iter();
+    for (key, accepted, kind) in checked_config {
+        let value = values.next().expect("one result per configuration key");
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2381,14 +2400,8 @@ fn analyze_resolved_repository_compatibility(
     }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
-        for key in [
-            "core.filemode",
-            "core.ignorecase",
-            "core.precomposeunicode",
-            "core.protecthfs",
-            "core.protectntfs",
-        ] {
-            let value = git.config_value(repository, key)?;
+        for &key in profile_keys {
+            let value = values.next().expect("one result per configuration key");
             hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
             if let Some(value) = value {
                 checkout_config.push((key.to_owned(), value));
@@ -5562,6 +5575,84 @@ mod tests {
         let error = super::resume_prune(&riftri_git::Git::default(), &store, snapshot, None)
             .expect_err("recovery must reject a changed snapshot");
         assert!(error.to_string().contains("changed"), "{error}");
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn batched_configuration_preserves_checkout_profile_and_captured_values() {
+        use sha2::{Digest, Sha256};
+        let fixture = tempdir().expect("fixture");
+        git(fixture.path(), &["init", "--quiet"]);
+        git(
+            fixture.path(),
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        let keys = [
+            "core.attributesfile",
+            "core.sparsecheckout",
+            "core.sparsecheckoutcone",
+            "core.autocrlf",
+            "core.eol",
+            "core.symlinks",
+            "core.filemode",
+            "core.ignorecase",
+            "core.precomposeunicode",
+            "core.protecthfs",
+            "core.protectntfs",
+        ];
+        for configured in [false, true] {
+            if configured {
+                for (key, value) in [
+                    ("core.autocrlf", "false"),
+                    ("core.eol", "lf"),
+                    ("core.symlinks", "true"),
+                    ("core.ignorecase", "false"),
+                    ("core.protecthfs", "true"),
+                    ("core.protectntfs", "true"),
+                ] {
+                    git(fixture.path(), &["config", key, value]);
+                }
+            }
+            let real_git = riftri_git::Git::default();
+            // Reference the previous sequence of individual reads, including its
+            // exact hash order. Batching must not invalidate existing base keys.
+            let mut expected_profile = Sha256::new();
+            expected_profile.update(b"riftri-checkout-profile-v2-isolated\0");
+            super::hash_profile_input(
+                &mut expected_profile,
+                b"git.version",
+                Some(real_git.detect().unwrap().version.as_bytes()),
+            );
+            let mut expected_config = Vec::new();
+            for key in keys {
+                let value = real_git.config_value(fixture.path(), key).unwrap();
+                super::hash_profile_input(&mut expected_profile, key.as_bytes(), value.as_deref());
+                if let Some(value) = value {
+                    expected_config.push((key.to_owned(), value));
+                }
+            }
+            let analysis = super::analyze_repository_compatibility(
+                &real_git,
+                fixture.path(),
+                std::ffi::OsStr::new("HEAD"),
+            )
+            .unwrap();
+            assert_eq!(
+                analysis.checkout_profile,
+                expected_profile.finalize().to_vec()
+            );
+            assert_eq!(analysis.checkout_config, expected_config);
+        }
     }
 
     #[cfg(unix)]

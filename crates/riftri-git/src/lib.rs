@@ -373,6 +373,59 @@ impl Git {
         }
     }
 
+    /// Read exact canonical configuration keys in one process, preserving input order.
+    ///
+    /// As in Git's output, section and variable names must be lowercase; subsection
+    /// names retain their case. Keys must not contain newlines or NUL bytes.
+    /// Values remain raw bytes. The last occurrence wins,
+    /// matching `config --get`, including includes and worktree/command overrides.
+    /// Missing keys are `None`; both empty and valueless entries are `Some(vec![])`.
+    pub fn config_values(
+        &self,
+        path: &Path,
+        keys: &[&str],
+    ) -> Result<Vec<Option<Vec<u8>>>, GitError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        if keys
+            .iter()
+            .any(|key| key.is_empty() || key.contains(['\n', '\0']))
+        {
+            return Err(GitError::InvalidOutput {
+                context: "configuration keys",
+                detail: "expected nonempty canonical keys without newline or NUL bytes".to_owned(),
+            });
+        }
+        let alternatives = keys
+            .iter()
+            .map(|key| {
+                let mut escaped = String::new();
+                for ch in key.chars() {
+                    if ".[](){}*+?^$|\\".contains(ch) {
+                        escaped.push('\\');
+                    }
+                    escaped.push(ch);
+                }
+                escaped
+            })
+            .collect::<Vec<_>>();
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--null"),
+            OsString::from("--get-regexp"),
+            OsString::from(format!("^({})$", alternatives.join("|"))),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(vec![None; keys.len()]);
+        }
+        if !output.status.success() {
+            return Err(command_failed(&arguments, &output));
+        }
+        parse_config_values(&output.stdout, keys)
+    }
+
     /// Read one value from this repository's local configuration only.
     pub fn local_config_value(&self, path: &Path, key: &str) -> Result<Option<Vec<u8>>, GitError> {
         let arguments = [
@@ -1140,6 +1193,42 @@ impl Git {
     }
 }
 
+fn parse_config_values(input: &[u8], keys: &[&str]) -> Result<Vec<Option<Vec<u8>>>, GitError> {
+    let mut values = vec![None; keys.len()];
+    if input.is_empty() {
+        return Ok(values);
+    }
+    let records = input
+        .strip_suffix(&[0])
+        .ok_or_else(|| GitError::InvalidOutput {
+            context: "configuration values",
+            detail: "output did not end with a NUL delimiter".to_owned(),
+        })?;
+    for record in records.split(|byte| *byte == 0) {
+        let mut matched = false;
+        // Match the full requested key before its separator, rather than splitting
+        // on every newline: values can contain arbitrary newline bytes.
+        for (key, value) in keys.iter().zip(&mut values) {
+            if let Some(rest) = record.strip_prefix(key.as_bytes()) {
+                if rest.is_empty() {
+                    *value = Some(Vec::new());
+                    matched = true;
+                } else if let Some(raw) = rest.strip_prefix(b"\n") {
+                    *value = Some(raw.to_vec());
+                    matched = true;
+                }
+            }
+        }
+        if !matched {
+            return Err(GitError::InvalidOutput {
+                context: "configuration values",
+                detail: "output contained an unexpected key or malformed record".to_owned(),
+            });
+        }
+    }
+    Ok(values)
+}
+
 /// Parse NUL-delimited `git check-attr -z` path/name/value triples.
 pub fn parse_attribute_records(input: &[u8]) -> Result<Vec<GitAttribute>, GitError> {
     if input.is_empty() {
@@ -1768,6 +1857,221 @@ mod tests {
                 .expect("read missing config"),
             None
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batched_configuration_uses_one_process() {
+        let fixture = RepositoryFixture::unborn();
+        let keys = [
+            "core.attributesfile",
+            "core.sparsecheckout",
+            "core.sparsecheckoutcone",
+            "core.autocrlf",
+            "core.eol",
+            "core.symlinks",
+            "core.filemode",
+            "core.ignorecase",
+            "core.precomposeunicode",
+            "core.protecthfs",
+            "core.protectntfs",
+        ];
+        let git = Git::default();
+        let expected = keys
+            .iter()
+            .map(|key| git.config_value(fixture.path(), key).unwrap())
+            .collect::<Vec<_>>();
+        let before = git.process_attempts();
+        assert_eq!(git.config_values(fixture.path(), &keys).unwrap(), expected);
+        assert_eq!(
+            git.process_attempts() - before,
+            1,
+            "settings must share one Git process"
+        );
+    }
+
+    #[test]
+    fn batched_configuration_preserves_values_and_include_precedence() {
+        let fixture = RepositoryFixture::unborn();
+        let config = fixture.path().join(".git/config");
+        let mut contents = fs::read(&config).unwrap();
+        contents.extend_from_slice(b"\n[riftritest]\nvalue = first\n[include]\npath = included-config\n[riftritest]\nvalue = last\nempty =\nimplicit\nmultiline = \"one\\ntwo\\tthree\"\n[riftritest \"a+b\"]\nvalue = literal\n[riftritest \"aaab\"]\nvalue = wrong\n");
+        fs::write(&config, contents).unwrap();
+        fs::write(
+            fixture.path().join(".git/included-config"),
+            b"[riftritest]\nvalue = included\nincluded = yes\n",
+        )
+        .unwrap();
+        let keys = [
+            "riftritest.value",
+            "riftritest.empty",
+            "riftritest.implicit",
+            "riftritest.multiline",
+            "riftritest.included",
+            "riftritest.absent",
+            "riftritest.a+b.value",
+            "riftritest.value",
+        ];
+        let git = Git::default();
+        let expected = keys
+            .iter()
+            .map(|key| git.config_value(fixture.path(), key).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(expected[0].as_deref(), Some(b"last".as_slice()));
+        assert_eq!(expected[1].as_deref(), Some(b"".as_slice()));
+        assert_eq!(expected[2].as_deref(), Some(b"".as_slice()));
+        assert_eq!(expected[3].as_deref(), Some(b"one\ntwo\tthree".as_slice()));
+        assert_eq!(expected[5], None);
+        assert_eq!(expected[6].as_deref(), Some(b"literal".as_slice()));
+        assert_eq!(git.config_values(fixture.path(), &keys).unwrap(), expected);
+        assert_eq!(
+            git.config_values(fixture.path(), &["riftritest.absent"])
+                .unwrap(),
+            vec![None]
+        );
+        assert!(git.config_values(fixture.path(), &[]).unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batched_configuration_preserves_non_utf8_values() {
+        let fixture = RepositoryFixture::unborn();
+        let config = fixture.path().join(".git/config");
+        let mut contents = fs::read(&config).unwrap();
+        contents.extend_from_slice(b"\n[riftritest]\nraw = \"a\xffb\\nline\"\n");
+        fs::write(config, contents).unwrap();
+        let git = Git::default();
+        let expected = git.config_value(fixture.path(), "riftritest.raw").unwrap();
+        assert_eq!(expected.as_deref(), Some(b"a\xffb\nline".as_slice()));
+        assert_eq!(
+            git.config_values(fixture.path(), &["riftritest.raw"])
+                .unwrap(),
+            vec![expected]
+        );
+    }
+
+    #[test]
+    fn batched_configuration_propagates_invalid_config_errors() {
+        let fixture = RepositoryFixture::unborn();
+        fs::write(fixture.path().join(".git/config"), b"[broken\n").unwrap();
+        let git = Git::default();
+        assert!(
+            git.config_value(fixture.path(), "riftritest.absent")
+                .is_err()
+        );
+        assert!(
+            git.config_values(fixture.path(), &["riftritest.absent"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn batched_configuration_parser_rejects_truncated_or_unrequested_records() {
+        for input in [
+            b"riftritest.a\nvalue".as_slice(),
+            b"\0",
+            b"riftritest.other\nvalue\0",
+        ] {
+            assert!(super::parse_config_values(input, &["riftritest.a"]).is_err());
+        }
+        assert_eq!(
+            super::parse_config_values(b"riftritest.a\nfirst\0riftritest.a\0", &["riftritest.a"])
+                .unwrap(),
+            vec![Some(Vec::new())],
+            "a later valueless entry overrides an earlier value"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batched_configuration_empty_or_invalid_keys_do_not_start_git() {
+        let git = Git::new("git-must-not-be-started");
+        assert!(git.config_values(Path::new("."), &[]).unwrap().is_empty());
+        for key in ["", "riftritest.a\nvalue", "riftritest.a\0value"] {
+            assert!(git.config_values(Path::new("."), &[key]).is_err());
+        }
+        assert_eq!(git.process_attempts(), 0);
+    }
+
+    #[test]
+    fn batched_configuration_observes_linked_worktree_overrides() {
+        let fixture = RepositoryFixture::committed();
+        let linked = fixture.path().join("linked");
+        git(
+            fixture.path(),
+            &["config", "extensions.worktreeConfig", "true"],
+        );
+        git(
+            fixture.path(),
+            &["config", "riftritest.value", "repository"],
+        );
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git(
+            &linked,
+            &["config", "--worktree", "riftritest.value", "worktree"],
+        );
+        let git = Git::default();
+        for (path, expected) in [
+            (fixture.path(), b"repository".as_slice()),
+            (linked.as_path(), b"worktree".as_slice()),
+        ] {
+            assert_eq!(
+                git.config_value(path, "riftritest.value")
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+            assert_eq!(
+                git.config_values(path, &["riftritest.value"]).unwrap(),
+                vec![Some(expected.to_vec())]
+            );
+        }
+        git.remove_worktree(fixture.path(), &linked).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn batched_configuration_observes_global_system_and_command_overrides() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = RepositoryFixture::unborn();
+        let wrapper = fixture.path().join("git-wrapper");
+        fs::write(
+            fixture.path().join("system-config"),
+            b"[riftritest]\nsystem = system\nvalue = system\n",
+        )
+        .unwrap();
+        fs::write(
+            fixture.path().join("global-config"),
+            b"[riftritest]\nglobal = global\nvalue = global\n",
+        )
+        .unwrap();
+        git(fixture.path(), &["config", "riftritest.value", "local"]);
+        fs::write(&wrapper, b"#!/bin/sh\nunset GIT_CONFIG_NOSYSTEM GIT_CONFIG\nexport GIT_CONFIG_SYSTEM=\"${0%/*}/system-config\"\nexport GIT_CONFIG_GLOBAL=\"${0%/*}/global-config\"\nexport GIT_CONFIG_COUNT=1\nexport GIT_CONFIG_KEY_0=riftritest.value\nexport GIT_CONFIG_VALUE_0=command\nexec git \"$@\"\n").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let git = Git::new(wrapper);
+        let keys = ["riftritest.system", "riftritest.global", "riftritest.value"];
+        let expected = keys
+            .iter()
+            .map(|key| git.config_value(fixture.path(), key).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected,
+            vec![
+                Some(b"system".to_vec()),
+                Some(b"global".to_vec()),
+                Some(b"command".to_vec())
+            ]
+        );
+        assert_eq!(git.config_values(fixture.path(), &keys).unwrap(), expected);
     }
 
     #[test]
