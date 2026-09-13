@@ -3,48 +3,139 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const repositoryRoot = path.resolve(scriptDirectory, "..", "..");
-const platformsDirectory = path.join(repositoryRoot, "package", "platforms");
-const platformPackages = (await readdir(platformsDirectory, { withFileTypes: true }))
-  .filter((entry) => entry.isDirectory())
-  .map((entry) => path.join(platformsDirectory, entry.name))
-  .sort();
-const rootPackageDirectory = path.join(repositoryRoot, "dist", "npm-root");
+const scriptPath = fileURLToPath(import.meta.url);
+const defaultRepositoryRoot = path.resolve(path.dirname(scriptPath), "..", "..");
 
-for (const packageDirectory of [...platformPackages, rootPackageDirectory]) {
-  const manifest = JSON.parse(
+function defaultRunNpm(arguments_, options = {}) {
+  return spawnSync("npm", arguments_, options);
+}
+
+function defaultWait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function commandOutput(result) {
+  return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+}
+
+async function packageManifest(packageDirectory) {
+  return JSON.parse(
     await readFile(path.join(packageDirectory, "package.json"), "utf8"),
   );
-  const identifier = `${manifest.name}@${manifest.version}`;
-  const lookup = spawnSync("npm", ["view", identifier, "version", "--json"], {
+}
+
+async function releasePackages(repositoryRoot) {
+  const platformsDirectory = path.join(repositoryRoot, "package", "platforms");
+  const platformPackages = (
+    await readdir(platformsDirectory, { withFileTypes: true })
+  )
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(platformsDirectory, entry.name))
+    .sort();
+  return [...platformPackages, path.join(repositoryRoot, "dist", "npm-root")];
+}
+
+function lookupExactVersion(runNpm, identifier) {
+  const lookup = runNpm(["view", identifier, "version", "--json"], {
     encoding: "utf8",
   });
-
+  if (lookup.error) throw lookup.error;
   if (lookup.status === 0) {
-    process.stdout.write(`${identifier} is already published; skipping\n`);
-    continue;
+    let version;
+    try {
+      version = JSON.parse(lookup.stdout);
+    } catch (error) {
+      throw new Error(`npm returned invalid version metadata for ${identifier}`, {
+        cause: error,
+      });
+    }
+    return { published: true, version };
   }
-  if (!`${lookup.stdout}\n${lookup.stderr}`.includes("E404")) {
-    process.stderr.write(lookup.stderr);
-    throw new Error(`could not determine whether ${identifier} exists`);
+  if (commandOutput(lookup).includes("E404")) {
+    return { published: false };
+  }
+  if (lookup.stderr) process.stderr.write(lookup.stderr);
+  throw new Error(`could not determine whether ${identifier} exists`);
+}
+
+export async function publishPackages({
+  repositoryRoot = defaultRepositoryRoot,
+  runNpm = defaultRunNpm,
+  wait = defaultWait,
+  verificationAttempts = 5,
+} = {}) {
+  if (!Number.isInteger(verificationAttempts) || verificationAttempts < 1) {
+    throw new Error("verificationAttempts must be a positive integer");
+  }
+  const packages = await releasePackages(repositoryRoot);
+  const expected = [];
+
+  for (const packageDirectory of packages) {
+    const manifest = await packageManifest(packageDirectory);
+    const identifier = `${manifest.name}@${manifest.version}`;
+    expected.push({ identifier, version: manifest.version });
+    const lookup = lookupExactVersion(runNpm, identifier);
+
+    if (lookup.published) {
+      if (lookup.version !== manifest.version) {
+        throw new Error(
+          `${identifier} resolved to unexpected registry version ${JSON.stringify(lookup.version)}`,
+        );
+      }
+      process.stdout.write(`${identifier} is already published; skipping\n`);
+      continue;
+    }
+
+    const distributionTag = manifest.version.includes("-") ? "next" : "latest";
+    const publish = runNpm(
+      [
+        "publish",
+        packageDirectory,
+        "--access",
+        "public",
+        "--provenance",
+        "--tag",
+        distributionTag,
+      ],
+      { stdio: "inherit" },
+    );
+    if (publish.error) throw publish.error;
+    if (publish.status !== 0) {
+      throw new Error(`publishing ${identifier} failed`);
+    }
   }
 
-  const distributionTag = manifest.version.includes("-") ? "next" : "latest";
-  const publish = spawnSync(
-    "npm",
-    [
-      "publish",
-      packageDirectory,
-      "--access",
-      "public",
-      "--provenance",
-      "--tag",
-      distributionTag,
-    ],
-    { stdio: "inherit" },
-  );
-  if (publish.status !== 0) {
-    throw new Error(`publishing ${identifier} failed`);
+  let missing = [];
+  for (let attempt = 1; attempt <= verificationAttempts; attempt += 1) {
+    missing = [];
+    for (const { identifier, version } of expected) {
+      const lookup = lookupExactVersion(runNpm, identifier);
+      if (!lookup.published) {
+        missing.push(identifier);
+        continue;
+      }
+      if (lookup.version !== version) {
+        throw new Error(
+          `${identifier} resolved to unexpected registry version ${JSON.stringify(lookup.version)}`,
+        );
+      }
+    }
+    if (missing.length === 0) break;
+    if (attempt < verificationAttempts) {
+      await wait(2 ** (attempt - 1) * 1_000);
+    }
   }
+  if (missing.length > 0) {
+    throw new Error(
+      `${missing.join(", ")} still missing after the publish verification retries`,
+    );
+  }
+  process.stdout.write(
+    `verified ${expected.length} exact npm package versions after publication\n`,
+  );
+  return expected.map(({ identifier }) => identifier);
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {
+  await publishPackages();
 }
