@@ -4722,13 +4722,13 @@ fn remove_registered_worktree_for_rollback(
     if !journal.destination.exists() || contains_only_git_pointer(&journal.destination)? {
         remove_pointer_only_worktree(git, &journal.repository, journal)?;
     } else if git.worktree_is_clean(&journal.destination)? {
-        git.remove_worktree(&journal.repository, &journal.destination)?;
+        remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
         git.synchronize_worktree_index(&journal.destination)?;
         if !git.worktree_is_clean(&journal.destination)? {
             return Err(changed_rollback_worktree(journal));
         }
-        git.remove_worktree(&journal.repository, &journal.destination)?;
+        remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
     } else {
         return Err(changed_rollback_worktree(journal));
     }
@@ -4795,11 +4795,25 @@ fn remove_pointer_only_worktree(
     }
     // Git can remove a missing directory without force. If a writer recreates
     // it first, Git's ordinary safety checks apply to that new directory.
-    if let Err(error) = git.remove_worktree(repository, &journal.destination) {
+    if let Err(error) = remove_worktree_for_rollback(git, repository, &journal.destination) {
         restore_staged_git_pointer(journal)?;
-        return Err(error.into());
+        return Err(error);
     }
     remove_file_if_present(&staged)
+}
+
+fn remove_worktree_for_rollback(
+    git: &Git,
+    repository: &Path,
+    destination: &Path,
+) -> Result<(), WorktreeError> {
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::RollbackGitRemoval,
+        destination,
+    );
+    git.remove_worktree(repository, destination)?;
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -5371,7 +5385,7 @@ fn remove_file_if_present(path: &Path) -> Result<(), WorktreeError> {
 fn remove_empty_directory_if_present(path: &Path) -> Result<(), WorktreeError> {
     #[cfg(test)]
     crate::test_hooks::fire(
-        crate::test_hooks::FilesystemRacePoint::BeforeEmptyDirectoryRemoval,
+        crate::test_hooks::FilesystemRacePoint::EmptyDirectoryRemoval,
         path,
     );
     match fs::remove_dir(path) {
@@ -5432,8 +5446,6 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{Arc, Barrier};
@@ -5459,6 +5471,8 @@ mod tests {
         AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
         RemoveWorktreePhase,
     };
+    #[cfg(unix)]
+    use riftri_git::GitError;
 
     fn git(path: &Path, arguments: &[&str]) {
         let output = Command::new("git")
@@ -5479,7 +5493,7 @@ mod tests {
         let destination = fixture.path().join("worktree");
         fs::create_dir(&destination).expect("create empty destination");
         let _hook = crate::test_hooks::install(
-            crate::test_hooks::FilesystemRacePoint::BeforeEmptyDirectoryRemoval,
+            crate::test_hooks::FilesystemRacePoint::EmptyDirectoryRemoval,
             |path| fs::write(path.join("raced.txt"), b"preserve\n").expect("race cleanup"),
         );
 
@@ -6643,22 +6657,24 @@ mod tests {
                 .pop()
                 .expect("incomplete add journal");
 
-            let wrapper = fixture.path().join("racing-git");
-            fs::write(
-            &wrapper,
-            "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = remove ]; then\n  mkdir -p \"$(dirname \"$0\")/worktree\"\n  printf 'raced write\\n' > \"$(dirname \"$0\")/worktree/raced.txt\"\nfi\nexec git \"$@\"\n",
-        )
-        .expect("write racing Git wrapper");
-            let mut permissions = fs::metadata(&wrapper)
-                .expect("wrapper metadata")
-                .permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+            let _hook = crate::test_hooks::install(
+                crate::test_hooks::FilesystemRacePoint::RollbackGitRemoval,
+                |path| {
+                    fs::create_dir_all(path).expect("restore raced destination");
+                    fs::write(path.join("raced.txt"), "raced write\n").expect("write raced file");
+                },
+            );
 
-            let error = super::rollback_decoded(&Git::new(wrapper), &journal)
+            let error = super::rollback_decoded(&Git::default(), &journal)
                 .expect_err("rollback must preserve the concurrent write");
 
-            assert!(error.to_string().contains("Git command failed"));
+            assert!(
+                matches!(
+                    &error,
+                    super::WorktreeError::Git(GitError::CommandFailed { .. })
+                ),
+                "unexpected rollback error: {error}"
+            );
             assert_eq!(
                 fs::read_to_string(destination.join("raced.txt")).expect("read preserved write"),
                 "raced write\n"

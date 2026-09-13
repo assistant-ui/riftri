@@ -3,8 +3,9 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FilesystemRacePoint {
-    BeforeJournalOpen,
-    BeforeEmptyDirectoryRemoval,
+    JournalOpen,
+    EmptyDirectoryRemoval,
+    RollbackGitRemoval,
 }
 
 type Hook = Box<dyn FnOnce(&Path)>;

@@ -132,10 +132,7 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
         });
     }
     #[cfg(test)]
-    crate::test_hooks::fire(
-        crate::test_hooks::FilesystemRacePoint::BeforeJournalOpen,
-        path,
-    );
+    crate::test_hooks::fire(crate::test_hooks::FilesystemRacePoint::JournalOpen, path);
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -1696,7 +1693,7 @@ mod tests {
         std::fs::write(&outside, b"outside\n").expect("write outside file");
         let outside_for_hook = outside.clone();
         let _hook = crate::test_hooks::install(
-            crate::test_hooks::FilesystemRacePoint::BeforeJournalOpen,
+            crate::test_hooks::FilesystemRacePoint::JournalOpen,
             move |path| {
                 std::fs::remove_file(path).expect("remove inspected journal");
                 symlink(&outside_for_hook, path).expect("replace journal with symlink");
