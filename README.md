@@ -214,6 +214,8 @@ details on measuring physical sharing, see
 [Linux reflink verification](docs/linux-reflink.md), or see
 [Windows ReFS support](docs/windows-refs.md) for that backend's requirements.
 The tested metadata guarantees and platform boundaries are documented in
+[Backend guarantees and metadata profiles](docs/backend-guarantees.md), with
+the detailed integration cases in
 [Filesystem metadata compatibility](docs/filesystem-compatibility.md).
 
 ## Project status
@@ -229,6 +231,7 @@ Development plans and design details live in:
 - [Roadmap](ROADMAP.md)
 - [Architecture](docs/architecture.md)
 - [Design decisions](docs/decisions.md)
+- [Backend guarantees](docs/backend-guarantees.md)
 - [Native COW benchmark](docs/benchmarks.md)
 - [Release process](RELEASING.md)
 

@@ -2,6 +2,9 @@
 
 Riftri worktrees use native filesystem paths after creation. Metadata changes
 must therefore stay private to one view just like file-content changes.
+The normative cross-backend contract is in
+[Backend guarantees and metadata profiles](backend-guarantees.md); this page
+records the platform-specific metadata tests behind that contract.
 
 ## Certified behavior
 
