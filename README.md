@@ -54,11 +54,9 @@ a per-user directory. **Node.js and npm are not required.** See the
 [direct-download installation guide](docs/install.md) for all eight targets and
 copyable checksum-verification commands.
 
-The npm launcher is a separate distribution channel. As of September 12, 2026,
-`riftri@0.1.1` is not published: npm rejected its Windows ARM64 dependency during
-the initial release. Published native platform packages do not make the launcher
-available on their own. Use direct downloads while npm publication is pending.
-For a version whose launcher has been published, npm installation is:
+The npm launcher is a separate distribution channel. Confirm that the requested
+version is present on npm because GitHub and npm publication complete
+independently. To install a published npm version:
 
 ```console
 $ npm install --global riftri
