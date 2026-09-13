@@ -1,5 +1,10 @@
 # Native COW benchmark
 
+For a real-project, ten-agent run using the public direct-download CLI, see
+[the assistant-ui experiment](benchmarks/assistant-ui-ten-agents-2026-09-12.md).
+It records both allocation savings and slower creation, along with the
+repository compatibility adjustment and workload limitations.
+
 Riftri includes one ignored integration benchmark for comparing worktree
 creation and physical allocation on a real supported destination filesystem.
 It exercises the same public core transaction used by the CLI; no synthetic
