@@ -2326,7 +2326,7 @@ fn analyze_resolved_repository_compatibility(
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut checkout_config = Vec::new();
-    for (key, accepted, kind) in [
+    let checked_config = [
         (
             "core.attributesfile",
             &[][..],
@@ -2357,8 +2357,21 @@ fn analyze_resolved_repository_compatibility(
             &[b"true".as_slice()][..],
             RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
         ),
-    ] {
-        let value = git.config_value(repository, key)?;
+    ];
+    let config_keys = checked_config.iter().map(|(key, _, _)| *key);
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let profile_keys = [
+        "core.filemode",
+        "core.ignorecase",
+        "core.precomposeunicode",
+        "core.protecthfs",
+        "core.protectntfs",
+    ];
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let config_keys = config_keys.chain(profile_keys);
+    let config_values = git.config_values(repository, &config_keys.collect::<Vec<_>>())?;
+    for (key, accepted, kind) in checked_config {
+        let value = config_values.get(key).cloned();
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2381,14 +2394,8 @@ fn analyze_resolved_repository_compatibility(
     }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
-        for key in [
-            "core.filemode",
-            "core.ignorecase",
-            "core.precomposeunicode",
-            "core.protecthfs",
-            "core.protectntfs",
-        ] {
-            let value = git.config_value(repository, key)?;
+        for key in profile_keys {
+            let value = config_values.get(key).cloned();
             hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
             if let Some(value) = value {
                 checkout_config.push((key.to_owned(), value));
@@ -5418,6 +5425,86 @@ mod tests {
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn batched_checkout_configuration_preserves_profile_and_rejections() {
+        use sha2::{Digest, Sha256};
+
+        let fixture = tempdir().unwrap();
+        let repository = fixture.path();
+        git(repository, &["init", "--quiet"]);
+        git(repository, &["config", "core.autocrlf", "false"]);
+        git(repository, &["config", "core.eol", "lf"]);
+        git(repository, &["config", "core.precomposeunicode", "false"]);
+        git(
+            repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "initial",
+            ],
+        );
+        let git = riftri_git::Git::default();
+        let resolved = git
+            .resolve_revision(repository, std::ffi::OsStr::new("HEAD"))
+            .unwrap();
+        let keys = [
+            "core.attributesfile",
+            "core.sparsecheckout",
+            "core.sparsecheckoutcone",
+            "core.autocrlf",
+            "core.eol",
+            "core.symlinks",
+            "core.filemode",
+            "core.ignorecase",
+            "core.precomposeunicode",
+            "core.protecthfs",
+            "core.protectntfs",
+        ];
+        for (autocrlf, compatible) in [("false", true), ("true", false)] {
+            git.set_local_config(repository, "core.autocrlf", std::ffi::OsStr::new(autocrlf))
+                .unwrap();
+            let analysis =
+                super::analyze_resolved_repository_compatibility(&git, repository, &resolved)
+                    .unwrap();
+            // Reconstruct the previous, individual-read profile independently.
+            let mut profile = Sha256::new();
+            profile.update(b"riftri-checkout-profile-v2-isolated\0");
+            let version = git.detect().unwrap().version;
+            super::hash_profile_input(&mut profile, b"git.version", Some(version.as_bytes()));
+            let mut captured = Vec::new();
+            for key in keys {
+                let value = git.config_value(repository, key).unwrap();
+                super::hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+                if let Some(value) = value {
+                    captured.push((key.to_owned(), value));
+                }
+            }
+            assert_eq!(analysis.checkout_profile, profile.finalize().to_vec());
+            assert_eq!(analysis.checkout_config, captured);
+            assert_eq!(analysis.report.compatible, compatible);
+            if !compatible {
+                assert!(
+                    analysis
+                        .report
+                        .blockers
+                        .iter()
+                        .any(|blocker| blocker.explanation.contains("core.autocrlf=true"))
+                );
+            }
+            assert!(
+                !repository.join(".git/riftri").exists(),
+                "analysis must not create lifecycle state"
+            );
+        }
     }
 
     #[cfg(target_os = "windows")]
