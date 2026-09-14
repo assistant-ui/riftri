@@ -465,6 +465,18 @@ pub fn prepare_posix_shell_deactivation() -> Result<String, ActivationError> {
     prepare_posix_shell_deactivation_inner()
 }
 
+/// Prepare a durable Git shim and render PowerShell code that activates it for
+/// the current session and every child process.
+pub fn prepare_powershell_hook() -> Result<String, ActivationError> {
+    prepare_powershell_hook_inner()
+}
+
+/// Render PowerShell code that removes Riftri from the current session. The
+/// caller must explicitly evaluate the returned code in PowerShell.
+pub fn prepare_powershell_deactivation() -> Result<String, ActivationError> {
+    prepare_powershell_deactivation_inner()
+}
+
 /// Report whether the current process inherited a complete, usable shell hook.
 pub fn shell_activation_status() -> Result<ShellActivationStatus, ActivationError> {
     shell_activation_status_inner()
@@ -513,7 +525,50 @@ fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
     ))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "windows")]
+fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
+    let real_git = locate_real_git()?;
+    let current_executable = env::current_exe()
+        .map_err(|error| shell_error(format!("locate the Riftri executable: {error}")))?;
+    let shim_directory = shell_shim_directory()?;
+    ensure_real_shell_shim_directory(&shim_directory)?;
+    set_private_directory_permissions(&shim_directory)?;
+    install_durable_git_shim(&shim_directory, &current_executable)?;
+
+    let shim_directory = powershell_quote_path(&shim_directory)?;
+    let real_git = powershell_quote_path(&real_git)?;
+    Ok(format!(
+        "$env:{real_git_env} = {real_git}\n$env:{shim_active_env} = '1'\n$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = (@($_riftriShim) + $_riftriPath) -join ';'\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
+        real_git_env = riftri_git::REAL_GIT_ENV,
+        shim_active_env = SHIM_ACTIVE_ENV,
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
+    Err(shell_error(
+        "the PowerShell hook is currently available only on Windows",
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_powershell_deactivation_inner() -> Result<String, ActivationError> {
+    let shim_directory = powershell_quote_path(&shell_shim_directory()?)?;
+    Ok(format!(
+        "$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
+        real_git_env = riftri_git::REAL_GIT_ENV,
+        shim_active_env = SHIM_ACTIVE_ENV,
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn prepare_powershell_deactivation_inner() -> Result<String, ActivationError> {
+    Err(shell_error(
+        "PowerShell deactivation is currently available only on Windows",
+    ))
+}
+
+#[cfg(any(unix, target_os = "windows"))]
 fn shell_activation_status_inner() -> Result<ShellActivationStatus, ActivationError> {
     let shim_directory = shell_shim_directory()?;
     let marker_set = environment_truthy(SHIM_ACTIVE_ENV);
@@ -538,11 +593,9 @@ fn shell_activation_status_inner() -> Result<ShellActivationStatus, ActivationEr
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_os = "windows")))]
 fn shell_activation_status_inner() -> Result<ShellActivationStatus, ActivationError> {
-    Err(shell_error(
-        "shell status for sh/bash/zsh is currently available only on Unix-like systems",
-    ))
+    Err(shell_error("shell status is unavailable on this platform"))
 }
 
 #[cfg(unix)]
@@ -550,7 +603,12 @@ fn shim_executable_paths(directory: &Path) -> Vec<PathBuf> {
     vec![directory.join("git")]
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "windows")]
+fn shim_executable_paths(directory: &Path) -> Vec<PathBuf> {
+    vec![directory.join("git.exe")]
+}
+
+#[cfg(any(unix, target_os = "windows"))]
 fn shell_shim_directory() -> Result<PathBuf, ActivationError> {
     let cache_root = env::var_os(CACHE_DIR_ENV)
         .filter(|path| !path.is_empty())
@@ -564,7 +622,7 @@ fn shell_shim_directory() -> Result<PathBuf, ActivationError> {
             .map_err(|error| shell_error(format!("resolve current directory: {error}")))?
             .join(cache_root)
     };
-    Ok(cache_root.join("shims/v1"))
+    Ok(cache_root.join("shims").join("v1"))
 }
 
 #[cfg(target_os = "macos")]
@@ -588,6 +646,16 @@ fn default_cache_directory() -> Result<PathBuf, ActivationError> {
     Ok(PathBuf::from(home).join(".cache/riftri"))
 }
 
+#[cfg(target_os = "windows")]
+fn default_cache_directory() -> Result<PathBuf, ActivationError> {
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            shell_error("LOCALAPPDATA is not set; cannot choose a shell shim directory")
+        })?;
+    Ok(PathBuf::from(local_app_data).join("Riftri").join("Cache"))
+}
+
 #[cfg(unix)]
 fn set_private_directory_permissions(directory: &Path) -> Result<(), ActivationError> {
     use std::os::unix::fs::PermissionsExt;
@@ -600,7 +668,12 @@ fn set_private_directory_permissions(directory: &Path) -> Result<(), ActivationE
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "windows")]
+fn set_private_directory_permissions(_directory: &Path) -> Result<(), ActivationError> {
+    Ok(())
+}
+
+#[cfg(any(unix, target_os = "windows"))]
 fn ensure_real_shell_shim_directory(directory: &Path) -> Result<(), ActivationError> {
     let shims = directory
         .parent()
@@ -619,7 +692,7 @@ fn ensure_real_shell_shim_directory(directory: &Path) -> Result<(), ActivationEr
     ensure_real_shell_directory(directory)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn ensure_real_shell_directory(directory: &Path) -> Result<(), ActivationError> {
     match fs::create_dir(directory) {
         Ok(()) => {}
@@ -634,7 +707,7 @@ fn ensure_real_shell_directory(directory: &Path) -> Result<(), ActivationError> 
     require_real_shell_directory(directory)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, target_os = "windows"))]
 fn require_real_shell_directory(directory: &Path) -> Result<(), ActivationError> {
     let metadata = fs::symlink_metadata(directory).map_err(|error| {
         shell_error(format!(
@@ -642,7 +715,17 @@ fn require_real_shell_directory(directory: &Path) -> Result<(), ActivationError>
             directory.display()
         ))
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    #[cfg(unix)]
+    let unsafe_kind = metadata.file_type().is_symlink() || !metadata.is_dir();
+    #[cfg(target_os = "windows")]
+    let unsafe_kind = {
+        use std::os::windows::fs::MetadataExt;
+
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+        !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    };
+    if unsafe_kind {
         return Err(shell_error(format!(
             "shell shim path {} is not a real directory",
             directory.display()
@@ -678,6 +761,104 @@ fn install_durable_git_shim(
     Ok(destination)
 }
 
+#[cfg(target_os = "windows")]
+fn install_durable_git_shim(
+    directory: &Path,
+    current_executable: &Path,
+) -> Result<PathBuf, ActivationError> {
+    use std::io::Write;
+
+    let source_metadata = fs::symlink_metadata(current_executable).map_err(|error| {
+        shell_error(format!(
+            "inspect Riftri executable {}: {error}",
+            current_executable.display()
+        ))
+    })?;
+    if !source_metadata.is_file() || is_windows_reparse_point(&source_metadata) {
+        return Err(shell_error(format!(
+            "Riftri executable is not a regular non-reparse file: {}",
+            current_executable.display()
+        )));
+    }
+
+    let destination = directory.join("git.exe");
+    if let Ok(metadata) = fs::symlink_metadata(&destination)
+        && (!metadata.is_file() || is_windows_reparse_point(&metadata))
+    {
+        return Err(shell_error(format!(
+            "shell Git shim is not a regular non-reparse file: {}",
+            destination.display()
+        )));
+    }
+
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".git-")
+        .suffix(".tmp")
+        .tempfile_in(directory)
+        .map_err(|error| shell_error(format!("create temporary shell Git shim: {error}")))?;
+    let mut source = fs::File::open(current_executable).map_err(|error| {
+        shell_error(format!(
+            "open Riftri executable {}: {error}",
+            current_executable.display()
+        ))
+    })?;
+    std::io::copy(&mut source, temporary.as_file_mut())
+        .map_err(|error| shell_error(format!("copy shell Git shim: {error}")))?;
+    temporary
+        .flush()
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| shell_error(format!("sync shell Git shim: {error}")))?;
+    let (_, temporary_path) = temporary.keep().map_err(|error| {
+        shell_error(format!("retain temporary shell Git shim: {}", error.error))
+    })?;
+    if let Err(error) = windows_replace_file(&temporary_path, &destination) {
+        let _ = fs::remove_file(&temporary_path);
+        return Err(error);
+    }
+    Ok(destination)
+}
+
+#[cfg(target_os = "windows")]
+fn is_windows_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(target_os = "windows")]
+fn windows_replace_file(source: &Path, destination: &Path) -> Result<(), ActivationError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let mut source_wide = source.as_os_str().encode_wide().collect::<Vec<_>>();
+    source_wide.push(0);
+    let mut destination_wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
+    destination_wide.push(0);
+    // SAFETY: both path buffers are NUL-terminated UTF-16. The source is a
+    // closed, same-directory temporary file and the destination was rejected
+    // above if it was not a regular non-reparse file.
+    let succeeded = unsafe {
+        MoveFileExW(
+            source_wide.as_ptr(),
+            destination_wide.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if succeeded == 0 {
+        return Err(shell_error(format!(
+            "activate shell Git shim {}: {}",
+            destination.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn posix_quote_path(path: &Path) -> Result<String, ActivationError> {
     let value = path
@@ -690,6 +871,23 @@ fn posix_quote_path(path: &Path) -> Result<String, ActivationError> {
         )));
     }
     Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_quote_path(path: &Path) -> Result<String, ActivationError> {
+    let value = path.to_str().ok_or_else(|| {
+        shell_error(format!(
+            "shell path is not valid Unicode: {}",
+            path.display()
+        ))
+    })?;
+    if value.contains(';') {
+        return Err(shell_error(format!(
+            "shell shim path cannot contain a semicolon: {}",
+            path.display()
+        )));
+    }
+    Ok(format!("'{}'", value.replace('\'', "''")))
 }
 
 fn activation_with_git(git: &Git, path: &Path) -> Result<RepositoryActivation, ActivationError> {

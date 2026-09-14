@@ -51,11 +51,30 @@ Inside that process tree, supported `git worktree add` commands for the enabled
 repository use ReFS block cloning. Other Git commands pass through to the real
 Git executable. Riftri does not install or edit a PowerShell profile.
 
+To use ordinary `git worktree` commands in the current PowerShell session,
+explicitly evaluate Riftri's hook and opt in the repository:
+
+```powershell
+Invoke-Expression ((riftri shell hook powershell) -join [Environment]::NewLine)
+riftri enable
+git worktree add -b feature/auth ..\app-auth main
+```
+
+The hook affects only the current session and its children unless the user
+deliberately adds it to a profile. Repository enablement remains a separate
+per-repository choice. Inspect both layers with `riftri shell status` and
+explicitly deactivate the current session with:
+
+```powershell
+Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
+```
+
 ## Current limits
 
 - NTFS is not an optimized backend and fails closed.
-- The checkout profile remains intentionally strict: Git LFS, custom filters,
-  sparse checkout, submodules, and external attributes are rejected.
+- The checkout profile remains intentionally strict: canonical local Git LFS
+  objects are supported, while custom filters, sparse checkout, submodules, and
+  external attributes are rejected.
 - A Windows account needs permission to create any symlink present in the tree.
 - The implementation is experimental; keep important work committed or backed
   up and use `riftri status` and `riftri repair` when diagnosing interrupted

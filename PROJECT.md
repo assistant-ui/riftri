@@ -95,6 +95,14 @@ $ riftri enable
 $ git worktree add -b feature/auth ../app-auth main
 ```
 
+Windows PowerShell uses the same explicit-evaluation boundary:
+
+```powershell
+Invoke-Expression ((riftri shell hook powershell) -join [Environment]::NewLine)
+riftri enable
+git worktree add -b feature/auth ../app-auth main
+```
+
 The hook is shell-scoped and inherited by child processes. It routes supported
 adds through Riftri only in repositories explicitly enabled by the user and
 delegates everything else to the exact real Git executable. Riftri prints the
@@ -230,7 +238,7 @@ requires a clean Git status before success. Linux uses an active unnamed-file
 isolation before mutation. Neither backend substitutes a full byte copy when
 its native operation fails. Add operations are journaled and recoverable.
 Repository-local enable/disable state, process-scoped execution, and an
-explicitly activated sh/bash/zsh hook route supported normal Git adds through
+explicitly activated sh/bash/zsh or PowerShell hook route supported normal Git adds through
 that same transaction. Process-scoped commands can also be bound to a validated
 existing worktree without agent-specific behavior. Clean managed removals use a
 separate, recoverable journal, and retained bases expose derived reference

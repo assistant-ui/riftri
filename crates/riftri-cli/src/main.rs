@@ -272,16 +272,16 @@ enum StateCommand {
 enum ShellCommand {
     /// Print initialization code to evaluate in a shell.
     Hook {
-        /// Bourne-compatible shell whose initialization code should be emitted.
+        /// Shell whose initialization code should be emitted.
         #[arg(value_enum)]
-        shell: PosixShell,
+        shell: ShellKind,
     },
 
     /// Print code to evaluate to deactivate Riftri in the current shell.
     Deactivate {
-        /// Bourne-compatible shell whose deactivation code should be emitted.
+        /// Shell whose deactivation code should be emitted.
         #[arg(value_enum)]
-        shell: PosixShell,
+        shell: ShellKind,
     },
 
     /// Show shell interception and repository opt-in status.
@@ -303,10 +303,11 @@ enum OverlayFsCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum PosixShell {
+enum ShellKind {
     Sh,
     Bash,
     Zsh,
+    Powershell,
 }
 
 fn main() -> Result<()> {
@@ -350,6 +351,10 @@ fn run(cli: Cli) -> Result<()> {
                     "Activate this shell with: eval \"$(riftri shell hook {})\"",
                     detected_posix_shell()
                 );
+                #[cfg(target_os = "windows")]
+                println!(
+                    "Activate this PowerShell session with: Invoke-Expression (& riftri shell hook powershell | Out-String)"
+                );
                 println!("Or activate one process with: riftri exec -- <command>");
             }
         }
@@ -379,12 +384,22 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Shell { command } => match command {
-            ShellCommand::Hook { shell: _ } => {
-                print!("{}", riftri_core::prepare_posix_shell_hook()?);
-            }
-            ShellCommand::Deactivate { shell: _ } => {
-                print!("{}", riftri_core::prepare_posix_shell_deactivation()?);
-            }
+            ShellCommand::Hook { shell } => match shell {
+                ShellKind::Sh | ShellKind::Bash | ShellKind::Zsh => {
+                    print!("{}", riftri_core::prepare_posix_shell_hook()?);
+                }
+                ShellKind::Powershell => {
+                    print!("{}", riftri_core::prepare_powershell_hook()?);
+                }
+            },
+            ShellCommand::Deactivate { shell } => match shell {
+                ShellKind::Sh | ShellKind::Bash | ShellKind::Zsh => {
+                    print!("{}", riftri_core::prepare_posix_shell_deactivation()?);
+                }
+                ShellKind::Powershell => {
+                    print!("{}", riftri_core::prepare_powershell_deactivation()?);
+                }
+            },
             ShellCommand::Status { repository } => print_shell_status(&repository)?,
         },
         Command::Doctor {
@@ -1295,7 +1310,7 @@ mod tests {
     use clap::error::ErrorKind;
 
     use super::{
-        Cli, Command, OverlayFsCommand, PosixShell, ShellCommand, WorktreeCommand, failure_receipt,
+        Cli, Command, OverlayFsCommand, ShellCommand, ShellKind, WorktreeCommand, failure_receipt,
     };
 
     #[test]
@@ -1387,7 +1402,7 @@ mod tests {
         else {
             panic!("unexpected shell command");
         };
-        assert_eq!(shell, PosixShell::Zsh);
+        assert_eq!(shell, ShellKind::Zsh);
 
         let deactivate = Cli::try_parse_from(["riftri", "shell", "deactivate", "bash"])
             .expect("parse shell deactivation command");
@@ -1397,7 +1412,17 @@ mod tests {
         else {
             panic!("unexpected shell deactivation command");
         };
-        assert_eq!(shell, PosixShell::Bash);
+        assert_eq!(shell, ShellKind::Bash);
+
+        let powershell = Cli::try_parse_from(["riftri", "shell", "hook", "powershell"])
+            .expect("parse PowerShell hook command");
+        let Command::Shell {
+            command: ShellCommand::Hook { shell },
+        } = powershell.command
+        else {
+            panic!("unexpected PowerShell command");
+        };
+        assert_eq!(shell, ShellKind::Powershell);
 
         let status = Cli::try_parse_from(["riftri", "shell", "status", "../app"])
             .expect("parse shell status command");

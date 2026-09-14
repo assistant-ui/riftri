@@ -1,7 +1,7 @@
 # Global shell activation
 
-Riftri can be present in every new sh, bash, or zsh session without enabling
-every repository. These are separate controls:
+Riftri can be present in every new sh, bash, zsh, or PowerShell session without
+enabling every repository. These are separate controls:
 
 ```text
 shell profile evaluates hook     repository has riftri.enabled=true
@@ -17,6 +17,12 @@ Git interception layer for that user:
 
 ```sh
 eval "$(riftri shell hook zsh)"
+```
+
+Windows PowerShell uses explicit evaluation as well:
+
+```powershell
+Invoke-Expression ((riftri shell hook powershell) -join [Environment]::NewLine)
 ```
 
 Riftri never adds or removes that line. In repositories without `riftri enable`,
@@ -35,6 +41,12 @@ Remove Riftri from the current shell with:
 eval "$(riftri shell deactivate zsh)"
 ```
 
+PowerShell:
+
+```powershell
+Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
+```
+
 This removes every Riftri shim-directory entry from `PATH` and unsets the two
 shim variables. It does not disable a repository. If the hook is in a profile,
 remove that profile line yourself before opening another shell. Remove the line
@@ -49,6 +61,7 @@ non-disruptive:
 | Area | Verified behavior |
 | --- | --- |
 | sh, bash, zsh | Every installed supported shell can evaluate the same hook. CI always requires sh and exercises the other shells when installed. |
+| Windows PowerShell | The hook installs a real `git.exe` shim, is tested as current-session-only and reversible, and exercises optimized creation on a disposable ReFS volume. |
 | Disabled repository | Normal Git creates an ordinary linked worktree and no Riftri state. |
 | Enabled repository on APFS | Supported adds create clean, real Git worktrees through strict native clones. |
 | Child tools | Plain-shell, `claude`, and `codex`-named child harnesses inherit interception without Riftri-specific prompts. |

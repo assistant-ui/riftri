@@ -18,7 +18,8 @@ Riftri is never a global Git replacement by default.
 2. Repository opt-in plus process-scoped activation: `riftri enable`, then
    `riftri exec -- claude`, optionally with `--worktree <path>`
 3. Repository opt-in plus explicit shell activation: evaluate
-   `riftri shell hook zsh`, then use normal `git` commands
+   `riftri shell hook zsh` or `riftri shell hook powershell`, then use normal
+   `git` commands
 
 The process-scoped mode places a small Git shim at the front of `PATH` only for
 the selected process and its children. Repository consent is stored in local Git
@@ -35,9 +36,11 @@ entry in Git's structured worktree inventory before launching the command. The
 binding does not imply repository enablement and does not create a new workspace
 abstraction.
 
-The shell hook installs a versioned shim link in the user's cache and prints
-Bourne-compatible environment assignments. Evaluating those assignments puts
-the shim first on `PATH` for that shell and its descendants. The hook is never
+The shell hook installs a versioned shim in the user's cache and prints
+environment assignments for sh/bash/zsh or PowerShell. Unix uses an executable
+link; Windows atomically installs a real `git.exe` copy so child processes do
+not depend on command-wrapper semantics. Evaluating those assignments puts the
+shim first on `PATH` for that shell and its descendants. The hook is never
 evaluated automatically and Riftri never edits shell startup files. Once it is
 active, `riftri enable` and `riftri disable` are the repository-specific switch;
 disabled repositories and commands outside repositories still delegate to the
@@ -48,8 +51,8 @@ repository-local consent is still required.
 
 `riftri shell status` reports the two independent activation layers and whether
 they combine into effective optimized interception for a selected repository.
-`riftri shell deactivate <sh|bash|zsh>` prints code that removes every cached
-shim-directory occurrence from `PATH` and unsets Riftri's shim environment in
+`riftri shell deactivate <sh|bash|zsh|powershell>` prints code that removes
+every cached shim-directory occurrence from `PATH` and unsets Riftri's shim environment in
 the current shell when explicitly evaluated. It does not change repository
 configuration or edit a shell profile, so persistent global activation remains
 under the user's direct control.
