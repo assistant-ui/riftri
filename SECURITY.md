@@ -2,9 +2,9 @@
 
 Riftri is experimental, pre-release software. It performs opt-in worktree
 creation, removal, repair, and garbage-collection mutations on supported
-macOS/APFS volumes. Until the first tagged release, only the `main` branch
-receives security fixes. After releases begin, the latest tagged release and
-`main` will receive fixes; older prereleases may require upgrading.
+macOS/APFS, Linux reflink and OverlayFS, and Windows/ReFS destinations. The
+latest tagged release and `main` receive security fixes; older experimental
+releases may require upgrading.
 
 Do not open a public issue for vulnerabilities or behavior that could delete,
 overwrite, expose, or cross-contaminate worktree data. Use GitHub's private

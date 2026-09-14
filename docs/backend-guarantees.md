@@ -20,9 +20,10 @@ Every successful optimized add guarantees all of the following:
    primitive. Riftri never silently substitutes a normal full checkout.
 5. **Private changes.** A write in one view cannot change its immutable base or
    another view. OverlayFS changes go to the view's private upper layer.
-6. **Recoverable lifecycle.** Add, clean removal, move, prune, and base
-   collection mutations are authorized by validated paths and durable journals.
-   Inconsistent or changed paths are preserved for inspection.
+6. **Recoverable lifecycle.** Add, clean or explicitly forced removal, move,
+   prune, compaction, and base collection mutations are authorized by validated
+   paths and durable journals. Inconsistent or changed paths are preserved for
+   inspection.
 7. **Visible limitations.** Unsupported checkout inputs, volume capabilities,
    and lifecycle forms stop with an explanation instead of weakening the
    guarantee.
@@ -65,9 +66,12 @@ needed to reproduce an accepted Git checkout:
 | ACLs, resource forks, Finder metadata, arbitrary xattrs | Not reconstructed from Git and not part of base identity |
 
 Only deterministic in-tree `text`, `eol`, and `binary` attribute semantics are
-accepted. Git LFS, custom filters, working-tree encodings, ident substitution,
-legacy or unknown attributes, external attributes, sparse checkout, and
-submodules remain outside this profile and fail closed.
+accepted. Canonical Git LFS paths are also accepted when they use strict v1
+pointers and the referenced SHA-256-verified objects are already present in the
+default local LFS store. Custom LFS storage, pointer extensions, custom filters,
+working-tree encodings, ident substitution, legacy or unknown attributes,
+external attributes, sparse checkout, and submodules remain outside this
+profile and fail closed.
 
 Git does not store arbitrary extended attributes. Riftri therefore does not
 promise to reproduce a source directory's xattrs from a commit. The native
@@ -87,15 +91,19 @@ optimized checkout is activated.
 | --- | --- | --- | --- | --- |
 | Add and recover | Journaled | Journaled | Journaled with mount identity and private-layer token | Journaled |
 | Clean remove | Supported | Supported | Supported with identity-checked unmount | Supported |
+| Snapshot-guarded forced remove | Supported | Supported | Supported with identity-checked unmount | Supported |
 | Same-volume move | Supported | Supported | Rejected while mounted | Supported |
 | Prune managed metadata | Journaled and fail-closed | Journaled and fail-closed | Journaled and fail-closed | Journaled and fail-closed |
+| Compact pristine view | Journaled swap | Journaled swap | Not yet supported | Journaled swap |
 | Explicit base collection | Reference-revalidated and journaled | Reference-revalidated and journaled | Reference-revalidated and journaled | Reference-revalidated and journaled |
 | Recovery after reboot | No mount restoration needed | No mount restoration needed | Explicit repair remounts a validated view and retains its upper layer | No mount restoration needed |
 
-Normal removal is deliberately clean-only. Riftri has no forced managed removal
-path: dirty, missing-but-inconsistent, foreign-mounted, or otherwise changed
-views are retained for manual attention. `riftri repair` repeats only actions
-authorized by a valid journal and revalidates the observed state first.
+Normal removal is deliberately clean-only. Forced managed removal is a separate
+explicit path that records an exact content snapshot before deletion. If the
+view changes after force intent is recorded, removal and recovery stop and
+preserve it for inspection. Missing-but-inconsistent, foreign-mounted, or
+otherwise unexplained views are likewise retained. `riftri repair` repeats only
+actions authorized by a valid journal and revalidates the observed state first.
 
 ## Disk and performance claims
 

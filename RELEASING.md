@@ -45,15 +45,13 @@ package renaming or blind retries.
 GitHub release availability does not imply that `npm install riftri` or
 `npx riftri` is available for the same version.
 
-As of September 12, 2026, the initial `v0.1.1` npm publication stopped at
+As of September 14, 2026, the `v0.2.1` npm publication stopped at
 `riftri-win32-arm64` with `E403: Package name triggered spam detection` after
-publishing the four macOS/Linux native packages. The Windows x64 package and
-main launcher were not attempted. The `v0.1.1` tag predates these independent
-jobs; rerunning that old tag uses its original workflow, not the workflow on
-`main`. If publishing its direct downloads separately, use binaries from its
-successful tag-build jobs and stage them from the exact tagged source, verify
-all six archives and checksums, and create the release without changing the
-tag or npm versions. Do not substitute binaries from a newer `main` build.
+publishing the six macOS and Linux native packages. The Windows x64 package and
+main launcher were not attempted. The corresponding GitHub release completed
+with all eight native archives and checksums. Resolve the registry rejection
+before retrying the failed npm job; do not rename packages, create another tag,
+or advertise npm availability as a workaround.
 
 ## Package layout
 

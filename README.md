@@ -62,14 +62,11 @@ remain available from [GitHub Releases](https://github.com/assistant-ui/riftri/r
 **Node.js and npm are not required.** See the [direct-download installation
 guide](docs/install.md) for all eight targets and checksum-verification commands.
 
-The npm launcher is a separate distribution channel. Confirm that the requested
-version is present on npm because GitHub and npm publication complete
-independently. To install a published npm version:
-
-```console
-$ npm install --global riftri
-$ riftri doctor
-```
+The npm launcher is a separate distribution channel. It is not currently
+available because the initial publication is incomplete; use the verified
+standalone installer or GitHub release assets for now. GitHub and npm
+publication complete independently, so this notice will be removed only after
+the launcher and all eight native packages are present and verified on npm.
 
 Or build it from source:
 
@@ -295,4 +292,4 @@ an isolated global prefix without registry access, and exercises the resulting
 `riftri` command. Native-backend CI also runs the complete add, edit, remove,
 status, and collection workflow from that installed command.
 
-Riftri is licensed under the [Apache License 2.0](LICENSE).
+Riftri is licensed under the [MIT License](LICENSE).

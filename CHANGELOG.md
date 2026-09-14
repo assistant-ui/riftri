@@ -7,6 +7,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- A checksum-verifying PowerShell installer provides profile-free per-user
+  installation for Windows x64 and ARM64.
+- Canonical Git LFS checkouts accept strict v1 pointers backed by verified
+  objects already present in the default local LFS store.
+- Snapshot-guarded forced managed removal safely supports intentional discard
+  while preserving any changes made after force intent is recorded.
+- Explicit compaction recreates pristine native-COW views to release retained
+  private blocks without changing their Git worktree registration or HEAD.
 - Explicitly evaluated PowerShell activation and deactivation provide the same
   repository-gated normal Git interception as sh, bash, and zsh without editing
   PowerShell profiles or persistent `PATH`.
