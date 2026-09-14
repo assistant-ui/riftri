@@ -209,7 +209,8 @@ Outcome: cover real-world repositories and long-lived worktrees.
 - Symlinks, executable modes, xattrs, and case-sensitivity testing. (native
   Unix metadata-isolation matrix and ASCII case-collision preflight complete;
   non-ASCII case folding and normalization remain in progress)
-- Clean-worktree compaction onto a new immutable base.
+- Clean-worktree compaction onto a new immutable base. (complete for APFS,
+  Linux reflink, and ReFS native-COW views; OverlayFS upper-layer reset remains)
 - Shared dependency and build-cache guidance without sharing unsafe writable
   directories.
 - Repeatable cold/cached creation and allocation benchmark artifacts across the

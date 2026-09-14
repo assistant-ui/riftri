@@ -33,7 +33,11 @@ and status reports retained-base references and disk usage with repository-aware
 repair for incomplete journals. Explicit garbage collection uses its own
 recoverable journal and revalidates references under the immutable-base lock.
 Status reports unexplained or inconsistent state paths but never deletes them.
-Managed move and prune now use separate recoverable journals. Linux creation
+Managed move and prune now use separate recoverable journals. Pristine
+native-COW views can also be compacted explicitly through a separate recoverable
+swap journal. Compaction preserves Git registration and HEAD, rejects tracked,
+untracked, and ignored entries, and protects both bases until the active add
+journal is updated; OverlayFS compaction remains open. Linux creation
 actively verifies `FICLONE` with unnamed temporary files and supports Btrfs and
 reflink-enabled XFS without a byte-copy fallback. When reflinks are unsupported,
 Linux can select OverlayFS only after an artifact-clean active probe succeeds in

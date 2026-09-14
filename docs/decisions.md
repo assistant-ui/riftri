@@ -444,6 +444,27 @@ Git status path. This revalidation boundary does not lock out a process already
 holding a writable file descriptor, so Riftri does not claim force removal is a
 filesystem sandbox against a cooperating user's concurrent writer.
 
+### D037: pristine native views compact through a recoverable directory swap
+
+Compaction is an explicit lifecycle operation, not an automatic background
+policy. It requires the managed worktree to have no tracked, untracked, or
+ignored status entries, records a whole-view content and platform-metadata
+snapshot, and revalidates
+the Git registration, HEAD, cleanliness, and snapshot before replacing the
+path. The fresh view comes only from the exact current-tree immutable base and
+the same native backend; no byte-copy fallback is allowed. Unix extended
+attributes participate in the snapshot, Windows file attributes are hashed,
+and Windows alternate data streams are refused rather than discarded.
+
+The original view is atomically renamed to a journal-derived quarantine before
+the replacement is activated at the same path. The active add journal is then
+updated idempotently to the current commit and base. Only after the quarantined
+view still matches the preflight snapshot may Riftri delete it. Repair restores
+the original before activation or completes the transaction after activation,
+and garbage collection treats both journaled bases as protected while the
+operation is pending. OverlayFS is excluded until private-upper reset can use
+the same mount-identity and recovery guarantees.
+
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 
 Pointer-only worktree cleanup stages the real `.git` pointer at a journal-derived
@@ -523,7 +544,6 @@ so bases built with the older mutable-input path are not reused by new adds.
   proven deterministic without executing arbitrary filters during base builds?
 - If scale requires an indexed registry, how can it remain a rebuildable cache of
   journal and completion-marker state rather than a second recovery authority?
-- Should clean-view compaction be manual, idle-time automatic, or policy-based?
 - Which Windows fallback provides acceptable performance on ordinary NTFS?
 - What integration is possible for harnesses that use libgit2 or another
   embedded Git implementation instead of spawning `git`?

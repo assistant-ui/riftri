@@ -964,10 +964,33 @@ impl Git {
         Ok(())
     }
 
+    /// Reset the linked worktree index to HEAD without requiring the visible
+    /// files to remain clean while the command runs.
+    pub fn reset_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
+        self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+        Ok(())
+    }
+
     pub fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, GitError> {
         let output = self.run(
             Some(worktree),
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        Ok(output.stdout.is_empty())
+    }
+
+    /// Return whether replacing a checkout from its exact tree would discard
+    /// no tracked, untracked, or ignored files.
+    pub fn worktree_is_pristine(&self, worktree: &Path) -> Result<bool, GitError> {
+        let output = self.run(
+            Some(worktree),
+            &[
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ],
         )?;
         Ok(output.stdout.is_empty())
     }
@@ -1915,8 +1938,23 @@ mod tests {
 
         fs::write(linked.join("tracked.txt"), "changed\n").expect("modify linked file");
         assert!(!git.worktree_is_clean(&linked).expect("check dirty"));
+        git.reset_worktree_index(&linked)
+            .expect("reset index while worktree is dirty");
+        assert!(!git.worktree_is_clean(&linked).expect("still dirty"));
         fs::write(linked.join("tracked.txt"), "tracked\n").expect("restore linked file");
         assert!(git.worktree_is_clean(&linked).expect("check restored"));
+        assert!(git.worktree_is_pristine(&linked).expect("check pristine"));
+
+        fs::write(fixture.path().join(".git/info/exclude"), "ignored\n")
+            .expect("configure ignored fixture path");
+        fs::write(linked.join("ignored"), "private build output\n").expect("write ignored file");
+        assert!(git.worktree_is_clean(&linked).expect("ignored stays clean"));
+        assert!(
+            !git.worktree_is_pristine(&linked)
+                .expect("ignored is not safe to discard")
+        );
+        fs::remove_file(linked.join("ignored")).expect("remove ignored file");
+        assert!(git.worktree_is_pristine(&linked).expect("pristine again"));
 
         git.remove_worktree_force(fixture.path(), &linked)
             .expect("remove linked worktree");

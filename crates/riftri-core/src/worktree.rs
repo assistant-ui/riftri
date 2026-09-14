@@ -49,20 +49,21 @@ use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use crate::journal::{
-    CollectionJournalPaths, CollectionJournalRecord, JournalPaths, JournalRecord, MoveJournalPaths,
-    MoveJournalRecord, PruneJournalRecord, RemovalJournalPaths, ensure_real_state_directory,
-    require_real_state_directory,
+    CollectionJournalPaths, CollectionJournalRecord, CompactJournalPaths, CompactJournalRecord,
+    JournalPaths, JournalRecord, MoveJournalPaths, MoveJournalRecord, PruneJournalRecord,
+    RemovalJournalPaths, ensure_real_state_directory, require_real_state_directory,
 };
 use crate::journal::{
-    CollectionJournalStore, DecodedCollectionJournal, DecodedJournal, DecodedMoveJournal,
-    DecodedPruneJournal, DecodedRemovalJournal, JournalError, JournalStore, MoveJournalStore,
-    PruneJournalStore, RemovalJournalRecord, RemovalJournalStore,
+    CollectionJournalStore, CompactJournalStore, DecodedCollectionJournal, DecodedCompactJournal,
+    DecodedJournal, DecodedMoveJournal, DecodedPruneJournal, DecodedRemovalJournal, JournalError,
+    JournalStore, MoveJournalStore, PruneJournalStore, RemovalJournalRecord, RemovalJournalStore,
 };
 use crate::{
-    AddWorktreePhase, GarbageCollectionPhase, JournalTransitionError, MoveJournalTransitionError,
-    MoveWorktreePhase, PruneJournalTransitionError, PruneWorktreesPhase,
-    RemoveJournalTransitionError, RemoveWorktreePhase, RepositoryCompatibilityBlocker,
-    RepositoryCompatibilityBlockerKind, RepositoryCompatibilityReport,
+    AddWorktreePhase, CompactJournalTransitionError, CompactWorktreePhase, GarbageCollectionPhase,
+    JournalTransitionError, MoveJournalTransitionError, MoveWorktreePhase,
+    PruneJournalTransitionError, PruneWorktreesPhase, RemoveJournalTransitionError,
+    RemoveWorktreePhase, RepositoryCompatibilityBlocker, RepositoryCompatibilityBlockerKind,
+    RepositoryCompatibilityReport,
 };
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -170,6 +171,25 @@ pub struct MoveWorktreeResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct CompactWorktreeRequest {
+    pub repository: PathBuf,
+    pub destination: PathBuf,
+    /// Defaults to `<common-git-dir>/riftri`.
+    pub state_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactWorktreeResult {
+    pub destination: PathBuf,
+    pub commit: ObjectId,
+    pub tree: ObjectId,
+    pub old_base_path: PathBuf,
+    pub base_path: PathBuf,
+    pub journal_path: PathBuf,
+    pub reused_base: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct PruneWorktreesRequest {
     pub repository: PathBuf,
     /// Defaults to `<common-git-dir>/riftri`.
@@ -236,6 +256,9 @@ pub struct StorageAccountingReport {
     pub pending_removals: usize,
     pub completed_moves: usize,
     pub pending_moves: usize,
+    pub completed_compactions: usize,
+    pub cancelled_compactions: usize,
+    pub pending_compactions: usize,
     pub completed_prunes: usize,
     pub pending_prunes: usize,
     pub completed_collections: usize,
@@ -260,6 +283,8 @@ pub struct RecoveryReport {
     pub recovered_removals: usize,
     pub completed_moves: usize,
     pub recovered_moves: usize,
+    pub completed_compactions: usize,
+    pub recovered_compactions: usize,
     pub completed_prunes: usize,
     pub recovered_prunes: usize,
     pub completed_collections: usize,
@@ -289,6 +314,9 @@ pub enum WorktreeError {
 
     #[error(transparent)]
     PruneJournalTransition(#[from] PruneJournalTransitionError),
+
+    #[error(transparent)]
+    CompactJournalTransition(#[from] CompactJournalTransitionError),
 
     #[error("unsupported optimized checkout: {0}")]
     Unsupported(String),
@@ -321,6 +349,9 @@ pub enum WorktreeError {
 
     #[error("injected garbage-collection failure after {0:?}")]
     InjectedCollectionFailure(GarbageCollectionPhase),
+
+    #[error("injected compaction failure after {0:?}")]
+    InjectedCompactionFailure(CompactWorktreePhase),
 }
 
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
@@ -344,6 +375,12 @@ pub fn force_remove_worktree(
 
 pub fn move_worktree(request: MoveWorktreeRequest) -> Result<MoveWorktreeResult, WorktreeError> {
     move_worktree_inner(request, None)
+}
+
+pub fn compact_worktree(
+    request: CompactWorktreeRequest,
+) -> Result<CompactWorktreeResult, WorktreeError> {
+    compact_worktree_inner(request, None)
 }
 
 pub fn prune_worktrees(
@@ -659,6 +696,7 @@ pub fn storage_accounting(
     let add_load = JournalStore::open(&state_directory).load_all_for_status()?;
     let removal_load = RemovalJournalStore::open(&state_directory).load_all_for_status()?;
     let move_load = MoveJournalStore::open(&state_directory).load_all_for_status()?;
+    let compact_load = CompactJournalStore::open(&state_directory).load_all_for_status()?;
     let prune_load = PruneJournalStore::open(&state_directory).load_all_for_status()?;
     let collection_load = CollectionJournalStore::open(&state_directory).load_all_for_status()?;
     let journal_issues = add_load
@@ -666,6 +704,7 @@ pub fn storage_accounting(
         .into_iter()
         .chain(removal_load.issues)
         .chain(move_load.issues)
+        .chain(compact_load.issues)
         .chain(prune_load.issues)
         .chain(collection_load.issues)
         .map(|issue| StateDiagnosticIssue {
@@ -679,6 +718,7 @@ pub fn storage_accounting(
     let loaded_add_journals = add_load.journals;
     let loaded_removal_journals = removal_load.journals;
     let move_journals = move_load.journals;
+    let loaded_compact_journals = compact_load.journals;
     let prune_journals = prune_load.journals;
     let collection_journals = collection_load.journals;
     let mut removal_journals = Vec::with_capacity(loaded_removal_journals.len());
@@ -718,6 +758,19 @@ pub fn storage_accounting(
                 path: journal.journal_path.clone(),
                 reason: format!(
                     "unsafe durable add journal; Riftri did not inspect its referenced paths: {error}"
+                ),
+            }),
+        }
+    }
+    let mut compact_journals = Vec::with_capacity(loaded_compact_journals.len());
+    let mut invalid_compact_journals = Vec::new();
+    for journal in loaded_compact_journals {
+        match validate_compaction_paths(&state_directory, &journal) {
+            Ok(()) => compact_journals.push(journal),
+            Err(error) => invalid_compact_journals.push(StateDiagnosticIssue {
+                path: journal.journal_path.clone(),
+                reason: format!(
+                    "unsafe durable compaction journal; Riftri did not trust its lifecycle claim: {error}"
                 ),
             }),
         }
@@ -783,6 +836,7 @@ pub fn storage_accounting(
         &add_journals,
         &removal_journals,
         &move_journals,
+        &compact_journals,
         &prune_journals,
         &collection_journals,
         &journal_issues,
@@ -790,6 +844,7 @@ pub fn storage_accounting(
     let invalid_journal_paths = invalid_add_journals
         .iter()
         .chain(&invalid_removal_journals)
+        .chain(&invalid_compact_journals)
         .map(|issue| issue.path.as_path())
         .collect::<HashSet<_>>();
     state_diagnosis
@@ -797,6 +852,7 @@ pub fn storage_accounting(
         .retain(|issue| !invalid_journal_paths.contains(issue.path.as_path()));
     state_diagnosis.issues.extend(invalid_add_journals);
     state_diagnosis.issues.extend(invalid_removal_journals);
+    state_diagnosis.issues.extend(invalid_compact_journals);
     state_diagnosis
         .issues
         .sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -827,6 +883,23 @@ pub fn storage_accounting(
         pending_moves: move_journals
             .iter()
             .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+            .count(),
+        completed_compactions: compact_journals
+            .iter()
+            .filter(|journal| journal.phase == CompactWorktreePhase::Complete)
+            .count(),
+        cancelled_compactions: compact_journals
+            .iter()
+            .filter(|journal| journal.phase == CompactWorktreePhase::Cancelled)
+            .count(),
+        pending_compactions: compact_journals
+            .iter()
+            .filter(|journal| {
+                !matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+            })
             .count(),
         completed_prunes: prune_journals
             .iter()
@@ -1010,14 +1083,28 @@ fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, Work
     let adds = JournalStore::open(state_directory).load_all()?;
     let removals = RemovalJournalStore::open(state_directory).load_all()?;
     let completed = validated_completed_removal_ids(state_directory, &adds, &removals)?;
-    Ok(adds
+    let mut protected = adds
         .into_iter()
         .filter(|journal| {
             journal.phase != AddWorktreePhase::RolledBack
                 && !completed.contains(&journal.operation_id)
         })
         .map(|journal| journal.base_path)
-        .collect())
+        .collect::<HashSet<_>>();
+    for journal in CompactJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| {
+            !matches!(
+                journal.phase,
+                CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+            )
+        })
+    {
+        protected.insert(journal.old_base_path);
+        protected.insert(journal.base_path);
+    }
+    Ok(protected)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1559,6 +1646,181 @@ fn move_worktree_inner(
         destination,
         base_path: managed.base_path,
         journal_path,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn compact_worktree_inner(
+    _request: CompactWorktreeRequest,
+    _fail_after: Option<CompactWorktreePhase>,
+) -> Result<CompactWorktreeResult, WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "journaled Riftri compaction requires a supported native COW backend".to_owned(),
+    ))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn compact_worktree_inner(
+    request: CompactWorktreeRequest,
+    fail_after: Option<CompactWorktreePhase>,
+) -> Result<CompactWorktreeResult, WorktreeError> {
+    let git = Git::default();
+    let repository = git.inspect_repository(&request.repository)?;
+    if repository.is_bare {
+        return Err(WorktreeError::Unsupported(
+            "bare repositories do not have compactable worktree views".to_owned(),
+        ));
+    }
+    let repository_root = repository.root.ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+    })?;
+    let destination = normalize_existing_destination(&request.destination)?;
+    let requested_state = request
+        .state_dir
+        .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
+    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
+    let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "{} is not an active Riftri-managed worktree in {}",
+            destination.display(),
+            state_directory.display()
+        ))
+    })?;
+    validate_recovery_paths(&state_directory, &managed)?;
+    if managed.backend == BackendKind::OverlayFs {
+        return Err(WorktreeError::Unsupported(
+            "compacting an active OverlayFS worktree is not yet supported; remove and recreate it to reset the private upper layer"
+                .to_owned(),
+        ));
+    }
+    if CompactJournalStore::open(&state_directory)
+        .load_all()?
+        .iter()
+        .any(|journal| {
+            journal.source_add_operation_id == managed.operation_id
+                && !matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+        })
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "a compaction of {} is already pending; run `riftri repair --state-dir {}`",
+            destination.display(),
+            state_directory.display()
+        )));
+    }
+
+    let _operation_lock = try_lock_add_operation(&managed.journal_path)?.ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "worktree {} is busy with another Riftri operation",
+            destination.display()
+        ))
+    })?;
+    let resolved = git.resolve_revision(&destination, OsStr::new("HEAD"))?;
+    verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)?;
+    let compatibility = validate_resolved_compatibility(&git, &destination, &resolved)?;
+    validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
+    verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
+    #[cfg(target_os = "windows")]
+    ensure_no_windows_alternate_streams(&destination)?;
+    let selected_backend = supported_worktree_backend(&destination)?;
+    if selected_backend.kind != managed.backend {
+        return Err(WorktreeError::Unsupported(format!(
+            "worktree was created with {}, but {} is now selected for its volume",
+            managed.backend.display_name(),
+            selected_backend.kind.display_name()
+        )));
+    }
+    let state_volume = inspected_native_cow_volume(&state_directory, managed.backend)?;
+    if selected_backend.volume.identity != state_volume.identity {
+        return Err(WorktreeError::Unsupported(
+            "the managed worktree and Riftri state directory are no longer on the same volume"
+                .to_owned(),
+        ));
+    }
+    let expected_snapshot = directory_snapshot(&destination)?;
+    let base_directory = state_directory.join("bases/v1").join(repository_cache_id(
+        &repository.identity.common_git_dir,
+        &compatibility.checkout_profile,
+    ));
+    ensure_real_state_directory(&base_directory, "create repository base directory")?;
+    let store = CompactJournalStore::create(&state_directory)?;
+    let operation_id = allocate_lifecycle_operation_id("compact", |operation_id| {
+        store.path_for(operation_id).exists()
+    })?;
+    let replacement = destination
+        .expect_parent()?
+        .join(format!(".riftri-compact-new-{operation_id}"));
+    let quarantine = destination
+        .expect_parent()?
+        .join(format!(".riftri-compact-old-{operation_id}"));
+    if replacement.exists() || quarantine.exists() {
+        return Err(WorktreeError::InvalidRequest(
+            "new compaction paths unexpectedly already exist".to_owned(),
+        ));
+    }
+    let base_path = base_directory.join(resolved.tree.as_str());
+    let base_staging = base_directory.join(format!(".riftri-build-{operation_id}"));
+    let temporary_index = state_directory
+        .join("tmp")
+        .join(format!("compact-index-{operation_id}"));
+    let mut journal = CompactJournalRecord::new(
+        operation_id,
+        CompactJournalPaths {
+            repository: &repository_root,
+            destination: &destination,
+            replacement: &replacement,
+            quarantine: &quarantine,
+            base_staging: &base_staging,
+            base_path: &base_path,
+            temporary_index: &temporary_index,
+            old_base_path: &managed.base_path,
+        },
+        managed.operation_id.clone(),
+        resolved.commit.as_str().to_owned(),
+        expected_snapshot,
+        managed.backend,
+    );
+    let journal_path = store.persist(&journal)?;
+    fail_compaction_if_requested(journal.phase, fail_after)?;
+
+    let reused_base = prepare_base(
+        &git,
+        &destination,
+        &resolved.tree,
+        &base_path,
+        &base_staging,
+        &temporary_index,
+        &compatibility.checkout_config,
+        &compatibility.lfs_objects,
+    )?;
+    NativeCowCloner::clone_tree(&base_path, &replacement)?;
+    NativeCowCloner::make_tree_owner_writable(&replacement)?;
+    copy_git_pointer(&destination, &replacement)?;
+    verify_snapshot(&replacement, &journal.expected_snapshot)?;
+    sync_parent(&replacement)?;
+    advance_compaction(
+        &store,
+        &mut journal,
+        CompactWorktreePhase::ReplacementReady,
+        fail_after,
+    )?;
+    resume_compaction(
+        &git,
+        &store,
+        journal.decode(journal_path.clone())?,
+        fail_after,
+    )?;
+
+    Ok(CompactWorktreeResult {
+        destination,
+        commit: resolved.commit,
+        tree: resolved.tree,
+        old_base_path: managed.base_path,
+        base_path,
+        journal_path,
+        reused_base,
     })
 }
 
@@ -3227,6 +3489,7 @@ fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
         state_directory.join("operations"),
         state_directory.join("removals"),
         state_directory.join("moves"),
+        state_directory.join("compactions"),
         state_directory.join("prunes"),
         state_directory.join("collections"),
         state_directory.join("tmp"),
@@ -3367,6 +3630,17 @@ fn find_managed_add_journal(
         .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    let pending_compactions = CompactJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| {
+            !matches!(
+                journal.phase,
+                CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+            )
+        })
+        .map(|journal| journal.source_add_operation_id)
+        .collect::<HashSet<_>>();
     let mut matches = adds
         .into_iter()
         .filter(|journal| {
@@ -3388,6 +3662,16 @@ fn find_managed_add_journal(
     {
         return Err(WorktreeError::InvalidRequest(format!(
             "a removal of {} is already pending; run `riftri repair --state-dir {}`",
+            destination.display(),
+            state_directory.display()
+        )));
+    }
+    if managed
+        .as_ref()
+        .is_some_and(|journal| pending_compactions.contains(journal.operation_id.as_str()))
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "a compaction of {} is already pending; run `riftri repair --state-dir {}`",
             destination.display(),
             state_directory.display()
         )));
@@ -3474,11 +3758,13 @@ fn fail_removal_if_requested(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
 fn diagnose_state_paths(
     state_directory: &Path,
     add_journals: &[DecodedJournal],
     removal_journals: &[DecodedRemovalJournal],
     move_journals: &[DecodedMoveJournal],
+    compact_journals: &[DecodedCompactJournal],
     prune_journals: &[DecodedPruneJournal],
     collection_journals: &[DecodedCollectionJournal],
     journal_issues: &[StateDiagnosticIssue],
@@ -3497,6 +3783,7 @@ fn diagnose_state_paths(
         "operations",
         "removals",
         "moves",
+        "compactions",
         "prunes",
         "collections",
         "tmp",
@@ -3551,6 +3838,14 @@ fn diagnose_state_paths(
         &mut issues,
     )?;
     diagnose_journal_directory(
+        &state_directory.join("compactions"),
+        compact_journals
+            .iter()
+            .map(|journal| journal.journal_path.clone())
+            .collect(),
+        &mut issues,
+    )?;
+    diagnose_journal_directory(
         &state_directory.join("prunes"),
         prune_journals
             .iter()
@@ -3581,6 +3876,15 @@ fn diagnose_state_paths(
         .copied()
         .filter(|journal| journal.last_forward_phase < AddWorktreePhase::BaseReady)
         .collect::<Vec<_>>();
+    let pending_compactions = compact_journals
+        .iter()
+        .filter(|journal| {
+            !matches!(
+                journal.phase,
+                CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+            )
+        })
+        .collect::<Vec<_>>();
     diagnose_temporary_directory(
         &state_directory.join("tmp"),
         pending_base_builds
@@ -3591,6 +3895,11 @@ fn diagnose_state_paths(
                     .iter()
                     .filter(|journal| journal.phase != AddWorktreePhase::RolledBack)
                     .map(pointer_staging_path),
+            )
+            .chain(
+                pending_compactions
+                    .iter()
+                    .map(|journal| journal.temporary_index.clone()),
             )
             .collect(),
         &mut issues,
@@ -3605,6 +3914,7 @@ fn diagnose_state_paths(
         state_directory,
         collection_journals,
         &pending_base_builds,
+        &pending_compactions,
         &mut issues,
         &mut coordination_locks,
     )?;
@@ -3655,6 +3965,7 @@ fn diagnose_state_paths(
     _add_journals: &[DecodedJournal],
     _removal_journals: &[DecodedRemovalJournal],
     _move_journals: &[DecodedMoveJournal],
+    _compact_journals: &[DecodedCompactJournal],
     _prune_journals: &[DecodedPruneJournal],
     _collection_journals: &[DecodedCollectionJournal],
     journal_issues: &[StateDiagnosticIssue],
@@ -3720,6 +4031,7 @@ fn diagnose_base_directories(
     state_directory: &Path,
     collection_journals: &[DecodedCollectionJournal],
     pending_base_builds: &[&DecodedJournal],
+    pending_compactions: &[&DecodedCompactJournal],
     issues: &mut Vec<StateDiagnosticIssue>,
     coordination_locks: &mut usize,
 ) -> Result<(), WorktreeError> {
@@ -3753,6 +4065,11 @@ fn diagnose_base_directories(
     let pending_staging = pending_base_builds
         .iter()
         .map(|journal| journal.base_staging.clone())
+        .chain(
+            pending_compactions
+                .iter()
+                .map(|journal| journal.base_staging.clone()),
+        )
         .collect::<HashSet<_>>();
     let pending_quarantines = collection_journals
         .iter()
@@ -4101,6 +4418,8 @@ pub fn recover_incomplete_operations(
     let loaded_removal_journals = removal_store.load_all()?;
     let move_store = MoveJournalStore::open(&state_directory);
     let move_journals = move_store.load_all()?;
+    let compact_store = CompactJournalStore::open(&state_directory);
+    let compact_journals = compact_store.load_all()?;
     let prune_store = PruneJournalStore::open(&state_directory);
     let prune_journals = prune_store.load_all()?;
     let collection_store = CollectionJournalStore::open(&state_directory);
@@ -4129,6 +4448,7 @@ pub fn recover_incomplete_operations(
             .saturating_add(removal_journals.len())
             .saturating_add(invalid_removal_journals.len())
             .saturating_add(move_journals.len())
+            .saturating_add(compact_journals.len())
             .saturating_add(prune_journals.len())
             .saturating_add(collection_journals.len()),
         ..RecoveryReport::default()
@@ -4239,6 +4559,60 @@ pub fn recover_incomplete_operations(
         } else {
             report.recovered_moves += 1;
             report.completed_moves += 1;
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    for journal in compact_journals {
+        match journal.phase {
+            CompactWorktreePhase::Complete => {
+                report.completed_compactions += 1;
+                continue;
+            }
+            CompactWorktreePhase::Cancelled => continue,
+            _ => {}
+        }
+        let add = match JournalStore::open(&state_directory)
+            .load_operation(&journal.source_add_operation_id)
+        {
+            Ok(add) => add,
+            Err(error) => {
+                report.errors.push(format!(
+                    "compaction operation {}: {error}",
+                    journal.operation_id
+                ));
+                continue;
+            }
+        };
+        let _operation_lock = match try_lock_add_operation(&add.journal_path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                report.busy_adds += 1;
+                continue;
+            }
+            Err(error) => {
+                report.errors.push(format!(
+                    "compaction operation {}: {error}",
+                    journal.operation_id
+                ));
+                continue;
+            }
+        };
+        if let Err(error) = resume_compaction(&git, &compact_store, journal.clone(), None) {
+            report.errors.push(format!(
+                "compaction operation {}: {error}",
+                journal.operation_id
+            ));
+        } else {
+            let phase = compact_store
+                .load_all()?
+                .into_iter()
+                .find(|candidate| candidate.operation_id == journal.operation_id)
+                .map(|candidate| candidate.phase);
+            if phase == Some(CompactWorktreePhase::Complete) {
+                report.recovered_compactions += 1;
+                report.completed_compactions += 1;
+            }
         }
     }
 
@@ -4555,6 +4929,569 @@ fn resume_move(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn resume_compaction(
+    git: &Git,
+    store: &CompactJournalStore,
+    journal: DecodedCompactJournal,
+    fail_after: Option<CompactWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    let state_directory = lifecycle_state_directory(&journal.journal_path, "compaction")?;
+    validate_compaction_paths(&state_directory, &journal)?;
+    let mut record = store.reload(&journal)?;
+
+    if matches!(
+        record.phase,
+        CompactWorktreePhase::IntentRecorded | CompactWorktreePhase::ReplacementReady
+    ) {
+        let destination_exists = journal.destination.exists();
+        let replacement_exists = journal.replacement.exists();
+        let quarantine_exists = journal.quarantine.exists();
+
+        if destination_exists && quarantine_exists && !replacement_exists {
+            if record.phase == CompactWorktreePhase::IntentRecorded {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "compaction journal {} has an activated filesystem state before its replacement-ready phase",
+                    journal.journal_path.display()
+                )));
+            }
+            advance_compaction(
+                store,
+                &mut record,
+                CompactWorktreePhase::ReplacementActivated,
+                fail_after,
+            )?;
+        } else if record.phase == CompactWorktreePhase::IntentRecorded
+            && destination_exists
+            && !quarantine_exists
+        {
+            remove_tree_if_present(&journal.replacement)?;
+            remove_tree_if_present(&journal.base_staging)?;
+            remove_file_if_present(&journal.temporary_index)?;
+            advance_compaction(
+                store,
+                &mut record,
+                CompactWorktreePhase::Cancelled,
+                fail_after,
+            )?;
+            return Ok(());
+        } else if !destination_exists && quarantine_exists && replacement_exists {
+            verify_snapshot(&journal.quarantine, &journal.expected_snapshot)?;
+            remove_tree_if_present(&journal.replacement)?;
+            fs::rename(&journal.quarantine, &journal.destination).map_err(|source| {
+                io(
+                    "restore original worktree after interrupted compaction",
+                    &journal.destination,
+                    source,
+                )
+            })?;
+            sync_parent(&journal.destination)?;
+            advance_compaction(
+                store,
+                &mut record,
+                CompactWorktreePhase::Cancelled,
+                fail_after,
+            )?;
+            return Ok(());
+        } else if record.phase == CompactWorktreePhase::ReplacementReady
+            && destination_exists
+            && replacement_exists
+            && !quarantine_exists
+        {
+            let _metadata_lock =
+                acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
+            let commit = ObjectId::parse(journal.expected_commit.clone())?;
+            verify_compaction_source(
+                git,
+                &journal.repository,
+                &journal.destination,
+                &commit,
+                Some(&journal.expected_snapshot),
+            )?;
+            verify_snapshot(&journal.replacement, &journal.expected_snapshot)?;
+            fs::rename(&journal.destination, &journal.quarantine).map_err(|source| {
+                io(
+                    "quarantine original worktree for compaction",
+                    &journal.quarantine,
+                    source,
+                )
+            })?;
+            sync_parent(&journal.quarantine)?;
+            if let Err(source) = fs::rename(&journal.replacement, &journal.destination) {
+                let rollback = fs::rename(&journal.quarantine, &journal.destination);
+                return match rollback {
+                    Ok(()) => Err(io(
+                        "activate compacted worktree",
+                        &journal.destination,
+                        source,
+                    )),
+                    Err(rollback) => Err(WorktreeError::OperationAndRollback {
+                        operation: io("activate compacted worktree", &journal.destination, source)
+                            .to_string(),
+                        rollback: io("restore original worktree", &journal.destination, rollback)
+                            .to_string(),
+                    }),
+                };
+            }
+            sync_parent(&journal.destination)?;
+            advance_compaction(
+                store,
+                &mut record,
+                CompactWorktreePhase::ReplacementActivated,
+                fail_after,
+            )?;
+        } else {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "compaction journal {} does not match a recoverable filesystem state; all paths were preserved",
+                journal.journal_path.display()
+            )));
+        }
+    }
+
+    if record.phase == CompactWorktreePhase::ReplacementActivated {
+        if journal.replacement.exists()
+            || !journal.destination.is_dir()
+            || !journal.quarantine.is_dir()
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "compaction journal {} says its replacement is active, but the paths disagree",
+                journal.journal_path.display()
+            )));
+        }
+        git.reset_worktree_index(&journal.destination)?;
+        if !git
+            .list_worktrees(&journal.repository)?
+            .into_iter()
+            .any(|worktree| paths_match(&worktree.path, &journal.destination))
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "compacted worktree {} is no longer registered; its quarantine was preserved",
+                journal.destination.display()
+            )));
+        }
+        let add_store = JournalStore::open(&state_directory);
+        let managed = add_store
+            .load_all()?
+            .into_iter()
+            .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
+            .ok_or_else(|| {
+                WorktreeError::InvalidRequest(format!(
+                    "compaction journal {} does not reference a known add operation",
+                    journal.journal_path.display()
+                ))
+            })?;
+        add_store.update_active_base(
+            &managed.journal_path,
+            &journal.destination,
+            &journal.old_base_path,
+            &journal.base_path,
+            &journal.expected_commit,
+        )?;
+        advance_compaction(
+            store,
+            &mut record,
+            CompactWorktreePhase::AddJournalUpdated,
+            fail_after,
+        )?;
+    }
+
+    if record.phase == CompactWorktreePhase::AddJournalUpdated {
+        if journal.replacement.exists()
+            || !journal.destination.is_dir()
+            || !git
+                .list_worktrees(&journal.repository)?
+                .into_iter()
+                .any(|worktree| paths_match(&worktree.path, &journal.destination))
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "compacted worktree {} is missing or unregistered; its quarantine was preserved",
+                journal.destination.display()
+            )));
+        }
+        if journal.quarantine.exists() {
+            verify_snapshot(&journal.quarantine, &journal.expected_snapshot)?;
+            remove_tree_if_present(&journal.quarantine)?;
+            sync_parent(&journal.quarantine)?;
+        }
+        advance_compaction(
+            store,
+            &mut record,
+            CompactWorktreePhase::Complete,
+            fail_after,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn validate_compaction_paths(
+    state_directory: &Path,
+    journal: &DecodedCompactJournal,
+) -> Result<(), WorktreeError> {
+    let bases = state_directory.join("bases/v1");
+    let temporary = state_directory.join("tmp");
+    let destination_parent = journal.destination.parent();
+    let replacement_name = format!(".riftri-compact-new-{}", journal.operation_id);
+    let quarantine_name = format!(".riftri-compact-old-{}", journal.operation_id);
+    if !journal.repository.is_absolute()
+        || !journal.destination.is_absolute()
+        || journal.replacement.parent() != destination_parent
+        || journal.quarantine.parent() != destination_parent
+        || journal.replacement.file_name() != Some(OsStr::new(&replacement_name))
+        || journal.quarantine.file_name() != Some(OsStr::new(&quarantine_name))
+        || journal.base_path.parent().and_then(Path::parent) != Some(bases.as_path())
+        || journal.old_base_path.parent().and_then(Path::parent) != Some(bases.as_path())
+        || journal.base_staging.parent() != journal.base_path.parent()
+        || !journal
+            .base_staging
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".riftri-build-"))
+        || journal.temporary_index.parent() != Some(temporary.as_path())
+        || journal.backend == BackendKind::OverlayFs
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} contains paths outside its operation scope",
+            journal.journal_path.display()
+        )));
+    }
+    let source =
+        JournalStore::open(state_directory).load_operation(&journal.source_add_operation_id)?;
+    let expected_base = if matches!(
+        journal.phase,
+        CompactWorktreePhase::AddJournalUpdated | CompactWorktreePhase::Complete
+    ) {
+        &journal.base_path
+    } else if source.base_path == journal.old_base_path || source.base_path == journal.base_path {
+        &source.base_path
+    } else {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} does not match its add journal's immutable base",
+            journal.journal_path.display()
+        )));
+    };
+    if source.phase != AddWorktreePhase::Active
+        || source.repository != journal.repository
+        || source.destination != journal.destination
+        || source.backend != journal.backend
+        || source.base_path.as_path() != expected_base.as_path()
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} does not match its active add operation",
+            journal.journal_path.display()
+        )));
+    }
+    validate_recovery_paths(state_directory, &source)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn verify_compaction_source(
+    git: &Git,
+    repository: &Path,
+    destination: &Path,
+    expected_commit: &ObjectId,
+    expected_snapshot: Option<&str>,
+) -> Result<(), WorktreeError> {
+    verify_compaction_registration(git, repository, destination, expected_commit)?;
+    if !git.worktree_is_pristine(destination)? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} has tracked, untracked, or ignored entries; compaction preserved it",
+            destination.display()
+        )));
+    }
+    if let Some(expected_snapshot) = expected_snapshot {
+        verify_snapshot(destination, expected_snapshot)?;
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn verify_compaction_registration(
+    git: &Git,
+    repository: &Path,
+    destination: &Path,
+    expected_commit: &ObjectId,
+) -> Result<(), WorktreeError> {
+    let registered = git
+        .list_worktrees(repository)?
+        .into_iter()
+        .find(|worktree| paths_match(&worktree.path, destination));
+    if registered
+        .as_ref()
+        .and_then(|worktree| worktree.head.as_ref())
+        != Some(expected_commit)
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} is unregistered or its HEAD moved; compaction preserved it",
+            destination.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn verify_compaction_checkout_shape(
+    destination: &Path,
+    checkout_paths: &[PathBuf],
+) -> Result<(), WorktreeError> {
+    let mut expected = HashSet::new();
+    for path in checkout_paths {
+        expected.insert(path.clone());
+        let mut parent = path.parent();
+        while let Some(path) = parent {
+            if path.as_os_str().is_empty() {
+                break;
+            }
+            expected.insert(path.to_path_buf());
+            parent = path.parent();
+        }
+    }
+    let mut pending = vec![(destination.to_path_buf(), PathBuf::new())];
+    while let Some((directory, relative)) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|source| io("inspect compactable worktree", &directory, source))?
+        {
+            let entry =
+                entry.map_err(|source| io("read compactable worktree", &directory, source))?;
+            if relative.as_os_str().is_empty() && entry.file_name() == OsStr::new(".git") {
+                continue;
+            }
+            let child = relative.join(entry.file_name());
+            if !expected.contains(&child) {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "worktree {} contains an entry outside its exact Git tree at {}; compaction preserved it",
+                    destination.display(),
+                    child.display()
+                )));
+            }
+            let metadata = fs::symlink_metadata(entry.path()).map_err(|source| {
+                io("inspect compactable worktree entry", &entry.path(), source)
+            })?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                pending.push((entry.path(), child));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
+    let marker = crate::base_integrity::marker(path)
+        .map_err(|source| io("snapshot managed worktree", path, source))?;
+    let mut digest = Sha256::new();
+    digest.update(b"riftri-compaction-snapshot-v1\0");
+    digest.update(marker);
+    #[cfg(unix)]
+    hash_extended_attributes(path, &mut digest)?;
+    #[cfg(target_os = "windows")]
+    hash_windows_attributes(path, &mut digest)?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(unix)]
+fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut name_buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
+    rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(&mut name_buffer))
+        .map_err(|source| io("list worktree extended attributes", path, source.into()))?;
+    let mut names = name_buffer
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    digest.update((names.len() as u64).to_le_bytes());
+    for name in names {
+        let mut value_buffer: Vec<u8> = Vec::with_capacity(256 * 1024);
+        rustix::fs::lgetxattr(
+            path,
+            OsStr::from_bytes(&name),
+            rustix::buffer::spare_capacity(&mut value_buffer),
+        )
+        .map_err(|source| io("read worktree extended attribute", path, source.into()))?;
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(&name);
+        digest.update((value_buffer.len() as u64).to_le_bytes());
+        digest.update(value_buffer);
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|source| io("read worktree snapshot directory", path, source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| io("read worktree snapshot entry", path, source))?;
+        entries.sort_unstable_by_key(|entry| entry.file_name());
+        for entry in entries {
+            hash_extended_attributes(&entry.path(), digest)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn hash_windows_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    use std::os::windows::fs::MetadataExt;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect Windows worktree metadata", path, source))?;
+    digest.update(metadata.file_attributes().to_le_bytes());
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|source| io("read Windows worktree snapshot directory", path, source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| io("read Windows worktree snapshot entry", path, source))?;
+        entries.sort_unstable_by_key(|entry| entry.file_name());
+        for entry in entries {
+            hash_windows_attributes(&entry.path(), digest)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_no_windows_alternate_streams(root: &Path) -> Result<(), WorktreeError> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Foundation::{ERROR_HANDLE_EOF, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindClose, FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard,
+        WIN32_FIND_STREAM_DATA,
+    };
+
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|source| io("inspect Windows worktree stream path", &path, source))?;
+        let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        wide.push(0);
+        let mut data = WIN32_FIND_STREAM_DATA::default();
+        // SAFETY: `wide` is NUL-terminated and `data` is a valid writable output buffer.
+        let handle = unsafe {
+            FindFirstStreamW(
+                wide.as_ptr(),
+                FindStreamInfoStandard,
+                (&mut data as *mut WIN32_FIND_STREAM_DATA).cast(),
+                0,
+            )
+        };
+        if handle == INVALID_HANDLE_VALUE {
+            // SAFETY: this reads the calling thread's error immediately after the failed call.
+            let error = unsafe { GetLastError() };
+            if error != ERROR_HANDLE_EOF {
+                return Err(io(
+                    "enumerate Windows worktree streams",
+                    &path,
+                    std::io::Error::from_raw_os_error(error as i32),
+                ));
+            }
+        } else {
+            let mut alternate = false;
+            loop {
+                let length = data
+                    .cStreamName
+                    .iter()
+                    .position(|unit| *unit == 0)
+                    .unwrap_or(data.cStreamName.len());
+                let name = &data.cStreamName[..length];
+                let default_stream = name
+                    == [
+                        b':' as u16,
+                        b':' as u16,
+                        b'$' as u16,
+                        b'D' as u16,
+                        b'A' as u16,
+                        b'T' as u16,
+                        b'A' as u16,
+                    ];
+                alternate |= !default_stream;
+                // SAFETY: `handle` is a live stream enumeration handle and `data` is writable.
+                if unsafe {
+                    FindNextStreamW(handle, (&mut data as *mut WIN32_FIND_STREAM_DATA).cast())
+                } == 0
+                {
+                    // SAFETY: this reads the calling thread's error immediately after iteration.
+                    let error = unsafe { GetLastError() };
+                    // SAFETY: `handle` came from a successful `FindFirstStreamW` call.
+                    unsafe { FindClose(handle) };
+                    if error != ERROR_HANDLE_EOF {
+                        return Err(io(
+                            "enumerate Windows worktree streams",
+                            &path,
+                            std::io::Error::from_raw_os_error(error as i32),
+                        ));
+                    }
+                    break;
+                }
+            }
+            if alternate {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "worktree {} contains an alternate data stream at {}; compaction preserved it",
+                    root.display(),
+                    path.display()
+                )));
+            }
+        }
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            for entry in fs::read_dir(&path)
+                .map_err(|source| io("read Windows worktree stream directory", &path, source))?
+            {
+                pending.push(
+                    entry
+                        .map_err(|source| io("read Windows worktree stream entry", &path, source))?
+                        .path(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn verify_snapshot(path: &Path, expected: &str) -> Result<(), WorktreeError> {
+    if directory_snapshot(path)? != expected {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree content changed during compaction; preserved {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn copy_git_pointer(source: &Path, destination: &Path) -> Result<(), WorktreeError> {
+    let source_path = source.join(".git");
+    let destination_path = destination.join(".git");
+    let mut input = crate::base_integrity::open_regular(&source_path)
+        .map_err(|source| io("open linked-worktree pointer", &source_path, source))?;
+    let metadata = input
+        .metadata()
+        .map_err(|source| io("inspect linked-worktree pointer", &source_path, source))?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    #[cfg(target_os = "windows")]
+    options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut output = options
+        .open(&destination_path)
+        .map_err(|source| io("create replacement Git pointer", &destination_path, source))?;
+    std::io::copy(&mut input, &mut output)
+        .map_err(|source| io("copy linked-worktree pointer", &destination_path, source))?;
+    fs::set_permissions(&destination_path, metadata.permissions()).map_err(|source| {
+        io(
+            "set linked-worktree pointer permissions",
+            &destination_path,
+            source,
+        )
+    })?;
+    output
+        .sync_all()
+        .map_err(|source| io("sync linked-worktree pointer", &destination_path, source))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_move_paths(
     state_directory: &Path,
     journal: &DecodedMoveJournal,
@@ -4726,6 +5663,15 @@ fn verify_prune_safe(
             .load_all()?
             .iter()
             .any(|journal| journal.phase != MoveWorktreePhase::Complete)
+        || CompactJournalStore::open(state_directory)
+            .load_all()?
+            .iter()
+            .any(|journal| {
+                !matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+            })
         || PruneJournalStore::open(state_directory)
             .load_all()?
             .iter()
@@ -4794,6 +5740,30 @@ fn fail_move_if_requested(
 ) -> Result<(), WorktreeError> {
     if fail_after == Some(phase) {
         Err(WorktreeError::InjectedMoveFailure(phase))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn advance_compaction(
+    store: &CompactJournalStore,
+    record: &mut CompactJournalRecord,
+    phase: CompactWorktreePhase,
+    fail_after: Option<CompactWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    record.transition(phase)?;
+    store.persist(record)?;
+    fail_compaction_if_requested(phase, fail_after)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn fail_compaction_if_requested(
+    phase: CompactWorktreePhase,
+    fail_after: Option<CompactWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    if fail_after == Some(phase) {
+        Err(WorktreeError::InjectedCompactionFailure(phase))
     } else {
         Ok(())
     }
@@ -6048,11 +7018,12 @@ mod tests {
     #[cfg(unix)]
     use super::Git;
     use super::{
-        AddWorktreeRequest, BackendKind, MoveWorktreeRequest, PruneWorktreesRequest,
-        RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, force_remove_worktree_inner,
-        garbage_collect_inner, has_ascii_case_alias, move_worktree_inner, next_operation_id,
-        prune_worktrees_inner, recover_incomplete_operations, remove_empty_directory_if_present,
-        remove_worktree_inner, storage_accounting,
+        AddWorktreeRequest, BackendKind, CompactWorktreeRequest, MoveWorktreeRequest,
+        PruneWorktreesRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
+        compact_worktree_inner, force_remove_worktree_inner, garbage_collect_inner,
+        has_ascii_case_alias, move_worktree_inner, next_operation_id, prune_worktrees_inner,
+        recover_incomplete_operations, remove_empty_directory_if_present, remove_worktree_inner,
+        storage_accounting,
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
@@ -6062,8 +7033,8 @@ mod tests {
     };
     use crate::test_support::writable_tempdir as tempdir;
     use crate::{
-        AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
-        RemoveWorktreePhase,
+        AddWorktreePhase, CompactWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase,
+        PruneWorktreesPhase, RemoveWorktreePhase,
     };
     #[cfg(unix)]
     use riftri_git::GitError;
@@ -6108,6 +7079,87 @@ mod tests {
         }
     }
 
+    #[test]
+    fn recovery_is_safe_and_idempotent_after_every_compaction_transition() {
+        for phase in [
+            CompactWorktreePhase::IntentRecorded,
+            CompactWorktreePhase::ReplacementReady,
+            CompactWorktreePhase::ReplacementActivated,
+            CompactWorktreePhase::AddJournalUpdated,
+            CompactWorktreePhase::Complete,
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from("feature/compact-recovery")),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+                true,
+            )
+            .expect("create managed worktree");
+            fs::write(destination.join("tracked.txt"), "allocate private blocks\n")
+                .expect("edit view");
+            fs::write(destination.join("tracked.txt"), "base\n").expect("restore view");
+
+            compact_worktree_inner(
+                CompactWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("inject compaction interruption");
+
+            let first = recover_incomplete_operations(&state).expect("first repair");
+            assert!(first.errors.is_empty(), "{phase:?}: {first:?}");
+            let second = recover_incomplete_operations(&state).expect("second repair");
+            assert!(second.errors.is_empty(), "{phase:?}: {second:?}");
+            assert!(destination.is_dir(), "{phase:?}");
+            assert_eq!(
+                fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+                "base\n",
+                "{phase:?}"
+            );
+            let output = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&destination)
+                .output()
+                .expect("inspect recovered worktree");
+            assert!(output.status.success(), "{phase:?}");
+            assert!(output.stdout.is_empty(), "{phase:?}");
+            let accounting = storage_accounting(&state).expect("account after repair");
+            assert_eq!(accounting.pending_compactions, 0, "{phase:?}");
+            assert_eq!(
+                accounting.completed_compactions + accounting.cancelled_compactions,
+                1,
+                "{phase:?}"
+            );
+            assert!(
+                accounting.diagnostic_issues.is_empty(),
+                "{phase:?}: {accounting:?}"
+            );
+        }
+    }
+
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     #[test]
     fn git_lfs_materialization_rejects_same_size_corruption() {
@@ -6134,6 +7186,62 @@ mod tests {
 
         assert!(error.to_string().contains("failed SHA-256 verification"));
         assert_eq!(fs::read(source).expect("source preserved"), b"evil");
+    }
+
+    #[test]
+    fn compaction_recovery_preserves_edits_made_after_replacement_activation() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/compact-live-edit")),
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(CompactWorktreePhase::ReplacementActivated),
+        )
+        .expect_err("interrupt after activation");
+        fs::write(
+            destination.join("tracked.txt"),
+            "edit in the new active view\n",
+        )
+        .expect("edit replacement");
+
+        let repair = recover_incomplete_operations(&state).expect("resume compaction");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+            "edit in the new active view\n"
+        );
+        let accounting = storage_accounting(&state).expect("inspect completed compaction");
+        assert_eq!(accounting.completed_compactions, 1);
+        assert_eq!(accounting.pending_compactions, 0);
     }
 
     #[test]
@@ -6957,7 +8065,14 @@ mod tests {
         let fixture = tempdir().expect("fixture");
         let state = fixture.path().join("state");
         let mut malformed = HashSet::new();
-        for directory in ["operations", "removals", "moves", "prunes", "collections"] {
+        for directory in [
+            "operations",
+            "removals",
+            "moves",
+            "compactions",
+            "prunes",
+            "collections",
+        ] {
             let path = state.join(directory).join("corrupt.json");
             fs::create_dir_all(path.parent().expect("journal parent"))
                 .expect("create journal directory");

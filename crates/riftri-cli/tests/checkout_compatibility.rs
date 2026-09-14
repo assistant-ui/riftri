@@ -174,7 +174,7 @@ fn riftri(path: &Path, arguments: &[&str]) -> Output {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn canonical_local_git_lfs_object_creates_a_clean_isolated_worktree() {
+fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree() {
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = RepositoryFixture::new();
@@ -278,6 +278,31 @@ fn canonical_local_git_lfs_object_creates_a_clean_isolated_worktree() {
         .expect("inspect LFS worktree");
     assert!(status.status.success());
     assert!(status.stdout.is_empty(), "expanded LFS worktree is dirty");
+
+    let compact = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "worktree",
+            "compact",
+            destination.to_str().expect("UTF-8 destination"),
+            "--state-dir",
+            state.to_str().expect("UTF-8 state"),
+        ])
+        .current_dir(&fixture.repository)
+        .env("PATH", &child_path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("compact Riftri LFS worktree");
+    assert!(
+        compact.status.success(),
+        "Riftri LFS compaction failed: {}",
+        String::from_utf8_lossy(&compact.stderr)
+    );
+    assert_eq!(
+        fs::read(destination.join("payload.bin")).expect("read compacted expanded payload"),
+        contents
+    );
+
     fs::write(destination.join("payload.bin"), b"private edit\n").expect("edit private view");
     assert_eq!(
         fs::read(&object).expect("read retained LFS object"),
