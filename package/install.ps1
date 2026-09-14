@@ -212,6 +212,7 @@ function Invoke-RiftriInstaller {
 
 if ($Help) {
   Write-Output 'Usage: powershell -File install.ps1 [-Version VERSION]'
+  Write-Output 'Installer: https://riftri.dev/install.ps1'
   Write-Output 'Installs the latest stable release, or a pinned version such as v0.2.1.'
   Write-Output 'RIFTRI_INSTALL_DIR overrides the per-user destination directory.'
   exit 0

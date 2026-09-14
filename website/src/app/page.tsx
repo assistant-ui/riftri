@@ -6,7 +6,7 @@ import { StorageMap } from "../components/storage-map";
 
 const githubUrl = "https://github.com/assistant-ui/riftri";
 const agentbaseUrl = "https://agentbase.dev";
-const installCommand = "curl -fsSL https://riftri.vercel.app/install.sh | bash";
+const installCommand = "curl -fsSL https://riftri.dev/install.sh | bash";
 
 export const metadata: Metadata = {
   title: "Riftri — Lightweight Git workspaces for parallel development",
