@@ -246,7 +246,10 @@ durable exact-content snapshot; recovery refuses to delete a view changed after
 that intent.
 Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
 missing paths referenced by active journals without deleting them. Managed move
-and guarded prune use recoverable forward-only journals. The Linux reflink and
+and guarded prune use recoverable forward-only journals. Pristine native-COW
+views can be compacted explicitly onto a freshly cloned exact-tree base through
+a separate recoverable swap journal; tracked, untracked, and ignored entries
+all stop compaction before replacement. The Linux reflink and
 OverlayFS slices of Milestone 5 and Windows ReFS slice of Milestone 7 are
 exercised on disposable native volumes in CI. When reflinks are unavailable,
 Linux selects OverlayFS only after proving that the caller's current namespace

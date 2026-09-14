@@ -154,6 +154,7 @@ ReFS, Riftri supports:
 - Repository-scoped and process-scoped Git interception.
 - Clean worktree removal plus snapshot-guarded forced removal, move, and prune
   operations.
+- Explicit compaction of pristine native-COW worktrees.
 - Reusable immutable bases with disk-usage reporting.
 - Journaled recovery, repair, and garbage collection.
 - Safe compatibility checks before any worktree is created.
@@ -197,6 +198,7 @@ Useful commands:
 $ riftri doctor
 $ riftri status
 $ riftri repair
+$ riftri worktree compact ../app-auth
 $ riftri gc
 $ riftri gc --apply
 $ riftri state forget-missing /absolute/path/to/removed-state
@@ -226,6 +228,13 @@ APFS clones, Linux reflinks, or ReFS block clones from it, or exposes it as an
 OverlayFS lower layer with a private writable upper. Unchanged contents are not
 materialized again; worktrees are lightweight—not free—and private disk use
 grows as they diverge.
+
+After edits have been reverted or committed, a long-lived native-COW view may
+still retain private filesystem blocks. `riftri worktree compact <path>`
+replaces a pristine managed view with a fresh clone of its exact current tree
+while preserving its Git worktree registration, branch, and HEAD. It refuses
+tracked, untracked, and ignored entries, and its swap is journaled for
+`riftri repair`. Active OverlayFS views are not compacted yet.
 
 `riftri status` reports managed views and filesystem-accounted allocation. For
 details on measuring physical sharing, see

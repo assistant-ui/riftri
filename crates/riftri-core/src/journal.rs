@@ -11,11 +11,13 @@ use thiserror::Error;
 use crate::JournalTransitionError;
 use crate::RemoveJournalTransitionError;
 use crate::{
-    AddWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
-    RemoveWorktreePhase,
+    AddWorktreePhase, CompactWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase,
+    PruneWorktreesPhase, RemoveWorktreePhase,
 };
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-use crate::{MoveJournalTransitionError, PruneJournalTransitionError};
+use crate::{
+    CompactJournalTransitionError, MoveJournalTransitionError, PruneJournalTransitionError,
+};
 
 #[derive(Debug, Error)]
 pub enum JournalError {
@@ -404,6 +406,25 @@ pub(crate) struct MoveJournalRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CompactJournalRecord {
+    pub format_version: u16,
+    pub operation_id: String,
+    repository: NativeOsString,
+    destination: NativeOsString,
+    replacement: NativeOsString,
+    quarantine: NativeOsString,
+    base_staging: NativeOsString,
+    base_path: NativeOsString,
+    temporary_index: NativeOsString,
+    old_base_path: NativeOsString,
+    pub source_add_operation_id: String,
+    pub expected_commit: String,
+    pub expected_snapshot: String,
+    pub backend: BackendKind,
+    pub phase: CompactWorktreePhase,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PruneJournalRecord {
     pub format_version: u16,
     pub operation_id: String,
@@ -433,6 +454,18 @@ pub(crate) struct MoveJournalPaths<'a> {
     pub repository: &'a Path,
     pub source: &'a Path,
     pub destination: &'a Path,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub(crate) struct CompactJournalPaths<'a> {
+    pub repository: &'a Path,
+    pub destination: &'a Path,
+    pub replacement: &'a Path,
+    pub quarantine: &'a Path,
+    pub base_staging: &'a Path,
+    pub base_path: &'a Path,
+    pub temporary_index: &'a Path,
+    pub old_base_path: &'a Path,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -469,6 +502,29 @@ pub(crate) struct DecodedMoveJournal {
     pub destination: PathBuf,
     pub source_add_operation_id: String,
     pub phase: MoveWorktreePhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
+    allow(dead_code)
+)]
+pub(crate) struct DecodedCompactJournal {
+    pub journal_path: PathBuf,
+    pub operation_id: String,
+    pub repository: PathBuf,
+    pub destination: PathBuf,
+    pub replacement: PathBuf,
+    pub quarantine: PathBuf,
+    pub base_staging: PathBuf,
+    pub base_path: PathBuf,
+    pub temporary_index: PathBuf,
+    pub old_base_path: PathBuf,
+    pub source_add_operation_id: String,
+    pub expected_commit: String,
+    pub expected_snapshot: String,
+    pub backend: BackendKind,
+    pub phase: CompactWorktreePhase,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -843,6 +899,90 @@ impl MoveJournalRecord {
     }
 }
 
+impl CompactJournalRecord {
+    pub const FORMAT_VERSION: u16 = 1;
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn new(
+        operation_id: String,
+        paths: CompactJournalPaths<'_>,
+        source_add_operation_id: String,
+        expected_commit: String,
+        expected_snapshot: String,
+        backend: BackendKind,
+    ) -> Self {
+        Self {
+            format_version: Self::FORMAT_VERSION,
+            operation_id,
+            repository: NativeOsString::encode(paths.repository.as_os_str()),
+            destination: NativeOsString::encode(paths.destination.as_os_str()),
+            replacement: NativeOsString::encode(paths.replacement.as_os_str()),
+            quarantine: NativeOsString::encode(paths.quarantine.as_os_str()),
+            base_staging: NativeOsString::encode(paths.base_staging.as_os_str()),
+            base_path: NativeOsString::encode(paths.base_path.as_os_str()),
+            temporary_index: NativeOsString::encode(paths.temporary_index.as_os_str()),
+            old_base_path: NativeOsString::encode(paths.old_base_path.as_os_str()),
+            source_add_operation_id,
+            expected_commit,
+            expected_snapshot,
+            backend,
+            phase: CompactWorktreePhase::IntentRecorded,
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn transition(
+        &mut self,
+        next: CompactWorktreePhase,
+    ) -> Result<(), CompactJournalTransitionError> {
+        if !self.phase.can_transition_to(next) {
+            return Err(CompactJournalTransitionError {
+                current: self.phase,
+                requested: next,
+            });
+        }
+        self.phase = next;
+        Ok(())
+    }
+
+    pub fn decode(self, journal_path: PathBuf) -> Result<DecodedCompactJournal, JournalError> {
+        if self.format_version != Self::FORMAT_VERSION {
+            return Err(JournalError::UnsupportedVersion {
+                path: journal_path,
+                version: self.format_version,
+            });
+        }
+        if self.expected_snapshot.len() != 64
+            || !self
+                .expected_snapshot
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path,
+                detail: "compaction snapshot must be a 32-byte hexadecimal digest".to_owned(),
+            });
+        }
+        Ok(DecodedCompactJournal {
+            operation_id: self.operation_id,
+            repository: PathBuf::from(self.repository.decode(&journal_path)?),
+            destination: PathBuf::from(self.destination.decode(&journal_path)?),
+            replacement: PathBuf::from(self.replacement.decode(&journal_path)?),
+            quarantine: PathBuf::from(self.quarantine.decode(&journal_path)?),
+            base_staging: PathBuf::from(self.base_staging.decode(&journal_path)?),
+            base_path: PathBuf::from(self.base_path.decode(&journal_path)?),
+            temporary_index: PathBuf::from(self.temporary_index.decode(&journal_path)?),
+            old_base_path: PathBuf::from(self.old_base_path.decode(&journal_path)?),
+            source_add_operation_id: self.source_add_operation_id,
+            expected_commit: self.expected_commit,
+            expected_snapshot: self.expected_snapshot.to_ascii_lowercase(),
+            backend: self.backend,
+            phase: self.phase,
+            journal_path,
+        })
+    }
+}
+
 impl PruneJournalRecord {
     pub const FORMAT_VERSION: u16 = 1;
 
@@ -1158,6 +1298,49 @@ impl JournalStore {
         self.persist(&record)?;
         Ok(())
     }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn update_active_base(
+        &self,
+        journal_path: &Path,
+        expected_destination: &Path,
+        expected_old_base: &Path,
+        base_path: &Path,
+        expected_commit: &str,
+    ) -> Result<(), JournalError> {
+        let file = open_real_journal(journal_path, "open operation journal")?;
+        let mut record: JournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: journal_path.to_path_buf(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, journal_path)?;
+        let decoded = record.clone().decode(journal_path.to_path_buf())?;
+        if decoded.phase != AddWorktreePhase::Active || decoded.destination != expected_destination
+        {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "only the expected active add journal can be compacted".to_owned(),
+            });
+        }
+        if decoded.base_path == base_path && decoded.expected_commit == expected_commit {
+            return Ok(());
+        }
+        if decoded.base_path != expected_old_base {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: format!(
+                    "expected old base {}, found {}",
+                    expected_old_base.display(),
+                    decoded.base_path.display()
+                ),
+            });
+        }
+        record.base_path = NativeOsString::encode(base_path.as_os_str());
+        record.expected_commit = expected_commit.to_owned();
+        self.persist(&record)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1338,6 +1521,102 @@ impl MoveJournalStore {
     fn load_path(&self, path: PathBuf) -> Result<DecodedMoveJournal, JournalError> {
         let file = open_real_journal(&path, "open move journal")?;
         let record: MoveJournalRecord =
+            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+                path: path.clone(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, &path)?;
+        record.decode(path)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CompactJournalStore {
+    directory: PathBuf,
+}
+
+impl CompactJournalStore {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn reload(
+        &self,
+        expected: &DecodedCompactJournal,
+    ) -> Result<CompactJournalRecord, JournalError> {
+        reload_snapshot(
+            &self.directory,
+            &expected.journal_path,
+            &expected.operation_id,
+            expected,
+            CompactJournalRecord::decode,
+        )
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn create(state_directory: &Path) -> Result<Self, JournalError> {
+        let directory = state_directory.join("compactions");
+        ensure_real_state_directory(&directory, "create compaction journal directory")?;
+        sync_parent(&directory)?;
+        Ok(Self { directory })
+    }
+
+    pub fn open(state_directory: &Path) -> Self {
+        Self {
+            directory: state_directory.join("compactions"),
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn path_for(&self, operation_id: &str) -> PathBuf {
+        self.directory.join(format!("{operation_id}.json"))
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn persist(&self, record: &CompactJournalRecord) -> Result<PathBuf, JournalError> {
+        let path = self.path_for(&record.operation_id);
+        validate_operation_id(&record.operation_id, &path)?;
+        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
+            JournalError::Serialize {
+                path: temporary.to_path_buf(),
+                source,
+            }
+        })?;
+        writer
+            .write_all(b"\n")
+            .map_err(|source| io("write compaction journal", &temporary, source))?;
+        writer
+            .flush()
+            .map_err(|source| io("flush compaction journal", &temporary, source))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|source| io("sync compaction journal", &temporary, source))?;
+        drop(writer);
+        atomic_replace(&temporary, &path)?;
+        temporary.disable_cleanup(true);
+        sync_parent(&path)?;
+        Ok(path)
+    }
+
+    pub fn load_all(&self) -> Result<Vec<DecodedCompactJournal>, JournalError> {
+        journal_paths(&self.directory)?
+            .into_iter()
+            .map(|path| self.load_path(path))
+            .collect()
+    }
+
+    pub fn load_all_for_status(
+        &self,
+    ) -> Result<StatusJournalLoad<DecodedCompactJournal>, JournalError> {
+        Ok(load_status_journals(
+            journal_paths(&self.directory)?,
+            |path| self.load_path(path),
+        ))
+    }
+
+    fn load_path(&self, path: PathBuf) -> Result<DecodedCompactJournal, JournalError> {
+        let file = open_real_journal(&path, "open compaction journal")?;
+        let record: CompactJournalRecord =
             serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
                 path: path.clone(),
                 source,
@@ -1606,14 +1885,17 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore, JournalError,
-        JournalPaths, JournalRecord, JournalStore, MoveJournalPaths, MoveJournalRecord,
-        MoveJournalStore, PruneJournalRecord, PruneJournalStore, RemovalJournalPaths,
-        RemovalJournalRecord, RemovalJournalStore,
+        CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore,
+        CompactJournalPaths, CompactJournalRecord, CompactJournalStore, JournalError, JournalPaths,
+        JournalRecord, JournalStore, MoveJournalPaths, MoveJournalRecord, MoveJournalStore,
+        PruneJournalRecord, PruneJournalStore, RemovalJournalPaths, RemovalJournalRecord,
+        RemovalJournalStore,
     };
     #[cfg(target_os = "linux")]
     use crate::AddWorktreePhase;
-    use crate::{GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase};
+    use crate::{
+        CompactWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
+    };
 
     #[test]
     fn journal_store_rejects_a_symlinked_state_directory() {
@@ -1640,7 +1922,14 @@ mod tests {
         let outside = directory.path().join("outside");
         std::fs::create_dir(&outside).expect("create outside directory");
 
-        for name in ["operations", "removals", "moves", "prunes", "collections"] {
+        for name in [
+            "operations",
+            "removals",
+            "moves",
+            "compactions",
+            "prunes",
+            "collections",
+        ] {
             let journal_directory = directory.path().join(name);
             symlink(&outside, &journal_directory).expect("symlink journal directory");
 
@@ -1650,6 +1939,9 @@ mod tests {
                     .load_all()
                     .map(|_| ()),
                 "moves" => MoveJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "compactions" => CompactJournalStore::open(directory.path())
                     .load_all()
                     .map(|_| ()),
                 "prunes" => PruneJournalStore::open(directory.path())
@@ -1675,7 +1967,14 @@ mod tests {
         let outside = directory.path().join("outside.json");
         std::fs::write(&outside, b"{}\n").expect("write outside journal");
 
-        for name in ["operations", "removals", "moves", "prunes", "collections"] {
+        for name in [
+            "operations",
+            "removals",
+            "moves",
+            "compactions",
+            "prunes",
+            "collections",
+        ] {
             let journal_directory = directory.path().join(name);
             std::fs::create_dir(&journal_directory).expect("create journal directory");
             let journal_path = journal_directory.join("linked.json");
@@ -1687,6 +1986,9 @@ mod tests {
                     .load_all()
                     .map(|_| ()),
                 "moves" => MoveJournalStore::open(directory.path())
+                    .load_all()
+                    .map(|_| ()),
+                "compactions" => CompactJournalStore::open(directory.path())
                     .load_all()
                     .map(|_| ()),
                 "prunes" => PruneJournalStore::open(directory.path())
@@ -1885,6 +2187,32 @@ mod tests {
         let renamed = path.with_file_name("renamed.json");
         std::fs::rename(path, &renamed).expect("rename move journal");
         assert_invalid_journal(move_store.load_all(), &renamed);
+
+        let compact_store =
+            CompactJournalStore::create(directory.path()).expect("create compaction store");
+        let compact = CompactJournalRecord::new(
+            "compact-operation".to_owned(),
+            CompactJournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                replacement: Path::new("/replacement"),
+                quarantine: Path::new("/quarantine"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                old_base_path: Path::new("/old-base"),
+            },
+            "add-operation".to_owned(),
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            "00".repeat(32),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        let path = compact_store
+            .persist(&compact)
+            .expect("persist compaction journal");
+        let renamed = path.with_file_name("renamed.json");
+        std::fs::rename(path, &renamed).expect("rename compaction journal");
+        assert_invalid_journal(compact_store.load_all(), &renamed);
 
         let prune_store = PruneJournalStore::create(directory.path()).expect("create prune store");
         let prune = PruneJournalRecord::new("prune-operation".to_owned(), Path::new("/repository"));
@@ -2243,7 +2571,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn move_and_prune_journals_round_trip_native_paths_and_phases() {
+    fn move_compact_and_prune_journals_round_trip_native_paths_and_phases() {
         use std::ffi::OsString;
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
@@ -2281,6 +2609,49 @@ mod tests {
             destination.as_os_str().as_bytes()
         );
         assert_eq!(moves[0].phase, MoveWorktreePhase::WorktreeMoved);
+
+        let compact_store =
+            CompactJournalStore::create(directory.path()).expect("create compaction store");
+        let replacement = directory
+            .path()
+            .join(OsString::from_vec(b"replacement-\xfd".to_vec()));
+        let quarantine = directory
+            .path()
+            .join(OsString::from_vec(b"quarantine-\xfc".to_vec()));
+        let mut compact_record = CompactJournalRecord::new(
+            "compact-operation".to_owned(),
+            CompactJournalPaths {
+                repository: Path::new("/repository"),
+                destination: &destination,
+                replacement: &replacement,
+                quarantine: &quarantine,
+                base_staging: Path::new("/state/bases/v1/repository/.riftri-build-compact"),
+                base_path: Path::new("/state/bases/v1/repository/tree"),
+                temporary_index: Path::new("/state/tmp/compact-index"),
+                old_base_path: Path::new("/state/bases/v1/repository/old-tree"),
+            },
+            "add-operation".to_owned(),
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            "ab".repeat(32),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        compact_record
+            .transition(CompactWorktreePhase::ReplacementReady)
+            .expect("advance compaction journal");
+        compact_store
+            .persist(&compact_record)
+            .expect("persist compaction journal");
+        let compactions = compact_store.load_all().expect("load compaction journal");
+        assert_eq!(compactions.len(), 1);
+        assert_eq!(
+            compactions[0].replacement.as_os_str().as_bytes(),
+            replacement.as_os_str().as_bytes()
+        );
+        assert_eq!(
+            compactions[0].quarantine.as_os_str().as_bytes(),
+            quarantine.as_os_str().as_bytes()
+        );
+        assert_eq!(compactions[0].phase, CompactWorktreePhase::ReplacementReady);
 
         let prune_store = PruneJournalStore::create(directory.path()).expect("create prune store");
         let mut prune_record =
@@ -2390,6 +2761,35 @@ mod tests {
         move_store
             .persist(&move_record)
             .expect("move journal must ignore the stale temporary symlink");
+
+        let compact_store =
+            CompactJournalStore::create(directory.path()).expect("create compaction store");
+        let compact = CompactJournalRecord::new(
+            "compact-operation".to_owned(),
+            CompactJournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                replacement: Path::new("/replacement"),
+                quarantine: Path::new("/quarantine"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                old_base_path: Path::new("/old-base"),
+            },
+            "add-operation".to_owned(),
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            "00".repeat(32),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        plant_symlink(
+            directory.path(),
+            "compactions",
+            "compact-operation",
+            &protected,
+        );
+        compact_store
+            .persist(&compact)
+            .expect("compaction journal must ignore the stale temporary symlink");
 
         let prune_store = PruneJournalStore::create(directory.path()).expect("create prune store");
         let prune = PruneJournalRecord::new("prune-operation".to_owned(), Path::new("/repository"));

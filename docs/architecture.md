@@ -281,6 +281,38 @@ all inconsistent states, and atomically relocates the active add-journal
 reference. The source and destination must be on the same native COW-capable
 volume.
 
+## Compaction-operation journal state machine
+
+Explicit compaction of a pristine native-COW view uses a separate journal under
+`compactions/`:
+
+```text
+intent-recorded
+  -> replacement-ready
+  -> replacement-activated
+  -> add-journal-updated
+  -> complete
+```
+
+Before recording intent, Riftri requires an active managed Git registration,
+the expected HEAD, and an empty structured status including ignored paths. It
+snapshots names, kinds, bytes, modes, symlink targets, Unix extended
+attributes, and Windows file attributes across the complete view. Windows
+alternate data streams fail closed. Riftri then prepares or reuses the exact current-tree base,
+creates a fresh native COW replacement, and copies the real linked-worktree
+pointer into it. Immediately before the same-parent directory swap, Riftri
+revalidates registration, HEAD, strict cleanliness, and the snapshot. The old
+view is quarantined until the active add journal points at the new base; its
+snapshot is checked again before deletion.
+
+Recovery cancels intent-only work and restores a quarantined original when the
+replacement was not activated. Once activation occurred it moves forward,
+updates the add journal idempotently, and removes only the exact journaled
+quarantine. Pending compactions protect both old and new bases from garbage
+collection. OverlayFS compaction remains separate future work because resetting
+a mounted private upper requires mount-identity-aware handling rather than a
+native directory clone and rename.
+
 ## Prune-operation journal state machine
 
 Managed-state pruning uses separate journals under `prunes/`:
@@ -292,7 +324,7 @@ intent-recorded
 ```
 
 Before invoking Git, Riftri verifies that every active managed view exists and
-is registered and that no add, removal, or move is incomplete. Repeating Git's
+is registered and that no add, removal, move, or compaction is incomplete. Repeating Git's
 prune after an interruption is safe because managed registrations are
 revalidated first.
 

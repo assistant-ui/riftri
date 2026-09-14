@@ -37,13 +37,14 @@ pub use activation::{
 };
 pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{
-    AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, GarbageCollectionCandidate,
-    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PruneWorktreesRequest,
-    PruneWorktreesResult, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
-    StateDiagnosticIssue, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
-    WorktreeMode, add_worktree, force_remove_worktree, forget_missing_state_directory,
-    garbage_collect, is_managed_worktree, move_worktree, prune_worktrees,
-    recover_incomplete_operations, remove_worktree, storage_accounting,
+    AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, CompactWorktreeRequest,
+    CompactWorktreeResult, GarbageCollectionCandidate, GarbageCollectionReport,
+    MoveWorktreeRequest, MoveWorktreeResult, PruneWorktreesRequest, PruneWorktreesResult,
+    RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue,
+    StorageAccountingReport, ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree,
+    compact_worktree, force_remove_worktree, forget_missing_state_directory, garbage_collect,
+    is_managed_worktree, move_worktree, prune_worktrees, recover_incomplete_operations,
+    remove_worktree, storage_accounting,
 };
 
 /// A diagnostic check and its optional failure explanation.
@@ -275,6 +276,38 @@ pub enum GarbageCollectionPhase {
     Cancelled,
 }
 
+/// Durable phases of a clean managed-worktree compaction transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompactWorktreePhase {
+    IntentRecorded,
+    ReplacementReady,
+    ReplacementActivated,
+    AddJournalUpdated,
+    Complete,
+    Cancelled,
+}
+
+impl CompactWorktreePhase {
+    /// Return whether a compaction journal may atomically advance to `next`.
+    pub fn can_transition_to(self, next: Self) -> bool {
+        use CompactWorktreePhase::{
+            AddJournalUpdated, Cancelled, Complete, IntentRecorded, ReplacementActivated,
+            ReplacementReady,
+        };
+
+        matches!(
+            (self, next),
+            (IntentRecorded, ReplacementReady)
+                | (ReplacementReady, ReplacementActivated)
+                | (ReplacementActivated, AddJournalUpdated)
+                | (AddJournalUpdated, Complete)
+                | (IntentRecorded, Cancelled)
+                | (ReplacementReady, Cancelled)
+        )
+    }
+}
+
 impl RemoveWorktreePhase {
     /// Return whether a removal journal may atomically advance to `next`.
     pub fn can_transition_to(self, next: Self) -> bool {
@@ -402,6 +435,13 @@ pub struct MoveJournalTransitionError {
 pub struct PruneJournalTransitionError {
     pub current: PruneWorktreesPhase,
     pub requested: PruneWorktreesPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("invalid compact-worktree journal transition from {current:?} to {requested:?}")]
+pub struct CompactJournalTransitionError {
+    pub current: CompactWorktreePhase,
+    pub requested: CompactWorktreePhase,
 }
 
 /// Inspect a repository and the volume containing `path` without changing
@@ -652,7 +692,7 @@ mod tests {
 
     use super::{
         AddWorktreeJournal, AddWorktreePhase, BaseKey, CheckoutProfile, CheckoutProfileInput,
-        MoveWorktreePhase, PruneWorktreesPhase, RemoveWorktreePhase,
+        CompactWorktreePhase, MoveWorktreePhase, PruneWorktreesPhase, RemoveWorktreePhase,
     };
 
     #[test]
@@ -767,6 +807,37 @@ mod tests {
         );
         assert!(
             !PruneWorktreesPhase::Complete.can_transition_to(PruneWorktreesPhase::IntentRecorded)
+        );
+    }
+
+    #[test]
+    fn compaction_journal_accepts_completion_and_safe_cancellation_paths() {
+        assert!(
+            CompactWorktreePhase::IntentRecorded
+                .can_transition_to(CompactWorktreePhase::ReplacementReady)
+        );
+        assert!(
+            CompactWorktreePhase::ReplacementReady
+                .can_transition_to(CompactWorktreePhase::ReplacementActivated)
+        );
+        assert!(
+            CompactWorktreePhase::ReplacementActivated
+                .can_transition_to(CompactWorktreePhase::AddJournalUpdated)
+        );
+        assert!(
+            CompactWorktreePhase::AddJournalUpdated
+                .can_transition_to(CompactWorktreePhase::Complete)
+        );
+        assert!(
+            CompactWorktreePhase::IntentRecorded.can_transition_to(CompactWorktreePhase::Cancelled)
+        );
+        assert!(
+            CompactWorktreePhase::ReplacementReady
+                .can_transition_to(CompactWorktreePhase::Cancelled)
+        );
+        assert!(
+            !CompactWorktreePhase::ReplacementActivated
+                .can_transition_to(CompactWorktreePhase::Cancelled)
         );
     }
 }

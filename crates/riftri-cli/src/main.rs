@@ -160,6 +160,7 @@ impl Command {
                 WorktreeCommand::Add { .. } => "worktree-add",
                 WorktreeCommand::Remove { .. } => "worktree-remove",
                 WorktreeCommand::Move { .. } => "worktree-move",
+                WorktreeCommand::Compact { .. } => "worktree-compact",
                 WorktreeCommand::Prune { .. } => "worktree-prune",
             },
         }
@@ -223,6 +224,18 @@ enum WorktreeCommand {
         source: PathBuf,
         /// New worktree directory on the same filesystem volume.
         destination: PathBuf,
+        /// Repository owning the linked worktree.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+        /// Riftri state directory; defaults to <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+    },
+
+    /// Replace a pristine managed worktree with a fresh native COW view.
+    Compact {
+        /// Existing clean Riftri-managed worktree directory.
+        path: PathBuf,
         /// Repository owning the linked worktree.
         #[arg(long, default_value = ".")]
         repository: PathBuf,
@@ -510,6 +523,23 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Retained immutable base: {}", result.base_path.display());
                 println!("Journal: {}", result.journal_path.display());
             }
+            WorktreeCommand::Compact {
+                path,
+                repository,
+                state_dir,
+            } => {
+                let result = riftri_core::compact_worktree(riftri_core::CompactWorktreeRequest {
+                    repository,
+                    destination: path,
+                    state_dir,
+                })?;
+                println!("Compacted Riftri-backed Git worktree");
+                println!("Destination: {}", result.destination.display());
+                println!("Commit: {}", result.commit.as_str());
+                println!("Immutable base: {}", result.base_path.display());
+                println!("Reused immutable base: {}", result.reused_base);
+                println!("Journal: {}", result.journal_path.display());
+            }
             WorktreeCommand::Prune {
                 repository,
                 state_dir,
@@ -580,6 +610,7 @@ fn worktree_failure_fields(
         WorktreeError::JournalTransition(_)
         | WorktreeError::RemoveJournalTransition(_)
         | WorktreeError::MoveJournalTransition(_)
+        | WorktreeError::CompactJournalTransition(_)
         | WorktreeError::PruneJournalTransition(_) => (
             "journal-transition-failed",
             "operational",
@@ -636,6 +667,13 @@ fn worktree_failure_fields(
             "unknown",
             "inspect",
         ),
+        WorktreeError::InjectedCompactionFailure(phase) => (
+            "injected-failure",
+            "operational",
+            Some(compact_phase_name(*phase)),
+            "unknown",
+            "inspect",
+        ),
         WorktreeError::InjectedPruneFailure(phase) => (
             "injected-failure",
             "operational",
@@ -655,8 +693,8 @@ fn worktree_failure_fields(
 
 fn recovery_for_operation(operation: &str) -> &'static str {
     match operation {
-        "worktree-add" | "worktree-remove" | "worktree-move" | "worktree-prune"
-        | "garbage-collection" | "repair" => "inspect",
+        "worktree-add" | "worktree-remove" | "worktree-move" | "worktree-compact"
+        | "worktree-prune" | "garbage-collection" | "repair" => "inspect",
         _ => "unknown",
     }
 }
@@ -695,6 +733,18 @@ fn move_phase_name(phase: riftri_core::MoveWorktreePhase) -> &'static str {
         WorktreeMoved => "worktree-moved",
         AddJournalUpdated => "add-journal-updated",
         Complete => "complete",
+    }
+}
+
+fn compact_phase_name(phase: riftri_core::CompactWorktreePhase) -> &'static str {
+    use riftri_core::CompactWorktreePhase::*;
+    match phase {
+        IntentRecorded => "intent-recorded",
+        ReplacementReady => "replacement-ready",
+        ReplacementActivated => "replacement-activated",
+        AddJournalUpdated => "add-journal-updated",
+        Complete => "complete",
+        Cancelled => "cancelled",
     }
 }
 
@@ -859,6 +909,8 @@ fn print_recovery_report(
     println!("Recovered removals: {}", report.recovered_removals);
     println!("Completed moves: {}", report.completed_moves);
     println!("Recovered moves: {}", report.recovered_moves);
+    println!("Completed compactions: {}", report.completed_compactions);
+    println!("Recovered compactions: {}", report.recovered_compactions);
     println!("Completed prunes: {}", report.completed_prunes);
     println!("Recovered prunes: {}", report.recovered_prunes);
     println!("Completed collections: {}", report.completed_collections);
@@ -979,6 +1031,12 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     println!("Pending moves: {}", report.pending_moves);
     if report.pending_moves > 0 {
         println!("Attention: run `riftri repair` to resume pending moves");
+    }
+    println!("Completed compactions: {}", report.completed_compactions);
+    println!("Cancelled compactions: {}", report.cancelled_compactions);
+    println!("Pending compactions: {}", report.pending_compactions);
+    if report.pending_compactions > 0 {
+        println!("Attention: run `riftri repair` to resume pending compactions");
     }
     println!("Completed prunes: {}", report.completed_prunes);
     println!("Pending prunes: {}", report.pending_prunes);
@@ -1403,6 +1461,30 @@ mod tests {
             panic!("unexpected forced removal command");
         };
         assert!(force);
+
+        let compact = Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "compact",
+            "../app-auth",
+            "--repository",
+            "../app",
+        ])
+        .expect("parse worktree compaction");
+        let Command::Worktree {
+            command:
+                WorktreeCommand::Compact {
+                    path,
+                    repository,
+                    state_dir,
+                },
+        } = compact.command
+        else {
+            panic!("unexpected compaction command");
+        };
+        assert_eq!(path, Path::new("../app-auth"));
+        assert_eq!(repository, Path::new("../app"));
+        assert!(state_dir.is_none());
 
         let status =
             Cli::try_parse_from(["riftri", "status", "../app"]).expect("parse storage status");

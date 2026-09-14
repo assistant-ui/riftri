@@ -71,6 +71,30 @@ fn documented_command_creates_a_clean_real_worktree() {
         String::from_utf8_lossy(&git(&repository, &["worktree", "list", "--porcelain"]).stdout)
             .contains("refs/heads/feature/cli")
     );
+
+    fs::write(destination.join("tracked.txt"), "private allocation\n").expect("edit view");
+    fs::write(destination.join("tracked.txt"), "tracked\n").expect("restore view");
+    let compact = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "compact"])
+        .arg(&destination)
+        .args(["--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri compaction CLI");
+    assert!(
+        compact.status.success(),
+        "riftri compact failed: {}",
+        String::from_utf8_lossy(&compact.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&compact.stdout).contains("Compacted Riftri-backed Git worktree")
+    );
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
 }
 
 #[test]
