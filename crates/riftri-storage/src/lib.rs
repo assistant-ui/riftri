@@ -1044,6 +1044,16 @@ pub enum CapabilityStatus {
     Unavailable,
 }
 
+impl CapabilityStatus {
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Supported => "supported",
+            Self::Unsupported => "unsupported",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 /// Identity of the volume that would contain the requested destination.
 ///
 /// `device_id` is the platform device identifier. The filesystem name is part
@@ -1519,6 +1529,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{BackendKind, CapabilityStatus, probe_backends};
+
+    #[test]
+    fn capability_status_names_are_stable_and_human_readable() {
+        assert_eq!(CapabilityStatus::Supported.display_name(), "supported");
+        assert_eq!(CapabilityStatus::Unsupported.display_name(), "unsupported");
+        assert_eq!(CapabilityStatus::Unavailable.display_name(), "unavailable");
+    }
 
     #[test]
     fn probes_the_volume_of_a_missing_destination_via_its_parent() {

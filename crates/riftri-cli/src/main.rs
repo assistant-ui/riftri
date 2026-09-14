@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(
     name = "riftri",
     version,
-    about = "Copy-on-write acceleration for real Git worktrees"
+    about = "Lightweight Git workspaces for parallel development"
 )]
 struct Cli {
     /// Emit command failures as one machine-readable JSON receipt on stderr.
@@ -431,8 +431,10 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Storage capabilities for {}:", path.display());
                 for backend in backends {
                     println!(
-                        "- {:?} ({:?}): {}",
-                        backend.kind, backend.status, backend.explanation
+                        "- {} ({}): {}",
+                        backend.kind.display_name(),
+                        backend.status.display_name(),
+                        backend.explanation
                     );
                 }
                 println!("\nCapability support does not mean a backend is active yet.");
@@ -1295,8 +1297,10 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
     println!("Destination storage capabilities:");
     for backend in &report.storage_capabilities {
         println!(
-            "- {:?} ({:?}): {}",
-            backend.kind, backend.status, backend.explanation
+            "- {} ({}): {}",
+            backend.kind.display_name(),
+            backend.status.display_name(),
+            backend.explanation
         );
     }
 }
@@ -1306,12 +1310,20 @@ mod tests {
     use std::ffi::OsStr;
     use std::path::Path;
 
-    use clap::Parser;
     use clap::error::ErrorKind;
+    use clap::{CommandFactory, Parser};
 
     use super::{
         Cli, Command, OverlayFsCommand, ShellCommand, ShellKind, WorktreeCommand, failure_receipt,
     };
+
+    #[test]
+    fn help_uses_the_public_product_description() {
+        let help = Cli::command().render_help().to_string();
+
+        assert!(help.contains("Lightweight Git workspaces for parallel development"));
+        assert!(!help.contains("Copy-on-write acceleration"));
+    }
 
     #[test]
     fn parses_machine_readable_failure_output_globally() {
