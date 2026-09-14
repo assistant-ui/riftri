@@ -47,12 +47,20 @@ It does not edit shell profiles, use sudo, or activate Git interception.
 [Read the script](package/install.sh) before running it, or download it for review
 first as described in the [installation guide](docs/install.md#bash-installer).
 
-For Windows or manual installation, download the standalone native CLI from
-[GitHub Releases](https://github.com/assistant-ui/riftri/releases). Choose your
-OS and architecture, verify the archive against `SHA256SUMS`, and install it in
-a per-user directory. **Node.js and npm are not required.** See the
-[direct-download installation guide](docs/install.md) for all eight targets and
-copyable checksum-verification commands.
+On Windows, download and run the checksum-verifying PowerShell installer:
+
+```powershell
+$Installer = Join-Path $env:TEMP 'riftri-install.ps1'
+Invoke-WebRequest https://riftri.vercel.app/install.ps1 -OutFile $Installer
+& $Installer
+```
+
+It installs the matching x64 or ARM64 executable in a per-user directory and
+does not edit PowerShell profiles or persistent `PATH`. You can inspect
+[`package/install.ps1`](package/install.ps1) before running it. Manual downloads
+remain available from [GitHub Releases](https://github.com/assistant-ui/riftri/releases).
+**Node.js and npm are not required.** See the [direct-download installation
+guide](docs/install.md) for all eight targets and checksum-verification commands.
 
 The npm launcher is a separate distribution channel. Confirm that the requested
 version is present on npm because GitHub and npm publication complete

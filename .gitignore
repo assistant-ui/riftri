@@ -5,6 +5,7 @@
 /website/.farm/
 /website/.vercel/
 /website/public/install.sh
+/website/public/install.ps1
 /package/platforms/*/bin/
 *.tgz
 .DS_Store

@@ -4,7 +4,8 @@ The Riftri product site is a single-page Farm.js application. Product concepts, 
 transparent Git usage, safety, storage lifecycle, and compatibility all live at `/`.
 
 Development and production builds copy the canonical `../package/install.sh`
-to `public/install.sh`, serving it at `/install.sh`. Do not edit that generated
+and `../package/install.ps1` to `public/`, serving them at `/install.sh` and
+`/install.ps1`. Do not edit those generated
 copy. Deploy from the repository with `website` as the app directory so the
 staging script can access `package/`. The public site and copyable installation
 command use `https://riftri.vercel.app` on the existing `assistant-ui/riftri`

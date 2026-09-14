@@ -135,6 +135,27 @@ that policy; these instructions do not remove quarantine or disable Gatekeeper.
 
 ## Windows PowerShell
 
+Download the PowerShell installer, inspect it, and run it. It selects Windows
+x64 or ARM64, verifies the release archive against `SHA256SUMS`, checks the
+downloaded executable's version, and replaces only a regular-file installation
+in your per-user application-data directory:
+
+```powershell
+$Installer = Join-Path $env:TEMP 'riftri-install.ps1'
+Invoke-WebRequest https://riftri.vercel.app/install.ps1 -OutFile $Installer
+Get-Content $Installer
+& $Installer
+```
+
+Pin a release with `& $Installer -Version v0.2.1`. Set an absolute
+`RIFTRI_INSTALL_DIR` before running the script to choose another destination.
+It does not edit a PowerShell profile, persistently change `PATH`, enable a
+repository, or require administrator access. The website serves the canonical
+[`package/install.ps1`](../package/install.ps1); download that file from a
+reviewed commit when the installer itself must be pinned.
+
+The manual procedure remains available below.
+
 Use PowerShell with `tar` available. Choose `riftri-win32-x64` or
 `riftri-win32-arm64` for `Platform`. These commands install or replace only the
 executable under your user's local application-data directory, without

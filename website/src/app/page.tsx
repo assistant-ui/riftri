@@ -187,7 +187,8 @@ function GetStarted() {
           Shell profiles and Git activation stay unchanged. Linux requires glibc.
         </p>
         <div className="install-links">
-          <a href="/install.sh">Read the installer</a>
+          <a href="/install.sh">Read the Bash installer</a>
+          <a href="/install.ps1">Read the PowerShell installer</a>
           <a href={`${githubUrl}/blob/c462a27e55ea1fce08e6ceedf50b0bc5be89a4b9/docs/install.md#windows-powershell`}>Windows &amp; manual install</a>
           <a href={`${githubUrl}/releases`}>Release downloads</a>
         </div>
