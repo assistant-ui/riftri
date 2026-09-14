@@ -175,12 +175,7 @@ enum WorktreeCommand {
         path: PathBuf,
 
         /// Create and check out a new branch.
-        #[arg(
-            short = 'b',
-            value_name = "BRANCH",
-            conflicts_with = "detach",
-            required_unless_present = "detach"
-        )]
+        #[arg(short = 'b', value_name = "BRANCH", conflicts_with = "detach")]
         branch: Option<OsString>,
 
         /// Create a detached worktree instead of a branch.
@@ -188,8 +183,8 @@ enum WorktreeCommand {
         detach: bool,
 
         /// Commit-ish to use for the new worktree.
-        #[arg(default_value = "HEAD")]
-        revision: OsString,
+        #[arg(required_unless_present_any = ["branch", "detach"])]
+        revision: Option<OsString>,
 
         /// Repository in which Git should create linked-worktree metadata.
         #[arg(long, default_value = ".")]
@@ -481,9 +476,19 @@ fn run(cli: Cli) -> Result<()> {
                 repository,
                 state_dir,
             } => {
-                let mode = match (branch, detach) {
-                    (Some(branch), false) => riftri_core::WorktreeMode::NewBranch(branch),
-                    (None, true) => riftri_core::WorktreeMode::Detached,
+                let (mode, revision) = match (branch, detach, revision) {
+                    (Some(branch), false, revision) => (
+                        riftri_core::WorktreeMode::NewBranch(branch),
+                        revision.unwrap_or_else(|| OsString::from("HEAD")),
+                    ),
+                    (None, true, revision) => (
+                        riftri_core::WorktreeMode::Detached,
+                        revision.unwrap_or_else(|| OsString::from("HEAD")),
+                    ),
+                    (None, false, Some(branch)) => (
+                        riftri_core::WorktreeMode::ExistingBranch(branch.clone()),
+                        branch,
+                    ),
                     _ => unreachable!("Clap enforces exactly one worktree head mode"),
                 };
                 let result = riftri_core::add_worktree(riftri_core::AddWorktreeRequest {
@@ -1589,11 +1594,35 @@ mod tests {
         };
         assert_eq!(path, Path::new("../app-auth"));
         assert_eq!(branch.as_deref(), Some(OsStr::new("feature/auth")));
-        assert_eq!(revision, OsStr::new("main"));
+        assert_eq!(revision.as_deref(), Some(OsStr::new("main")));
     }
 
     #[test]
-    fn requires_a_branch_or_detached_mode() {
+    fn parses_an_existing_branch_worktree_command() {
+        let cli = Cli::try_parse_from(["riftri", "worktree", "add", "../app-auth", "feature/auth"])
+            .expect("parse existing-branch worktree command");
+
+        let Command::Worktree {
+            command:
+                WorktreeCommand::Add {
+                    path,
+                    branch,
+                    detach,
+                    revision,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("unexpected command");
+        };
+        assert_eq!(path, Path::new("../app-auth"));
+        assert!(branch.is_none());
+        assert!(!detach);
+        assert_eq!(revision.as_deref(), Some(OsStr::new("feature/auth")));
+    }
+
+    #[test]
+    fn requires_an_explicit_head_mode() {
         let error = Cli::try_parse_from(["riftri", "worktree", "add", "../app-auth"])
             .expect_err("head mode must be explicit");
 

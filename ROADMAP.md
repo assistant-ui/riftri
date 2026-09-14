@@ -98,7 +98,7 @@ Initial add/remove slice complete: repository-local `riftri enable` and
 `riftri disable`, `riftri exec -- <command>`, optional exact-worktree process
 binding, exact real-Git delegation, explicitly evaluated sh/bash/zsh and
 PowerShell hooks,
-supported `worktree add`, clean and explicitly forced managed
+supported `worktree add` for new, existing, and detached heads, clean and explicitly forced managed
 `worktree remove`, managed
 `worktree move`, and guarded `worktree prune` routing, and `RIFTRI_BYPASS=1`
 are implemented. Move and prune have forward-only durable journals and

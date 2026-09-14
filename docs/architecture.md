@@ -57,7 +57,8 @@ the current shell when explicitly evaluated. It does not change repository
 configuration or edit a shell profile, so persistent global activation remains
 under the user's direct control.
 
-The shim accepts optimized `worktree add` with `-b <new-branch>` or `--detach`
+The shim accepts optimized `worktree add` with an existing local branch,
+`-b <new-branch>`, or `--detach`
 and routes the ordinary no-option `worktree remove <path>` and `worktree move
 <source> <destination>` forms through Riftri when the target has an active
 Riftri add journal. A no-option `worktree prune` first verifies that every
@@ -188,6 +189,13 @@ For an enabled `git worktree add <path> <ref>` operation, the intended sequence 
 7. Populate or refresh the per-worktree index.
 8. Verify that `git status` reports the expected clean state.
 9. Atomically record the operation as active.
+
+Existing-branch requests resolve and validate the exact local branch before
+mutation. Git attaches that branch while holding Riftri's repository metadata
+lock, and Riftri verifies the attached HEAD still equals the preflight commit
+before materializing its tree. A moved or already-checked-out branch therefore
+fails through Git's normal safety rules and the journaled rollback path; Riftri
+never deletes a branch it did not create.
 
 Failures are rolled back from an operation journal. Riftri must not silently
 fall back to a full copy unless the user explicitly allows that policy.

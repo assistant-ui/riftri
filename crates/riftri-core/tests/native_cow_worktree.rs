@@ -237,6 +237,41 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
 }
 
 #[test]
+fn creates_a_clean_linked_worktree_for_an_existing_branch() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let destination = fixture.path().join("existing");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+    git(&repository, &["branch", "feature/existing"]);
+
+    add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        revision: OsString::from("feature/existing"),
+        mode: WorktreeMode::ExistingBranch(OsString::from("feature/existing")),
+        state_dir: Some(state),
+    })
+    .expect("create existing-branch Riftri worktree");
+
+    assert_eq!(
+        git(&destination, &["branch", "--show-current"]).trim(),
+        "feature/existing"
+    );
+    assert!(git(&destination, &["status", "--porcelain=v1"]).is_empty());
+}
+
+#[test]
 fn validates_unicode_aliases_before_durable_mutation() {
     for (first_name, second_name) in [("e\u{301}.txt", "é.txt"), ("Ü.txt", "ü.txt")] {
         let fixture = tempdir().unwrap();

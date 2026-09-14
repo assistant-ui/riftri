@@ -536,6 +536,23 @@ repository `info/attributes`, global/system attributes, and later configuration
 changes cannot change the cached bytes. The checkout-profile namespace changes
 so bases built with the older mutable-input path are not reused by new adds.
 
+### Existing branches remain caller-owned
+
+An optimized add may attach a real linked worktree to an exact existing local
+branch. Riftri resolves that branch before mutation, holds the Git worktree
+metadata lock while creating the no-checkout registration, and verifies that
+the attached branch still names the resolved commit before materializing a
+view. Tags, remote-tracking names, arbitrary commits, and implicit Git revision
+selection do not enter this mode.
+
+The add journal records both the attached branch and whether Riftri created it.
+Rollback deletes only a branch created by the same operation. For an existing
+branch, recovery may remove a pointer-only registration when a branch movement
+is detected in the narrow metadata-creation crash window, but it never deletes
+or rewinds that branch. Once materialization advances, branch or HEAD changes
+preserve the view for explicit user resolution. Version 1 journals that lack
+the ownership field retain the legacy created-branch interpretation.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

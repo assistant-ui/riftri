@@ -321,6 +321,8 @@ pub(crate) struct JournalRecord {
     base_path: NativeOsString,
     temporary_index: NativeOsString,
     branch: Option<NativeOsString>,
+    #[serde(default = "legacy_created_branch")]
+    branch_created: bool,
     pub expected_commit: String,
     #[serde(default = "legacy_apfs_backend")]
     pub backend: BackendKind,
@@ -349,6 +351,7 @@ pub(crate) struct JournalPaths<'a> {
     pub base_path: &'a Path,
     pub temporary_index: &'a Path,
     pub branch: Option<&'a OsStr>,
+    pub branch_created: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +365,7 @@ pub(crate) struct DecodedJournal {
     pub base_path: PathBuf,
     pub temporary_index: PathBuf,
     pub branch: Option<OsString>,
+    pub branch_created: bool,
     pub expected_commit: String,
     pub backend: BackendKind,
     pub overlayfs: Option<DecodedOverlayFsJournal>,
@@ -574,6 +578,7 @@ impl JournalRecord {
             base_path: NativeOsString::encode(paths.base_path.as_os_str()),
             temporary_index: NativeOsString::encode(paths.temporary_index.as_os_str()),
             branch: paths.branch.map(NativeOsString::encode),
+            branch_created: paths.branch_created,
             expected_commit,
             backend,
             overlayfs: None,
@@ -734,6 +739,7 @@ impl JournalRecord {
                 .branch
                 .map(|branch| branch.decode(&journal_path))
                 .transpose()?,
+            branch_created: self.branch_created,
             expected_commit: self.expected_commit,
             backend: self.backend,
             overlayfs,
@@ -757,6 +763,10 @@ fn validate_recovery_token(journal_path: &Path, token: &str) -> Result<(), Journ
 
 const fn legacy_apfs_backend() -> BackendKind {
     BackendKind::ApfsClone
+}
+
+const fn legacy_created_branch() -> bool {
+    true
 }
 
 impl RemovalJournalRecord {
@@ -2023,6 +2033,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             riftri_storage::BackendKind::ApfsClone,
@@ -2077,6 +2088,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             riftri_storage::BackendKind::ApfsClone,
@@ -2144,6 +2156,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             riftri_storage::BackendKind::ApfsClone,
@@ -2260,6 +2273,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: Some(OsString::from_vec(b"branch-\xfe".to_vec()).as_os_str()),
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             riftri_storage::BackendKind::ApfsClone,
@@ -2278,15 +2292,16 @@ mod tests {
             Some(b"branch-\xfe".as_slice())
         );
         assert_eq!(loaded[0].backend, riftri_storage::BackendKind::ApfsClone);
+        assert!(!loaded[0].branch_created);
 
         let mut legacy = serde_json::to_value(record).expect("serialize legacy fixture");
-        legacy
-            .as_object_mut()
-            .expect("journal object")
-            .remove("backend");
+        let legacy_object = legacy.as_object_mut().expect("journal object");
+        legacy_object.remove("backend");
+        legacy_object.remove("branch_created");
         let legacy: JournalRecord =
             serde_json::from_value(legacy).expect("read journal without backend field");
         assert_eq!(legacy.backend, riftri_storage::BackendKind::ApfsClone);
+        assert!(legacy.branch_created);
     }
 
     #[cfg(unix)]
@@ -2320,6 +2335,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             &layout_root,
@@ -2405,6 +2421,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             riftri_storage::BackendKind::OverlayFs,
@@ -2424,6 +2441,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             Path::new("/layout"),
@@ -2466,6 +2484,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             Path::new("/state/overlays/v1/operation"),
@@ -2717,6 +2736,7 @@ mod tests {
                 base_path: Path::new("/base"),
                 temporary_index: Path::new("/index"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             riftri_storage::BackendKind::ApfsClone,

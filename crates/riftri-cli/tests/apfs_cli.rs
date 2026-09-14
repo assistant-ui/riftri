@@ -199,3 +199,95 @@ fn worktree_add_uses_the_revision_resolved_before_mutation() {
             .is_empty()
     );
 }
+
+#[test]
+fn existing_branch_move_fails_and_rolls_back_without_deleting_the_branch() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let destination = fixture.path().join("worktree");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "first\n").expect("write first revision");
+    assert!(
+        git(&repository, &["add", "--", "tracked.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "first"])
+            .status
+            .success()
+    );
+    let first = String::from_utf8(git(&repository, &["rev-parse", "HEAD"]).stdout)
+        .expect("first commit is UTF-8")
+        .trim()
+        .to_owned();
+    assert!(
+        git(&repository, &["branch", "moving", &first])
+            .status
+            .success()
+    );
+    fs::write(repository.join("tracked.txt"), "second\n").expect("write second revision");
+    assert!(
+        git(&repository, &["commit", "-am", "second", "--quiet"])
+            .status
+            .success()
+    );
+    let second = String::from_utf8(git(&repository, &["rev-parse", "HEAD"]).stdout)
+        .expect("second commit is UTF-8")
+        .trim()
+        .to_owned();
+
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("locate real Git")
+            .stdout,
+    )
+    .expect("Git path is UTF-8")
+    .trim()
+    .to_owned();
+    let wrapper = fixture.path().join("moving-existing-git");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = add ]; then\n  \"$RIFTRI_TEST_REAL_GIT\" update-ref refs/heads/moving \"$RIFTRI_TEST_MOVED_COMMIT\" || exit $?\nfi\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write Git wrapper");
+    let mut permissions = fs::metadata(&wrapper)
+        .expect("wrapper metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).expect("make wrapper executable");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&destination)
+        .args(["moving", "--state-dir"])
+        .arg(&state)
+        .env("RIFTRI_SHIM_ACTIVE", "1")
+        .env("RIFTRI_REAL_GIT", &wrapper)
+        .env("RIFTRI_TEST_REAL_GIT", real_git)
+        .env("RIFTRI_TEST_MOVED_COMMIT", &second)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI through moving-ref wrapper");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("existing branch moved"));
+    assert!(!destination.exists());
+    assert_eq!(
+        String::from_utf8(git(&repository, &["rev-parse", "moving"]).stdout)
+            .expect("branch target is UTF-8")
+            .trim(),
+        second
+    );
+}

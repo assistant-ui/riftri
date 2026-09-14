@@ -113,6 +113,7 @@ pub(crate) struct DestinationBackendReadiness {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeMode {
     NewBranch(OsString),
+    ExistingBranch(OsString),
     Detached,
 }
 
@@ -1898,6 +1899,23 @@ fn add_worktree_inner(
     })?;
     let destination = normalize_new_destination(&request.destination)?;
     let resolved = git.resolve_revision(&repository_root, &request.revision)?;
+    if let WorktreeMode::ExistingBranch(branch) = &request.mode {
+        let target = git
+            .local_branch_target(&repository_root, branch)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidRequest(format!(
+                    "existing local branch does not exist: {}",
+                    branch.to_string_lossy()
+                ))
+            })?;
+        if target != resolved.commit {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "existing branch moved from {} to {} while the request was being validated",
+                resolved.commit.as_str(),
+                target.as_str()
+            )));
+        }
+    }
     let compatibility = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     let selected_backend = supported_worktree_backend(&destination)?;
@@ -1941,9 +1959,10 @@ fn add_worktree_inner(
         .parent()
         .expect("normalized destination has a parent")
         .join(format!(".riftri-view-{operation_id}"));
-    let branch = match &request.mode {
-        WorktreeMode::NewBranch(branch) => Some(branch.as_os_str()),
-        WorktreeMode::Detached => None,
+    let (branch, branch_created) = match &request.mode {
+        WorktreeMode::NewBranch(branch) => (Some(branch.as_os_str()), true),
+        WorktreeMode::ExistingBranch(branch) => (Some(branch.as_os_str()), false),
+        WorktreeMode::Detached => (None, false),
     };
     let journal_paths = JournalPaths {
         repository: &repository_root,
@@ -1953,6 +1972,7 @@ fn add_worktree_inner(
         base_path: &base_path,
         temporary_index: &temporary_index,
         branch,
+        branch_created,
     };
     let backend = selected_backend.kind;
     let mut journal = if backend == BackendKind::OverlayFs {
@@ -2073,6 +2093,7 @@ fn perform_add(
 ) -> Result<bool, WorktreeError> {
     let head = match mode {
         WorktreeMode::NewBranch(branch) => WorktreeHead::NewBranch(branch),
+        WorktreeMode::ExistingBranch(branch) => WorktreeHead::ExistingBranch(branch),
         WorktreeMode::Detached => WorktreeHead::Detached,
     };
     let metadata_lock = acquire_git_worktree_metadata_lock(common_git_dir)?;
@@ -2083,6 +2104,16 @@ fn perform_add(
         AddWorktreePhase::GitMetadataCreated,
         fail_after,
     )?;
+    if matches!(mode, WorktreeMode::ExistingBranch(_)) {
+        let attached = git.resolve_revision(destination, OsStr::new("HEAD"))?;
+        if attached.commit != *commit {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "existing branch moved from {} to {} while its worktree was being created",
+                commit.as_str(),
+                attached.commit.as_str()
+            )));
+        }
+    }
     drop(metadata_lock);
 
     let reused_base = prepare_base(
@@ -6204,26 +6235,40 @@ fn validate_recovery_paths(
 fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeError> {
     let metadata_lock =
         acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
-    let expected_branch_target =
-        if journal.last_forward_phase >= AddWorktreePhase::GitMetadataCreated {
-            journal
+    let expected_branch_target = if journal.last_forward_phase
+        >= AddWorktreePhase::GitMetadataCreated
+    {
+        journal
                 .branch
                 .as_ref()
                 .map(|branch| {
                     let expected = ObjectId::parse(journal.expected_commit.clone())?;
                     let current = git.local_branch_target(&journal.repository, branch)?;
                     if current.as_ref().is_some_and(|current| current != &expected) {
+                        let recoverable_creation_race = !journal.branch_created
+                            && journal.last_forward_phase
+                                == AddWorktreePhase::GitMetadataCreated
+                            && journal.destination.exists()
+                            && contains_only_git_pointer(&journal.destination)?;
+                        if !recoverable_creation_race {
+                            return Err(WorktreeError::InvalidRequest(format!(
+                                "branch {} moved after creation; recovery preserved its worktree",
+                                branch.to_string_lossy()
+                            )));
+                        }
+                    }
+                    if !journal.branch_created && current.is_none() {
                         return Err(WorktreeError::InvalidRequest(format!(
-                            "branch {} moved after creation; recovery preserved its worktree",
+                            "existing branch {} disappeared after creation; recovery preserved its worktree",
                             branch.to_string_lossy()
                         )));
                     }
                     Ok((branch, current))
                 })
                 .transpose()?
-        } else {
-            None
-        };
+    } else {
+        None
+    };
 
     let registered = git
         .list_worktrees(&journal.repository)?
@@ -6232,12 +6277,16 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
 
     if let Some(worktree) = registered {
         let expected = ObjectId::parse(journal.expected_commit.clone())?;
+        let expected_worktree_head = expected_branch_target
+            .as_ref()
+            .and_then(|(_, target)| target.as_ref())
+            .unwrap_or(&expected);
         let expected_branch = journal.branch.as_ref().map(|branch| {
             let mut reference = b"refs/heads/".to_vec();
             reference.extend_from_slice(branch.as_encoded_bytes());
             reference
         });
-        if worktree.head.as_ref() != Some(&expected)
+        if worktree.head.as_ref() != Some(expected_worktree_head)
             || worktree.branch != expected_branch
             || worktree.detached != journal.branch.is_none()
             || worktree.bare
@@ -6272,8 +6321,10 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     remove_file_if_present(&journal.temporary_index)?;
     remove_file_if_present(&pointer_staging_path(journal))?;
 
-    if let Some((branch, Some(_))) = expected_branch_target {
-        git.delete_branch_force(&journal.repository, branch)?;
+    if journal.branch_created {
+        if let Some((branch, Some(_))) = expected_branch_target {
+            git.delete_branch_force(&journal.repository, branch)?;
+        }
     }
     drop(metadata_lock);
     Ok(())
@@ -8035,6 +8086,7 @@ mod tests {
                 base_path: &base_path,
                 temporary_index: &state.join("tmp/index-operation"),
                 branch: None,
+                branch_created: false,
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             BackendKind::ApfsClone,
