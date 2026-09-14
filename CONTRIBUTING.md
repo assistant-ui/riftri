@@ -12,7 +12,7 @@ can agree on the direction first.
 
 ## Development setup
 
-Install stable Rust with Rustfmt and Clippy, Git, and Node.js 18.18 or newer.
+Install stable Rust with Rustfmt and Clippy, Git, and Node.js 20 or newer.
 Then run:
 
 ```console

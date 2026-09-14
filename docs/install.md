@@ -228,9 +228,10 @@ process-scoped or explicitly evaluated shell activation remain separate choices.
 ## npm is a separate channel
 
 GitHub downloads and npm packages contain the same native CLI for a given tag,
-but publication status is independent. Confirm the requested version exists in
-the npm registry before using `npx riftri`; a GitHub release does not by itself
-mean the corresponding npm launcher finished publishing.
+but publication status is independent. The `riftri` launcher is not currently
+available because the initial npm publication is incomplete. Use a standalone
+installer or GitHub release asset until this notice is removed. A GitHub release
+does not by itself mean the corresponding npm launcher finished publishing.
 
 ## Updating and uninstalling
 
