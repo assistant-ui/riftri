@@ -109,6 +109,9 @@ jobs:
       - name: Install website dependencies
         run: pnpm --dir website install --frozen-lockfile
 
+      - name: Audit deployed website dependencies
+        run: pnpm --dir website audit --prod
+
       - name: Check website types
         run: pnpm --dir website type-check
 
