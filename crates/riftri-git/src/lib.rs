@@ -332,6 +332,49 @@ impl Git {
         parse_tree_entries(&output.stdout)
     }
 
+    /// Return the uncompressed size of one exact blob object.
+    pub fn blob_size(&self, path: &Path, object: &ObjectId) -> Result<u64, GitError> {
+        let size = self.run_text(
+            Some(path),
+            &["cat-file", "-s", object.as_str()],
+            "blob size",
+        )?;
+        size.parse::<u64>()
+            .map_err(|error| GitError::InvalidOutput {
+                context: "blob size",
+                detail: error.to_string(),
+            })
+    }
+
+    /// Read the exact bytes of one blob object without consulting checkout
+    /// filters or the mutable working tree.
+    pub fn read_blob(&self, path: &Path, object: &ObjectId) -> Result<Vec<u8>, GitError> {
+        let arguments = [
+            OsString::from("cat-file"),
+            OsString::from("blob"),
+            OsString::from(object.as_str()),
+        ];
+        Ok(self.run_os(Some(path), &arguments)?.stdout)
+    }
+
+    /// Return the installed Git LFS version line, or `None` when the standard
+    /// `git lfs version` command is unavailable or unhealthy.
+    pub fn lfs_version(&self, path: &Path) -> Result<Option<Vec<u8>>, GitError> {
+        let arguments = [OsString::from("lfs"), OsString::from("version")];
+        let output = self.output_os(Some(path), &arguments)?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let version = trim_line_endings(&output.stdout);
+        if version.is_empty() {
+            return Err(GitError::InvalidOutput {
+                context: "git lfs version",
+                detail: "version output was empty".to_owned(),
+            });
+        }
+        Ok(Some(version.to_vec()))
+    }
+
     /// Check whether any repository configuration key matches a Git regexp.
     pub fn has_config_matching(&self, path: &Path, pattern: &str) -> Result<bool, GitError> {
         let arguments = [
@@ -377,9 +420,11 @@ impl Git {
     /// Read simple `section.variable` keys in one Git process, with normal
     /// configuration precedence and the same raw values as `config_value`.
     ///
-    /// Keys are case-insensitive and returned lowercase; subsection keys are
-    /// deliberately unsupported. Missing keys are absent, while empty values
-    /// and implicit booleans are present with empty bytes, as with `--get`.
+    /// Keys are case-insensitive and returned lowercase. This supports the
+    /// conservative ASCII subset needed by checkout configuration, including
+    /// subsection keys such as `filter.lfs.clean`. Missing keys are absent,
+    /// while empty values and implicit booleans are present with empty bytes,
+    /// as with `--get`.
     /// The result is operation-local: no answers are cached between calls.
     pub fn config_values(
         &self,
@@ -392,19 +437,18 @@ impl Git {
         let keys = keys
             .iter()
             .map(|key| {
-                let valid = key.split_once('.').is_some_and(|(section, variable)| {
-                    !section.is_empty()
-                        && section
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                        && variable
-                            .as_bytes()
-                            .first()
-                            .is_some_and(u8::is_ascii_alphabetic)
-                        && variable
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                });
+                let components = key.split('.').collect::<Vec<_>>();
+                let valid = components.len() >= 2
+                    && components.iter().all(|component| {
+                        !component.is_empty()
+                            && component
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+                    && components
+                        .last()
+                        .and_then(|variable| variable.as_bytes().first())
+                        .is_some_and(u8::is_ascii_alphabetic);
                 if !valid {
                     return Err(GitError::InvalidOutput {
                         context: "configuration keys",
@@ -1568,6 +1612,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn reads_exact_blob_bytes_and_size() {
+        let fixture = RepositoryFixture::committed();
+        let object = Command::new("git")
+            .args(["rev-parse", "HEAD:tracked.txt"])
+            .current_dir(fixture.path())
+            .output()
+            .expect("read object ID");
+        assert!(object.status.success());
+        let object = String::from_utf8(object.stdout).expect("UTF-8 object ID");
+        let object = super::ObjectId::parse(object.trim()).expect("object ID");
+        let git = Git::default();
+
+        assert_eq!(git.blob_size(fixture.path(), &object).unwrap(), 8);
+        assert_eq!(
+            git.read_blob(fixture.path(), &object).unwrap(),
+            b"tracked\n"
+        );
+    }
+
+    #[test]
+    fn batch_configuration_reads_lfs_subsection_keys() {
+        let fixture = RepositoryFixture::unborn();
+        git(
+            fixture.path(),
+            &["config", "filter.lfs.clean", "git-lfs clean -- %f"],
+        );
+        git(
+            fixture.path(),
+            &["config", "filter.lfs.process", "git-lfs filter-process"],
+        );
+        let values = Git::default()
+            .config_values(fixture.path(), &["filter.lfs.clean", "filter.lfs.process"])
+            .expect("read LFS configuration");
+
+        assert_eq!(
+            values.get("filter.lfs.clean").map(Vec::as_slice),
+            Some(&b"git-lfs clean -- %f"[..])
+        );
+        assert_eq!(
+            values.get("filter.lfs.process").map(Vec::as_slice),
+            Some(&b"git-lfs filter-process"[..])
+        );
+    }
+
     fn git(path: &Path, arguments: &[&str]) {
         let status = Command::new("git")
             .args(arguments)
@@ -2049,7 +2138,7 @@ mod tests {
             ".value",
             "core.*",
             "core.value|user.name",
-            "filter.subsection.clean",
+            "filter..clean",
             "core.1value",
         ] {
             assert!(

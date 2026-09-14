@@ -196,7 +196,11 @@ Outcome: cover real-world repositories and long-lived worktrees.
 
 - Validate potential ASCII case and Unicode aliases from the exact tree on the
   destination filesystem before durable state or Git metadata is created. (complete)
-- Git LFS and custom filter compatibility.
+- Git LFS and custom filter compatibility. (canonical Git LFS attributes,
+  standard filter configuration, strict v1 pointers, and verified objects from
+  the repository's default local LFS store are complete; custom filters,
+  pointer extensions, custom LFS storage, and implicit network fetching remain
+  fail-closed)
 - Sparse-checkout profiles.
 - Submodule policy and support.
 - Symlinks, executable modes, xattrs, and case-sensitivity testing. (native

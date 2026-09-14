@@ -235,6 +235,10 @@ that same transaction. Process-scoped commands can also be bound to a validated
 existing worktree without agent-specific behavior. Clean managed removals use a
 separate, recoverable journal, and retained bases expose derived reference
 counts plus logical and allocated-byte accounting.
+Canonical Git LFS paths can be expanded from strict v1 pointers when the
+standard filters are installed and the SHA-256-verified object is already in
+the repository's default local LFS store; custom filters and broader LFS
+profiles remain fail-closed.
 Repository-aware repair resumes incomplete journals, and explicit journaled
 garbage collection can remove independently revalidated zero-reference bases.
 Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and

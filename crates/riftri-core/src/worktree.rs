@@ -78,6 +78,22 @@ struct CompatibilityAnalysis {
     checkout_paths: Vec<PathBuf>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     checkout_config: Vec<(String, Vec<u8>)>,
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    lfs_objects: Vec<GitLfsObject>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitLfsPointer {
+    oid: String,
+    size: u64,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitLfsObject {
+    checkout_path: PathBuf,
+    source_path: PathBuf,
+    pointer: GitLfsPointer,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1676,6 +1692,7 @@ fn add_worktree_inner(
             &request.mode,
             &resolved.tree,
             &compatibility.checkout_config,
+            &compatibility.lfs_objects,
             &repository.identity.common_git_dir,
             fail_after,
         )
@@ -1742,6 +1759,7 @@ fn perform_add(
     mode: &WorktreeMode,
     tree: &ObjectId,
     checkout_config: &[(String, Vec<u8>)],
+    lfs_objects: &[GitLfsObject],
     common_git_dir: &Path,
     fail_after: Option<AddWorktreePhase>,
 ) -> Result<bool, WorktreeError> {
@@ -1767,6 +1785,7 @@ fn perform_add(
         base_staging,
         temporary_index,
         checkout_config,
+        lfs_objects,
     )?;
     advance(store, journal, AddWorktreePhase::BaseReady, fail_after)?;
 
@@ -2022,6 +2041,135 @@ fn acquire_base_read_lock(lock_path: &Path) -> Result<BaseReadLock, WorktreeErro
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn materialize_git_lfs_objects(
+    base_staging: &Path,
+    objects: &[GitLfsObject],
+) -> Result<(), WorktreeError> {
+    use std::io::{Read, Write};
+
+    for object in objects {
+        let destination = base_staging.join(&object.checkout_path);
+        let mut source_options = OpenOptions::new();
+        source_options.read(true);
+        #[cfg(unix)]
+        source_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+        #[cfg(target_os = "windows")]
+        source_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let mut source = source_options.open(&object.source_path).map_err(|error| {
+            WorktreeError::Unsupported(format!(
+                "could not open local Git LFS object {} for {}: {error}",
+                object.pointer.oid,
+                object.checkout_path.display()
+            ))
+        })?;
+        validate_opened_git_lfs_file(&source, &object.source_path, "local Git LFS object")?;
+        let source_size = source
+            .metadata()
+            .map_err(|error| io("inspect opened Git LFS object", &object.source_path, error))?
+            .len();
+        if source_size != object.pointer.size {
+            return Err(WorktreeError::Unsupported(format!(
+                "local Git LFS object {} changed size before materialization; expected {}, found {source_size}",
+                object.pointer.oid, object.pointer.size
+            )));
+        }
+
+        let mut destination_options = OpenOptions::new();
+        destination_options.write(true).truncate(true);
+        #[cfg(unix)]
+        destination_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+        #[cfg(target_os = "windows")]
+        destination_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let mut output = destination_options
+            .open(&destination)
+            .map_err(|error| io("open Git LFS checkout destination", &destination, error))?;
+        validate_opened_git_lfs_file(&output, &destination, "Git LFS checkout destination")?;
+
+        let mut digest = Sha256::new();
+        let mut copied = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = source
+                .read(&mut buffer)
+                .map_err(|error| io("read local Git LFS object", &object.source_path, error))?;
+            if count == 0 {
+                break;
+            }
+            copied = copied.checked_add(count as u64).ok_or_else(|| {
+                WorktreeError::Unsupported("Git LFS object size overflowed u64".to_owned())
+            })?;
+            digest.update(&buffer[..count]);
+            output
+                .write_all(&buffer[..count])
+                .map_err(|error| io("write expanded Git LFS object", &destination, error))?;
+        }
+        if copied != object.pointer.size {
+            return Err(WorktreeError::Unsupported(format!(
+                "local Git LFS object {} changed while it was read; expected {} bytes, read {copied}",
+                object.pointer.oid, object.pointer.size
+            )));
+        }
+        let actual_oid = format!("{:x}", digest.finalize());
+        if actual_oid != object.pointer.oid {
+            return Err(WorktreeError::Unsupported(format!(
+                "local Git LFS object {} failed SHA-256 verification; found {actual_oid}",
+                object.pointer.oid
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn validate_opened_git_lfs_file(
+    opened: &File,
+    path: &Path,
+    role: &str,
+) -> Result<(), WorktreeError> {
+    let opened_metadata = opened
+        .metadata()
+        .map_err(|error| io("inspect opened Git LFS file", path, error))?;
+    let path_metadata =
+        fs::symlink_metadata(path).map_err(|error| io("inspect Git LFS file path", path, error))?;
+    if !opened_metadata.is_file()
+        || !path_metadata.is_file()
+        || path_metadata.file_type().is_symlink()
+    {
+        return Err(WorktreeError::Unsupported(format!(
+            "{role} {} is not a stable regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened_metadata.dev() != path_metadata.dev()
+            || opened_metadata.ino() != path_metadata.ino()
+        {
+            return Err(WorktreeError::Unsupported(format!(
+                "{role} {} changed while it was opened",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        if opened_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || path_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return Err(WorktreeError::Unsupported(format!(
+                "{role} {} is a reparse point",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
 fn prepare_base(
     git: &Git,
     repository: &Path,
@@ -2030,6 +2178,7 @@ fn prepare_base(
     base_staging: &Path,
     temporary_index: &Path,
     checkout_config: &[(String, Vec<u8>)],
+    lfs_objects: &[GitLfsObject],
 ) -> Result<bool, WorktreeError> {
     let base_parent = base_path.expect_parent()?;
     let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
@@ -2067,6 +2216,7 @@ fn prepare_base(
         temporary_index,
         checkout_config,
     )?;
+    materialize_git_lfs_objects(base_staging, lfs_objects)?;
     remove_file_if_present(temporary_index)?;
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
@@ -2282,6 +2432,7 @@ fn analyze_resolved_repository_compatibility(
                 .to_owned(),
         });
     }
+    let mut lfs_paths = Vec::new();
 
     let info_attributes_path = git.info_attributes_path(repository)?;
     // Only an absent or empty regular file is supported. Inspect its metadata
@@ -2328,19 +2479,14 @@ fn analyze_resolved_repository_compatibility(
     };
     if info_attributes_safe {
         let mut in_tree = git.in_tree_attributes_for_paths(repository, &resolved.tree, &paths)?;
-        if let Some(attribute) = in_tree
-            .iter()
-            .find(|attribute| !is_supported_in_tree_attribute(attribute))
-        {
-            blockers.push(RepositoryCompatibilityBlocker {
-                kind: RepositoryCompatibilityBlockerKind::InTreeAttributes,
-                explanation: format!(
-                    "tree attribute {}={} for {} is outside Riftri's deterministic checkout allowlist; Git LFS, filters, encodings, ident substitution, legacy, and unknown attributes are not supported yet",
-                    String::from_utf8_lossy(&attribute.name),
-                    String::from_utf8_lossy(&attribute.value),
-                    attribute.path.display(),
-                ),
-            });
+        match classify_in_tree_attributes(&in_tree) {
+            Ok(paths) => lfs_paths = paths,
+            Err(explanation) => {
+                blockers.push(RepositoryCompatibilityBlocker {
+                    kind: RepositoryCompatibilityBlockerKind::InTreeAttributes,
+                    explanation,
+                });
+            }
         }
 
         let mut effective =
@@ -2358,7 +2504,7 @@ fn analyze_resolved_repository_compatibility(
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut profile = {
         let mut profile = Sha256::new();
-        profile.update(b"riftri-checkout-profile-v2-isolated\0");
+        profile.update(b"riftri-checkout-profile-v3-lfs\0");
         let git_version = git.detect()?.version;
         hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
         profile
@@ -2398,7 +2544,10 @@ fn analyze_resolved_repository_compatibility(
             RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
         ),
     ];
-    let config_keys = checked_config.iter().map(|(key, _, _)| *key);
+    let mut config_keys = checked_config
+        .iter()
+        .map(|(key, _, _)| *key)
+        .collect::<Vec<_>>();
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let profile_keys = [
         "core.filemode",
@@ -2408,8 +2557,19 @@ fn analyze_resolved_repository_compatibility(
         "core.protectntfs",
     ];
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    let config_keys = config_keys.chain(profile_keys);
-    let config_values = git.config_values(repository, &config_keys.collect::<Vec<_>>())?;
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    config_keys.extend(profile_keys);
+    let lfs_config_keys = [
+        "filter.lfs.clean",
+        "filter.lfs.smudge",
+        "filter.lfs.process",
+        "filter.lfs.required",
+        "lfs.storage",
+    ];
+    if !lfs_paths.is_empty() {
+        config_keys.extend(lfs_config_keys);
+    }
+    let config_values = git.config_values(repository, &config_keys)?;
     for (key, accepted, kind) in checked_config {
         let value = config_values.get(key).cloned();
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2442,6 +2602,77 @@ fn analyze_resolved_repository_compatibility(
             }
         }
     }
+    if !lfs_paths.is_empty() {
+        let expected_lfs_config = [
+            ("filter.lfs.clean", Some(&b"git-lfs clean -- %f"[..]), false),
+            (
+                "filter.lfs.smudge",
+                Some(&b"git-lfs smudge -- %f"[..]),
+                false,
+            ),
+            (
+                "filter.lfs.process",
+                Some(&b"git-lfs filter-process"[..]),
+                true,
+            ),
+            ("filter.lfs.required", Some(&b"true"[..]), false),
+            ("lfs.storage", None, true),
+        ];
+        for (key, expected, optional) in expected_lfs_config {
+            let value = config_values.get(key).map(Vec::as_slice);
+            #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+            hash_profile_input(&mut profile, key.as_bytes(), value);
+            let matches = match (value, expected) {
+                (None, None) => true,
+                (None, Some(_)) => optional,
+                (Some(actual), Some(expected)) if key == "filter.lfs.required" => {
+                    actual.eq_ignore_ascii_case(expected)
+                }
+                (Some(actual), Some(expected)) => actual == expected,
+                (Some(_), None) => false,
+            };
+            if !matches {
+                blockers.push(RepositoryCompatibilityBlocker {
+                    kind: RepositoryCompatibilityBlockerKind::GitLfs,
+                    explanation: match value {
+                        Some(value) => format!(
+                            "Git LFS configuration {key}={} is outside Riftri's deterministic local-object profile",
+                            String::from_utf8_lossy(value)
+                        ),
+                        None => format!(
+                            "Git LFS configuration {key} is required for clean-worktree verification"
+                        ),
+                    },
+                });
+            }
+        }
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let mut lfs_objects = Vec::new();
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    if !lfs_paths.is_empty() {
+        let lfs_version = git.lfs_version(repository)?;
+        hash_profile_input(&mut profile, b"git-lfs.version", lfs_version.as_deref());
+        if lfs_version.is_none() {
+            blockers.push(RepositoryCompatibilityBlocker {
+                kind: RepositoryCompatibilityBlockerKind::GitLfs,
+                explanation: "the standard `git lfs` command is unavailable; Riftri cannot prove that the expanded worktree will remain clean"
+                    .to_owned(),
+            });
+        }
+        match inspect_git_lfs_objects(git, repository, &entries, &lfs_paths) {
+            Ok(objects) => {
+                for object in &objects {
+                    hash_lfs_profile_object(&mut profile, object);
+                }
+                lfs_objects = objects;
+            }
+            Err(explanation) => blockers.push(RepositoryCompatibilityBlocker {
+                kind: RepositoryCompatibilityBlockerKind::GitLfs,
+                explanation,
+            }),
+        }
+    }
     Ok(CompatibilityAnalysis {
         report: RepositoryCompatibilityReport {
             commit: resolved.commit.clone(),
@@ -2455,7 +2686,60 @@ fn analyze_resolved_repository_compatibility(
         checkout_paths: paths,
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_config,
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        lfs_objects,
     })
+}
+
+fn classify_in_tree_attributes(attributes: &[GitAttribute]) -> Result<Vec<PathBuf>, String> {
+    let mut by_path = BTreeMap::<PathBuf, Vec<&GitAttribute>>::new();
+    for attribute in attributes {
+        by_path
+            .entry(attribute.path.clone())
+            .or_default()
+            .push(attribute);
+    }
+    let mut lfs_paths = Vec::new();
+    for (path, attributes) in by_path {
+        let uses_lfs = attributes.iter().any(|attribute| {
+            matches!(attribute.name.as_slice(), b"filter" | b"diff" | b"merge")
+                && attribute.value == b"lfs"
+        });
+        if uses_lfs {
+            let required = [
+                (&b"filter"[..], &b"lfs"[..]),
+                (&b"diff"[..], &b"lfs"[..]),
+                (&b"merge"[..], &b"lfs"[..]),
+                (&b"text"[..], &b"unset"[..]),
+            ];
+            let canonical = attributes.len() == required.len()
+                && required.iter().all(|(name, value)| {
+                    attributes.iter().any(|attribute| {
+                        attribute.name.as_slice() == *name && attribute.value.as_slice() == *value
+                    })
+                });
+            if !canonical {
+                return Err(format!(
+                    "Git LFS attributes for {} must resolve exactly to filter=lfs, diff=lfs, merge=lfs, and -text; mixed or custom filter semantics remain unsupported",
+                    path.display()
+                ));
+            }
+            lfs_paths.push(path);
+            continue;
+        }
+        if let Some(attribute) = attributes
+            .iter()
+            .find(|attribute| !is_supported_in_tree_attribute(attribute))
+        {
+            return Err(format!(
+                "tree attribute {}={} for {} is outside Riftri's deterministic checkout allowlist; custom filters, encodings, ident substitution, legacy, and unknown attributes are not supported yet",
+                String::from_utf8_lossy(&attribute.name),
+                String::from_utf8_lossy(&attribute.value),
+                attribute.path.display(),
+            ));
+        }
+    }
+    Ok(lfs_paths)
 }
 
 fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
@@ -2466,6 +2750,164 @@ fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
         b"diff" | b"merge" => attribute.value == b"unset",
         _ => false,
     }
+}
+
+fn parse_git_lfs_pointer(bytes: &[u8]) -> Result<GitLfsPointer, String> {
+    const VERSION: &[u8] = b"version https://git-lfs.github.com/spec/v1";
+    let lines = bytes.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    if lines.len() != 4 || lines[0] != VERSION || !lines[3].is_empty() {
+        return Err("Git LFS pointer is not the canonical three-line v1 representation".to_owned());
+    }
+    let oid = lines[1]
+        .strip_prefix(b"oid sha256:")
+        .ok_or_else(|| "Git LFS pointer does not contain a sha256 object ID".to_owned())?;
+    if oid.len() != 64
+        || !oid
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+    {
+        return Err("Git LFS object ID must be 64 lowercase hexadecimal characters".to_owned());
+    }
+    let size = lines[2]
+        .strip_prefix(b"size ")
+        .ok_or_else(|| "Git LFS pointer does not contain an object size".to_owned())?;
+    if size.is_empty()
+        || !size.iter().all(u8::is_ascii_digit)
+        || (size.len() > 1 && size[0] == b'0')
+    {
+        return Err("Git LFS object size is not canonical unsigned decimal".to_owned());
+    }
+    let size = std::str::from_utf8(size)
+        .expect("ASCII decimal was validated")
+        .parse::<u64>()
+        .map_err(|error| format!("Git LFS object size is invalid: {error}"))?;
+    Ok(GitLfsPointer {
+        oid: std::str::from_utf8(oid)
+            .expect("ASCII hexadecimal was validated")
+            .to_owned(),
+        size,
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn inspect_git_lfs_objects(
+    git: &Git,
+    repository: &Path,
+    entries: &[riftri_git::TreeEntry],
+    paths: &[PathBuf],
+) -> Result<Vec<GitLfsObject>, String> {
+    const MAX_POINTER_BYTES: u64 = 1024;
+    let repository_info = git
+        .inspect_repository(repository)
+        .map_err(|error| format!("could not locate the Git LFS object store: {error}"))?;
+    let mut objects = Vec::with_capacity(paths.len());
+    for path in paths {
+        let entry = entries
+            .iter()
+            .find(|entry| entry.path == *path)
+            .ok_or_else(|| {
+                format!(
+                    "Git LFS path {} is absent from the exact tree",
+                    path.display()
+                )
+            })?;
+        if entry.object_kind != b"blob" || !matches!(entry.mode, 0o100644 | 0o100755) {
+            return Err(format!(
+                "Git LFS path {} is not a regular file in the exact tree",
+                path.display()
+            ));
+        }
+        let blob_size = git
+            .blob_size(repository, &entry.object_id)
+            .map_err(|error| {
+                format!(
+                    "could not inspect Git LFS pointer {}: {error}",
+                    path.display()
+                )
+            })?;
+        if blob_size > MAX_POINTER_BYTES {
+            return Err(format!(
+                "Git LFS pointer {} is {blob_size} bytes; canonical pointers must be at most {MAX_POINTER_BYTES} bytes",
+                path.display()
+            ));
+        }
+        let bytes = git
+            .read_blob(repository, &entry.object_id)
+            .map_err(|error| {
+                format!("could not read Git LFS pointer {}: {error}", path.display())
+            })?;
+        let pointer = parse_git_lfs_pointer(&bytes)
+            .map_err(|error| format!("invalid Git LFS pointer {}: {error}", path.display()))?;
+        let source_path = repository_info
+            .identity
+            .common_git_dir
+            .join("lfs/objects")
+            .join(&pointer.oid[..2])
+            .join(&pointer.oid[2..4])
+            .join(&pointer.oid);
+        let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
+            format!(
+                "local Git LFS object {} for {} is unavailable at {}: {error}",
+                pointer.oid,
+                path.display(),
+                source_path.display()
+            )
+        })?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(format!(
+                "local Git LFS object {} for {} is not a regular file",
+                pointer.oid,
+                path.display()
+            ));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::fs::MetadataExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                return Err(format!(
+                    "local Git LFS object {} for {} is a reparse point",
+                    pointer.oid,
+                    path.display()
+                ));
+            }
+        }
+        if metadata.len() != pointer.size {
+            return Err(format!(
+                "local Git LFS object {} for {} has size {}, expected {}",
+                pointer.oid,
+                path.display(),
+                metadata.len(),
+                pointer.size
+            ));
+        }
+        objects.push(GitLfsObject {
+            checkout_path: path.clone(),
+            source_path,
+            pointer,
+        });
+    }
+    Ok(objects)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn hash_lfs_profile_object(hasher: &mut Sha256, object: &GitLfsObject) {
+    #[cfg(unix)]
+    let path = object.checkout_path.as_os_str().as_bytes().to_vec();
+    #[cfg(target_os = "windows")]
+    let path = object
+        .checkout_path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    hash_profile_input(hasher, b"git-lfs.path", Some(&path));
+    hash_profile_input(hasher, b"git-lfs.oid", Some(object.pointer.oid.as_bytes()));
+    hash_profile_input(
+        hasher,
+        b"git-lfs.size",
+        Some(&object.pointer.size.to_le_bytes()),
+    );
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -5488,6 +5930,61 @@ mod tests {
     }
 
     #[test]
+    fn git_lfs_pointer_parser_accepts_only_the_canonical_v1_shape() {
+        let oid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let pointer =
+            format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 42\n");
+        let parsed = super::parse_git_lfs_pointer(pointer.as_bytes()).expect("canonical pointer");
+        assert_eq!(parsed.oid, oid);
+        assert_eq!(parsed.size, 42);
+
+        for rejected in [
+            format!("version https://git-lfs.github.com/spec/v1\nsize 42\noid sha256:{oid}\n"),
+            format!(
+                "version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize 42\n",
+                oid.to_ascii_uppercase()
+            ),
+            format!(
+                "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 42\next-foo bar\n"
+            ),
+            format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize 042\n"),
+        ] {
+            assert!(
+                super::parse_git_lfs_pointer(rejected.as_bytes()).is_err(),
+                "accepted non-canonical pointer {rejected:?}"
+            );
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn git_lfs_materialization_rejects_same_size_corruption() {
+        use sha2::{Digest, Sha256};
+
+        let fixture = tempdir().expect("LFS materialization fixture");
+        let staging = fixture.path().join("staging");
+        fs::create_dir(&staging).expect("create staging directory");
+        fs::write(staging.join("asset.bin"), b"pointer\n").expect("write pointer destination");
+        let source = fixture.path().join("object");
+        fs::write(&source, b"evil").expect("write corrupt local object");
+        let expected = format!("{:x}", Sha256::digest(b"good"));
+        let object = super::GitLfsObject {
+            checkout_path: PathBuf::from("asset.bin"),
+            source_path: source.clone(),
+            pointer: super::GitLfsPointer {
+                oid: expected,
+                size: 4,
+            },
+        };
+
+        let error = super::materialize_git_lfs_objects(&staging, &[object])
+            .expect_err("same-size corrupt object must fail SHA-256 verification");
+
+        assert!(error.to_string().contains("failed SHA-256 verification"));
+        assert_eq!(fs::read(source).expect("source preserved"), b"evil");
+    }
+
+    #[test]
     fn empty_directory_cleanup_preserves_a_file_created_at_the_remove_boundary() {
         let fixture = tempdir().expect("cleanup race fixture");
         let destination = fixture.path().join("worktree");
@@ -5561,7 +6058,7 @@ mod tests {
                     .unwrap();
             // Reconstruct the previous, individual-read profile independently.
             let mut profile = Sha256::new();
-            profile.update(b"riftri-checkout-profile-v2-isolated\0");
+            profile.update(b"riftri-checkout-profile-v3-lfs\0");
             let version = git.detect().unwrap().version;
             super::hash_profile_input(&mut profile, b"git.version", Some(version.as_bytes()));
             let mut captured = Vec::new();

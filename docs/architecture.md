@@ -102,12 +102,25 @@ already covered by the exact tree ID. If Riftri cannot account for an active
 external input, it must reject optimized creation rather than reuse an
 ambiguous base.
 
-The current native COW policy asks Git to resolve attributes from the exact requested
-tree through an isolated temporary index. Only built-in `text`, `eol`, and
+The current native COW policy asks Git to resolve attributes from the exact
+requested tree through an isolated temporary index. Built-in `text`, `eol`, and
 `binary` checkout semantics are allowlisted; `diff` and `merge` records emitted
-by the built-in binary macro are checkout-neutral. Repository-local, global,
-and system attribute sources remain unsupported because they are mutable
-outside the tree identity.
+by the built-in binary macro are checkout-neutral. A narrow Git LFS profile is
+also supported when each affected path resolves to the canonical
+`filter=lfs diff=lfs merge=lfs -text` quartet, the installed filter
+configuration is standard, and the strict v1 pointer names an exact object in
+the repository's default local LFS store. Repository-local, global, and system
+attribute sources remain unsupported because they are mutable outside the tree
+identity.
+
+Git materializes the exact pointer tree inside Riftri's isolated administrative
+directory, where inherited filters are intentionally disabled. Riftri then
+opens each validated local LFS object without following links, checks its exact
+size and SHA-256 while streaming it into the base staging tree, and only then
+allows the immutable base rename and completion marker. Riftri never downloads
+an LFS object during a worktree transaction. The checkout profile includes the
+Git LFS version, standard filter configuration, native path, object ID, and
+size, so older or semantically different bases cannot be reused.
 
 ### Storage engine
 
@@ -467,8 +480,8 @@ concurrent worktree requests.
 - Never silently create a full copy when the selected policy requires COW.
 - Never run the complete Riftri process as root.
 - Never place writable Riftri lifecycle state on a network filesystem.
-- Treat submodules, sparse checkout, filters, and Git LFS as explicit
-  compatibility features with safe fallback behavior.
+- Treat submodules, sparse checkout, custom filters, and broader Git LFS forms
+  as explicit compatibility features with safe fallback behavior.
 
 ## Initial delivery sequence
 

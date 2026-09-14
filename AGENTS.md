@@ -52,10 +52,12 @@ creation actively verifies ReFS block cloning and private-write isolation before
 mutation and uses the same journaled lifecycle. Riftri still has no forced
 move/removal lifecycle path, automatic orphan-state repair, ordinary-NTFS
 backend, managed-environment integration, or daemon.
-The native COW checkout path accepts only an allowlisted deterministic subset of
-in-tree attributes (`text`, `eol`, and `binary` semantics). External attributes,
-Git LFS, custom filters, encodings, ident substitution, legacy attributes, and
-unknown attribute names remain fail-closed.
+The native COW checkout path accepts an allowlisted deterministic subset of
+in-tree attributes (`text`, `eol`, and `binary` semantics) plus canonical Git
+LFS paths backed by strict v1 pointers and verified objects already present in
+the default local LFS store. External attributes, custom LFS storage or pointer
+extensions, custom filters, encodings, ident substitution, legacy attributes,
+and unknown attribute names remain fail-closed.
 
 Milestone 4's transparent-Git compatibility matrix lives in
 `crates/riftri-cli/tests/global_activation.rs`. Global per-user shell activation
