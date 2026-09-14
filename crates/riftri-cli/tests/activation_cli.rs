@@ -812,6 +812,65 @@ fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
     );
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn powershell_hook_is_session_scoped_idempotent_and_reversible() {
+    let fixture = RepositoryFixture::new();
+    let cache = fixture.directory.path().join("cache with ' quote");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let script = r#"
+$hook = (& $env:RIFTRI_TEST_BIN shell hook powershell) -join [Environment]::NewLine
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Expression $hook
+Invoke-Expression $hook
+$shimDirectory = Join-Path $env:RIFTRI_CACHE_DIR 'shims\v1'
+$shim = Join-Path $shimDirectory 'git.exe'
+$matches = @($env:PATH -split ';' | Where-Object { $_ -eq $shimDirectory }).Count
+if ($matches -ne 1) { exit 41 }
+Write-Output "shim=$((Get-Command git -CommandType Application).Source)"
+& powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'git --version; exit $LASTEXITCODE'
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $env:RIFTRI_TEST_BIN shell status $env:RIFTRI_TEST_REPOSITORY
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$deactivate = (& $env:RIFTRI_TEST_BIN shell deactivate powershell) -join [Environment]::NewLine
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Invoke-Expression $deactivate
+if (Test-Path Env:RIFTRI_SHIM_ACTIVE) { exit 42 }
+if (Test-Path Env:RIFTRI_REAL_GIT) { exit 43 }
+if ((Get-Command git -CommandType Application).Source -eq $shim) { exit 44 }
+Write-Output 'deactivated=true'
+"#;
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+        .env("RIFTRI_TEST_REPOSITORY", &fixture.repository)
+        .env("RIFTRI_CACHE_DIR", &cache)
+        .output()
+        .expect("activate, inspect, and deactivate PowerShell hook");
+
+    assert!(
+        output.status.success(),
+        "PowerShell lifecycle failed with {:?}: {}\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 PowerShell output");
+    assert!(stdout.contains("shim="));
+    assert!(stdout.contains("shims\\v1\\git.exe"));
+    assert!(stdout.contains("git version "));
+    assert!(stdout.contains("Shell interception: active"));
+    assert!(stdout.contains("Repository optimization: enabled"));
+    assert!(stdout.contains("Effective optimized interception: active"));
+    assert!(stdout.contains("deactivated=true"));
+}
+
 #[test]
 fn enabled_unsupported_add_fails_without_falling_back() {
     let fixture = RepositoryFixture::new();

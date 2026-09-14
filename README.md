@@ -121,6 +121,15 @@ $ riftri enable
 $ git worktree add -b feature/auth ../app-auth main
 ```
 
+In Windows PowerShell, explicitly evaluate the equivalent session hook:
+
+```powershell
+Invoke-Expression ((riftri shell hook powershell) -join [Environment]::NewLine)
+Set-Location app
+riftri enable
+git worktree add -b feature/auth ../app-auth main
+```
+
 The shell hook may be added to your shell profile if you want it available in
 every new shell. This does **not** enable Riftri for every repository:
 `riftri enable` is still required in each repository. Commands in repositories
@@ -139,6 +148,12 @@ inspect activation, or deactivate the shim in the current shell with:
 
 ```console
 $ eval "$(riftri shell deactivate zsh)"
+```
+
+In PowerShell, deactivate the current session with:
+
+```powershell
+Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
 ```
 
 See [Global shell activation](docs/global-activation.md) for shell setup,

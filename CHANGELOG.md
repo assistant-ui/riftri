@@ -5,6 +5,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- Explicitly evaluated PowerShell activation and deactivation provide the same
+  repository-gated normal Git interception as sh, bash, and zsh without editing
+  PowerShell profiles or persistent `PATH`.
+
 ## 0.2.1 - 2026-09-13
 
 ### Fixed

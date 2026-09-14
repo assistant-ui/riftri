@@ -22,8 +22,8 @@ worktrees from strict native APFS clones, Linux reflinks, or ReFS block clones,
 reuses exact-tree immutable bases, persists atomic add journals, rolls back
 failures, and recovers interrupted
 adds without deleting a changed view. Repository-local activation, the
-process-scoped Git shim, and an
-explicitly evaluated sh/bash/zsh hook can route supported adds through the same
+process-scoped Git shim, and explicitly evaluated sh/bash/zsh or PowerShell
+hooks can route supported adds through the same
 transaction. Shell status and explicitly evaluated deactivation keep global
 per-user hook setup visible and reversible without editing shell profiles.
 Process-scoped commands can optionally start from a validated Git worktree root.
@@ -112,7 +112,15 @@ $ riftri enable
 $ git worktree add ../app-auth -b feature/auth main
 ```
 
-Both Git-shim modes must pass normal Git commands directly to the real Git
+Windows PowerShell uses an explicitly evaluated current-session hook:
+
+```powershell
+Invoke-Expression ((riftri shell hook powershell) -join [Environment]::NewLine)
+riftri enable
+git worktree add ../app-auth -b feature/auth main
+```
+
+All Git-shim modes must pass normal Git commands directly to the real Git
 executable, and repository-local enablement must control optimized adds. Shell
 integration must remain explicitly evaluated; never edit shell startup files or
 replace system Git globally by default.

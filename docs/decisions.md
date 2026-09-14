@@ -123,9 +123,11 @@ shim only to the selected child process tree and records the exact real Git
 executable before changing `PATH`. Its optional `--worktree` binding accepts an
 exact live root from Git's worktree inventory, changes only the child working
 directory, and remains independent of any agent brand. As an explicit alternative,
-`riftri shell hook <sh|bash|zsh>` prepares a versioned shim in the user's cache
-and prints environment changes for the user to evaluate. Riftri never evaluates
-the hook or edits a shell profile itself. In either scope, the shim delegates
+`riftri shell hook <sh|bash|zsh|powershell>` prepares a versioned shim in the
+user's cache and prints environment changes for the user to evaluate. Windows
+atomically installs a real `git.exe` shim so agents that launch Git directly
+receive the same behavior as interactive PowerShell commands. Riftri never
+evaluates the hook or edits a shell profile itself. In either scope, the shim delegates
 commands outside enabled repositories and non-worktree Git commands unchanged.
 Unsupported optimized add forms fail visibly; `RIFTRI_BYPASS=1` is the explicit
 ordinary-Git escape hatch.

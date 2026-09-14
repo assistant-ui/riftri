@@ -96,7 +96,8 @@ prompt or skill.
 
 Initial add/remove slice complete: repository-local `riftri enable` and
 `riftri disable`, `riftri exec -- <command>`, optional exact-worktree process
-binding, exact real-Git delegation, an explicitly evaluated sh/bash/zsh hook,
+binding, exact real-Git delegation, explicitly evaluated sh/bash/zsh and
+PowerShell hooks,
 supported `worktree add`, clean and explicitly forced managed
 `worktree remove`, managed
 `worktree move`, and guarded `worktree prune` routing, and `RIFTRI_BYPASS=1`
@@ -107,8 +108,8 @@ shell without editing a user's profile. Forced removal records an exact content
 snapshot and recovery preserves a view changed after that intent. Unsupported
 configured lifecycle forms remain fail-closed for managed state. The
 compatibility matrix covers
-installed sh/bash/zsh shells, disabled repositories, brand-neutral child
-process inheritance, Claude/Codex-named harnesses, passthrough standard I/O and
+installed sh/bash/zsh and Windows PowerShell sessions, disabled repositories,
+brand-neutral child process inheritance, Claude/Codex-named harnesses, passthrough standard I/O and
 exit status, repeated activation, deactivation, base reuse, and clean real Git
 worktrees. A manual, non-gating latency probe reports the global shim's
 per-command cost without imposing a host-load-sensitive threshold. Destination-
@@ -223,8 +224,9 @@ Outcome: expand the same storage contract without changing the Git UX.
 The first Windows-native slice is implemented: Riftri actively verifies ReFS
 block cloning and private-write isolation on the destination volume, creates
 real linked worktrees through the existing journaled lifecycle, and exercises
-explicit and process-scoped Git commands on a disposable ReFS volume in CI.
-Windows shell-profile integration, ordinary-NTFS alternatives, and managed
+explicit, process-scoped, and explicitly evaluated PowerShell Git interception
+on a disposable ReFS volume in CI. Riftri does not edit PowerShell profiles.
+Ordinary-NTFS alternatives and managed
 environments remain open, so the milestone as a whole is not yet complete.
 
 - ReFS block-clone capability and implementation. (complete)
