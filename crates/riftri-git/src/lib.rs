@@ -106,6 +106,7 @@ pub struct GitAttribute {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeHead<'a> {
     NewBranch(&'a OsStr),
+    ExistingBranch(&'a OsStr),
     Detached,
 }
 
@@ -944,13 +945,18 @@ impl Git {
             OsString::from("--quiet"),
             OsString::from("--no-checkout"),
         ];
-        match head {
+        let revision = match head {
             WorktreeHead::NewBranch(branch) => {
                 arguments.push(OsString::from("-b"));
                 arguments.push(branch.to_os_string());
+                revision
             }
-            WorktreeHead::Detached => arguments.push(OsString::from("--detach")),
-        }
+            WorktreeHead::ExistingBranch(branch) => branch,
+            WorktreeHead::Detached => {
+                arguments.push(OsString::from("--detach"));
+                revision
+            }
+        };
         arguments.push(git_path_argument(destination));
         arguments.push(revision.to_os_string());
         self.run_os(Some(repository), &arguments)?;
@@ -1965,6 +1971,33 @@ mod tests {
             git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
                 .expect("check removed branch"),
             None
+        );
+    }
+
+    #[test]
+    fn creates_suppressed_checkout_for_an_existing_branch() {
+        let fixture = RepositoryFixture::committed();
+        let linked_parent = tempdir().expect("linked parent");
+        let linked = linked_parent.path().join("existing");
+        let git_client = Git::default();
+        git(fixture.path(), &["branch", "feature/existing"]);
+
+        git_client
+            .add_worktree_no_checkout(
+                fixture.path(),
+                &linked,
+                OsStr::new("feature/existing"),
+                WorktreeHead::ExistingBranch(OsStr::new("feature/existing")),
+            )
+            .expect("add existing branch without checkout");
+
+        assert!(linked.join(".git").is_file());
+        assert!(!linked.join("tracked.txt").exists());
+        assert_eq!(
+            git_client
+                .run_text(Some(&linked), &["branch", "--show-current"], "branch")
+                .expect("read linked branch"),
+            "feature/existing"
         );
     }
 

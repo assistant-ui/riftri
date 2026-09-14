@@ -880,13 +880,12 @@ fn enabled_unsupported_add_fails_without_falling_back() {
     let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "add"])
         .arg(&destination)
-        .arg("HEAD")
         .current_dir(&fixture.repository)
         .output()
         .expect("run unsupported enabled add");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires `-b <branch>`"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires an existing local branch"));
     assert!(!destination.exists());
     assert!(!fixture.repository.join(".git/riftri").exists());
 }
@@ -926,6 +925,43 @@ fn exec_routes_enabled_git_worktree_add_through_apfs() {
             .is_empty()
     );
     assert!(fixture.repository.join(".git/riftri/operations").is_dir());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_routes_an_existing_branch_through_apfs() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("existing-branch-view");
+    assert!(
+        git(&fixture.repository, &["branch", "feature/existing"])
+            .status
+            .success()
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "add"])
+        .arg(&destination)
+        .arg("feature/existing")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run existing-branch Git worktree add");
+
+    assert!(
+        output.status.success(),
+        "existing-branch add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("optimized APFS worktree"));
+    assert_eq!(
+        String::from_utf8_lossy(&git(&destination, &["branch", "--show-current"]).stdout).trim(),
+        "feature/existing"
+    );
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
 }
 
 #[cfg(target_os = "macos")]

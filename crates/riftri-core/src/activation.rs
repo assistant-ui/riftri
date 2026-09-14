@@ -1077,16 +1077,25 @@ fn parse_enabled_add(
         index += 1;
     }
 
-    let mode = mode.ok_or_else(|| {
-        unsupported(format!(
-            "optimized add currently requires `-b <branch>` or `--detach`; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
-        ))
-    })?;
     if !(1..=2).contains(&positional.len()) {
         return Err(unsupported(
             "expected `git worktree add [options] <path> [<commit-ish>]`",
         ));
     }
+
+    let revision = positional
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| OsString::from("HEAD"));
+    let mode = match mode {
+        Some(mode) => mode,
+        None if positional.len() == 2 => WorktreeMode::ExistingBranch(revision.clone()),
+        None => {
+            return Err(unsupported(format!(
+                "optimized add requires an existing local branch, `-b <new-branch>`, or `--detach`; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+            )));
+        }
+    };
 
     let destination = PathBuf::from(&positional[0]);
     let destination = if destination.is_absolute() {
@@ -1098,10 +1107,7 @@ fn parse_enabled_add(
     Ok(AddWorktreeRequest {
         repository: repository.to_path_buf(),
         destination,
-        revision: positional
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| OsString::from("HEAD")),
+        revision,
         mode,
         state_dir: None,
     })
@@ -1464,6 +1470,29 @@ mod tests {
     }
 
     #[test]
+    fn enabled_existing_branch_add_is_planned_as_an_optimized_worktree() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let arguments = [
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("../activated-view"),
+            OsString::from("feature/existing"),
+        ];
+
+        let GitProxyPlan::OptimizedAdd(request) =
+            plan_git_command(fixture.path(), &arguments).expect("plan Git command")
+        else {
+            panic!("enabled existing-branch add was not optimized");
+        };
+        assert_eq!(request.revision, OsStr::new("feature/existing"));
+        assert_eq!(
+            request.mode,
+            WorktreeMode::ExistingBranch(OsString::from("feature/existing"))
+        );
+    }
+
+    #[test]
     fn disabled_repository_passes_the_same_add_to_git() {
         let fixture = repository_fixture();
         let arguments = [
@@ -1492,7 +1521,11 @@ mod tests {
 
         let error = plan_git_command(fixture.path(), &arguments)
             .expect_err("ambiguous worktree add must fail");
-        assert!(error.to_string().contains("requires `-b <branch>`"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires an existing local branch")
+        );
     }
 
     #[test]

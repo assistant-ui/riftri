@@ -102,6 +102,12 @@ $ cd ../app-auth
 $ git status
 ```
 
+Attach an existing local branch without creating a replacement branch:
+
+```console
+$ riftri worktree add ../app-auth feature/auth
+```
+
 The new directory behaves like any other Git worktree. Riftri shares unchanged
 data through an immutable native base; files allocate private storage as they
 are changed.
@@ -116,6 +122,7 @@ $ eval "$(riftri shell hook zsh)"
 $ cd app
 $ riftri enable
 $ git worktree add -b feature/auth ../app-auth main
+$ git worktree add ../existing-auth feature/existing-auth
 ```
 
 In Windows PowerShell, explicitly evaluate the equivalent session hook:
