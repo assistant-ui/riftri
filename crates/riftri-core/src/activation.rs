@@ -19,8 +19,8 @@ use crate::worktree::{managed_worktree_state_directory, repository_state_directo
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
     PruneWorktreesRequest, PruneWorktreesResult, RemoveWorktreeRequest, RemoveWorktreeResult,
-    WorktreeError, WorktreeMode, add_worktree, move_worktree, prune_worktrees, remove_worktree,
-    storage_accounting,
+    WorktreeError, WorktreeMode, add_worktree, force_remove_worktree, move_worktree,
+    prune_worktrees, remove_worktree, storage_accounting,
 };
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
@@ -48,6 +48,7 @@ pub enum GitProxyPlan {
     Passthrough,
     OptimizedAdd(AddWorktreeRequest),
     OptimizedRemove(RemoveWorktreeRequest),
+    OptimizedForceRemove(RemoveWorktreeRequest),
     OptimizedMove(MoveWorktreeRequest),
     OptimizedPrune(PruneWorktreesRequest),
 }
@@ -188,6 +189,9 @@ pub fn proxy_git_command(
         GitProxyPlan::OptimizedRemove(request) => {
             Ok(GitProxyOutcome::OptimizedRemove(remove_worktree(request)?))
         }
+        GitProxyPlan::OptimizedForceRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
+            force_remove_worktree(request)?,
+        )),
         GitProxyPlan::OptimizedMove(request) => {
             Ok(GitProxyOutcome::OptimizedMove(move_worktree(request)?))
         }
@@ -908,11 +912,23 @@ fn parse_enabled_add(
 fn parse_enabled_remove(
     repository: &Path,
     arguments: &[OsString],
-) -> Result<Option<RemoveWorktreeRequest>, ActivationError> {
-    let path = match arguments {
-        [path] => path,
-        [separator, path] if separator == "--" => path,
-        _ => return Ok(None),
+) -> Result<Option<(RemoveWorktreeRequest, bool)>, ActivationError> {
+    let mut force = false;
+    let mut options = true;
+    let mut positional = Vec::new();
+    for argument in arguments {
+        if options && argument == "--" {
+            options = false;
+        } else if options && matches!(argument.to_str(), Some("--force" | "-f")) {
+            force = true;
+        } else if options && argument.to_string_lossy().starts_with('-') {
+            return Ok(None);
+        } else {
+            positional.push(argument);
+        }
+    }
+    let [path] = positional.as_slice() else {
+        return Ok(None);
     };
     let destination = PathBuf::from(path);
     let destination = if destination.is_absolute() {
@@ -923,11 +939,14 @@ fn parse_enabled_remove(
     let Some(state_directory) = managed_worktree_state_directory(repository, &destination)? else {
         return Ok(None);
     };
-    Ok(Some(RemoveWorktreeRequest {
-        repository: repository.to_path_buf(),
-        destination,
-        state_dir: Some(state_directory),
-    }))
+    Ok(Some((
+        RemoveWorktreeRequest {
+            repository: repository.to_path_buf(),
+            destination,
+            state_dir: Some(state_directory),
+        },
+        force,
+    )))
 }
 
 fn plan_enabled_remove(
@@ -936,8 +955,12 @@ fn plan_enabled_remove(
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
     if optimization_compatible {
-        if let Some(request) = parse_enabled_remove(repository, arguments)? {
-            return Ok(GitProxyPlan::OptimizedRemove(request));
+        if let Some((request, force)) = parse_enabled_remove(repository, arguments)? {
+            return Ok(if force {
+                GitProxyPlan::OptimizedForceRemove(request)
+            } else {
+                GitProxyPlan::OptimizedRemove(request)
+            });
         }
     }
     guard_managed_path_lifecycle(repository, arguments, "remove")?;

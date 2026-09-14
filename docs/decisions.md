@@ -139,8 +139,8 @@ line.
 
 ### D018: removal moves forward and accounting is journal-derived
 
-Riftri removal records intent only after an initial clean check, invokes Git
-without `--force`, and moves forward to completion rather than trying to
+Clean Riftri removal records intent only after an initial clean check, invokes
+Git without `--force`, and moves forward to completion rather than trying to
 reconstruct a deleted writable view. Recovery rechecks a still-present view and
 preserves it if it changed. Active reference counts are derived from terminal
 add and removal journals instead of maintained as a second mutable counter.
@@ -422,6 +422,27 @@ non-ASCII case equivalence. This intentionally pays name-only probe I/O for
 international path sets rather than risk a false negative from an approximate
 Unicode folding table. Native Unix bytes remain intact; ASCII-only trees with
 no case alias retain their existing fast path.
+
+### D036: forced removal binds consent to an exact content snapshot
+
+`riftri worktree remove --force` and an enabled ordinary
+`git worktree remove --force` may discard changes in exactly one active managed
+view. Force is never inferred and does not broaden move or prune behavior.
+Before recording intent, native views are hashed across names, kinds, bytes,
+permissions, and symlink targets; OverlayFS records the equivalent complete
+private-layer snapshot. The removal journal persists the explicit force choice
+and lowercase SHA-256 snapshot without changing the version 1 phase machine.
+
+The snapshot is recomputed at the final deletion boundary and whenever repair
+resumes an incomplete force operation. A mismatch preserves the view and its
+base reference. A still-present native view reaches Git's force removal only
+after this comparison. If a view disappears after the durable checkpoint,
+metadata cleanup uses ordinary Git removal so a recreated destination does not
+inherit the old destructive consent. Snapshotting intentionally adds a full
+sequential read to forced native removal; clean removal keeps its existing fast
+Git status path. This revalidation boundary does not lock out a process already
+holding a writable file descriptor, so Riftri does not claim force removal is a
+filesystem sandbox against a cooperating user's concurrent writer.
 
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 

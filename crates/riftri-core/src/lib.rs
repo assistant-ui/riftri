@@ -41,9 +41,9 @@ pub use worktree::{
     GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PruneWorktreesRequest,
     PruneWorktreesResult, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
     StateDiagnosticIssue, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
-    WorktreeMode, add_worktree, forget_missing_state_directory, garbage_collect,
-    is_managed_worktree, move_worktree, prune_worktrees, recover_incomplete_operations,
-    remove_worktree, storage_accounting,
+    WorktreeMode, add_worktree, force_remove_worktree, forget_missing_state_directory,
+    garbage_collect, is_managed_worktree, move_worktree, prune_worktrees,
+    recover_incomplete_operations, remove_worktree, storage_accounting,
 };
 
 /// A diagnostic check and its optional failure explanation.

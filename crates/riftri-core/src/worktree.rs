@@ -333,6 +333,15 @@ pub fn remove_worktree(
     remove_worktree_inner(request, None)
 }
 
+/// Remove one explicitly selected managed worktree even when it has changes.
+/// The durable operation records and revalidates an exact content snapshot so
+/// recovery cannot discard changes made after this request.
+pub fn force_remove_worktree(
+    request: RemoveWorktreeRequest,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    force_remove_worktree_inner(request, None)
+}
+
 pub fn move_worktree(request: MoveWorktreeRequest) -> Result<MoveWorktreeResult, WorktreeError> {
     move_worktree_inner(request, None)
 }
@@ -1309,10 +1318,35 @@ fn remove_worktree_inner(
     ))
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn force_remove_worktree_inner(
+    request: RemoveWorktreeRequest,
+    fail_after: Option<RemoveWorktreePhase>,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    remove_worktree_inner(request, fail_after)
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn remove_worktree_inner(
     request: RemoveWorktreeRequest,
     fail_after: Option<RemoveWorktreePhase>,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    remove_worktree_with_mode(request, fail_after, false)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn force_remove_worktree_inner(
+    request: RemoveWorktreeRequest,
+    fail_after: Option<RemoveWorktreePhase>,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    remove_worktree_with_mode(request, fail_after, true)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn remove_worktree_with_mode(
+    request: RemoveWorktreeRequest,
+    fail_after: Option<RemoveWorktreePhase>,
+    force: bool,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
     let git = Git::default();
     let repository = git.inspect_repository(&request.repository)?;
@@ -1349,7 +1383,12 @@ fn remove_worktree_inner(
         )));
     }
     let overlayfs_clean_snapshot = snapshot_overlayfs_private_layer(&managed)?;
-    if !git.worktree_is_clean(&destination)? {
+    let force_snapshot = if force {
+        Some(snapshot_managed_worktree_for_force(&managed)?)
+    } else {
+        None
+    };
+    if !force && !git.worktree_is_clean(&destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "worktree {} has changes; commit, stash, or remove them before retrying",
             destination.display()
@@ -1358,15 +1397,20 @@ fn remove_worktree_inner(
 
     let store = RemovalJournalStore::create(&state_directory)?;
     let operation_id = allocate_removal_operation_id(&store)?;
-    let mut journal = RemovalJournalRecord::new(
-        operation_id,
-        RemovalJournalPaths {
-            repository: &repository_root,
-            destination: &destination,
-            base_path: &managed.base_path,
-        },
-        managed.operation_id.clone(),
-    );
+    let paths = RemovalJournalPaths {
+        repository: &repository_root,
+        destination: &destination,
+        base_path: &managed.base_path,
+    };
+    let mut journal = match force_snapshot {
+        Some(snapshot) => RemovalJournalRecord::new_forced(
+            operation_id,
+            paths,
+            managed.operation_id.clone(),
+            snapshot,
+        ),
+        None => RemovalJournalRecord::new(operation_id, paths, managed.operation_id.clone()),
+    };
     journal.overlayfs_clean_snapshot = overlayfs_clean_snapshot;
     let journal_path = store.persist(&journal)?;
     fail_removal_if_requested(journal.phase, fail_after)?;
@@ -1383,6 +1427,8 @@ fn remove_worktree_inner(
         &destination,
         &managed,
         journal.overlayfs_clean_snapshot.as_deref(),
+        journal.force,
+        journal.force_snapshot.as_deref(),
     )?;
     advance_removal(
         &store,
@@ -4346,16 +4392,33 @@ fn resume_removal(
     if record.phase == RemoveWorktreePhase::CleanVerified {
         let (registered, destination_exists) = removal_presence(git, &journal)?;
         if registered {
-            if destination_exists
-                && !managed_worktree_is_clean_for_removal(
+            let safe = if !destination_exists {
+                true
+            } else if journal.force {
+                managed_worktree_matches_force_snapshot(
+                    &managed,
+                    journal.force_snapshot.as_deref().ok_or_else(|| {
+                        WorktreeError::InvalidRequest(
+                            "forced removal journal has no content snapshot".to_owned(),
+                        )
+                    })?,
+                )?
+            } else {
+                managed_worktree_is_clean_for_removal(
                     git,
                     &managed,
                     journal.overlayfs_clean_snapshot.as_deref(),
                 )?
-            {
+            };
+            if !safe {
+                let reason = if journal.force {
+                    "changed after forced removal intent"
+                } else {
+                    "has changes"
+                };
                 return Err(WorktreeError::InvalidRequest(format!(
-                    "worktree {} has changes; recovery preserved it",
-                    journal.destination.display()
+                    "worktree {} {reason}; recovery preserved it",
+                    journal.destination.display(),
                 )));
             }
             remove_managed_worktree_files(
@@ -4364,6 +4427,8 @@ fn resume_removal(
                 &journal.destination,
                 &managed,
                 journal.overlayfs_clean_snapshot.as_deref(),
+                journal.force,
+                journal.force_snapshot.as_deref(),
             )?;
         } else if destination_exists {
             return Err(WorktreeError::InvalidRequest(format!(
@@ -4764,14 +4829,30 @@ fn verify_recoverable_removal(
     managed: &DecodedJournal,
 ) -> Result<(), WorktreeError> {
     let (registered, destination_exists) = removal_presence(git, journal)?;
-    if registered
-        && destination_exists
-        && !managed_worktree_is_clean_for_removal(git, managed, None)?
-    {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "worktree {} has changes; recovery preserved it",
-            journal.destination.display()
-        )));
+    if registered && destination_exists {
+        let safe = if journal.force {
+            managed_worktree_matches_force_snapshot(
+                managed,
+                journal.force_snapshot.as_deref().ok_or_else(|| {
+                    WorktreeError::InvalidRequest(
+                        "forced removal journal has no content snapshot".to_owned(),
+                    )
+                })?,
+            )?
+        } else {
+            managed_worktree_is_clean_for_removal(git, managed, None)?
+        };
+        if !safe {
+            let reason = if journal.force {
+                "changed after forced removal intent"
+            } else {
+                "has changes"
+            };
+            return Err(WorktreeError::InvalidRequest(format!(
+                "worktree {} {reason}; recovery preserved it",
+                journal.destination.display(),
+            )));
+        }
     }
     if !registered && destination_exists {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -4811,6 +4892,38 @@ fn snapshot_overlayfs_private_layer(
     Err(WorktreeError::Unsupported(
         "OverlayFS snapshots require Linux".to_owned(),
     ))
+}
+
+fn snapshot_managed_worktree_for_force(managed: &DecodedJournal) -> Result<String, WorktreeError> {
+    if managed.backend == BackendKind::OverlayFs {
+        return snapshot_overlayfs_private_layer(managed)?.ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "OverlayFS worktree {} has no private-layer snapshot",
+                managed.destination.display()
+            ))
+        });
+    }
+    let marker = crate::base_integrity::marker(&managed.destination).map_err(|source| {
+        io(
+            "snapshot managed worktree before forced removal",
+            &managed.destination,
+            source,
+        )
+    })?;
+    let mut digest = Sha256::new();
+    digest.update(b"riftri-forced-removal-snapshot-v1\0");
+    digest.update(marker);
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn managed_worktree_matches_force_snapshot(
+    managed: &DecodedJournal,
+    expected: &str,
+) -> Result<bool, WorktreeError> {
+    if !managed.destination.exists() {
+        return Ok(false);
+    }
+    Ok(snapshot_managed_worktree_for_force(managed)? == expected)
 }
 
 #[cfg(target_os = "linux")]
@@ -4953,12 +5066,33 @@ fn remove_managed_worktree_files(
     destination: &Path,
     managed: &DecodedJournal,
     expected_snapshot: Option<&str>,
+    force: bool,
+    force_snapshot: Option<&str>,
 ) -> Result<(), WorktreeError> {
     #[cfg(not(target_os = "linux"))]
     let _ = expected_snapshot;
     if managed.backend != BackendKind::OverlayFs {
+        if !force || !destination.exists() {
+            return git
+                .remove_worktree(repository, destination)
+                .map_err(WorktreeError::from);
+        }
+        #[cfg(test)]
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::ForceRemovalRevalidation,
+            destination,
+        );
+        let expected = force_snapshot.ok_or_else(|| {
+            WorktreeError::InvalidRequest("forced removal has no content snapshot".to_owned())
+        })?;
+        if !managed_worktree_matches_force_snapshot(managed, expected)? {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "worktree {} changed after forced removal intent; it was preserved",
+                destination.display()
+            )));
+        }
         return git
-            .remove_worktree(repository, destination)
+            .remove_worktree_force(repository, destination)
             .map_err(WorktreeError::from);
     }
     #[cfg(not(target_os = "linux"))]
@@ -4992,13 +5126,29 @@ fn remove_managed_worktree_files(
         let local_snapshot = overlayfs_layer_snapshot(layout.upper())?;
         match OverlayFsMounter::mount_state(&layout, identity)? {
             OverlayFsMountState::Active => {
-                if !git.worktree_is_clean(destination)? {
+                #[cfg(test)]
+                crate::test_hooks::fire(
+                    crate::test_hooks::FilesystemRacePoint::ForceRemovalRevalidation,
+                    destination,
+                );
+                let safe = if force {
+                    let current_snapshot = overlayfs_layer_snapshot(layout.upper())?;
+                    force_snapshot.is_some_and(|expected| current_snapshot == expected)
+                } else {
+                    git.worktree_is_clean(destination)?
+                };
+                if !safe {
                     return Err(changed_rollback_worktree(managed));
                 }
                 OverlayFsMounter::unmount(&layout, identity)?;
             }
             OverlayFsMountState::Absent => {
-                if expected_snapshot.is_none() && !overlayfs_private_layer_is_clean(&layout)? {
+                let safe = if force {
+                    force_snapshot.is_some_and(|expected| local_snapshot == expected)
+                } else {
+                    expected_snapshot.is_some() || overlayfs_private_layer_is_clean(&layout)?
+                };
+                if !safe {
                     return Err(changed_rollback_worktree(managed));
                 }
             }
@@ -5015,8 +5165,10 @@ fn remove_managed_worktree_files(
                 )));
             }
         }
-        if overlayfs_layer_snapshot(layout.upper())? != expected_snapshot.unwrap_or(&local_snapshot)
-        {
+        let expected_after_unmount = force_snapshot
+            .or(expected_snapshot)
+            .unwrap_or(&local_snapshot);
+        if overlayfs_layer_snapshot(layout.upper())? != expected_after_unmount {
             return Err(changed_rollback_worktree(managed));
         }
         restore_overlayfs_pointer(&layout)?;
@@ -5897,10 +6049,10 @@ mod tests {
     use super::Git;
     use super::{
         AddWorktreeRequest, BackendKind, MoveWorktreeRequest, PruneWorktreesRequest,
-        RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, garbage_collect_inner,
-        has_ascii_case_alias, move_worktree_inner, next_operation_id, prune_worktrees_inner,
-        recover_incomplete_operations, remove_empty_directory_if_present, remove_worktree_inner,
-        storage_accounting,
+        RemoveWorktreeRequest, WorktreeMode, add_worktree_inner, force_remove_worktree_inner,
+        garbage_collect_inner, has_ascii_case_alias, move_worktree_inner, next_operation_id,
+        prune_worktrees_inner, recover_incomplete_operations, remove_empty_directory_if_present,
+        remove_worktree_inner, storage_accounting,
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
@@ -7431,6 +7583,130 @@ mod tests {
         assert_eq!(repeated.recovered_removals, 0);
         assert_eq!(repeated.completed_removals, 1);
         assert!(repeated.errors.is_empty());
+    }
+
+    #[test]
+    fn forced_removal_preserves_a_write_at_the_delete_boundary_and_during_recovery() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        fs::write(destination.join("tracked.txt"), "discard requested\n")
+            .expect("dirty tracked file");
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::ForceRemovalRevalidation,
+            |path| {
+                fs::write(path.join("late.txt"), "preserve late write\n")
+                    .expect("write at force boundary");
+            },
+        );
+
+        let error = force_remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect_err("a write after force intent must stop deletion");
+
+        assert!(
+            error
+                .to_string()
+                .contains("changed after forced removal intent")
+        );
+        assert_eq!(
+            fs::read(destination.join("late.txt")).expect("late write preserved"),
+            b"preserve late write\n"
+        );
+        for _ in 0..2 {
+            let recovery = recover_incomplete_operations(&state).expect("repair report");
+            assert_eq!(recovery.recovered_removals, 0);
+            assert_eq!(recovery.errors.len(), 1, "{recovery:?}");
+            assert!(recovery.errors[0].contains("changed after forced removal intent"));
+            assert!(destination.exists());
+        }
+        let accounting = storage_accounting(&state).expect("retained accounting");
+        assert_eq!(accounting.active_views, 1);
+        assert_eq!(accounting.bases[0].reference_count, 1);
+    }
+
+    #[test]
+    fn forced_removal_recovers_an_unchanged_dirty_view_after_intent() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        fs::write(destination.join("untracked.txt"), "explicitly discarded\n")
+            .expect("dirty worktree");
+
+        let error = force_remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(RemoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("simulate interruption after durable force intent");
+        assert!(error.to_string().contains("injected removal failure"));
+        assert!(destination.exists());
+
+        let recovery = recover_incomplete_operations(&state).expect("recover forced removal");
+        assert!(recovery.errors.is_empty(), "{recovery:?}");
+        assert_eq!(recovery.recovered_removals, 1);
+        assert_eq!(recovery.completed_removals, 1);
+        assert!(!destination.exists());
+        let accounting = storage_accounting(&state).expect("released accounting");
+        assert_eq!(accounting.active_views, 0);
+        assert_eq!(accounting.bases[0].reference_count, 0);
     }
 
     #[test]

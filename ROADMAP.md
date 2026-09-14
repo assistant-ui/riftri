@@ -97,13 +97,16 @@ prompt or skill.
 Initial add/remove slice complete: repository-local `riftri enable` and
 `riftri disable`, `riftri exec -- <command>`, optional exact-worktree process
 binding, exact real-Git delegation, an explicitly evaluated sh/bash/zsh hook,
-supported `worktree add`, clean managed `worktree remove`, managed
+supported `worktree add`, clean and explicitly forced managed
+`worktree remove`, managed
 `worktree move`, and guarded `worktree prune` routing, and `RIFTRI_BYPASS=1`
 are implemented. Move and prune have forward-only durable journals and
 idempotent recovery. Shell status distinguishes hook activation from
 repository consent, and explicitly evaluated deactivation restores the current
-shell without editing a user's profile. Unsupported forced/configured lifecycle
-forms remain fail-closed for managed state. The compatibility matrix covers
+shell without editing a user's profile. Forced removal records an exact content
+snapshot and recovery preserves a view changed after that intent. Unsupported
+configured lifecycle forms remain fail-closed for managed state. The
+compatibility matrix covers
 installed sh/bash/zsh shells, disabled repositories, brand-neutral child
 process inheritance, Claude/Codex-named harnesses, passthrough standard I/O and
 exit status, repeated activation, deactivation, base reuse, and clean real Git

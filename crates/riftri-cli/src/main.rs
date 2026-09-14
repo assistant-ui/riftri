@@ -199,7 +199,7 @@ enum WorktreeCommand {
         state_dir: Option<PathBuf>,
     },
 
-    /// Safely remove a clean Riftri-managed linked worktree.
+    /// Safely remove a Riftri-managed linked worktree.
     Remove {
         /// Existing Riftri-managed worktree directory.
         path: PathBuf,
@@ -211,6 +211,10 @@ enum WorktreeCommand {
         /// Riftri state directory; defaults to <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+
+        /// Discard current changes after recording an exact recovery snapshot.
+        #[arg(long, short = 'f')]
+        force: bool,
     },
 
     /// Move a Riftri-managed linked worktree with recoverable metadata updates.
@@ -465,13 +469,25 @@ fn run(cli: Cli) -> Result<()> {
                 path,
                 repository,
                 state_dir,
+                force,
             } => {
-                let result = riftri_core::remove_worktree(riftri_core::RemoveWorktreeRequest {
+                let request = riftri_core::RemoveWorktreeRequest {
                     repository,
                     destination: path,
                     state_dir,
-                })?;
-                println!("Removed Riftri-backed Git worktree");
+                };
+                let result = if force {
+                    riftri_core::force_remove_worktree(request)?
+                } else {
+                    riftri_core::remove_worktree(request)?
+                };
+                if force {
+                    println!(
+                        "Force-removed Riftri-backed Git worktree after snapshot verification"
+                    );
+                } else {
+                    println!("Removed Riftri-backed Git worktree");
+                }
                 println!("Destination: {}", result.destination.display());
                 println!("Retained immutable base: {}", result.base_path.display());
                 println!("Journal: {}", result.journal_path.display());
@@ -1366,6 +1382,7 @@ mod tests {
                     path,
                     repository,
                     state_dir,
+                    force,
                 },
         } = remove.command
         else {
@@ -1374,6 +1391,18 @@ mod tests {
         assert_eq!(path, Path::new("../app-auth"));
         assert_eq!(repository, Path::new("../app"));
         assert!(state_dir.is_none());
+        assert!(!force);
+
+        let forced =
+            Cli::try_parse_from(["riftri", "worktree", "remove", "--force", "../app-auth"])
+                .expect("parse forced worktree removal");
+        let Command::Worktree {
+            command: WorktreeCommand::Remove { force, .. },
+        } = forced.command
+        else {
+            panic!("unexpected forced removal command");
+        };
+        assert!(force);
 
         let status =
             Cli::try_parse_from(["riftri", "status", "../app"]).expect("parse storage status");

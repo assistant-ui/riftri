@@ -241,6 +241,9 @@ the repository's default local LFS store; custom filters and broader LFS
 profiles remain fail-closed.
 Repository-aware repair resumes incomplete journals, and explicit journaled
 garbage collection can remove independently revalidated zero-reference bases.
+Explicit forced removal can discard a dirty managed view, but only after a
+durable exact-content snapshot; recovery refuses to delete a view changed after
+that intent.
 Status diagnoses unjournaled artifacts, empty base buckets, unsafe markers, and
 missing paths referenced by active journals without deleting them. Managed move
 and guarded prune use recoverable forward-only journals. The Linux reflink and

@@ -925,7 +925,7 @@ fn exec_routes_clean_managed_git_worktree_removal_through_riftri() {
 
 #[cfg(target_os = "macos")]
 #[test]
-fn enabled_forced_removal_of_a_managed_view_fails_closed() {
+fn enabled_forced_removal_of_a_managed_view_is_journaled() {
     let fixture = RepositoryFixture::new();
     let destination = fixture.directory.path().join("guarded-remove-view");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
@@ -949,21 +949,46 @@ fn enabled_forced_removal_of_a_managed_view_fails_closed() {
         "{}",
         String::from_utf8_lossy(&added.stderr)
     );
+    fs::write(
+        destination.join("tracked.txt"),
+        "discarded tracked change\n",
+    )
+    .expect("write tracked change");
+    fs::write(
+        destination.join("untracked.txt"),
+        "discarded untracked change\n",
+    )
+    .expect("write untracked change");
 
     let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "remove", "--force"])
         .arg(&destination)
         .current_dir(&fixture.repository)
         .output()
-        .expect("guard forced managed removal");
+        .expect("force-remove managed worktree");
 
-    assert!(!removal.status.success());
-    assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
-    assert!(destination.is_dir());
     assert!(
-        git(&destination, &["status", "--porcelain=v1"])
-            .stdout
-            .is_empty()
+        removal.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removal.stderr)
+    );
+    assert!(String::from_utf8_lossy(&removal.stderr).contains("safely removed worktree"));
+    assert!(!destination.exists());
+    let journals = fs::read_dir(fixture.repository.join(".git/riftri/removals"))
+        .expect("read removal journals")
+        .map(|entry| entry.expect("journal entry").path())
+        .collect::<Vec<_>>();
+    assert_eq!(journals.len(), 1);
+    let journal: serde_json::Value =
+        serde_json::from_slice(&fs::read(&journals[0]).expect("read removal journal"))
+            .expect("parse removal journal");
+    assert_eq!(journal["force"], true);
+    assert_eq!(
+        journal["force_snapshot"]
+            .as_str()
+            .expect("force snapshot")
+            .len(),
+        64
     );
 }
 
@@ -1003,7 +1028,11 @@ fn enabled_forced_removal_of_a_missing_managed_view_fails_closed() {
         .expect("guard forced removal of missing managed worktree");
 
     assert!(!removal.status.success());
-    assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+    assert!(
+        String::from_utf8_lossy(&removal.stderr).contains("resolve worktree destination"),
+        "{}",
+        String::from_utf8_lossy(&removal.stderr)
+    );
     let inventory = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
     assert!(inventory.status.success());
     assert!(
