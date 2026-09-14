@@ -144,7 +144,8 @@ ReFS, Riftri supports:
 
 - Optimized creation of real linked worktrees.
 - Repository-scoped and process-scoped Git interception.
-- Clean worktree removal, move, and prune operations.
+- Clean worktree removal plus snapshot-guarded forced removal, move, and prune
+  operations.
 - Reusable immutable bases with disk-usage reporting.
 - Journaled recovery, repair, and garbage collection.
 - Safe compatibility checks before any worktree is created.
@@ -187,6 +188,13 @@ $ riftri gc
 $ riftri gc --apply
 $ riftri state forget-missing /absolute/path/to/removed-state
 ```
+
+Clean removal remains the default. To intentionally discard tracked,
+untracked, and ignored changes in one managed worktree, use either
+`riftri worktree remove --force <path>` or enabled Git interception with
+`git worktree remove --force <path>`. Riftri records an exact content snapshot
+before deletion; if the view changes after that intent, deletion and recovery
+stop and preserve it for inspection.
 
 Automation can add `--json-errors` anywhere in a command. A failure is then
 written to stderr as one versioned JSON receipt with a stable code, category,

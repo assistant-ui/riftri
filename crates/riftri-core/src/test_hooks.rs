@@ -5,6 +5,7 @@ use std::path::Path;
 pub(crate) enum FilesystemRacePoint {
     JournalOpen,
     EmptyDirectoryRemoval,
+    ForceRemovalRevalidation,
     RollbackGitRemoval,
 }
 

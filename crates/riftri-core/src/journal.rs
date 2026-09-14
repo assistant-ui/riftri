@@ -386,6 +386,10 @@ pub(crate) struct RemovalJournalRecord {
     pub phase: RemoveWorktreePhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overlayfs_clean_snapshot: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -448,6 +452,8 @@ pub(crate) struct DecodedRemovalJournal {
     pub source_add_operation_id: String,
     pub phase: RemoveWorktreePhase,
     pub overlayfs_clean_snapshot: Option<String>,
+    pub force: bool,
+    pub force_snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -715,7 +721,22 @@ impl RemovalJournalRecord {
             source_add_operation_id,
             phase: RemoveWorktreePhase::IntentRecorded,
             overlayfs_clean_snapshot: None,
+            force: false,
+            force_snapshot: None,
         }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn new_forced(
+        operation_id: String,
+        paths: RemovalJournalPaths<'_>,
+        source_add_operation_id: String,
+        force_snapshot: String,
+    ) -> Self {
+        let mut record = Self::new(operation_id, paths, source_add_operation_id);
+        record.force = true;
+        record.force_snapshot = Some(force_snapshot);
+        record
     }
 
     pub fn transition(
@@ -739,6 +760,20 @@ impl RemovalJournalRecord {
                 version: self.format_version,
             });
         }
+        if self.force != self.force_snapshot.is_some()
+            || self.force_snapshot.as_deref().is_some_and(|snapshot| {
+                snapshot.len() != 64
+                    || !snapshot
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path,
+                detail: "forced removal must contain one lowercase SHA-256 content snapshot"
+                    .to_owned(),
+            });
+        }
         Ok(DecodedRemovalJournal {
             operation_id: self.operation_id,
             repository: PathBuf::from(self.repository.decode(&journal_path)?),
@@ -747,6 +782,8 @@ impl RemovalJournalRecord {
             source_add_operation_id: self.source_add_operation_id,
             phase: self.phase,
             overlayfs_clean_snapshot: self.overlayfs_clean_snapshot,
+            force: self.force,
+            force_snapshot: self.force_snapshot,
             journal_path,
         })
     }
@@ -1762,6 +1799,32 @@ mod tests {
             !store.path_for("replacement").exists(),
             "mismatched update created a second journal"
         );
+    }
+
+    #[test]
+    fn forced_removal_journal_requires_a_lowercase_sha256_snapshot() {
+        let paths = RemovalJournalPaths {
+            repository: Path::new("/repository"),
+            destination: Path::new("/destination"),
+            base_path: Path::new("/base"),
+        };
+        let valid = RemovalJournalRecord::new_forced(
+            "remove-operation".to_owned(),
+            paths,
+            "add-operation".to_owned(),
+            "ab".repeat(32),
+        );
+        let journal_path = Path::new("/state/removals/remove-operation.json").to_path_buf();
+        assert!(valid.clone().decode(journal_path.clone()).is_ok());
+
+        for snapshot in [None, Some("AB".repeat(32)), Some("ab".repeat(31))] {
+            let mut invalid = valid.clone();
+            invalid.force_snapshot = snapshot;
+            assert!(matches!(
+                invalid.decode(journal_path.clone()),
+                Err(JournalError::InvalidRecord { .. })
+            ));
+        }
     }
 
     #[test]

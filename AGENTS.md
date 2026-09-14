@@ -27,7 +27,8 @@ explicitly evaluated sh/bash/zsh hook can route supported adds through the same
 transaction. Shell status and explicitly evaluated deactivation keep global
 per-user hook setup visible and reversible without editing shell profiles.
 Process-scoped commands can optionally start from a validated Git worktree root.
-Clean managed removals now use a separate recoverable journal,
+Clean and explicitly forced managed removals use a separate recoverable journal;
+force intent includes an exact content snapshot, recovery preserves later changes,
 and status reports retained-base references and disk usage with repository-aware
 repair for incomplete journals. Explicit garbage collection uses its own
 recoverable journal and revalidates references under the immutable-base lock.
@@ -49,8 +50,8 @@ mount identity, and token-bound crash-gap recovery. Explicit repair remounts an
 active view after a boot change while preserving its private upper layer;
 mounted moves remain fail-closed. Windows
 creation actively verifies ReFS block cloning and private-write isolation before
-mutation and uses the same journaled lifecycle. Riftri still has no forced
-move/removal lifecycle path, automatic orphan-state repair, ordinary-NTFS
+mutation and uses the same journaled lifecycle. Riftri still has no forced move
+lifecycle path, automatic orphan-state repair, ordinary-NTFS
 backend, managed-environment integration, or daemon.
 The native COW checkout path accepts only an allowlisted deterministic subset of
 in-tree attributes (`text`, `eol`, and `binary` semantics). External attributes,

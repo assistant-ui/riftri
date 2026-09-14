@@ -234,11 +234,22 @@ intent-recorded
   -> complete
 ```
 
-Riftri validates cleanliness before recording intent and rechecks cleanliness
-when resuming before Git removes a still-registered view. Git performs removal
-without `--force`, so a concurrent dirtying write is also rejected. A missing
-view plus missing Git registration is treated as an idempotently completed
-removal step. Inconsistent or changed paths are preserved for manual attention.
+Clean removal validates cleanliness before recording intent and rechecks it
+when resuming before Git removes a still-registered view. Git performs that
+path without `--force`, so a concurrent dirtying write is also rejected.
+
+An explicit forced removal snapshots the complete native view, or the complete
+OverlayFS private layer, before recording durable intent. The journal records
+both the force choice and snapshot. Riftri re-hashes the view at the final
+delete boundary and during recovery; any later change stops the operation and
+is preserved. Only a still-present native view whose snapshot matches reaches
+Git's force removal. Missing-path metadata cleanup continues through ordinary
+Git safety checks, so recreating the destination cannot turn old force consent
+into deletion of a new path. A missing view plus missing Git registration is
+treated as an idempotently completed removal step. Inconsistent or changed
+paths are preserved for manual attention. Snapshot comparison is a final
+revalidation boundary, not a write lock against a process already holding an
+open file descriptor.
 
 ## Move-operation journal state machine
 
