@@ -75,6 +75,10 @@ outside a supported journal.
 The CLI exposes diagnostics and explicit operations. The optional shim preserves
 the `git worktree` user experience inside an activated process or shell while
 repository-local configuration controls whether an add is optimized.
+`riftri worktree list` derives its read-only managed inventory from validated
+active add journals and Git's NUL-delimited worktree inventory. Its JSON schema
+includes readable paths and refs plus exact native-path and raw-ref hexadecimal
+encodings, so machine output does not discard non-UTF-8 identities.
 
 The npm distribution layer does not implement product behavior. Its launcher
 selects an exact platform package, executes the Rust CLI, and preserves the

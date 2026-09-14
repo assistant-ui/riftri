@@ -212,9 +212,16 @@ pub struct BaseStorageAccounting {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewStorageAccounting {
+    pub repository: PathBuf,
     pub destination: PathBuf,
     pub base_path: PathBuf,
     pub backend: BackendKind,
+    pub head: ObjectId,
+    /// Full refname as raw Git bytes so non-UTF-8 refs remain representable.
+    pub branch: Option<Vec<u8>>,
+    pub detached: bool,
+    pub locked_reason: Option<Vec<u8>>,
+    pub prunable_reason: Option<Vec<u8>>,
     pub logical_bytes: u64,
     pub allocated_bytes: u64,
 }
@@ -746,6 +753,7 @@ pub fn storage_accounting(
         .collect::<HashSet<_>>();
     let git = Git::default();
     let mut add_journals = Vec::with_capacity(loaded_add_journals.len());
+    let mut registered_worktrees = BTreeMap::new();
     let mut invalid_add_journals = Vec::new();
     for journal in loaded_add_journals {
         match validate_status_add_journal(
@@ -754,7 +762,12 @@ pub fn storage_accounting(
             &journal,
             completed.contains(&journal.operation_id),
         ) {
-            Ok(()) => add_journals.push(journal),
+            Ok(worktree) => {
+                if let Some(worktree) = worktree {
+                    registered_worktrees.insert(journal.operation_id.clone(), worktree);
+                }
+                add_journals.push(journal);
+            }
             Err(error) => invalid_add_journals.push(StateDiagnosticIssue {
                 path: journal.journal_path.clone(),
                 reason: format!(
@@ -783,6 +796,20 @@ pub fn storage_accounting(
     }) {
         *references.entry(journal.base_path.clone()).or_default() += 1;
         if journal.destination.is_dir() {
+            let worktree = registered_worktrees
+                .get(&journal.operation_id)
+                .ok_or_else(|| {
+                    WorktreeError::InvalidRequest(format!(
+                        "active destination {} lost its validated Git inventory entry",
+                        journal.destination.display()
+                    ))
+                })?;
+            let head = worktree.head.clone().ok_or_else(|| {
+                WorktreeError::InvalidRequest(format!(
+                    "active destination {} has no Git HEAD commit",
+                    journal.destination.display()
+                ))
+            })?;
             let (logical_bytes, allocated_bytes) = tree_usage(&journal.destination)?;
             #[cfg(target_os = "linux")]
             let allocated_bytes = if journal.backend == BackendKind::OverlayFs
@@ -794,9 +821,15 @@ pub fn storage_accounting(
                 allocated_bytes
             };
             views.push(ViewStorageAccounting {
+                repository: journal.repository.clone(),
                 destination: journal.destination.clone(),
                 base_path: journal.base_path.clone(),
                 backend: journal.backend,
+                head,
+                branch: worktree.branch.clone(),
+                detached: worktree.detached,
+                locked_reason: worktree.locked_reason.clone(),
+                prunable_reason: worktree.prunable_reason.clone(),
                 logical_bytes,
                 allocated_bytes,
             });
@@ -941,23 +974,29 @@ fn validate_status_add_journal(
     state_directory: &Path,
     journal: &DecodedJournal,
     removal_complete: bool,
-) -> Result<(), WorktreeError> {
+) -> Result<Option<riftri_git::WorktreeInfo>, WorktreeError> {
     validate_recovery_paths(state_directory, journal)?;
     if journal.phase != AddWorktreePhase::Active || removal_complete {
-        return Ok(());
+        return Ok(None);
     }
     let registered = git
         .list_worktrees(&journal.repository)?
         .into_iter()
-        .any(|worktree| paths_match(&worktree.path, &journal.destination));
-    if !registered {
+        .find(|worktree| paths_match(&worktree.path, &journal.destination))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "active destination {} is not registered by Git for {}",
+                journal.destination.display(),
+                journal.repository.display()
+            ))
+        })?;
+    if registered.head.is_none() {
         return Err(WorktreeError::InvalidRequest(format!(
-            "active destination {} is not registered by Git for {}",
-            journal.destination.display(),
-            journal.repository.display()
+            "active destination {} has no Git HEAD commit",
+            journal.destination.display()
         )));
     }
-    Ok(())
+    Ok(Some(registered))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
