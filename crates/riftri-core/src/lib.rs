@@ -137,6 +137,7 @@ pub struct DestinationReadiness {
 pub enum RepositoryCompatibilityBlockerKind {
     InTreeAttributes,
     EffectiveAttributes,
+    GitLfs,
     Submodules,
     SparseCheckout,
     CheckoutConfiguration,
@@ -147,6 +148,7 @@ impl RepositoryCompatibilityBlockerKind {
         match self {
             Self::InTreeAttributes => "in-tree-attributes",
             Self::EffectiveAttributes => "effective-attributes",
+            Self::GitLfs => "git-lfs",
             Self::Submodules => "submodules",
             Self::SparseCheckout => "sparse-checkout",
             Self::CheckoutConfiguration => "checkout-configuration",
@@ -594,6 +596,9 @@ fn compatibility_remedy(kind: RepositoryCompatibilityBlockerKind) -> &'static st
         }
         RepositoryCompatibilityBlockerKind::EffectiveAttributes => {
             "Remove the external attributes or custom filters affecting tracked paths, or use ordinary Git for this worktree."
+        }
+        RepositoryCompatibilityBlockerKind::GitLfs => {
+            "Install Git LFS, restore its standard filter configuration, and fetch the reported local object, or use ordinary Git for this worktree."
         }
         RepositoryCompatibilityBlockerKind::Submodules => {
             "Use ordinary Git for this worktree until Riftri supports submodules."

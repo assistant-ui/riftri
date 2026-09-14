@@ -182,19 +182,34 @@ inventory and refuses to proceed while another lifecycle journal is pending.
 Prune can then be repeated safely during recovery. Unsupported configured or
 forced forms fail closed for managed state.
 
-### D022: deterministic in-tree attributes are resolved by Git
+### D022: deterministic in-tree attributes and canonical local Git LFS are resolved safely
 
 Riftri asks the installed Git executable to resolve attributes from the exact
 requested tree through an isolated temporary index; it does not parse attribute
-patterns itself. The APFS backend accepts only the built-in `text`, `eol`, and
-`binary` checkout semantics, including the checkout-neutral `diff` and `merge`
-records emitted by `binary`. The tree ID already makes these rules part of the
-immutable-base identity. Git LFS, custom filters, working-tree encodings, ident
-substitution, legacy or unknown attributes, and any effective repository-local,
-global, or system attribute source remain fail-closed. This deliberately
-narrows D016's initial blanket rejection without changing its exact-tree or
-external-input safety requirements; existing bases need no migration because
-an attributed tree was previously rejected before base creation.
+patterns itself. Native backends accept the built-in `text`, `eol`, and `binary`
+checkout semantics, including the checkout-neutral `diff` and `merge` records
+emitted by `binary`. The tree ID already makes these rules part of the
+immutable-base identity.
+
+Git LFS is accepted only for paths whose resolved in-tree attributes are
+exactly `filter=lfs diff=lfs merge=lfs -text`. Riftri requires the standard Git
+LFS clean/smudge configuration, permits only the standard optional process
+command, rejects custom `lfs.storage`, and requires a working `git lfs` command.
+The committed blob must be a strict, extension-free, three-line v1 pointer. Its
+object must already exist under the common Git directory's default LFS object
+store as a real file with the declared size. Materialization streams that object
+through SHA-256 verification into the isolated staging tree before the base is
+renamed or marked complete; it never performs an implicit fetch. Git LFS
+version/configuration plus each native path, object ID, and size are included in
+the versioned checkout profile. This gives common local Git LFS repositories a
+deterministic path without authorizing arbitrary filter execution while shared
+bases are built.
+
+Custom filters, pointer extensions, custom LFS storage, working-tree encodings,
+ident substitution, legacy or unknown attributes, and any effective
+repository-local, global, or system attribute source remain fail-closed. The
+new checkout-profile namespace prevents reuse of bases built under the earlier
+policy.
 
 ### D023: Linux reflinks use an active unnamed-file probe
 
@@ -483,8 +498,8 @@ so bases built with the older mutable-input path are not reused by new adds.
   input representation?
 - Can a future optimization safely seed a base from a separately verified clean
   worktree without weakening D016's correctness guarantee?
-- Which Git filter and LFS configurations can be added to a versioned checkout
-  profile without making base reuse ambiguous?
+- Which additional Git LFS pointer extensions or filter configurations can be
+  proven deterministic without executing arbitrary filters during base builds?
 - If scale requires an indexed registry, how can it remain a rebuildable cache of
   journal and completion-marker state rather than a second recovery authority?
 - Should clean-view compaction be manual, idle-time automatic, or policy-based?

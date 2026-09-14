@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[cfg(target_os = "macos")]
+use sha2::{Digest, Sha256};
 use tempfile::{TempDir, tempdir};
 
 struct RepositoryFixture {
@@ -41,7 +43,7 @@ impl RepositoryFixture {
 
 #[derive(Clone, Copy, Debug)]
 enum UnsafeCheckoutCase {
-    GitLfs,
+    NonCanonicalGitLfs,
     NestedEncoding,
     RepositoryAttributes,
     SparseCheckout,
@@ -50,7 +52,7 @@ enum UnsafeCheckoutCase {
 
 impl UnsafeCheckoutCase {
     const ALL: [Self; 5] = [
-        Self::GitLfs,
+        Self::NonCanonicalGitLfs,
         Self::NestedEncoding,
         Self::RepositoryAttributes,
         Self::SparseCheckout,
@@ -59,7 +61,7 @@ impl UnsafeCheckoutCase {
 
     fn name(self) -> &'static str {
         match self {
-            Self::GitLfs => "git-lfs",
+            Self::NonCanonicalGitLfs => "noncanonical-git-lfs",
             Self::NestedEncoding => "nested-encoding",
             Self::RepositoryAttributes => "repository-attributes",
             Self::SparseCheckout => "sparse-checkout",
@@ -69,7 +71,8 @@ impl UnsafeCheckoutCase {
 
     fn blocker_kind(self) -> &'static str {
         match self {
-            Self::GitLfs | Self::NestedEncoding => "in-tree-attributes",
+            Self::NonCanonicalGitLfs => "in-tree-attributes",
+            Self::NestedEncoding => "in-tree-attributes",
             Self::RepositoryAttributes => "effective-attributes",
             Self::SparseCheckout => "sparse-checkout",
             Self::SubmoduleGitlink => "submodules",
@@ -78,15 +81,21 @@ impl UnsafeCheckoutCase {
 
     fn configure(self, fixture: &RepositoryFixture) {
         match self {
-            Self::GitLfs => {
+            Self::NonCanonicalGitLfs => {
                 fs::write(
                     fixture.repository.join(".gitattributes"),
-                    "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+                    "*.bin filter=lfs -text\n",
                 )
-                .expect("write Git LFS attributes");
-                fs::write(fixture.repository.join("payload.bin"), "lfs pointer\n")
-                    .expect("write LFS fixture");
-                fixture.commit(&[".gitattributes", "payload.bin"], "Git LFS attributes");
+                .expect("write incomplete Git LFS attributes");
+                fs::write(
+                    fixture.repository.join("payload.bin"),
+                    "not an LFS pointer\n",
+                )
+                .expect("write unsafe LFS fixture");
+                fixture.commit(
+                    &[".gitattributes", "payload.bin"],
+                    "incomplete Git LFS attributes",
+                );
             }
             Self::NestedEncoding => {
                 fs::create_dir(fixture.repository.join("nested")).expect("create nested directory");
@@ -161,6 +170,120 @@ fn riftri(path: &Path, arguments: &[&str]) -> Output {
         .current_dir(path)
         .output()
         .expect("run Riftri CLI")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn canonical_local_git_lfs_object_creates_a_clean_isolated_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = RepositoryFixture::new();
+    let contents = vec![0x5a; 2 * 1024 * 1024];
+    let oid = format!("{:x}", Sha256::digest(&contents));
+    let pointer = format!(
+        "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
+        contents.len()
+    );
+    fs::write(
+        fixture.repository.join(".gitattributes"),
+        "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    )
+    .expect("write canonical LFS attributes");
+    fs::write(fixture.repository.join("payload.bin"), &pointer).expect("write LFS pointer");
+    fixture.commit(
+        &[".gitattributes", "payload.bin"],
+        "canonical Git LFS pointer",
+    );
+
+    let object = fixture
+        .repository
+        .join(".git/lfs/objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(&oid);
+    fs::create_dir_all(object.parent().expect("LFS object parent"))
+        .expect("create LFS object store");
+    fs::write(&object, &contents).expect("write local LFS object");
+
+    for (key, value) in [
+        ("filter.lfs.clean", "git-lfs clean -- %f"),
+        ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+        ("filter.lfs.required", "true"),
+    ] {
+        assert_git_success(&fixture.repository, &["config", key, value]);
+    }
+    let fake_bin = fixture
+        .repository
+        .parent()
+        .expect("repository parent")
+        .join("fake-bin");
+    fs::create_dir(&fake_bin).expect("create fake executable directory");
+    let fake_lfs = fake_bin.join("git-lfs");
+    fs::write(
+        &fake_lfs,
+        format!(
+            "#!/bin/sh\ncase \"$1\" in\n  version) printf '%s\\n' 'git-lfs/3.7.0 (riftri fixture)' ;;\n  clean) cat >/dev/null; printf '%s' '{pointer}' ;;\n  *) exit 1 ;;\nesac\n"
+        ),
+    )
+    .expect("write fake git-lfs");
+    fs::set_permissions(&fake_lfs, fs::Permissions::from_mode(0o755))
+        .expect("make fake git-lfs executable");
+    let inherited_path = std::env::var_os("PATH").expect("PATH");
+    let mut child_path = fake_bin.into_os_string();
+    child_path.push(":");
+    child_path.push(inherited_path);
+
+    let destination = fixture
+        .repository
+        .parent()
+        .expect("repository parent")
+        .join("lfs-worktree");
+    let state = fixture
+        .repository
+        .parent()
+        .expect("repository parent")
+        .join("lfs-state");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "worktree",
+            "add",
+            destination.to_str().expect("UTF-8 destination"),
+            "--detach",
+            "HEAD",
+            "--state-dir",
+            state.to_str().expect("UTF-8 state"),
+        ])
+        .current_dir(&fixture.repository)
+        .env("PATH", &child_path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run Riftri LFS add");
+    assert!(
+        output.status.success(),
+        "Riftri LFS add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(destination.join("payload.bin")).expect("read expanded payload"),
+        contents
+    );
+    let status = Command::new("git")
+        .args(["status", "--porcelain=v1", "-z"])
+        .current_dir(&destination)
+        .env("PATH", &child_path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("inspect LFS worktree");
+    assert!(status.status.success());
+    assert!(status.stdout.is_empty(), "expanded LFS worktree is dirty");
+    fs::write(destination.join("payload.bin"), b"private edit\n").expect("edit private view");
+    assert_eq!(
+        fs::read(&object).expect("read retained LFS object"),
+        vec![0x5a; 2 * 1024 * 1024],
+        "private worktree edit changed the local LFS object"
+    );
 }
 
 #[test]

@@ -156,6 +156,8 @@ ReFS, Riftri supports:
 - Reusable immutable bases with disk-usage reporting.
 - Journaled recovery, repair, and garbage collection.
 - Safe compatibility checks before any worktree is created.
+- Canonical Git LFS checkouts from already-fetched, SHA-256-verified local
+  objects.
 
 Linux OverlayFS is also available experimentally when the add-time probe proves
 that the current mount namespace can host a persistent view. On a normal Linux
@@ -181,9 +183,12 @@ valid helper is available, Riftri stops before mutation and never silently
 creates a full-copy worktree.
 
 Riftri deliberately stops with a clear explanation when a checkout cannot yet
-be reproduced safely—for example, repositories using Git LFS, custom filters,
-sparse checkout, submodules, or external attributes. It never silently replaces
-an optimized operation with a full worktree copy.
+be reproduced safely—for example, repositories using custom filters, extended
+or custom-storage Git LFS configurations, sparse checkout, submodules, or
+external attributes. Git LFS objects must already be fetched; Riftri does not
+perform network access during worktree creation. It never silently replaces an
+optimized operation with a full worktree copy. See the exact
+[Git LFS compatibility profile](docs/git-lfs.md).
 
 Useful commands:
 
