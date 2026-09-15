@@ -396,3 +396,127 @@ fn worktree_list_reports_only_managed_views_in_human_and_json_output() {
     assert!(worktrees[0]["logical_bytes"].is_u64());
     assert!(worktrees[0]["allocated_bytes"].is_u64());
 }
+
+#[test]
+fn lifecycle_commands_emit_stable_json_reports() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let destination = fixture.path().join("worktree");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
+    assert!(
+        git(&repository, &["add", "--", "tracked.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "initial"])
+            .status
+            .success()
+    );
+
+    let riftri = |arguments: &[&str]| -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_riftri"));
+        command
+            .args(arguments)
+            .args(["--state-dir"])
+            .arg(&state)
+            .arg("--json")
+            .current_dir(&repository);
+        command.output().expect("run Riftri CLI")
+    };
+    let parse = |output: &Output, operation: &str| -> serde_json::Value {
+        assert!(
+            output.status.success(),
+            "riftri {operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("parse {operation} JSON: {error}"))
+    };
+
+    let destination_argument = destination.to_str().expect("UTF-8 destination");
+    let added = parse(
+        &riftri(&[
+            "worktree",
+            "add",
+            destination_argument,
+            "-b",
+            "feature/json",
+        ]),
+        "worktree add",
+    );
+    assert_eq!(added["schema_version"], 1);
+    assert_eq!(added["backend"], "apfs-clone");
+    assert!(added["commit"].is_string());
+    assert!(added["tree"].is_string());
+    assert_eq!(added["reused_base"], false);
+    assert!(added["base_path"].is_string());
+    assert!(added["journal_path"].is_string());
+
+    let status = parse(&riftri(&["status", "."]), "status");
+    assert_eq!(status["schema_version"], 1);
+    assert_eq!(status["operations"]["active_views"], 1);
+    assert_eq!(status["bases"].as_array().expect("bases").len(), 1);
+    assert_eq!(status["bases"][0]["reference_count"], 1);
+    assert_eq!(status["bases"][0]["in_use"], true);
+    assert_eq!(status["worktrees"].as_array().expect("views").len(), 1);
+    assert_eq!(status["worktrees"][0]["backend"], "apfs-clone");
+    assert!(status["total_logical_bytes"].is_u64());
+
+    let compacted = parse(
+        &riftri(&["worktree", "compact", destination_argument]),
+        "worktree compact",
+    );
+    assert_eq!(compacted["schema_version"], 1);
+    assert_eq!(compacted["destination"], added["destination"]);
+    assert!(compacted["old_base_path"].is_string());
+    assert!(compacted["base_path"].is_string());
+
+    let repaired = parse(&riftri(&["repair", "."]), "repair");
+    assert_eq!(repaired["schema_version"], 1);
+    assert_eq!(repaired["errors"], serde_json::json!([]));
+    assert_eq!(repaired["active"], 1);
+
+    let removed = parse(
+        &riftri(&["worktree", "remove", destination_argument]),
+        "worktree remove",
+    );
+    assert_eq!(removed["schema_version"], 1);
+    assert_eq!(removed["forced"], false);
+    assert!(removed["base_path"].is_string());
+
+    let pruned = parse(&riftri(&["worktree", "prune"]), "worktree prune");
+    assert_eq!(pruned["schema_version"], 1);
+    assert!(pruned["journal_path"].is_string());
+
+    let plan = parse(&riftri(&["gc", "."]), "gc plan");
+    assert_eq!(plan["schema_version"], 1);
+    assert_eq!(plan["applied"], false);
+    assert!(
+        !plan["candidates"]
+            .as_array()
+            .expect("candidates")
+            .is_empty()
+    );
+    assert_eq!(plan["collected"], serde_json::json!([]));
+
+    let collected = parse(&riftri(&["gc", ".", "--apply"]), "gc apply");
+    assert_eq!(collected["applied"], true);
+    assert!(
+        !collected["collected"]
+            .as_array()
+            .expect("collected")
+            .is_empty()
+    );
+    assert!(collected["removed_logical_bytes"].is_u64());
+}
