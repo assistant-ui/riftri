@@ -190,8 +190,11 @@ Riftri asks the installed Git executable to resolve attributes from the exact
 requested tree through an isolated temporary index; it does not parse attribute
 patterns itself. Native backends accept the built-in `text`, `eol`, and `binary`
 checkout semantics, including the checkout-neutral `diff` and `merge` records
-emitted by `binary`. The tree ID already makes these rules part of the
-immutable-base identity.
+emitted by `binary`, plus GitHub's linguist metadata attributes
+(`linguist-generated`, `linguist-vendored`, `linguist-documentation`,
+`linguist-detectable`, `linguist-language`), which never participate in
+checkout and therefore cannot change materialized bytes. The tree ID already
+makes these rules part of the immutable-base identity.
 
 Git LFS is accepted only for paths whose resolved in-tree attributes are
 exactly `filter=lfs diff=lfs merge=lfs -text`. Riftri requires the standard Git
