@@ -20,5 +20,5 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src", "farm.config.ts", "docs.config.ts"]
+  "include": ["src", "farm.config.ts", "docs.config.ts", "playwright.config.ts", "tests/browser"]
 }
