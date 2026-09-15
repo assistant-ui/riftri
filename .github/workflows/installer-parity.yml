@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      DEPLOY_BASE_URL: https://riftri.vercel.app
+      DEPLOY_BASE_URL: https://riftri.dev
 
     steps:
       - name: Check out source
