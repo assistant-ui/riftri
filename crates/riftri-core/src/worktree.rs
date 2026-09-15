@@ -7089,8 +7089,8 @@ mod tests {
     use super::{
         AddWorktreeRequest, BackendKind, CompactWorktreeRequest, MoveWorktreeRequest,
         PruneWorktreesRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
-        compact_worktree_inner, force_remove_worktree_inner, garbage_collect_inner,
-        classify_in_tree_attributes, has_ascii_case_alias, move_worktree_inner, next_operation_id,
+        classify_in_tree_attributes, compact_worktree_inner, force_remove_worktree_inner,
+        garbage_collect_inner, has_ascii_case_alias, move_worktree_inner, next_operation_id,
         prune_worktrees_inner, recover_incomplete_operations, remove_empty_directory_if_present,
         remove_worktree_inner, storage_accounting,
     };

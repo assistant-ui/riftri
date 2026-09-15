@@ -564,7 +564,10 @@ fn creates_a_clean_worktree_with_checkout_neutral_linguist_attributes() {
         &repository,
         &["add", "--", ".gitattributes", "pnpm-lock.yaml", "query.q"],
     );
-    git(&repository, &["commit", "--quiet", "-m", "linguist attributes"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "-m", "linguist attributes"],
+    );
 
     let result = add_worktree(AddWorktreeRequest {
         repository: repository.clone(),
