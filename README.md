@@ -237,6 +237,12 @@ written to stderr as one versioned JSON receipt with a stable code, category,
 operation, optional durable phase, cleanup disposition, and recovery guidance.
 Normal successful output and default human-readable errors are unchanged.
 
+Successful results are machine-readable too: `doctor`, `backends`, `status`,
+`repair`, `gc`, and every `worktree` subcommand accept `--json` and print one
+versioned report on stdout, using the same stable schema conventions as
+`riftri worktree list --json`. Combined with `--json-errors`, an automation
+harness can parse every Riftri outcome without scraping human text.
+
 If a custom state directory was removed outside Riftri, lifecycle interception
 continues to fail closed. Remove that exact stale repository-local registration
 explicitly with `riftri state forget-missing`; existing state directories are
