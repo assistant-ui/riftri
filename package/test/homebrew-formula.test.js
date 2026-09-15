@@ -90,14 +90,18 @@ test("updating writes the formula to disk from a checksum manifest", async (t) =
 });
 
 test("the checked-in formula matches the generator and the released version", async () => {
-  const formula = fs.readFileSync(path.join(root, "Formula/riftri.rb"), "utf8");
+  // .gitattributes pins the formula to LF, but normalize anyway so the test
+  // does not depend on how a contributor's Git checked the file out.
+  const formula = fs
+    .readFileSync(path.join(root, "Formula/riftri.rb"), "utf8")
+    .replace(/\r\n/g, "\n");
   const version = formula.match(/^  version "([^"]+)"$/m)?.[1];
   assert.ok(version, "formula must declare a version");
 
   // Regenerating from the formula's own checksums must reproduce it byte for
   // byte, so a hand edit or a partial bump fails here instead of at install.
   const checksums = new Map();
-  const urls = formula.matchAll(/url "[^"]+\/(?<file>[^"/]+)"\n\s+sha256 "(?<sha>[0-9a-f]{64})"/g);
+  const urls = formula.matchAll(/url "[^"]+\/(?<file>[^"/]+)"\s+sha256 "(?<sha>[0-9a-f]{64})"/g);
   for (const match of urls) {
     checksums.set(match.groups.file, match.groups.sha);
   }
