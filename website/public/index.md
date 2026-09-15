@@ -232,6 +232,7 @@ maps every document in one place.
 
 ### Setup and platform guides
 
+- [CLI reference](https://github.com/assistant-ui/riftri/blob/main/docs/cli.md): every command, argument, and flag, plus the shared JSON output conventions.
 - [Installation](https://github.com/assistant-ui/riftri/blob/main/docs/install.md): standalone installers, manual downloads, updates, and uninstalling.
 - [Shell and process activation](https://github.com/assistant-ui/riftri/blob/main/docs/global-activation.md): opt-in Git interception and shell compatibility.
 - [Agent integration](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md): harness setup, the JSON automation contract, and the parallel-agent lifecycle.
@@ -239,6 +240,7 @@ maps every document in one place.
 - [Linux OverlayFS](https://github.com/assistant-ui/riftri/blob/main/docs/linux-overlayfs.md): mount requirements, helper setup, and recovery.
 - [Windows ReFS](https://github.com/assistant-ui/riftri/blob/main/docs/windows-refs.md): Windows backend requirements and testing.
 - [Git LFS](https://github.com/assistant-ui/riftri/blob/main/docs/git-lfs.md): accepted pointers, local object requirements, and limitations.
+- [Troubleshooting and FAQ](https://github.com/assistant-ui/riftri/blob/main/docs/troubleshooting.md): symptom-first answers for refused operations, activation gaps, recovery, and disk usage.
 
 ### Architecture and guarantees
 

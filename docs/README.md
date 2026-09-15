@@ -6,6 +6,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Setup and platform guides
 
+- [cli.md](cli.md) — every command, argument, and flag, plus the shared
+  `--json`/`--json-errors` conventions.
 - [install.md](install.md) — standalone installers, all release targets,
   checksum verification, updates, and uninstalling.
 - [global-activation.md](global-activation.md) — opt-in Git interception,
@@ -21,6 +23,8 @@ add it to that overview's documentation index — CI enforces the link.
   testing.
 - [git-lfs.md](git-lfs.md) — the exact accepted Git LFS profile and its
   fail-closed boundaries.
+- [troubleshooting.md](troubleshooting.md) — symptom-first answers: refused
+  operations, activation gaps, recovery, disk usage, and installation.
 
 ## Concepts and guarantees
 
