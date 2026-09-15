@@ -115,6 +115,63 @@ jobs:
       - name: Check the workspace on the declared rust-version
         run: cargo +1.88 check --workspace --all-targets --locked
 
+  coverage:
+    name: Coverage (cargo-llvm-cov)
+    runs-on: ubuntu-24.04
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install Rust coverage components
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Install npm metadata only
+        run: npm ci --ignore-scripts --omit=optional
+
+      - name: Measure workspace test coverage
+        run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+      - name: Summarize coverage
+        run: |
+          {
+            echo '## Coverage summary'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
+
+      # No-op until a maintainer adds the CODECOV_TOKEN repository secret;
+      # the step is skipped whenever the token is absent (for example on
+      # forks), so coverage never blocks contributors without the secret.
+      - name: Upload coverage to Codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.1.0
+        with:
+          files: lcov.info
+          token: ${{ env.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+
   website:
     name: Website
     runs-on: ubuntu-24.04
