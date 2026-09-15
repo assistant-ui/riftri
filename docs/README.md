@@ -6,6 +6,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Setup and platform guides
 
+- [cli.md](cli.md) — every command, argument, and flag, plus the shared
+  `--json`/`--json-errors` conventions.
 - [install.md](install.md) — standalone installers, all release targets,
   checksum verification, updates, and uninstalling.
 - [global-activation.md](global-activation.md) — opt-in Git interception,
