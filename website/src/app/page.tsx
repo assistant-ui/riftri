@@ -80,8 +80,8 @@ function Hero() {
           <a className="button button-secondary" href={githubUrl}>
             <GitHubIcon /> View GitHub <ArrowUpRightIcon />
           </a>
-          <a className="button button-secondary" href="/index.md" type="text/plain">
-            Read Markdown
+          <a className="button button-secondary" href="/index.md" type="text/plain" download="index.md">
+            Download Markdown
           </a>
         </div>
         <div className="hero-install">

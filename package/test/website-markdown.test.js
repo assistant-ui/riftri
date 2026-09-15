@@ -55,10 +55,10 @@ test("homepage makes its Markdown guide discoverable", () => {
   assert.match(page, /<a[^>]*href="\/index\.md"[^>]*rel="alternate"[^>]*type="text\/plain"[^>]*>\s*READ MARKDOWN\s*<\/a>/);
 });
 
-test("hero links directly to raw Markdown without adding a guide section", () => {
+test("hero downloads the raw Markdown file without adding a guide section", () => {
   const page = read("website/src/app/page.tsx");
   const hero = page.slice(page.indexOf("function Hero"), page.indexOf("const essentials"));
-  assert.match(hero, /<a[^>]*className="button button-secondary"[^>]*href="\/index\.md"[^>]*>\s*Read Markdown\s*<\/a>/);
+  assert.match(hero, /<a[^>]*className="button button-secondary"[^>]*href="\/index\.md"[^>]*download="index\.md"[^>]*>\s*Download Markdown\s*<\/a>/);
   assert.doesNotMatch(page, /MarkdownGuide|markdown-callout|id="markdown"/);
 });
 

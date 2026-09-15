@@ -7,11 +7,12 @@ transparent Git usage, safety, storage lifecycle, and compatibility all live at 
 It covers setup, internals, supported backends, lifecycle, and benchmark context,
 with absolute links to the detailed GitHub documentation. Keep it in sync with
 product changes and add newly stored technical docs to its documentation index.
-The hero actions and footer link directly to the file, without a separate guide
-section. Static output finalization requires the file and serves it as
+The hero actions offer a direct `index.md` download; the footer opens the raw
+file. Neither adds a separate guide section. Static output finalization requires the file and serves it as
 `text/plain; charset=utf-8`, with an inline `index.md` filename and `nosniff`.
-This preserves the literal Markdown and its line breaks in browsers that display
-`text/markdown` as flowing text; the response is the unchanged `.md` file, not HTML.
+The response is the unchanged `.md` file, not HTML. Plain-text handling preserves
+literal Markdown in standard browsers; downloading also avoids embedded viewers
+that flatten whitespace even when the server returns the correct content type.
 `node --test package/test/website-markdown.test.js package/test/website-static-output.test.js`
 checks document coverage, local GitHub targets, and output configuration.
 The guide's star request is optional; agents must have
