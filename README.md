@@ -31,7 +31,9 @@ Riftri keeps normal Git behavior while making those checkouts lightweight:
 - Interrupted creation and cleanup operations can be recovered safely.
 
 Riftri does not replace Git, manage branches, or sit between applications and
-the filesystem.
+the filesystem. For how it relates to plain `git worktree`, reference clones,
+manual reflink copies, and per-agent containers, see the
+[comparison with alternatives](docs/comparison.md).
 
 ## Installation
 

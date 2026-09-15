@@ -227,6 +227,8 @@ grows; shared worktrees are lightweight, not free.
 
 The detailed documentation lives with the code on GitHub. These links follow
 `main`; use the matching release tag when you need version-specific behavior.
+The [documentation index](https://github.com/assistant-ui/riftri/blob/main/docs/README.md)
+maps every document in one place.
 
 ### Setup and platform guides
 
@@ -244,6 +246,7 @@ The detailed documentation lives with the code on GitHub. These links follow
 - [Design decisions](https://github.com/assistant-ui/riftri/blob/main/docs/decisions.md): settled choices and open questions.
 - [Backend guarantees](https://github.com/assistant-ui/riftri/blob/main/docs/backend-guarantees.md): storage contracts and metadata profiles.
 - [Filesystem compatibility](https://github.com/assistant-ui/riftri/blob/main/docs/filesystem-compatibility.md): permissions, symlinks, extended attributes, and platform boundaries.
+- [Comparison with alternatives](https://github.com/assistant-ui/riftri/blob/main/docs/comparison.md): Riftri versus plain `git worktree`, reference clones, manual reflink copies, and containers.
 
 ### Measurements and optimization work
 
