@@ -196,7 +196,7 @@ enum WorktreeCommand {
         path: PathBuf,
 
         /// Create and check out a new branch.
-        #[arg(short = 'b', value_name = "BRANCH", conflicts_with = "detach")]
+        #[arg(short = 'b', long, value_name = "BRANCH", conflicts_with = "detach")]
         branch: Option<OsString>,
 
         /// Create a detached worktree instead of a branch.
@@ -1326,10 +1326,10 @@ fn print_worktree_inventory(
         }
         println!("  Backend: {}", view.backend.display_name());
         println!("  Immutable base: {}", view.base_path.display());
-        println!("  Logical bytes: {}", view.logical_bytes);
+        println!("  Logical: {}", display_byte_count(view.logical_bytes));
         println!(
-            "  Filesystem-accounted allocated bytes: {}",
-            view.allocated_bytes
+            "  Filesystem-accounted allocated: {}",
+            display_byte_count(view.allocated_bytes)
         );
     }
     if !report.diagnostic_issues.is_empty() {
@@ -1377,6 +1377,27 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 fn display_git_bytes(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Exact byte count first, with a binary-unit rendering for readability once
+/// the count reaches one KiB. JSON reports keep raw integers.
+fn display_byte_count(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} bytes");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let rendered = if value >= 100.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    };
+    format!("{bytes} bytes ({rendered} {})", UNITS[unit])
 }
 
 const fn native_path_encoding() -> &'static str {
@@ -1499,22 +1520,22 @@ fn print_storage_accounting(
             "in use"
         };
         println!(
-            "- {}: refs={}, logical={} bytes, filesystem-accounted allocated={} bytes, state={}",
+            "- {}: refs={}, logical={}, filesystem-accounted allocated={}, state={}",
             base.path.display(),
             base.reference_count,
-            base.logical_bytes,
-            base.allocated_bytes,
+            display_byte_count(base.logical_bytes),
+            display_byte_count(base.allocated_bytes),
             state
         );
     }
     println!("Active view storage:");
     for view in &report.views {
         println!(
-            "- {}: backend={}, logical={} bytes, filesystem-accounted allocated={} bytes, base={}",
+            "- {}: backend={}, logical={}, filesystem-accounted allocated={}, base={}",
             view.destination.display(),
             view.backend.display_name(),
-            view.logical_bytes,
-            view.allocated_bytes,
+            display_byte_count(view.logical_bytes),
+            display_byte_count(view.allocated_bytes),
             view.base_path.display()
         );
     }
@@ -1525,10 +1546,13 @@ fn print_storage_accounting(
     if !report.diagnostic_issues.is_empty() {
         println!("Attention: Riftri preserves unexplained state; inspect it before manual cleanup");
     }
-    println!("Total logical: {} bytes", report.total_logical_bytes);
     println!(
-        "Total filesystem-accounted allocated: {} bytes",
-        report.total_allocated_bytes
+        "Total logical: {}",
+        display_byte_count(report.total_logical_bytes)
+    );
+    println!(
+        "Total filesystem-accounted allocated: {}",
+        display_byte_count(report.total_allocated_bytes)
     );
     print_allocation_note();
     Ok(())
@@ -1605,10 +1629,10 @@ fn print_garbage_collection_report(
     println!("Eligible bases: {}", report.candidates.len());
     for candidate in &report.candidates {
         println!(
-            "- {}: logical={} bytes, filesystem-accounted allocated={} bytes",
+            "- {}: logical={}, filesystem-accounted allocated={}",
             candidate.base_path.display(),
-            candidate.logical_bytes,
-            candidate.allocated_bytes
+            display_byte_count(candidate.logical_bytes),
+            display_byte_count(candidate.allocated_bytes)
         );
     }
     println!("Collected bases: {}", report.collected.len());
@@ -1617,10 +1641,13 @@ fn print_garbage_collection_report(
         "Skipped because now in use: {}",
         report.skipped_in_use.len()
     );
-    println!("Removed logical bytes: {}", report.removed_logical_bytes);
     println!(
-        "Removed filesystem-accounted allocated bytes: {}",
-        report.removed_allocated_bytes
+        "Removed logical: {}",
+        display_byte_count(report.removed_logical_bytes)
+    );
+    println!(
+        "Removed filesystem-accounted allocated: {}",
+        display_byte_count(report.removed_allocated_bytes)
     );
     print_allocation_note();
     if !report.applied && !report.candidates.is_empty() {
@@ -1870,6 +1897,40 @@ mod tests {
             };
             assert!(json, "JSON flag not parsed for {arguments:?}");
         }
+    }
+
+    #[test]
+    fn parses_the_branch_long_flag_as_an_alias_for_b() {
+        let cli = Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "add",
+            "../view",
+            "--branch",
+            "feature/topic",
+        ])
+        .expect("parse worktree add with --branch");
+        let Command::Worktree {
+            command: WorktreeCommand::Add { branch, .. },
+        } = cli.command
+        else {
+            panic!("unexpected worktree command");
+        };
+        assert_eq!(branch.as_deref(), Some(OsStr::new("feature/topic")));
+    }
+
+    #[test]
+    fn byte_counts_render_exact_values_with_binary_units() {
+        use super::display_byte_count;
+
+        assert_eq!(display_byte_count(0), "0 bytes");
+        assert_eq!(display_byte_count(1023), "1023 bytes");
+        assert_eq!(display_byte_count(1024), "1024 bytes (1.0 KiB)");
+        assert_eq!(display_byte_count(1_572_864), "1572864 bytes (1.5 MiB)");
+        assert_eq!(
+            display_byte_count(214_748_364_800),
+            "214748364800 bytes (200 GiB)"
+        );
     }
 
     #[test]
