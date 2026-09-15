@@ -64,7 +64,12 @@ test("manual release rehearsals cannot receive publishing permissions", async ()
 
   assert.match(githubRelease, /^    if: github\.event_name == 'push'$/m);
   assert.match(githubRelease, /^      contents: write$/m);
-  assert.doesNotMatch(githubRelease, /id-token: write|NPM_TOKEN|npm publish/);
+  // id-token is granted solely so the job can sign artifact attestations;
+  // npm publishing credentials must never appear here.
+  assert.match(githubRelease, /^      id-token: write$/m);
+  assert.match(githubRelease, /^      attestations: write$/m);
+  assert.match(githubRelease, /Attest build provenance for release assets/);
+  assert.doesNotMatch(githubRelease, /NPM_TOKEN|npm publish|registry\.npmjs\.org/);
 });
 
 test("direct downloads publish independently of npm from the inspected staged assets", async () => {

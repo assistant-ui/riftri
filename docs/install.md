@@ -86,6 +86,20 @@ The checksum detects corrupted or mismatched downloads; it is not a separate
 signature or a notarization claim. Obtain both files over HTTPS from the
 expected repository. Stop if checksum verification fails.
 
+Releases after v0.2.1 also publish signed build provenance through GitHub
+artifact attestations, which proves an asset was built by this repository's
+release workflow. With the [GitHub CLI](https://cli.github.com/) installed,
+verify a downloaded archive (or `SHA256SUMS`) before unpacking it:
+
+```sh
+gh attestation verify riftri-darwin-arm64-v0.3.0.tar.gz --repo assistant-ui/riftri
+```
+
+The command fails if the file was not produced by a tagged release build of
+`assistant-ui/riftri`. Attestation complements the checksum: the checksum
+proves integrity against `SHA256SUMS`, and the attestation proves both were
+built and published by the expected workflow.
+
 ## macOS and Linux
 
 Choose `platform` from the table above, without the version and `.tar.gz`
