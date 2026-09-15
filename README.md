@@ -31,7 +31,9 @@ Riftri keeps normal Git behavior while making those checkouts lightweight:
 - Interrupted creation and cleanup operations can be recovered safely.
 
 Riftri does not replace Git, manage branches, or sit between applications and
-the filesystem.
+the filesystem. For how it relates to plain `git worktree`, reference clones,
+manual reflink copies, and per-agent containers, see the
+[comparison with alternatives](docs/comparison.md).
 
 ## Installation
 
@@ -225,7 +227,12 @@ $ riftri worktree compact ../app-auth
 $ riftri gc
 $ riftri gc --apply
 $ riftri state forget-missing /absolute/path/to/removed-state
+$ riftri completions zsh
 ```
+
+`riftri completions <shell>` prints a completion script for bash, zsh, fish,
+elvish, or PowerShell on stdout. Evaluate it in your shell profile or write it
+to your shell's completion directory; generation is offline and deterministic.
 
 Clean removal remains the default. To intentionally discard tracked,
 untracked, and ignored changes in one managed worktree, use either
