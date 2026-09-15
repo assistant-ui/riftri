@@ -21,6 +21,28 @@ argument or a `--repository` flag, defaulting to the current directory (`.`).
 Commands that touch Riftri state accept `--state-dir <PATH>` to override the
 default state directory at `<common-git-dir>/riftri`.
 
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Operational failure — Git, storage, journal, or filesystem I/O |
+| `2` | Usage error — unknown flag or missing argument, reported by the parser |
+| `3` | Policy refusal — Riftri declined a request it will not optimize |
+
+Codes `1` and `3` mirror the `category` field (`operational` / `policy`) of
+the `--json-errors` receipt, so a wrapper can branch on the exit status
+without parsing JSON. A policy refusal means nothing was changed; consult
+[decisions.md](decisions.md) for the forms Riftri refuses and `RIFTRI_BYPASS=1`
+to run one such command through ordinary Git instead.
+
+## Destructive commands
+
+`riftri gc --apply` and `riftri worktree remove --force` ask for confirmation
+when stdin and stderr are both terminals. Pass `--yes` to skip the prompt.
+Non-interactive callers — agents, scripts, CI — are never prompted, so
+existing automation keeps working unchanged.
+
 ## Enablement and activation
 
 ### `riftri enable [PATH]`
@@ -111,6 +133,7 @@ Plan or apply collection of immutable bases with no journaled references.
 | Flag | Effect |
 | --- | --- |
 | `--apply` | Apply the collection plan. Without this flag, nothing is deleted |
+| `--yes` | Skip the interactive confirmation. Requires `--apply` |
 | `--state-dir <STATE_DIR>` | Explicit Riftri state directory |
 | `--json` | Emit stable machine-readable JSON |
 
@@ -144,7 +167,9 @@ worktree.
 
 Safely remove a Riftri-managed linked worktree. Removal is fail-closed:
 worktrees with local changes are refused unless `-f, --force` is given, which
-discards current changes only after recording an exact recovery snapshot.
+discards current changes only after recording an exact recovery snapshot. A
+forced removal asks for confirmation on a terminal; `--yes` skips that prompt
+and requires `--force`.
 
 ### `riftri worktree move [OPTIONS] <SOURCE> <DESTINATION>`
 
