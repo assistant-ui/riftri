@@ -550,7 +550,7 @@ code, pre { font-family: var(--font-mono); }
 .savings-result small { max-width: 15rem; margin-top: 0.75rem; color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.75rem; line-height: 1.6; }
 .savings-notes { padding: 1.5rem 2rem; border-top: 1px dashed var(--line); color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.75rem; line-height: 1.7; }
 .savings-notes p { margin: 0 0 0.75rem; }
-.savings-notes strong { color: var(--ink); font-weight: 500; }
+.savings-details summary { width: fit-content; min-height: 44px; padding-block: 0.75rem; color: var(--ink); cursor: pointer; }
 .savings-notes code { font-size: 0.7rem; overflow-wrap: anywhere; }
 .savings-notes a { display: inline-block; padding-block: 0.5rem; color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
 
@@ -647,7 +647,7 @@ code, pre { font-family: var(--font-mono); }
   .button-primary:hover { border-color: var(--accent); background: var(--accent); }
   .button-secondary:hover { color: var(--ink); }
   .site-footer a:hover { color: var(--accent); }
-  .savings-notes a:hover { color: var(--accent); }
+  .savings-notes a:hover, .savings-details summary:hover { color: var(--accent); }
   .savings-backend-toggle:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
 }
 

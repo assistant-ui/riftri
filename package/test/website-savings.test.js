@@ -21,7 +21,7 @@ test("website savings measurements match the recorded assistant-ui experiment", 
   assert.equal(((data.gitBytes - data.riftriBytes) / 2 ** 20).toFixed(2), "673.39");
 });
 
-test("savings section retains benchmark scope, tradeoff, and a source link", () => {
+test("savings section keeps a short scope note and expandable benchmark details", () => {
   const page = read("website/src/app/page.tsx");
   const chart = read("website/src/components/savings-map.tsx");
   assert.match(page, /id="savings"/);
@@ -29,10 +29,18 @@ test("savings section retains benchmark scope, tradeoff, and a source link", () 
   assert.match(chart, /<figcaption/);
   assert.match(chart, /<dl/);
   assert.match(chart, /aria-hidden="true"/);
-  assert.match(chart, /data\.reportPath/);
-  for (const limitation of ["Historical", "adjusted", "linguist-generated", "dependencies", "slower", "not a speed claim"]) {
-    assert.ok(chart.includes(limitation), limitation);
+  assert.match(chart, /<p id="savings-scope">\s*Source files only on APFS\. Dependencies and builds excluded\.\s*<\/p>/);
+  const details = chart.match(/<details className="savings-details">([\s\S]*?)<\/details>/)?.[1];
+  assert.ok(details, "benchmark details are collapsed by default");
+  assert.match(details, /<summary>Benchmark details<\/summary>/);
+  assert.match(details, /data\.reportPath/);
+  assert.match(details, /data\.riftriSeconds\.toFixed\(2\)/);
+  assert.match(details, /data\.gitSeconds\.toFixed\(2\)/);
+  assert.match(details, /<time dateTime=\{data\.date\}/);
+  for (const context of ["adjusted", "linguist-generated", "volume level"]) {
+    assert.ok(details.includes(context), context);
   }
+  assert.doesNotMatch(chart, /not a speed claim|Historical experiment/);
 });
 
 test("only backend names animate while the APFS reference figures stay fixed", () => {
