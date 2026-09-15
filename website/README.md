@@ -1,7 +1,10 @@
 # Riftri website
 
-The Riftri product site is a single-page Farm.js application. Product concepts, installation,
-transparent Git usage, safety, storage lifecycle, and compatibility all live at `/`.
+The Riftri product site is a single-page Farm.js application. The page at `/`
+has a hero with the copyable installer command, a storage-model overview, a
+worktree disk-usage comparison, and a three-step get-started section; deeper
+concepts, safety, lifecycle, and compatibility material stays in the
+repository documentation and the Markdown overview described below.
 
 `public/index.md` is the plain-Markdown overview served at `https://riftri.dev/index.md`.
 It covers setup, internals, supported backends, lifecycle, and benchmark context,
