@@ -239,6 +239,29 @@ full-copy fallback. Continue with the [quick start](../README.md#quick-start)
 only after reviewing the diagnostic. Repository-local `riftri enable` and
 process-scoped or explicitly evaluated shell activation remain separate choices.
 
+## Homebrew
+
+[`Formula/riftri.rb`](../Formula/riftri.rb) installs the published release
+archive for macOS and Linux on both architectures, verifying its SHA-256 the
+same way the other channels do. Until a tap repository exists, install it
+directly from a checkout:
+
+```sh
+brew install --formula ./Formula/riftri.rb
+```
+
+The formula is generated, not hand-written. After a release, regenerate it
+from that tag's published checksums:
+
+```sh
+gh release download v0.2.1 --repo assistant-ui/riftri --pattern SHA256SUMS --dir /tmp/riftri
+node package/scripts/update-homebrew-formula.mjs 0.2.1 /tmp/riftri/SHA256SUMS
+```
+
+`package/test/homebrew-formula.test.js` fails if the checked-in formula stops
+matching what the generator produces, so a partial bump or a hand edit is
+caught in CI rather than at install time.
+
 ## npm is a separate channel
 
 GitHub downloads and npm packages contain the same native CLI for a given tag,
