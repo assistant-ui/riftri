@@ -244,6 +244,7 @@ maps every document in one place.
 
 ### Architecture and guarantees
 
+- [How Riftri stays safe](https://github.com/assistant-ui/riftri/blob/main/docs/safety.md): fail-closed refusals, real-filesystem CI, honest benchmarks, and supply-chain measures.
 - [Architecture](https://github.com/assistant-ui/riftri/blob/main/docs/architecture.md): components, immutable bases, transactions, and journal state machines.
 - [Design decisions](https://github.com/assistant-ui/riftri/blob/main/docs/decisions.md): settled choices and open questions.
 - [Backend guarantees](https://github.com/assistant-ui/riftri/blob/main/docs/backend-guarantees.md): storage contracts and metadata profiles.

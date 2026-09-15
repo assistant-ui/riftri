@@ -28,6 +28,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Concepts and guarantees
 
+- [safety.md](safety.md) — how Riftri stays safe: fail-closed refusals,
+  real-filesystem CI, honest benchmarks, and supply-chain measures.
 - [architecture.md](architecture.md) — components, immutable bases,
   transactions, and journal state machines.
 - [decisions.md](decisions.md) — numbered settled decisions and open
