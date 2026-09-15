@@ -189,6 +189,7 @@ Filesystem work also needs platform-specific integration tests that prove:
 
 ## Documentation map
 
+- `docs/README.md`: the full documentation index, one entry per document.
 - `PROJECT.md`: product and technical outline.
 - `ROADMAP.md`: implementation order and acceptance criteria.
 - `docs/architecture.md`: component and transaction design.
