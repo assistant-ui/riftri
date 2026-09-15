@@ -179,7 +179,10 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
 
     let fixture = RepositoryFixture::new();
     let contents = vec![0x5a; 2 * 1024 * 1024];
-    let oid = format!("{:x}", Sha256::digest(&contents));
+    let oid = Sha256::digest(&contents)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let pointer = format!(
         "version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {}\n",
         contents.len()
