@@ -80,12 +80,19 @@ function Hero() {
           <a className="button button-secondary" href={githubUrl}>
             <GitHubIcon /> View GitHub <ArrowUpRightIcon />
           </a>
-          <a className="button button-secondary" href="/index.md" type="text/plain" download="index.md">
-            Download Markdown
-          </a>
         </div>
         <div className="hero-install">
           <CopyCommand command={installCommand} compact />
+          <a
+            className="copy-button hero-markdown"
+            href="/index.md"
+            type="text/plain"
+            download="index.md"
+            aria-label="Download Markdown guide"
+            title="Download Markdown guide"
+          >
+            .md
+          </a>
         </div>
       </div>
       <div className="hero-graph">

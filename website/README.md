@@ -7,8 +7,9 @@ transparent Git usage, safety, storage lifecycle, and compatibility all live at 
 It covers setup, internals, supported backends, lifecycle, and benchmark context,
 with absolute links to the detailed GitHub documentation. Keep it in sync with
 product changes and add newly stored technical docs to its documentation index.
-The hero actions offer a direct `index.md` download; the footer opens the raw
-file. Neither adds a separate guide section. Static output finalization requires the file and serves it as
+The hero installer has a compact `.md` download beside its copy button, with a
+descriptive accessible label; the footer opens the raw file. Neither adds a
+separate guide section. Static output finalization requires the file and serves it as
 `text/plain; charset=utf-8`, with an inline `index.md` filename and `nosniff`.
 The response is the unchanged `.md` file, not HTML. Plain-text handling preserves
 literal Markdown in standard browsers; downloading also avoids embedded viewers

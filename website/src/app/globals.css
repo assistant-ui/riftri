@@ -141,9 +141,11 @@ code, pre { font-family: var(--font-mono); }
 }
 
 .hero-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 1.5rem; margin-top: 2rem; }
-.hero-install { width: min(100%, 540px); margin-top: 1.5rem; }
+.hero-install { display: flex; width: min(100%, 540px); margin-top: 1.5rem; background: var(--surface); }
 .hero-install p { margin: 0 0 0.65rem; color: var(--ink-muted); font-size: 0.6rem; line-height: 1.5; }
+.hero-install .command { min-width: 0; }
 .hero-install .command code { white-space: normal; overflow-wrap: anywhere; }
+.hero-install .hero-markdown { display: grid; flex-shrink: 0; min-width: 44px; place-items: center; border-left: 1px solid var(--line); font-size: 0.7rem; }
 
 .button {
   position: relative;
