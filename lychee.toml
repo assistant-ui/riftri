@@ -1,0 +1,19 @@
+# Configuration for the Markdown link checker (https://lychee.cli.rs),
+# run by .github/workflows/links.yml.
+
+max_retries = 3
+timeout = 30
+
+# 429 means the host rate-limited the checker, not that the link is broken.
+accept = ["200..=299", "429"]
+
+# Private/local hosts appear in examples, not as links readers can follow.
+# (Email addresses are already excluded by default.)
+exclude_all_private = true
+
+exclude = [
+  # Placeholder URLs used in documentation examples.
+  "^https://raw\\.githubusercontent\\.com/assistant-ui/riftri/<full-commit-id>/",
+]
+
+exclude_path = ["node_modules", "website/node_modules", "target"]
