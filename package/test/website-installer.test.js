@@ -5,10 +5,11 @@ const path = require("node:path");
 const { test } = require("node:test");
 
 const root = path.resolve(__dirname, "../..");
-const url = "https://riftri.vercel.app/install.sh";
-const powershellUrl = "https://riftri.vercel.app/install.ps1";
+const siteUrl = "https://riftri.dev";
+const url = `${siteUrl}/install.sh`;
+const powershellUrl = `${siteUrl}/install.ps1`;
 
-test("website and guides use the public Vercel installer URL", () => {
+test("website and guides use the public riftri.dev installer URLs", () => {
   for (const file of ["website/src/app/page.tsx", "README.md", "docs/install.md"]) {
     const source = fs.readFileSync(path.join(root, file), "utf8");
     assert.ok(source.includes(`curl -fsSL ${url} | bash`), file);
@@ -22,6 +23,24 @@ test("website and guides use the public Vercel installer URL", () => {
   assert.ok(page.includes('href="/install.ps1"'));
   assert.ok(page.includes("docs/install.md#windows-powershell"));
   assert.ok(!page.includes("npm install --global riftri"));
+});
+
+test("public package metadata and installation sources use the custom domain", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  assert.equal(manifest.homepage, siteUrl);
+  const websiteGuide = fs.readFileSync(path.join(root, "website/README.md"), "utf8");
+  assert.ok(websiteGuide.includes(siteUrl));
+  for (const file of [
+    "README.md",
+    "docs/install.md",
+    "website/README.md",
+    "website/src/app/page.tsx",
+    "package.json",
+    "package/install.sh",
+    "package/install.ps1",
+  ]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /riftri\.vercel\.app/, file);
+  }
 });
 
 test("website stages the canonical installer without maintaining another copy", async (t) => {

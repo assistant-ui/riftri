@@ -38,7 +38,7 @@ the filesystem.
 On macOS or Linux, install the standalone native CLI with Bash:
 
 ```sh
-curl -fsSL https://riftri.vercel.app/install.sh | bash
+curl -fsSL https://riftri.dev/install.sh | bash
 ```
 
 The installer verifies SHA-256, checks the binary version, and installs to
@@ -51,7 +51,7 @@ On Windows, download and run the checksum-verifying PowerShell installer:
 
 ```powershell
 $Installer = Join-Path $env:TEMP 'riftri-install.ps1'
-Invoke-WebRequest https://riftri.vercel.app/install.ps1 -OutFile $Installer
+Invoke-WebRequest https://riftri.dev/install.ps1 -OutFile $Installer
 & $Installer
 ```
 

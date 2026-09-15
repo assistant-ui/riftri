@@ -12,6 +12,7 @@ main() (
   usage() {
     printf '%s\n' \
       'Usage: bash install.sh [VERSION]' \
+      'Installer: https://riftri.dev/install.sh' \
       'Install the latest stable release, or pin a version such as v0.2.0.' \
       'RIFTRI_INSTALL_DIR: absolute destination directory (default: ~/.local/bin).' \
       'No sudo, shell profile edits, or Git activation. Requires curl, tar, and SHA-256 tooling.'
