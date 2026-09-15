@@ -232,6 +232,7 @@ maps every document in one place.
 
 ### Setup and platform guides
 
+- [CLI reference](https://github.com/assistant-ui/riftri/blob/main/docs/cli.md): every command, argument, and flag, plus the shared JSON output conventions.
 - [Installation](https://github.com/assistant-ui/riftri/blob/main/docs/install.md): standalone installers, manual downloads, updates, and uninstalling.
 - [Shell and process activation](https://github.com/assistant-ui/riftri/blob/main/docs/global-activation.md): opt-in Git interception and shell compatibility.
 - [Agent integration](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md): harness setup, the JSON automation contract, and the parallel-agent lifecycle.
