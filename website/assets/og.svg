@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#0a0a0a"/>
+  <rect x="30" y="30" width="1140" height="570" fill="none" stroke="#45443f"/>
+  <path d="M30 504H1170M652 30V504" stroke="#45443f"/>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="76" y="101" fill="#f06a3a" font-size="17" letter-spacing="2">OPEN SOURCE / NATIVE COPY-ON-WRITE</text>
+    <text x="72" y="248" fill="#f1eee5" font-size="120" letter-spacing="-6">Riftri</text>
+    <text x="76" y="333" fill="#f1eee5" font-size="32">Real Git worktrees.</text>
+    <text x="76" y="378" fill="#aaa89e" font-size="32">Shared unchanged files.</text>
+    <text x="76" y="423" fill="#aaa89e" font-size="32">Private edits.</text>
+    <text x="76" y="563" fill="#f1eee5" font-size="27">riftri.dev</text>
+    <text x="752" y="560" fill="#aaa89e" font-size="18" letter-spacing="1">APFS / LINUX / ReFS</text>
+    <rect x="718" y="110" width="384" height="78" fill="#101010" stroke="#77786e"/>
+    <text x="742" y="144" fill="#f1eee5" font-size="21">One immutable base</text>
+    <text x="742" y="171" fill="#aaa89e" font-size="15">Exact Git tree / read only</text>
+    <path d="M750 188V412M750 246H798M750 329H798M750 412H798" fill="none" stroke="#f06a3a" stroke-width="2"/>
+    <g fill="#101010" stroke="#45443f">
+      <rect x="798" y="218" width="304" height="56"/>
+      <rect x="798" y="301" width="304" height="56"/>
+      <rect x="798" y="384" width="304" height="56"/>
+    </g>
+    <g fill="#f1eee5" font-size="19">
+      <text x="820" y="253">auth/</text>
+      <text x="820" y="336">billing/</text>
+      <text x="820" y="419">tests/</text>
+    </g>
+    <path d="M983 240H1080M983 323H1080M983 406H1080" stroke="#aaa89e" stroke-width="10" stroke-dasharray="8 6"/>
+    <path d="M1058 240H1080M1044 323H1080M1072 406H1080" stroke="#f06a3a" stroke-width="10"/>
+  </g>
+</svg>
