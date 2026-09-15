@@ -1302,18 +1302,20 @@ pub fn parse_attribute_records(input: &[u8]) -> Result<Vec<GitAttribute>, GitErr
     }
 
     fields
-        .chunks_exact(3)
-        .map(|fields| {
-            if fields[0].is_empty() || fields[1].is_empty() {
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|[path, name, value]| {
+            if path.is_empty() || name.is_empty() {
                 return Err(GitError::InvalidOutput {
                     context: "Git attribute record",
                     detail: "path and attribute name must not be empty".to_owned(),
                 });
             }
             Ok(GitAttribute {
-                path: PathBuf::from(os_string_from_git(fields[0], "attribute path")?),
-                name: fields[1].to_vec(),
-                value: fields[2].to_vec(),
+                path: PathBuf::from(os_string_from_git(path, "attribute path")?),
+                name: name.to_vec(),
+                value: value.to_vec(),
             })
         })
         .collect()

@@ -45,10 +45,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Create disposable APFS benchmark volume
         if: matrix.os == 'macos-15'
@@ -89,6 +89,31 @@ jobs:
 
       - name: Inspect npm package contents
         run: npm run pack:check
+
+  supply-chain:
+    name: Supply chain (cargo-deny)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Audit advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  msrv:
+    name: MSRV (Rust 1.88)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the minimum supported Rust toolchain
+        run: rustup toolchain install 1.88 --profile minimal --no-self-update
+
+      - name: Check the workspace on the declared rust-version
+        run: cargo +1.88 check --workspace --all-targets --locked
 
   website:
     name: Website
@@ -156,7 +181,7 @@ jobs:
         env:
           RIFTRI_REQUIRE_REFLINK: "1"
           TMPDIR: ${{ runner.temp }}/riftri-reflink
-        run: cargo test --workspace --features riftri-core/native-cow-integration
+        run: cargo test --workspace --locked --features riftri-core/native-cow-integration
 
       - name: Run installed npm workflow on the reflink volume
         env:
@@ -326,7 +351,7 @@ jobs:
           RIFTRI_REQUIRE_REFS: "1"
           TEMP: R:\riftri-temp
           TMP: R:\riftri-temp
-        run: cargo test --workspace --features riftri-core/native-cow-integration
+        run: cargo test --workspace --locked --features riftri-core/native-cow-integration
 
       - name: Run installed npm workflow on ReFS
         shell: pwsh
