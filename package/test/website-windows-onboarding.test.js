@@ -3,7 +3,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { test } = require("node:test");
 const root = path.resolve(__dirname, "../..");
-const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+// Markdown is LF-pinned; Windows may check TSX out as CRLF. Compare commands,
+// not Git's working-tree line-ending conversion.
+const read = (file) => fs.readFileSync(path.join(root, file), "utf8").replace(/\r\n/g, "\n");
 
 test("quick start includes a copyable, review-first PowerShell installer", () => {
   const page = read("website/src/app/page.tsx");
