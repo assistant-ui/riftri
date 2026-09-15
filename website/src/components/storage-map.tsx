@@ -1,3 +1,5 @@
+import { MotionFigure } from "./motion-figure";
+
 const views = [
   { index: "01", name: "auth", branch: "feature/auth", changed: 3 },
   { index: "02", name: "billing", branch: "feature/billing", changed: 2 },
@@ -19,12 +21,12 @@ function BlockTrack({ changed }: { changed: number }) {
 
 export function StorageMap() {
   return (
-    <figure className="storage-map graph-frame">
+    <MotionFigure className="storage-map graph-frame" label="worktree example" note="Illustration · not live data">
       <span className="corner corner-tl" aria-hidden="true">+</span>
       <span className="corner corner-tr" aria-hidden="true">+</span>
       <span className="corner corner-bl" aria-hidden="true">+</span>
       <span className="corner corner-br" aria-hidden="true">+</span>
-      <figcaption className="frame-title">[ LIVE WORKTREE MAP ]</figcaption>
+      <figcaption className="frame-title">[ WORKTREE EXAMPLE ]</figcaption>
       <div className="map-head">
         <span>REPOSITORY / EXACT TREE</span>
         <span>a4d2c19</span>
@@ -54,6 +56,6 @@ export function StorageMap() {
         <span><i>·</i> shared block</span>
         <span><i>█</i> private edit</span>
       </div>
-    </figure>
+    </MotionFigure>
   );
 }

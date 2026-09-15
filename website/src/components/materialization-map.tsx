@@ -1,3 +1,5 @@
+import { MotionFigure } from "./motion-figure";
+
 const stages = [
   {
     index: "01",
@@ -60,7 +62,7 @@ function BackendCycle() {
 
 export function MaterializationMap() {
   return (
-    <figure className="materialization-map graph-frame">
+    <MotionFigure className="materialization-map graph-frame" label="storage backend" note="APFS · Linux · ReFS">
       <span className="corner corner-tl" aria-hidden="true">+</span>
       <span className="corner corner-tr" aria-hidden="true">+</span>
       <span className="corner corner-bl" aria-hidden="true">+</span>
@@ -87,6 +89,6 @@ export function MaterializationMap() {
         <span>GIT OWNS THE WORKTREE</span>
         <span><i aria-hidden="true" /> RIFTRI EXITS AFTER CREATION</span>
       </div>
-    </figure>
+    </MotionFigure>
   );
 }
