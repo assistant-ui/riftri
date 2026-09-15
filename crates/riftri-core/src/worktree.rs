@@ -2487,7 +2487,7 @@ fn materialize_git_lfs_objects(
                 object.pointer.oid, object.pointer.size
             )));
         }
-        let actual_oid = format!("{:x}", digest.finalize());
+        let actual_oid = crate::base_integrity::hex_lower(digest.finalize());
         if actual_oid != object.pointer.oid {
             return Err(WorktreeError::Unsupported(format!(
                 "local Git LFS object {} failed SHA-256 verification; found {actual_oid}",
@@ -5355,7 +5355,7 @@ fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
     hash_extended_attributes(path, &mut digest)?;
     #[cfg(target_os = "windows")]
     hash_windows_attributes(path, &mut digest)?;
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
 
 #[cfg(unix)]
@@ -5953,7 +5953,7 @@ fn snapshot_managed_worktree_for_force(managed: &DecodedJournal) -> Result<Strin
     let mut digest = Sha256::new();
     digest.update(b"riftri-forced-removal-snapshot-v1\0");
     digest.update(marker);
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
 
 fn managed_worktree_matches_force_snapshot(
@@ -6038,7 +6038,7 @@ fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
     }
     let mut digest = Sha256::new();
     visit(root, &mut digest)?;
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
 
 fn managed_worktree_is_clean_for_removal(
@@ -7261,7 +7261,7 @@ mod tests {
         fs::write(staging.join("asset.bin"), b"pointer\n").expect("write pointer destination");
         let source = fixture.path().join("object");
         fs::write(&source, b"evil").expect("write corrupt local object");
-        let expected = format!("{:x}", Sha256::digest(b"good"));
+        let expected = crate::base_integrity::hex_lower(Sha256::digest(b"good"));
         let object = super::GitLfsObject {
             checkout_path: PathBuf::from("asset.bin"),
             source_path: source.clone(),

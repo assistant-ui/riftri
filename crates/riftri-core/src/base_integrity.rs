@@ -40,7 +40,20 @@ pub(crate) fn marker(root: &Path) -> io::Result<Vec<u8>> {
     let mut digest = Sha256::new();
     digest.update(b"riftri-base-content-v1\0");
     hash_entry(root, &mut digest)?;
-    Ok(format!("riftri-base-sha256-v1\n{:x}\n", digest.finalize()).into_bytes())
+    Ok(format!("riftri-base-sha256-v1\n{}\n", hex_lower(digest.finalize())).into_bytes())
+}
+
+/// sha2 0.11 digest outputs no longer implement `LowerHex`, so render the
+/// canonical lowercase hexadecimal form explicitly.
+pub(crate) fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut rendered = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        rendered.push(char::from(HEX[usize::from(byte >> 4)]));
+        rendered.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    rendered
 }
 
 fn hash_native(value: &OsStr, digest: &mut Sha256) {
