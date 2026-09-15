@@ -7,6 +7,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- Checkout-neutral GitHub linguist metadata attributes (`linguist-generated`,
+  `linguist-vendored`, `linguist-documentation`, `linguist-detectable`, and
+  `linguist-language`) no longer block optimized worktree creation, so stock
+  repositories using lockfile display hints work without edits.
 - Optimized explicit and intercepted worktree adds can attach an existing local
   branch while preserving Git's branch-in-use checks and Riftri's exact-commit
   transaction boundary.

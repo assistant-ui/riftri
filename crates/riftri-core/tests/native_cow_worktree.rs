@@ -532,6 +532,61 @@ fn creates_a_clean_worktree_with_deterministic_in_tree_attributes() {
 }
 
 #[test]
+fn creates_a_clean_worktree_with_checkout_neutral_linguist_attributes() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let destination = fixture.path().join("worktree");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    // The stock assistant-ui shape that previously hit the in-tree-attributes
+    // blocker, plus the other documented linguist forms.
+    fs::write(
+        repository.join(".gitattributes"),
+        "* text=auto eol=lf\n\
+         pnpm-lock.yaml linguist-generated\n\
+         vendor/** linguist-vendored=true\n\
+         docs/** linguist-documentation\n\
+         *.snap -linguist-detectable\n\
+         *.q linguist-language=SQL\n",
+    )
+    .expect("write linguist attributes");
+    fs::write(repository.join("pnpm-lock.yaml"), "lockfileVersion: 9\n")
+        .expect("write lockfile fixture");
+    fs::write(repository.join("query.q"), "select 1;\n").expect("write language fixture");
+    git(
+        &repository,
+        &["add", "--", ".gitattributes", "pnpm-lock.yaml", "query.q"],
+    );
+    git(&repository, &["commit", "--quiet", "-m", "linguist attributes"]);
+
+    let result = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/linguist")),
+        state_dir: Some(state),
+    })
+    .expect("linguist metadata must not block Riftri worktree creation");
+
+    assert!(git(&destination, &["status", "--porcelain=v1"]).is_empty());
+    assert_eq!(
+        fs::read(destination.join("pnpm-lock.yaml")).expect("read lockfile"),
+        b"lockfileVersion: 9\n",
+    );
+    assert_eq!(
+        fs::read(result.base_path.join("query.q")).expect("read immutable base"),
+        b"select 1;\n",
+    );
+}
+
+#[test]
 fn rejects_effective_attributes_before_creating_state_or_git_metadata() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");

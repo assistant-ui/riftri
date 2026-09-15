@@ -3087,6 +3087,24 @@ fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
         b"eol" => matches!(attribute.value.as_slice(), b"lf" | b"crlf"),
         b"binary" => attribute.value == b"set",
         b"diff" | b"merge" => attribute.value == b"unset",
+        name => is_checkout_neutral_metadata_attribute(name, &attribute.value),
+    }
+}
+
+/// GitHub linguist metadata attributes are read only by hosting-side tooling;
+/// Git's checkout machinery (text conversion, eol, smudge/clean filters) never
+/// consults them, so they cannot change materialized worktree bytes. Values
+/// are restricted to linguist's documented forms so typos and lookalike
+/// attributes still fail closed.
+fn is_checkout_neutral_metadata_attribute(name: &[u8], value: &[u8]) -> bool {
+    match name {
+        b"linguist-generated"
+        | b"linguist-vendored"
+        | b"linguist-documentation"
+        | b"linguist-detectable" => {
+            matches!(value, b"set" | b"unset" | b"true" | b"false")
+        }
+        b"linguist-language" => !value.is_empty(),
         _ => false,
     }
 }
@@ -7072,9 +7090,9 @@ mod tests {
         AddWorktreeRequest, BackendKind, CompactWorktreeRequest, MoveWorktreeRequest,
         PruneWorktreesRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
         compact_worktree_inner, force_remove_worktree_inner, garbage_collect_inner,
-        has_ascii_case_alias, move_worktree_inner, next_operation_id, prune_worktrees_inner,
-        recover_incomplete_operations, remove_empty_directory_if_present, remove_worktree_inner,
-        storage_accounting,
+        classify_in_tree_attributes, has_ascii_case_alias, move_worktree_inner, next_operation_id,
+        prune_worktrees_inner, recover_incomplete_operations, remove_empty_directory_if_present,
+        remove_worktree_inner, storage_accounting,
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
@@ -7101,6 +7119,50 @@ mod tests {
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn attribute_allowlist_accepts_checkout_neutral_linguist_metadata() {
+        let attribute = |name: &str, value: &str| riftri_git::GitAttribute {
+            path: PathBuf::from("pnpm-lock.yaml"),
+            name: name.as_bytes().to_vec(),
+            value: value.as_bytes().to_vec(),
+        };
+
+        for accepted in [
+            attribute("linguist-generated", "set"),
+            attribute("linguist-generated", "true"),
+            attribute("linguist-vendored", "unset"),
+            attribute("linguist-vendored", "false"),
+            attribute("linguist-documentation", "set"),
+            attribute("linguist-detectable", "true"),
+            attribute("linguist-language", "TypeScript"),
+            attribute("text", "auto"),
+        ] {
+            assert!(
+                classify_in_tree_attributes(std::slice::from_ref(&accepted)).is_ok(),
+                "rejected checkout-neutral attribute {:?}={:?}",
+                String::from_utf8_lossy(&accepted.name),
+                String::from_utf8_lossy(&accepted.value),
+            );
+        }
+
+        for rejected in [
+            attribute("linguist-generated", "sometimes"),
+            attribute("linguist-detectable", ""),
+            attribute("linguist-language", ""),
+            attribute("linguist-unknown", "set"),
+            attribute("filter", "example"),
+            attribute("ident", "set"),
+            attribute("working-tree-encoding", "UTF-16"),
+        ] {
+            assert!(
+                classify_in_tree_attributes(std::slice::from_ref(&rejected)).is_err(),
+                "accepted unsupported attribute {:?}={:?}",
+                String::from_utf8_lossy(&rejected.name),
+                String::from_utf8_lossy(&rejected.value),
+            );
+        }
     }
 
     #[test]
