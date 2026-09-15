@@ -69,6 +69,8 @@ status` derives base reference counts plus logical and allocated bytes with
 actionable lifecycle explanations. `riftri gc` plans zero-reference cleanup,
 while `riftri gc --apply` revalidates references under the per-base lock and
 uses a recoverable collection journal before deleting an immutable base.
+`riftri worktree list` provides a focused human or versioned JSON inventory of
+active managed worktrees without including ordinary Git worktrees.
 Status now reports state paths that are unjournaled, structurally unsafe, or
 missing despite an active journal, while preserving them for manual inspection.
 Deterministic failure injection covers every recoverable persisted creation,
