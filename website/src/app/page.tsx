@@ -134,6 +134,92 @@ function Overview() {
   );
 }
 
+const benchmarkStats = [
+  {
+    index: "01",
+    value: "87%",
+    unit: "less new disk allocation",
+    description:
+      "Creating all ten workspaces allocated 100.6 MiB where ordinary Git worktrees allocated 774.0 MiB for the same trees.",
+  },
+  {
+    index: "02",
+    value: "2.46 MiB",
+    unit: "per additional workspace",
+    description:
+      "After the first workspace primes the shared immutable base, each further workspace allocated about 2.46 MiB instead of a full ~77 MiB copy of the checkout.",
+  },
+  {
+    index: "03",
+    value: "0.25 MiB",
+    unit: "growth after ten agents worked",
+    description:
+      "Ten coding agents then edited and tested inside their own views; measured volume growth stayed within a quarter of a mebibyte because only changed blocks are written.",
+  },
+] as const;
+
+function Benchmark() {
+  return (
+    <section className="content-section bench-section" id="benchmark">
+      <div className="section-heading split-heading">
+        <div>
+          <GraphLabel index="02">MEASURED SAVINGS / ASSISTANT-UI</GraphLabel>
+          <h2>Ten parallel workspaces, about one checkout of disk</h2>
+        </div>
+        <p>
+          A recorded experiment created ten isolated worktrees of assistant-ui — a real
+          public repository with 5,346 tracked files and roughly 60.6 MiB of tracked
+          content — once with ordinary Git and once with Riftri on macOS/APFS, measuring
+          new volume allocation for each.
+        </p>
+      </div>
+
+      <figure className="bench-figure" aria-label="New disk allocation for ten worktrees">
+        <div className="bench-row">
+          <span className="bench-row-label">ORDINARY GIT WORKTREES</span>
+          <div className="bench-track">
+            <div className="bench-bar bench-bar-git" style={{ width: "100%" }} />
+            <span className="bench-value">774.0 MiB</span>
+          </div>
+        </div>
+        <div className="bench-row">
+          <span className="bench-row-label">RIFTRI WORKTREES</span>
+          <div className="bench-track">
+            <div className="bench-bar bench-bar-riftri" style={{ width: "13%" }} />
+            <span className="bench-value">100.6 MiB</span>
+          </div>
+        </div>
+        <figcaption>
+          New volume allocation while creating ten worktrees of the same tree, smaller is
+          better.
+        </figcaption>
+      </figure>
+
+      <div className="essential-grid bench-grid">
+        {benchmarkStats.map((stat) => (
+          <article key={stat.index}>
+            <span>{stat.index}</span>
+            <p className="bench-stat">
+              <strong>{stat.value}</strong> {stat.unit}
+            </p>
+            <p>{stat.description}</p>
+          </article>
+        ))}
+      </div>
+
+      <p className="bench-footnote">
+        One local experiment, not a universal promise: Riftri was slower to create the
+        views (22.4 s versus 9.9 s for all ten), and results vary with filesystem,
+        file count, and later private writes. Method, raw numbers, and caveats:{" "}
+        <a href={`${githubUrl}/blob/main/docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md`}>
+          the full write-up
+        </a>
+        .
+      </p>
+    </section>
+  );
+}
+
 const startSteps = [
   {
     index: "01",
@@ -160,7 +246,7 @@ function GetStarted() {
     <section className="content-section start-section" id="start">
       <div className="section-heading split-heading">
         <div>
-          <GraphLabel index="02">QUICK START</GraphLabel>
+          <GraphLabel index="03">QUICK START</GraphLabel>
           <h2>Create a Riftri worktree</h2>
         </div>
         <p>
@@ -217,6 +303,7 @@ export default function HomePage() {
         <main>
           <Hero />
           <Overview />
+          <Benchmark />
           <GetStarted />
         </main>
         <Footer />

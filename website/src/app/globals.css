@@ -497,6 +497,85 @@ code, pre { font-family: var(--font-mono); }
   background: var(--canvas);
 }
 
+.bench-section {
+  background: var(--canvas-deep);
+}
+
+.bench-figure {
+  margin: 3rem 0 0;
+  padding: 1.75rem 2rem 1.4rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.bench-row { display: grid; gap: 0.5rem; }
+.bench-row + .bench-row { margin-top: 1.4rem; }
+
+.bench-row-label {
+  color: var(--ink-faint);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+}
+
+.bench-track {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.bench-bar { height: 14px; min-width: 2px; }
+.bench-bar-git { background: var(--ink-faint); }
+.bench-bar-riftri { background: var(--accent); }
+
+.bench-value {
+  flex-shrink: 0;
+  color: var(--ink);
+  font-size: 0.68rem;
+  letter-spacing: 0.02em;
+}
+
+.bench-figure figcaption {
+  margin-top: 1.4rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--line);
+  color: var(--ink-faint);
+  font-size: 0.56rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.bench-grid article .bench-stat {
+  margin: 2rem 0 0;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 0.8rem;
+}
+
+.bench-grid article .bench-stat strong {
+  display: block;
+  font-size: clamp(1.6rem, 2.4vw, 2.2rem);
+  font-weight: 440;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.bench-grid article .bench-stat + p { margin-top: 0.65rem; }
+
+.bench-footnote {
+  max-width: 680px;
+  margin: 1.75rem 0 0;
+  color: var(--ink-faint);
+  font-family: var(--font-sans);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+.bench-footnote a {
+  color: var(--ink-muted);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
 .start-list {
   display: grid;
   gap: 0.75rem;
@@ -620,6 +699,8 @@ code, pre { font-family: var(--font-mono); }
   .essential-grid article { min-height: auto; padding: 1.5rem 0; }
   .essential-grid article + article { border-top: 1px solid var(--line); border-left: 0; }
   .essential-grid h3 { margin-top: 1.2rem; }
+  .bench-figure { padding: 1.4rem 1.25rem 1.2rem; }
+  .bench-grid article .bench-stat { margin-top: 1.2rem; }
   .start-list li { grid-template-columns: 2rem minmax(0, 1fr); padding: 0.75rem 0; }
   .start-list .command { grid-column: 1 / -1; width: 100%; margin-top: 0.4rem; }
   .install-notes { margin-left: 0; }
