@@ -1788,8 +1788,7 @@ mod tests {
             );
             match moving_git.resolve_revision(fixture.path(), OsStr::new("moving")) {
                 Err(crate::GitError::Start { ref source, .. })
-                    if source.kind() == std::io::ErrorKind::ExecutableFileBusy
-                        && attempts < 50 =>
+                    if source.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 =>
                 {
                     attempts += 1;
                     std::thread::sleep(std::time::Duration::from_millis(20));
