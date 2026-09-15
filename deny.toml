@@ -1,0 +1,34 @@
+# Configuration for `cargo deny check`, run in CI by the supply-chain job.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any advisory in the RustSec database, including yanked crates.
+yanked = "deny"
+
+[licenses]
+# Every allowed license must remain compatible with this repository's MIT
+# distribution terms.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# Duplicate dependency versions are tolerated but surfaced in the report.
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal workspace crates are unpublished path dependencies without versions.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
