@@ -219,6 +219,14 @@ code, pre { font-family: var(--font-mono); }
 
 .storage-map { width: 100%; margin: 0; }
 
+.diagram-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; padding: 0.4rem 1rem; border-top: 1px dashed var(--line); color: var(--ink-muted); font-size: 0.7rem; line-height: 1.5; }
+.diagram-controls button { min-height: 36px; min-width: 64px; padding: 0.4rem 0.5rem; border: 1px solid var(--line-strong); background: transparent; color: var(--ink); cursor: pointer; }
+.diagram-controls button:disabled { border-color: transparent; color: var(--ink-muted); cursor: default; }
+.diagram-controls button:active { color: var(--accent); }
+.motion-figure[data-paused="true"] .track-counter,
+.motion-figure[data-paused="true"] .backend-cycle-item,
+.motion-figure[data-paused="true"] .backend-cycle-item::after { animation-play-state: paused; }
+
 .map-head {
   display: flex;
   justify-content: space-between;
@@ -642,6 +650,7 @@ code, pre { font-family: var(--font-mono); }
 .site-footer .github-icon { font-size: 0.8rem; }
 
 @media (hover: hover) and (pointer: fine) {
+  .diagram-controls button:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
   .copy-button:not(.is-copied):hover { background: var(--ink); color: var(--canvas-deep); }
   .button:hover { transform: translateY(-1px); }
   .button:hover > span { transform: translateX(2px); }
