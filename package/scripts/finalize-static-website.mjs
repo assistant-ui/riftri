@@ -13,6 +13,18 @@ const installerRoute = {
   continue: true,
 };
 
+const markdownRoute = {
+  src: "^/index\\.md$",
+  headers: {
+    "Cache-Control": "public, max-age=300",
+    // Display literal Markdown in browsers that don't recognize text/markdown.
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Disposition": "inline; filename=\"index.md\"",
+    "X-Content-Type-Options": "nosniff",
+  },
+  continue: true,
+};
+
 export async function finalizeStaticWebsite(
   outputDirectory = path.join(root, "website/.vercel/output"),
 ) {
@@ -24,7 +36,7 @@ export async function finalizeStaticWebsite(
     throw new Error(`expected Vercel Build Output API version 3, received ${config.version}`);
   }
 
-  for (const name of ["index.html", "install.sh", "install.ps1"]) {
+  for (const name of ["index.html", "index.md", "install.sh", "install.ps1"]) {
     await access(path.join(staticDirectory, name));
   }
 
@@ -40,7 +52,7 @@ export async function finalizeStaticWebsite(
     overrides: {
       "index.html": { path: "" },
     },
-    routes: [installerRoute, immutableAssetRoute, { handle: "filesystem" }].filter(Boolean),
+    routes: [installerRoute, markdownRoute, immutableAssetRoute, { handle: "filesystem" }].filter(Boolean),
   };
 
   await writeFile(configPath, `${JSON.stringify(staticConfig, null, 2)}\n`);

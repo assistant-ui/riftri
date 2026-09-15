@@ -1,0 +1,12 @@
+{
+  "platform": "macos",
+  "reportPath": "docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md",
+  "date": "2026-09-12",
+  "version": "0.1.1",
+  "worktrees": 10,
+  "filesPerView": 5346,
+  "gitBytes": 811606016,
+  "riftriBytes": 105504768,
+  "gitSeconds": 9.9,
+  "riftriSeconds": 22.44
+}

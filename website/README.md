@@ -3,6 +3,22 @@
 The Riftri product site is a single-page Farm.js application. Product concepts, installation,
 transparent Git usage, safety, storage lifecycle, and compatibility all live at `/`.
 
+`public/index.md` is the plain-Markdown overview served at `https://riftri.dev/index.md`.
+It covers setup, internals, supported backends, lifecycle, and benchmark context,
+with absolute links to the detailed GitHub documentation. Keep it in sync with
+product changes and add newly stored technical docs to its documentation index.
+The hero installer has a compact `.md` download beside its copy button, with a
+descriptive accessible label; the footer opens the raw file. Neither adds a
+separate guide section. Static output finalization requires the file and serves it as
+`text/plain; charset=utf-8`, with an inline `index.md` filename and `nosniff`.
+The response is the unchanged `.md` file, not HTML. Plain-text handling preserves
+literal Markdown in standard browsers; downloading also avoids embedded viewers
+that flatten whitespace even when the server returns the correct content type.
+`node --test package/test/website-markdown.test.js package/test/website-static-output.test.js`
+checks document coverage, local GitHub targets, and output configuration.
+The guide's star request is optional; agents must have
+explicit user approval before starring on someone's behalf.
+
 Development and production builds copy the canonical `../package/install.sh`
 and `../package/install.ps1` to `public/`, serving them at `/install.sh` and
 `/install.ps1`. Do not edit those generated
@@ -24,6 +40,21 @@ $ pnpm exec farm generate --check
 $ pnpm type-check
 $ pnpm build
 ```
+
+The `/#savings` section visualizes the historical assistant-ui experiment in
+`../docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md`. Its raw allocation
+measurements live in `src/data/space-savings.json`; the chart derives MiB,
+saved bytes, and bar proportions from those values. Keep the benchmark version,
+APFS scope, and dependency exclusions visible. The expandable benchmark details
+retain the timing comparison, adjusted-fixture caveat, methodology, and source link.
+`node --test package/test/website-savings.test.js` from the repository root
+checks the displayed dataset against the source report. This is not a live
+benchmark or a claim about the latest release's performance.
+Only the Riftri backend name cycles: APFS, Linux reflink, and ReFS. The graph
+and numbers stay fixed to the recorded APFS reference measurement; the rotating
+names describe platform support, not additional measured results. Clicking
+the backend name pauses or resumes its animation. Reduced-motion preferences
+show a static label, with all supported backends available to screen readers.
 
 To publish the tested site from this directory:
 

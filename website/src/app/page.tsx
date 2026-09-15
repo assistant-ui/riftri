@@ -1,6 +1,7 @@
 import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
 import { MaterializationMap } from "../components/materialization-map";
+import { SavingsMap } from "../components/savings-map";
 import { SectionLink } from "../components/section-link";
 import { StorageMap } from "../components/storage-map";
 
@@ -82,6 +83,16 @@ function Hero() {
         </div>
         <div className="hero-install">
           <CopyCommand command={installCommand} compact />
+          <a
+            className="copy-button hero-markdown"
+            href="/index.md"
+            type="text/plain"
+            download="index.md"
+            aria-label="Download Markdown guide"
+            title="Download Markdown guide"
+          >
+            .md
+          </a>
         </div>
       </div>
       <div className="hero-graph">
@@ -134,6 +145,24 @@ function Overview() {
   );
 }
 
+function Savings() {
+  return (
+    <section className="content-section" id="savings" aria-labelledby="savings-title">
+      <div className="section-heading split-heading">
+        <div>
+          <GraphLabel index="02">MEASURED SAVINGS</GraphLabel>
+          <h2 id="savings-title">Worktree disk usage</h2>
+        </div>
+        <p>
+          New disk allocation for ten assistant-ui worktrees, using the same
+          tracked source in both comparisons.
+        </p>
+      </div>
+      <SavingsMap />
+    </section>
+  );
+}
+
 const startSteps = [
   {
     index: "01",
@@ -160,7 +189,7 @@ function GetStarted() {
     <section className="content-section start-section" id="start">
       <div className="section-heading split-heading">
         <div>
-          <GraphLabel index="02">QUICK START</GraphLabel>
+          <GraphLabel index="03">QUICK START</GraphLabel>
           <h2>Create a Riftri worktree</h2>
         </div>
         <p>
@@ -203,6 +232,9 @@ function Footer() {
       <a className="footer-maker-link" href={agentbaseUrl}>
         AGENTBASE AI <ArrowUpRightIcon />
       </a>
+      <a href="/index.md" rel="alternate" type="text/plain">
+        READ MARKDOWN
+      </a>
       <a href={githubUrl}>
         <GitHubIcon /> GET ON GITHUB <ArrowUpRightIcon />
       </a>
@@ -217,6 +249,7 @@ export default function HomePage() {
         <main>
           <Hero />
           <Overview />
+          <Savings />
           <GetStarted />
         </main>
         <Footer />
