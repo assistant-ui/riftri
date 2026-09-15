@@ -25,6 +25,15 @@ const markdownRoute = {
   continue: true,
 };
 
+// Vercel's error phase runs after the filesystem handle misses, so an unknown
+// path serves the prerendered page with a real 404 status instead of the
+// platform's generic body.
+const notFoundRoute = {
+  src: "/.*",
+  status: 404,
+  dest: "/404",
+};
+
 export async function finalizeStaticWebsite(
   outputDirectory = path.join(root, "website/.vercel/output"),
 ) {
@@ -36,7 +45,15 @@ export async function finalizeStaticWebsite(
     throw new Error(`expected Vercel Build Output API version 3, received ${config.version}`);
   }
 
-  for (const name of ["index.html", "index.md", "install.sh", "install.ps1"]) {
+  for (const name of [
+    "index.html",
+    "index.md",
+    "install.sh",
+    "install.ps1",
+    "robots.txt",
+    "sitemap.xml",
+    "404/index.html",
+  ]) {
     await access(path.join(staticDirectory, name));
   }
 
@@ -51,8 +68,16 @@ export async function finalizeStaticWebsite(
     version: 3,
     overrides: {
       "index.html": { path: "" },
+      "404/index.html": { path: "404" },
     },
-    routes: [installerRoute, markdownRoute, immutableAssetRoute, { handle: "filesystem" }].filter(Boolean),
+    routes: [
+      installerRoute,
+      markdownRoute,
+      immutableAssetRoute,
+      { handle: "filesystem" },
+      { handle: "error" },
+      notFoundRoute,
+    ].filter(Boolean),
   };
 
   await writeFile(configPath, `${JSON.stringify(staticConfig, null, 2)}\n`);
