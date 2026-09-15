@@ -59,6 +59,13 @@ enum Command {
         command: ShellCommand,
     },
 
+    /// Print a shell completion script for riftri commands on stdout.
+    Completions {
+        /// Shell whose completion script should be emitted.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
     /// Inspect Git and show the planned storage path without changing anything.
     Doctor {
         /// Repository path to inspect.
@@ -155,6 +162,7 @@ impl Command {
             Self::Exec { .. } => "exec",
             Self::Overlayfs { .. } => "overlayfs-helper-install",
             Self::Shell { .. } => "shell",
+            Self::Completions { .. } => "completions",
             Self::Doctor { .. } => "doctor",
             Self::Backends { .. } => "backends",
             Self::Status { .. } => "status",
@@ -435,6 +443,11 @@ fn run(cli: Cli) -> Result<()> {
             },
             ShellCommand::Status { repository } => print_shell_status(&repository)?,
         },
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+
+            clap_complete::generate(shell, &mut Cli::command(), "riftri", &mut std::io::stdout());
+        }
         Command::Doctor {
             path,
             destination,
@@ -1870,6 +1883,16 @@ mod tests {
             };
             assert!(json, "JSON flag not parsed for {arguments:?}");
         }
+    }
+
+    #[test]
+    fn parses_shell_completion_generation() {
+        let cli = Cli::try_parse_from(["riftri", "completions", "zsh"])
+            .expect("parse completions command");
+        assert_eq!(cli.command.operation_name(), "completions");
+
+        Cli::try_parse_from(["riftri", "completions"])
+            .expect_err("completions requires an explicit shell");
     }
 
     #[test]
