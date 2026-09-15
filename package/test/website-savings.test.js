@@ -35,18 +35,21 @@ test("savings section retains benchmark scope, tradeoff, and a source link", () 
   }
 });
 
-test("savings platforms cycle without presenting APFS measurements as cross-platform results", () => {
+test("only backend names animate while the APFS reference figures stay fixed", () => {
   const chart = read("website/src/components/savings-map.tsx");
+  const label = read("website/src/components/savings-backend-name.tsx");
   const css = read("website/src/app/globals.css");
   const page = read("website/src/app/page.tsx");
-  for (const platform of ["macos", "linux", "windows"]) assert.ok(chart.includes(`id: "${platform}"`));
-  assert.match(chart, /platform\.id === data\.platform/);
-  assert.match(chart, /Not measured/);
-  assert.match(chart, /Pause cycle/);
-  assert.match(chart, /aria-pressed/);
-  assert.match(chart, /prefers-reduced-motion: reduce/);
-  assert.match(chart, /clearInterval/);
-  assert.match(chart, /IntersectionObserver/);
+  for (const backend of ["APFS", "Linux reflink", "ReFS"]) assert.ok(label.includes(`"${backend}"`));
+  assert.match(chart, /APFS reference measurement/);
+  assert.match(chart, /not Linux or Windows measurements/);
+  assert.match(chart, /<SavingsBackendName\s*\/>/);
+  assert.doesNotMatch(chart, /savings-platforms|savings-panel|useState|useEffect|Not measured/);
+  assert.match(label, /backend name animation/);
+  assert.match(label, /aria-pressed/);
+  assert.match(label, /prefers-reduced-motion: reduce/);
+  assert.match(css, /animation-play-state: paused/);
+  assert.doesNotMatch(css, /\.savings-panel|\.savings-controls/);
   assert.match(page, /Worktree disk usage/);
   assert.doesNotMatch(page, /Ten worktrees\.|A smaller footprint|Same tracked source\. Same number/);
   const savingsCss = css.slice(css.indexOf(".savings-map"), css.indexOf(".start-section"));

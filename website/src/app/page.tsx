@@ -144,8 +144,8 @@ function Savings() {
           <h2 id="savings-title">Worktree disk usage</h2>
         </div>
         <p>
-          Disk allocation for ten assistant-ui worktrees. The recorded comparison
-          uses macOS and APFS; Linux and Windows results have not been recorded.
+          New disk allocation for ten assistant-ui worktrees, using the same
+          tracked source in both comparisons.
         </p>
       </div>
       <SavingsMap />
