@@ -6378,10 +6378,10 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     remove_file_if_present(&journal.temporary_index)?;
     remove_file_if_present(&pointer_staging_path(journal))?;
 
-    if journal.branch_created {
-        if let Some((branch, Some(_))) = expected_branch_target {
-            git.delete_branch_force(&journal.repository, branch)?;
-        }
+    if journal.branch_created
+        && let Some((branch, Some(_))) = expected_branch_target
+    {
+        git.delete_branch_force(&journal.repository, branch)?;
     }
     drop(metadata_lock);
     Ok(())
