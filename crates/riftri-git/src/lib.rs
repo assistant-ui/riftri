@@ -1770,18 +1770,33 @@ mod tests {
             .expect("original revision");
         fs::write(fixture.path().join("tracked.txt"), "new tree\n").expect("change tree");
         git(fixture.path(), &["commit", "-am", "second", "--quiet"]);
-        git(
-            fixture.path(),
-            &["branch", "moving", original.commit.as_str()],
-        );
         let wrapper = fixture.path().join("moving-git");
         fs::write(&wrapper, "#!/bin/sh\nif [ \"$4\" = 'moving^{commit}' ]; then\n  git \"$@\" || exit\n  git update-ref refs/heads/moving HEAD\nelse\n  exec git \"$@\"\nfi\n")
             .expect("write Git wrapper");
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
 
-        let resolved = Git::new(wrapper)
-            .resolve_revision(fixture.path(), OsStr::new("moving"))
-            .expect("resolve moving ref");
+        // Concurrent tests fork while the wrapper's write descriptor is briefly
+        // held, so exec can fail with ETXTBSY even though the file is closed
+        // here. A busy failure means the wrapper never ran, so retrying after
+        // re-pinning the moving ref is safe.
+        let moving_git = Git::new(wrapper);
+        let mut attempts = 0;
+        let resolved = loop {
+            git(
+                fixture.path(),
+                &["branch", "--force", "moving", original.commit.as_str()],
+            );
+            match moving_git.resolve_revision(fixture.path(), OsStr::new("moving")) {
+                Err(crate::GitError::Start { ref source, .. })
+                    if source.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && attempts < 50 =>
+                {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result.expect("resolve moving ref"),
+            }
+        };
         assert_eq!(resolved.commit, original.commit);
         assert_eq!(resolved.tree, original.tree);
     }
