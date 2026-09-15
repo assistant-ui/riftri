@@ -10,8 +10,9 @@ test("website finalization preserves installers and Markdown without a server ru
 
   fs.mkdirSync(path.join(output, "static"), { recursive: true });
   fs.mkdirSync(path.join(output, "functions", "__nitro.func"), { recursive: true });
+  const markdown = "# Riftri\n\n## Installation\n\n```sh\ncurl -fsSL https://riftri.dev/install.sh | bash\n```\n";
   for (const name of ["index.html", "index.md", "install.sh", "install.ps1"]) {
-    fs.writeFileSync(path.join(output, "static", name), name);
+    fs.writeFileSync(path.join(output, "static", name), name === "index.md" ? markdown : name);
   }
   fs.writeFileSync(path.join(output, "nitro.json"), "{}");
   fs.writeFileSync(
@@ -44,11 +45,13 @@ test("website finalization preserves installers and Markdown without a server ru
     src: "^/index\\.md$",
     headers: {
       "Cache-Control": "public, max-age=300",
-      "Content-Type": "text/markdown; charset=utf-8",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Disposition": "inline; filename=\"index.md\"",
+      "X-Content-Type-Options": "nosniff",
     },
     continue: true,
   });
-  assert.equal(fs.readFileSync(path.join(output, "static/index.md"), "utf8"), "index.md");
+  assert.equal(fs.readFileSync(path.join(output, "static/index.md"), "utf8"), markdown);
   assert.ok(config.routes.every((route) => route.dest !== "/__nitro"));
 });
 

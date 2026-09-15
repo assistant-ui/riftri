@@ -80,6 +80,9 @@ function Hero() {
           <a className="button button-secondary" href={githubUrl}>
             <GitHubIcon /> View GitHub <ArrowUpRightIcon />
           </a>
+          <a className="button button-secondary" href="/index.md" type="text/plain">
+            Read Markdown
+          </a>
         </div>
         <div className="hero-install">
           <CopyCommand command={installCommand} compact />
@@ -222,7 +225,7 @@ function Footer() {
       <a className="footer-maker-link" href={agentbaseUrl}>
         AGENTBASE AI <ArrowUpRightIcon />
       </a>
-      <a href="/index.md" rel="alternate" type="text/markdown">
+      <a href="/index.md" rel="alternate" type="text/plain">
         READ MARKDOWN
       </a>
       <a href={githubUrl}>

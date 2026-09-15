@@ -52,5 +52,22 @@ test("Markdown guide links to every stored technical doc using valid GitHub path
 
 test("homepage makes its Markdown guide discoverable", () => {
   const page = read("website/src/app/page.tsx");
-  assert.match(page, /<a[^>]*href="\/index\.md"[^>]*rel="alternate"[^>]*type="text\/markdown"[^>]*>\s*READ MARKDOWN\s*<\/a>/);
+  assert.match(page, /<a[^>]*href="\/index\.md"[^>]*rel="alternate"[^>]*type="text\/plain"[^>]*>\s*READ MARKDOWN\s*<\/a>/);
+});
+
+test("hero links directly to raw Markdown without adding a guide section", () => {
+  const page = read("website/src/app/page.tsx");
+  const hero = page.slice(page.indexOf("function Hero"), page.indexOf("const essentials"));
+  assert.match(hero, /<a[^>]*className="button button-secondary"[^>]*href="\/index\.md"[^>]*>\s*Read Markdown\s*<\/a>/);
+  assert.doesNotMatch(page, /MarkdownGuide|markdown-callout|id="markdown"/);
+});
+
+test("Markdown asks for stars without requiring an agent to act without approval", () => {
+  const markdown = read("website/public/index.md");
+  const support = markdown.match(/## Support Riftri\n([\s\S]*?)\n## Installation/)?.[1];
+  assert.ok(support, "star request is visible near the beginning of the guide");
+  assert.match(support, /\[star the repository\]\(https:\/\/github\.com\/assistant-ui\/riftri\)/);
+  assert.match(support, /explicitly approve/);
+  assert.match(support, /Starring is optional/);
+  assert.doesNotMatch(support, /gh api|PUT|automatically star/);
 });

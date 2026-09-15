@@ -17,7 +17,10 @@ const markdownRoute = {
   src: "^/index\\.md$",
   headers: {
     "Cache-Control": "public, max-age=300",
-    "Content-Type": "text/markdown; charset=utf-8",
+    // Display literal Markdown in browsers that don't recognize text/markdown.
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Disposition": "inline; filename=\"index.md\"",
+    "X-Content-Type-Options": "nosniff",
   },
   continue: true,
 };
