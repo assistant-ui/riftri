@@ -141,11 +141,11 @@ function Savings() {
       <div className="section-heading split-heading">
         <div>
           <GraphLabel index="02">MEASURED SAVINGS</GraphLabel>
-          <h2 id="savings-title">Ten worktrees.<br />A smaller footprint.</h2>
+          <h2 id="savings-title">Worktree disk usage</h2>
         </div>
         <p>
-          Same tracked source. Same number of worktrees. Here is how much new disk
-          space Git and Riftri used in a local assistant-ui experiment.
+          Disk allocation for ten assistant-ui worktrees. The recorded comparison
+          uses macOS and APFS; Linux and Windows results have not been recorded.
         </p>
       </div>
       <SavingsMap />

@@ -1,4 +1,5 @@
 {
+  "platform": "macos",
   "reportPath": "docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md",
   "date": "2026-09-12",
   "version": "0.1.1",

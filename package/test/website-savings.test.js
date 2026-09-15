@@ -8,6 +8,7 @@ const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
 
 test("website savings measurements match the recorded assistant-ui experiment", () => {
   const data = JSON.parse(read("website/src/data/space-savings.json"));
+  assert.equal(data.platform, "macos", "these measurements must remain scoped to macOS");
   const report = read(data.reportPath);
   const bytes = (value) => `${value.toLocaleString("en-US")} B`;
   assert.ok(report.includes(`\`riftri ${data.version}\``));
@@ -32,5 +33,23 @@ test("savings section retains benchmark scope, tradeoff, and a source link", () 
   for (const limitation of ["Historical", "adjusted", "linguist-generated", "dependencies", "slower", "not a speed claim"]) {
     assert.ok(chart.includes(limitation), limitation);
   }
-  assert.doesNotMatch(chart, /use client|useEffect|useState/);
+});
+
+test("savings platforms cycle without presenting APFS measurements as cross-platform results", () => {
+  const chart = read("website/src/components/savings-map.tsx");
+  const css = read("website/src/app/globals.css");
+  const page = read("website/src/app/page.tsx");
+  for (const platform of ["macos", "linux", "windows"]) assert.ok(chart.includes(`id: "${platform}"`));
+  assert.match(chart, /platform\.id === data\.platform/);
+  assert.match(chart, /Not measured/);
+  assert.match(chart, /Pause cycle/);
+  assert.match(chart, /aria-pressed/);
+  assert.match(chart, /prefers-reduced-motion: reduce/);
+  assert.match(chart, /clearInterval/);
+  assert.match(chart, /IntersectionObserver/);
+  assert.match(page, /Worktree disk usage/);
+  assert.doesNotMatch(page, /Ten worktrees\.|A smaller footprint|Same tracked source\. Same number/);
+  const savingsCss = css.slice(css.indexOf(".savings-map"), css.indexOf(".start-section"));
+  assert.doesNotMatch(savingsCss, /var\(--success\)/);
+  assert.match(savingsCss, /var\(--accent\)/);
 });

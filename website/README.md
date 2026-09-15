@@ -33,6 +33,12 @@ adjusted-fixture caveat, dependency exclusions, and timing tradeoff visible.
 `node --test package/test/website-savings.test.js` from the repository root
 checks the displayed dataset against the source report. This is not a live
 benchmark or a claim about the latest release's performance.
+The platform selector cycles every seven seconds while visible and pauses when
+a platform or source link receives focus. Manual selection also pauses the cycle;
+the pause/resume control explicitly restarts or stops it.
+Reduced-motion preferences disable automatic cycling and transitions. Linux
+and Windows panels show their backends but explicitly have no assistant-ui
+measurements; never reuse APFS allocation or timing figures as their results.
 
 To publish the tested site from this directory:
 
