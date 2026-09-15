@@ -185,11 +185,11 @@ const startSteps = [
 
 function GetStarted() {
   return (
-    <section className="content-section start-section" id="start">
+    <section className="content-section start-section" id="start" tabIndex={-1} aria-labelledby="start-title">
       <div className="section-heading split-heading">
         <div>
           <GraphLabel index="03">QUICK START</GraphLabel>
-          <h2>Create a Riftri worktree</h2>
+          <h2 id="start-title">Create a Riftri worktree</h2>
         </div>
         <p>
           Install the CLI, then run the support check from a Git repository. Riftri stops
