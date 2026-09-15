@@ -425,7 +425,7 @@ fn status_and_repair_explain_an_empty_lifecycle() {
             String::from_utf8_lossy(&gc.stderr)
         );
         let gc_output = String::from_utf8_lossy(&gc.stdout);
-        assert!(gc_output.contains("Removed filesystem-accounted allocated bytes: 0"));
+        assert!(gc_output.contains("Removed filesystem-accounted allocated: 0 bytes"));
         assert!(gc_output.contains("Physical-sharing proof: use the platform volume-delta"));
     }
 
