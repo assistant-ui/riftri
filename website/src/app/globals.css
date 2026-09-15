@@ -586,6 +586,13 @@ code, pre { font-family: var(--font-mono); }
 .install-links { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; margin-top: 0.75rem; }
 .install-links a { text-decoration: underline; text-underline-offset: 0.2em; }
 
+.install-options { min-width: 0; }
+.install-platform { margin: 0 0 0.6rem; color: var(--ink-muted); font-size: 0.7rem; }
+.windows-install { margin-top: 0.65rem; }
+.windows-install summary { width: fit-content; min-height: 44px; padding-block: 0.75rem; color: var(--ink); font-size: 0.75rem; cursor: pointer; }
+.windows-install p { margin: 0.25rem 0 0.8rem; color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.8rem; line-height: 1.6; }
+.windows-install .command + p { margin-top: 0.8rem; }
+
 .command {
   display: grid;
   width: min(100%, 540px);
@@ -606,6 +613,8 @@ code, pre { font-family: var(--font-mono); }
   font-size: 0.68rem;
   white-space: nowrap;
 }
+
+.command-multiline code { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
 
 .copy-button {
   align-self: stretch;
@@ -694,6 +703,7 @@ code, pre { font-family: var(--font-mono); }
   .savings-lane dd > strong { font-size: 1rem; }
   .start-list li { grid-template-columns: 2rem minmax(0, 1fr); padding: 0.75rem 0; }
   .start-list .command { grid-column: 1 / -1; width: 100%; margin-top: 0.4rem; }
+  .start-list .install-options { grid-column: 1 / -1; }
   .install-notes { margin-left: 0; }
   .site-footer { grid-template-columns: 1fr; }
   .site-footer > * { min-height: 58px; justify-content: flex-start !important; border-left: 0 !important; }
