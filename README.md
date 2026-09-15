@@ -300,6 +300,7 @@ Development plans and design details live in:
 - [Project definition](PROJECT.md)
 - [Roadmap](ROADMAP.md)
 - [Architecture](docs/architecture.md)
+- [How Riftri stays safe](docs/safety.md)
 - [Design decisions](docs/decisions.md)
 - [Backend guarantees](docs/backend-guarantees.md)
 - [Native COW benchmark](docs/benchmarks.md)
