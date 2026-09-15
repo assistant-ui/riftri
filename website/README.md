@@ -3,6 +3,15 @@
 The Riftri product site is a single-page Farm.js application. Product concepts, installation,
 transparent Git usage, safety, storage lifecycle, and compatibility all live at `/`.
 
+`public/index.md` is the plain-Markdown overview served at `https://riftri.dev/index.md`.
+It covers setup, internals, supported backends, lifecycle, and benchmark context,
+with absolute links to the detailed GitHub documentation. Keep it in sync with
+product changes and add newly stored technical docs to its documentation index.
+The footer links to it as a Markdown alternative. Static output finalization
+requires the file and sets its production content type to `text/markdown; charset=utf-8`.
+`node --test package/test/website-markdown.test.js package/test/website-static-output.test.js`
+checks document coverage, local GitHub targets, and output configuration.
+
 Development and production builds copy the canonical `../package/install.sh`
 and `../package/install.ps1` to `public/`, serving them at `/install.sh` and
 `/install.ps1`. Do not edit those generated

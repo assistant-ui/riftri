@@ -222,6 +222,9 @@ function Footer() {
       <a className="footer-maker-link" href={agentbaseUrl}>
         AGENTBASE AI <ArrowUpRightIcon />
       </a>
+      <a href="/index.md" rel="alternate" type="text/markdown">
+        READ MARKDOWN
+      </a>
       <a href={githubUrl}>
         <GitHubIcon /> GET ON GITHUB <ArrowUpRightIcon />
       </a>

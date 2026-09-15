@@ -625,7 +625,7 @@ code, pre { font-family: var(--font-mono); }
 .site-footer {
   display: grid;
   min-height: 82px;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   color: var(--ink-faint);
   font-size: 0.55rem;
