@@ -225,7 +225,12 @@ $ riftri worktree compact ../app-auth
 $ riftri gc
 $ riftri gc --apply
 $ riftri state forget-missing /absolute/path/to/removed-state
+$ riftri completions zsh
 ```
+
+`riftri completions <shell>` prints a completion script for bash, zsh, fish,
+elvish, or PowerShell on stdout. Evaluate it in your shell profile or write it
+to your shell's completion directory; generation is offline and deterministic.
 
 Clean removal remains the default. To intentionally discard tracked,
 untracked, and ignored changes in one managed worktree, use either
