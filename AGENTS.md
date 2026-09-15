@@ -192,5 +192,6 @@ Filesystem work also needs platform-specific integration tests that prove:
 - `PROJECT.md`: product and technical outline.
 - `ROADMAP.md`: implementation order and acceptance criteria.
 - `docs/architecture.md`: component and transaction design.
+- `docs/agent-integration.md`: harness setup and the automation contract.
 - `docs/decisions.md`: settled decisions and open questions.
 - `README.md`: public introduction and current status.

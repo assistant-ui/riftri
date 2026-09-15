@@ -162,7 +162,9 @@ Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::New
 
 See [Global shell activation](docs/global-activation.md) for shell setup,
 compatibility details, and edge cases involving IDEs, containers, aliases, and
-Git wrappers.
+Git wrappers. For harness setup — Claude Code, Codex, containers, parallel
+agents, and the machine-readable output contract — see the
+[agent integration guide](docs/agent-integration.md).
 
 ## Supported today
 
