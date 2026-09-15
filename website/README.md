@@ -25,6 +25,15 @@ $ pnpm type-check
 $ pnpm build
 ```
 
+The `/#savings` section visualizes the historical assistant-ui experiment in
+`../docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md`. Its raw allocation
+measurements live in `src/data/space-savings.json`; the chart derives MiB,
+saved bytes, and bar proportions from those values. Keep the benchmark version,
+adjusted-fixture caveat, dependency exclusions, and timing tradeoff visible.
+`node --test package/test/website-savings.test.js` from the repository root
+checks the displayed dataset against the source report. This is not a live
+benchmark or a claim about the latest release's performance.
+
 To publish the tested site from this directory:
 
 ```console

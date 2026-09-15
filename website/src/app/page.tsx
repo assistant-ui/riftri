@@ -1,6 +1,7 @@
 import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
 import { MaterializationMap } from "../components/materialization-map";
+import { SavingsMap } from "../components/savings-map";
 import { SectionLink } from "../components/section-link";
 import { StorageMap } from "../components/storage-map";
 
@@ -134,6 +135,24 @@ function Overview() {
   );
 }
 
+function Savings() {
+  return (
+    <section className="content-section" id="savings" aria-labelledby="savings-title">
+      <div className="section-heading split-heading">
+        <div>
+          <GraphLabel index="02">MEASURED SAVINGS</GraphLabel>
+          <h2 id="savings-title">Ten worktrees.<br />A smaller footprint.</h2>
+        </div>
+        <p>
+          Same tracked source. Same number of worktrees. Here is how much new disk
+          space Git and Riftri used in a local assistant-ui experiment.
+        </p>
+      </div>
+      <SavingsMap />
+    </section>
+  );
+}
+
 const startSteps = [
   {
     index: "01",
@@ -160,7 +179,7 @@ function GetStarted() {
     <section className="content-section start-section" id="start">
       <div className="section-heading split-heading">
         <div>
-          <GraphLabel index="02">QUICK START</GraphLabel>
+          <GraphLabel index="03">QUICK START</GraphLabel>
           <h2>Create a Riftri worktree</h2>
         </div>
         <p>
@@ -217,6 +236,7 @@ export default function HomePage() {
         <main>
           <Hero />
           <Overview />
+          <Savings />
           <GetStarted />
         </main>
         <Footer />
