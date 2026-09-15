@@ -5,11 +5,34 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+const CLI_EXAMPLES: &str = "\
+Examples:
+  riftri enable                            Opt the current repository in
+  riftri worktree add ../feature -b f/x    Create a COW-backed worktree
+  riftri worktree remove ../feature        Safely remove it again
+  riftri gc --apply                        Delete unreferenced bases
+  riftri doctor --json                     Inspect Git and storage support
+
+Run `riftri <command> --help` for details on one command.";
+
+const CLI_ENVIRONMENT: &str = "\
+Environment:
+  RIFTRI_BYPASS=1        Route one intercepted Git command to ordinary Git.
+  RIFTRI_CACHE_DIR=PATH  Directory holding the shell-activation Git shim
+                         (defaults to the platform cache directory).
+
+RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE are set by riftri itself inside
+activated scopes; RIFTRI_REQUIRE_* variables only make the test suites fail
+instead of falling back. See docs/agent-integration.md for the automation
+contract.";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "riftri",
     version,
-    about = "Lightweight Git workspaces for parallel development"
+    about = "Lightweight Git workspaces for parallel development",
+    after_help = CLI_EXAMPLES,
+    after_long_help = format!("{CLI_EXAMPLES}\n\n{CLI_ENVIRONMENT}")
 )]
 struct Cli {
     /// Emit command failures as one machine-readable JSON receipt on stderr.
@@ -142,6 +165,10 @@ enum Command {
         #[arg(long)]
         apply: bool,
 
+        /// Skip the interactive confirmation before applying the plan.
+        #[arg(long, requires = "apply")]
+        yes: bool,
+
         /// Emit stable machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -251,6 +278,10 @@ enum WorktreeCommand {
         /// Discard current changes after recording an exact recovery snapshot.
         #[arg(long, short = 'f')]
         force: bool,
+
+        /// Skip the interactive confirmation before a forced removal.
+        #[arg(long, requires = "force")]
+        yes: bool,
 
         /// Emit stable machine-readable JSON.
         #[arg(long)]
@@ -374,14 +405,53 @@ fn main() -> Result<()> {
 
     match run(cli) {
         Ok(()) => Ok(()),
-        Err(error) if json_errors => {
-            eprintln!(
-                "{}",
-                serde_json::to_string(&failure_receipt(operation, &error))?
-            );
-            std::process::exit(1);
+        Err(error) => {
+            if json_errors {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&failure_receipt(operation, &error))?
+                );
+            } else {
+                eprintln!("Error: {error:?}");
+            }
+            std::process::exit(failure_exit_code(&error));
         }
-        Err(error) => Err(error),
+    }
+}
+
+/// Exit codes: 0 success, 1 operational failure, 2 command-line usage error
+/// (clap), 3 policy refusal. Mirrors the receipt `category` field.
+fn failure_exit_code(error: &anyhow::Error) -> i32 {
+    match error
+        .downcast_ref::<riftri_core::WorktreeError>()
+        .map(worktree_failure_fields)
+    {
+        Some((_, "policy", ..)) => 3,
+        _ => 1,
+    }
+}
+
+/// Ask before a destructive action when running interactively. Non-interactive
+/// callers (agents, CI) are never prompted so existing automation is
+/// unaffected; `--yes` skips the prompt for interactive scripts.
+fn confirm_destructive_action(warning: &str, yes: bool) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    if yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(());
+    }
+    let mut stderr = std::io::stderr().lock();
+    write!(stderr, "{warning} Continue? [y/N] ").context("write confirmation prompt")?;
+    stderr.flush().context("flush confirmation prompt")?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .context("read confirmation answer")?;
+    if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES") {
+        Ok(())
+    } else {
+        anyhow::bail!("aborted without confirmation; pass --yes to skip the prompt")
     }
 }
 
@@ -523,8 +593,15 @@ fn run(cli: Cli) -> Result<()> {
             repository,
             state_dir,
             apply,
+            yes,
             json,
         } => {
+            if apply {
+                confirm_destructive_action(
+                    "riftri gc --apply permanently deletes every base in the plan.",
+                    yes,
+                )?;
+            }
             let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::garbage_collect(&state_directory, apply)?;
             print_garbage_collection_report(&state_directory, &report, json)?;
@@ -584,8 +661,15 @@ fn run(cli: Cli) -> Result<()> {
                 repository,
                 state_dir,
                 force,
+                yes,
                 json,
             } => {
+                if force {
+                    confirm_destructive_action(
+                        "riftri worktree remove --force discards uncommitted changes after recording a recovery snapshot.",
+                        yes,
+                    )?;
+                }
                 let request = riftri_core::RemoveWorktreeRequest {
                     repository,
                     destination: path,
@@ -2018,6 +2102,51 @@ mod tests {
     }
 
     #[test]
+    fn policy_failures_exit_with_a_distinct_code() {
+        use super::failure_exit_code;
+
+        let policy = anyhow::Error::new(riftri_core::WorktreeError::InvalidRequest(
+            "destination already exists".to_owned(),
+        ));
+        assert_eq!(failure_exit_code(&policy), 3);
+
+        let unsupported = anyhow::Error::new(riftri_core::WorktreeError::Unsupported(
+            "sparse checkout".to_owned(),
+        ));
+        assert_eq!(failure_exit_code(&unsupported), 3);
+
+        let operational = anyhow::anyhow!("disk on fire");
+        assert_eq!(failure_exit_code(&operational), 1);
+    }
+
+    #[test]
+    fn confirmation_never_prompts_without_a_terminal() {
+        // Test harnesses run without a TTY on stdin, so both the `--yes` and
+        // the plain path must return without blocking on input.
+        super::confirm_destructive_action("would delete things.", true).expect("--yes path");
+        super::confirm_destructive_action("would delete things.", false).expect("non-tty path");
+    }
+
+    #[test]
+    fn skipping_confirmation_requires_the_destructive_flag() {
+        assert!(Cli::try_parse_from(["riftri", "gc", "--yes"]).is_err());
+        assert!(Cli::try_parse_from(["riftri", "gc", "--apply", "--yes"]).is_ok());
+        assert!(Cli::try_parse_from(["riftri", "worktree", "remove", "w", "--yes"]).is_err());
+        assert!(
+            Cli::try_parse_from(["riftri", "worktree", "remove", "w", "--force", "--yes"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn long_help_documents_examples_and_environment() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("Examples:"), "{help}");
+        assert!(help.contains("RIFTRI_BYPASS"), "{help}");
+    }
+
+    #[test]
     fn parses_repository_activation_commands() {
         let enable = Cli::try_parse_from(["riftri", "enable", "../repository"])
             .expect("parse repository enable command");
@@ -2161,6 +2290,7 @@ mod tests {
                     repository,
                     state_dir,
                     force,
+                    yes: _,
                     json,
                 },
         } = remove.command
@@ -2244,6 +2374,7 @@ mod tests {
             repository,
             state_dir,
             apply,
+            yes: _,
             json,
         } = gc.command
         else {
