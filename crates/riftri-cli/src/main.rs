@@ -66,6 +66,12 @@ enum Command {
         shell: clap_complete::Shell,
     },
 
+    /// Write one troff man page per riftri command into a directory.
+    Man {
+        /// Existing or new directory that receives the man pages.
+        directory: PathBuf,
+    },
+
     /// Inspect Git and show the planned storage path without changing anything.
     Doctor {
         /// Repository path to inspect.
@@ -163,6 +169,7 @@ impl Command {
             Self::Overlayfs { .. } => "overlayfs-helper-install",
             Self::Shell { .. } => "shell",
             Self::Completions { .. } => "completions",
+            Self::Man { .. } => "man",
             Self::Doctor { .. } => "doctor",
             Self::Backends { .. } => "backends",
             Self::Status { .. } => "status",
@@ -447,6 +454,14 @@ fn run(cli: Cli) -> Result<()> {
             use clap::CommandFactory;
 
             clap_complete::generate(shell, &mut Cli::command(), "riftri", &mut std::io::stdout());
+        }
+        Command::Man { directory } => {
+            use clap::CommandFactory;
+
+            std::fs::create_dir_all(&directory)
+                .with_context(|| format!("create man page directory {}", directory.display()))?;
+            clap_mangen::generate_to(Cli::command(), &directory).context("write man pages")?;
+            println!("Man pages written to {}", directory.display());
         }
         Command::Doctor {
             path,
@@ -1954,6 +1969,34 @@ mod tests {
 
         Cli::try_parse_from(["riftri", "completions"])
             .expect_err("completions requires an explicit shell");
+    }
+
+    #[test]
+    fn parses_man_page_generation() {
+        let cli = Cli::try_parse_from(["riftri", "man", "../man"]).expect("parse man command");
+        assert_eq!(cli.command.operation_name(), "man");
+        let Command::Man { directory } = cli.command else {
+            panic!("unexpected man command");
+        };
+        assert_eq!(directory, std::path::PathBuf::from("../man"));
+
+        Cli::try_parse_from(["riftri", "man"])
+            .expect_err("man requires an explicit output directory");
+    }
+
+    #[test]
+    fn writes_one_man_page_per_command() {
+        use clap::CommandFactory;
+
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        clap_mangen::generate_to(Cli::command(), directory.path()).expect("generate man pages");
+
+        for page in ["riftri.1", "riftri-completions.1", "riftri-worktree-add.1"] {
+            assert!(
+                directory.path().join(page).is_file(),
+                "missing man page {page}"
+            );
+        }
     }
 
     #[test]
