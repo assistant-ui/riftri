@@ -68,6 +68,11 @@ helper during an upgrade. Requirements and recovery are covered in
 Print a shell completion script for riftri commands on stdout. Shells:
 `bash`, `elvish`, `fish`, `powershell`, `zsh`.
 
+### `riftri man <DIRECTORY>`
+
+Write one troff man page per riftri command (`riftri.1`,
+`riftri-worktree-add.1`, …) into `DIRECTORY`, creating it if needed.
+
 ## Inspection
 
 ### `riftri doctor [OPTIONS] [PATH]`
