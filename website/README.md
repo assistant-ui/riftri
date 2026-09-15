@@ -7,13 +7,14 @@ transparent Git usage, safety, storage lifecycle, and compatibility all live at 
 It covers setup, internals, supported backends, lifecycle, and benchmark context,
 with absolute links to the detailed GitHub documentation. Keep it in sync with
 product changes and add newly stored technical docs to its documentation index.
-The hero installer has a compact `.md` download beside its copy button, with a
-descriptive accessible label; the footer opens the raw file. Neither adds a
+The hero installer has a compact `.md` link beside its copy button, with a
+descriptive accessible label. It navigates to `https://riftri.dev/index.md` in the same browser
+tab, without a download attribute; the footer also opens the raw file. Neither adds a
 separate guide section. Static output finalization requires the file and serves it as
 `text/plain; charset=utf-8`, with an inline `index.md` filename and `nosniff`.
 The response is the unchanged `.md` file, not HTML. Plain-text handling preserves
-literal Markdown in standard browsers; downloading also avoids embedded viewers
-that flatten whitespace even when the server returns the correct content type.
+literal Markdown in standard browsers. Embedded viewers may flatten whitespace
+even when the server returns the correct content type.
 `node --test package/test/website-markdown.test.js package/test/website-static-output.test.js`
 checks document coverage, local GitHub targets, and output configuration.
 The guide's star request is optional; agents must have

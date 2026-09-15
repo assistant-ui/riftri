@@ -85,11 +85,10 @@ function Hero() {
           <CopyCommand command={installCommand} compact />
           <a
             className="copy-button hero-markdown"
-            href="/index.md"
+            href="https://riftri.dev/index.md"
             type="text/plain"
-            download="index.md"
-            aria-label="Download Markdown guide"
-            title="Download Markdown guide"
+            aria-label="Open Markdown guide"
+            title="Open Markdown guide"
           >
             .md
           </a>
@@ -232,7 +231,7 @@ function Footer() {
       <a className="footer-maker-link" href={agentbaseUrl}>
         AGENTBASE AI <ArrowUpRightIcon />
       </a>
-      <a href="/index.md" rel="alternate" type="text/plain">
+      <a href="https://riftri.dev/index.md" rel="alternate" type="text/plain">
         READ MARKDOWN
       </a>
       <a href={githubUrl}>

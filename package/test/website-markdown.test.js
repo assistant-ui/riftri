@@ -52,13 +52,16 @@ test("Markdown guide links to every stored technical doc using valid GitHub path
 
 test("homepage makes its Markdown guide discoverable", () => {
   const page = read("website/src/app/page.tsx");
-  assert.match(page, /<a[^>]*href="\/index\.md"[^>]*rel="alternate"[^>]*type="text\/plain"[^>]*>\s*READ MARKDOWN\s*<\/a>/);
+  assert.match(page, /<a[^>]*href="https:\/\/riftri\.dev\/index\.md"[^>]*rel="alternate"[^>]*type="text\/plain"[^>]*>\s*READ MARKDOWN\s*<\/a>/);
 });
 
-test("hero places a compact Markdown download beside the command copy control", () => {
+test("hero opens Markdown in the same tab beside the command copy control", () => {
   const page = read("website/src/app/page.tsx");
   const hero = page.slice(page.indexOf("function Hero"), page.indexOf("const essentials"));
-  assert.match(hero, /<div className="hero-install">\s*<CopyCommand[^>]+\/>\s*<a[^>]*className="copy-button hero-markdown"[^>]*href="\/index\.md"[^>]*download="index\.md"[^>]*aria-label="Download Markdown guide"[^>]*>\s*\.md\s*<\/a>/);
+  assert.match(hero, /<div className="hero-install">\s*<CopyCommand[^>]+\/>\s*<a[^>]*className="copy-button hero-markdown"[^>]*href="https:\/\/riftri\.dev\/index\.md"[^>]*aria-label="Open Markdown guide"[^>]*>\s*\.md\s*<\/a>/);
+  const markdownLink = hero.match(/<a\b[^>]*className="copy-button hero-markdown"[^>]*>/)?.[0];
+  assert.ok(markdownLink);
+  assert.doesNotMatch(markdownLink, /\b(?:download|target)\s*(?:=|\s|>)/);
   assert.doesNotMatch(hero, />\s*(?:Read|Download) Markdown\s*</);
   assert.doesNotMatch(page, /MarkdownGuide|markdown-callout|id="markdown"/);
 });
