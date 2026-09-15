@@ -291,3 +291,108 @@ fn existing_branch_move_fails_and_rolls_back_without_deleting_the_branch() {
         second
     );
 }
+
+#[test]
+fn worktree_list_reports_only_managed_views_in_human_and_json_output() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let managed = fixture.path().join("managed");
+    let unmanaged = fixture.path().join("unmanaged");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
+    assert!(
+        git(&repository, &["add", "--", "tracked.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "initial"])
+            .status
+            .success()
+    );
+
+    let created = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&managed)
+        .args(["-b", "feature/managed", "--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("create managed worktree");
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/unmanaged",
+                unmanaged.to_str().expect("UTF-8 unmanaged path"),
+            ],
+        )
+        .status
+        .success()
+    );
+    let managed = managed.canonicalize().expect("canonical managed path");
+
+    let human = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "list", "--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("list managed worktrees");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("human inventory is UTF-8");
+    assert!(human.contains("Managed worktrees: 1"));
+    assert!(human.contains(&managed.to_string_lossy().to_string()));
+    assert!(!human.contains(&unmanaged.to_string_lossy().to_string()));
+
+    let json = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "list", "--state-dir"])
+        .arg(&state)
+        .arg("--json")
+        .current_dir(&repository)
+        .output()
+        .expect("list managed worktrees as JSON");
+    assert!(json.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("parse worktree inventory JSON");
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["state_directory"], state.to_string_lossy().as_ref());
+    assert_eq!(report["diagnostic_issues"], serde_json::json!([]));
+    let worktrees = report["worktrees"].as_array().expect("worktree list");
+    assert_eq!(worktrees.len(), 1);
+    assert_eq!(worktrees[0]["path"], managed.to_string_lossy().as_ref());
+    assert_eq!(
+        worktrees[0]["repository"],
+        repository
+            .canonicalize()
+            .expect("canonical repository")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert!(worktrees[0]["head"].is_string());
+    assert_eq!(worktrees[0]["branch"], "refs/heads/feature/managed");
+    assert_eq!(worktrees[0]["detached"], false);
+    assert_eq!(worktrees[0]["locked_reason"], serde_json::Value::Null);
+    assert_eq!(worktrees[0]["prunable_reason"], serde_json::Value::Null);
+    assert_eq!(worktrees[0]["backend"], "apfs-clone");
+    assert!(worktrees[0]["base_path"].is_string());
+    assert!(worktrees[0]["logical_bytes"].is_u64());
+    assert!(worktrees[0]["allocated_bytes"].is_u64());
+}

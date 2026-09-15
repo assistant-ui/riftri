@@ -38,7 +38,7 @@ the filesystem.
 On macOS or Linux, install the standalone native CLI with Bash:
 
 ```sh
-curl -fsSL https://riftri.vercel.app/install.sh | bash
+curl -fsSL https://riftri.dev/install.sh | bash
 ```
 
 The installer verifies SHA-256, checks the binary version, and installs to
@@ -51,7 +51,7 @@ On Windows, download and run the checksum-verifying PowerShell installer:
 
 ```powershell
 $Installer = Join-Path $env:TEMP 'riftri-install.ps1'
-Invoke-WebRequest https://riftri.vercel.app/install.ps1 -OutFile $Installer
+Invoke-WebRequest https://riftri.dev/install.ps1 -OutFile $Installer
 & $Installer
 ```
 
@@ -215,6 +215,8 @@ Useful commands:
 
 ```console
 $ riftri doctor
+$ riftri worktree list
+$ riftri worktree list --json
 $ riftri status
 $ riftri repair
 $ riftri worktree compact ../app-auth
@@ -255,7 +257,13 @@ while preserving its Git worktree registration, branch, and HEAD. It refuses
 tracked, untracked, and ignored entries, and its swap is journaled for
 `riftri repair`. Active OverlayFS views are not compacted yet.
 
-`riftri status` reports managed views and filesystem-accounted allocation. For
+`riftri worktree list` shows only active Riftri-managed worktrees, including
+their repository, current Git HEAD and branch, storage backend, immutable base,
+and filesystem-accounted allocation. `--json` provides a versioned schema for
+automation and includes exact native-path and raw-ref hexadecimal encodings.
+Ordinary unmanaged Git worktrees remain visible through `git worktree list`.
+
+`riftri status` reports the complete storage and lifecycle accounting view. For
 details on measuring physical sharing, see
 [APFS allocation evidence](docs/allocation-evidence.md) and
 [Linux reflink verification](docs/linux-reflink.md), or see

@@ -14,6 +14,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Optimized explicit and intercepted worktree adds can attach an existing local
   branch while preserving Git's branch-in-use checks and Riftri's exact-commit
   transaction boundary.
+- `riftri worktree list` reports active managed worktrees in concise human or
+  versioned JSON form with Git identity, backend, base, and allocation details.
 - A checksum-verifying PowerShell installer provides profile-free per-user
   installation for Windows x64 and ARM64.
 - Canonical Git LFS checkouts accept strict v1 pointers backed by verified

@@ -175,7 +175,9 @@ for (const [label, options, message] of [
 
 test("help and invalid arguments do not download or install", { skip: !unix }, (t) => {
   const f = fixture(t);
-  assert.equal(f.run(["--help"]).status, 0);
+  const help = f.run(["--help"]);
+  assert.equal(help.status, 0);
+  assert.ok(help.stdout.includes("https://riftri.dev/install.sh"));
   for (const args of [[""], ["--unknown"], ["0.1.1", "extra"], ["../../oops"], ["v0.1.1; echo bad"]]) {
     assert.notEqual(f.run(args).status, 0);
   }

@@ -18,6 +18,7 @@ test("PowerShell installer keeps installation explicit and profile-free", () => 
   assert.match(source, /riftri\.exe/);
   assert.match(source, /File\]::Replace/);
   assert.match(source, /IsPathRooted/);
+  assert.ok(source.includes("Write-Output 'Installer: https://riftri.dev/install.ps1'"));
   assert.doesNotMatch(source, /Microsoft\.PowerShell_profile|CurrentUserAllHosts|SetEnvironmentVariable|\$PROFILE|winget|choco/i);
 });
 

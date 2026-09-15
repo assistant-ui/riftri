@@ -11,7 +11,7 @@ release you intend to install; do not mix files from different versions.
 On macOS (Apple Silicon or Intel) and Linux with glibc or musl (ARM64 or x64):
 
 ```sh
-curl -fsSL https://riftri.vercel.app/install.sh | bash
+curl -fsSL https://riftri.dev/install.sh | bash
 ```
 
 This selects the latest stable GitHub release once, downloads the matching
@@ -26,7 +26,7 @@ are involved. Git is still needed to use Riftri.
 To pin a release:
 
 ```sh
-curl -fsSL https://riftri.vercel.app/install.sh | bash -s -- v0.2.1
+curl -fsSL https://riftri.dev/install.sh | bash -s -- v0.2.1
 ```
 
 Piping a script to Bash executes code from that URL. To inspect it first,
@@ -35,7 +35,7 @@ download to a new directory, review it, and then run the saved file:
 ```sh
 installer_dir=$(mktemp -d "${TMPDIR:-/tmp}/riftri-installer-review.XXXXXX")
 curl --fail --location --proto '=https' --proto-redir '=https' \
-  https://riftri.vercel.app/install.sh \
+  https://riftri.dev/install.sh \
   --output "$installer_dir/install.sh"
 less "$installer_dir/install.sh"
 # Run only after reviewing the downloaded script:
@@ -53,7 +53,7 @@ An absolute `RIFTRI_INSTALL_DIR` overrides the destination. Set it on **Bash**,
 not on the `curl` side of the pipe:
 
 ```sh
-curl -fsSL https://riftri.vercel.app/install.sh | RIFTRI_INSTALL_DIR="$HOME/tools/bin" bash
+curl -fsSL https://riftri.dev/install.sh | RIFTRI_INSTALL_DIR="$HOME/tools/bin" bash
 ```
 
 Follow the PATH command printed by the installer, then check `riftri --version`.
@@ -142,7 +142,7 @@ in your per-user application-data directory:
 
 ```powershell
 $Installer = Join-Path $env:TEMP 'riftri-install.ps1'
-Invoke-WebRequest https://riftri.vercel.app/install.ps1 -OutFile $Installer
+Invoke-WebRequest https://riftri.dev/install.ps1 -OutFile $Installer
 Get-Content $Installer
 & $Installer
 ```

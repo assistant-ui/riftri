@@ -157,6 +157,7 @@ impl Command {
             Self::Gc { .. } => "garbage-collection",
             Self::State { .. } => "state",
             Self::Worktree { command } => match command {
+                WorktreeCommand::List { .. } => "worktree-list",
                 WorktreeCommand::Add { .. } => "worktree-add",
                 WorktreeCommand::Remove { .. } => "worktree-remove",
                 WorktreeCommand::Move { .. } => "worktree-move",
@@ -169,6 +170,21 @@ impl Command {
 
 #[derive(Debug, Subcommand)]
 enum WorktreeCommand {
+    /// List active Riftri-managed worktrees and their storage use.
+    List {
+        /// Repository whose default Riftri state should be inspected.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Riftri state directory; defaults to <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Create a real linked worktree using the platform's native COW backend.
     Add {
         /// New worktree directory.
@@ -468,6 +484,15 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Worktree { command } => match command {
+            WorktreeCommand::List {
+                repository,
+                state_dir,
+                json,
+            } => {
+                let state_directory = resolve_state_directory(&repository, state_dir)?;
+                let report = riftri_core::storage_accounting(&state_directory)?;
+                print_worktree_inventory(&state_directory, &report, json)?;
+            }
             WorktreeCommand::Add {
                 path,
                 branch,
@@ -1036,6 +1061,145 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult) {
     println!("Journal: {}", result.journal_path.display());
 }
 
+fn print_worktree_inventory(
+    state_directory: &Path,
+    report: &riftri_core::StorageAccountingReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let worktrees = report
+            .views
+            .iter()
+            .map(|view| {
+                serde_json::json!({
+                    "repository": view.repository.display().to_string(),
+                    "repository_native_hex": native_path_hex(&view.repository),
+                    "path": view.destination.display().to_string(),
+                    "path_native_hex": native_path_hex(&view.destination),
+                    "head": view.head.as_str(),
+                    "branch": view.branch.as_deref().map(display_git_bytes),
+                    "branch_hex": view.branch.as_deref().map(encode_hex),
+                    "detached": view.detached,
+                    "locked_reason": view.locked_reason.as_deref().map(display_git_bytes),
+                    "locked_reason_hex": view.locked_reason.as_deref().map(encode_hex),
+                    "prunable_reason": view.prunable_reason.as_deref().map(display_git_bytes),
+                    "prunable_reason_hex": view.prunable_reason.as_deref().map(encode_hex),
+                    "backend": view.backend,
+                    "base_path": view.base_path.display().to_string(),
+                    "base_path_native_hex": native_path_hex(&view.base_path),
+                    "logical_bytes": view.logical_bytes,
+                    "allocated_bytes": view.allocated_bytes,
+                })
+            })
+            .collect::<Vec<_>>();
+        let diagnostic_issues = report
+            .diagnostic_issues
+            .iter()
+            .map(|issue| {
+                serde_json::json!({
+                    "path": issue.path.display().to_string(),
+                    "path_native_hex": native_path_hex(&issue.path),
+                    "reason": issue.reason,
+                })
+            })
+            .collect::<Vec<_>>();
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "state_directory": state_directory.display().to_string(),
+            "state_directory_native_hex": native_path_hex(state_directory),
+            "native_path_encoding": native_path_encoding(),
+            "worktrees": worktrees,
+            "diagnostic_issues": diagnostic_issues,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
+        );
+        return Ok(());
+    }
+
+    println!("Riftri managed worktrees");
+    println!("State: {}", state_directory.display());
+    println!("Managed worktrees: {}", report.views.len());
+    for view in &report.views {
+        println!("- {}", view.destination.display());
+        println!("  Repository: {}", view.repository.display());
+        println!("  Head: {}", view.head.as_str());
+        if let Some(branch) = &view.branch {
+            println!("  Branch: {}", display_git_bytes(branch));
+        } else if view.detached {
+            println!("  Branch: detached");
+        }
+        if let Some(reason) = &view.locked_reason {
+            println!("  Locked: {}", display_git_bytes(reason));
+        }
+        if let Some(reason) = &view.prunable_reason {
+            println!("  Prunable: {}", display_git_bytes(reason));
+        }
+        println!("  Backend: {}", view.backend.display_name());
+        println!("  Immutable base: {}", view.base_path.display());
+        println!("  Logical bytes: {}", view.logical_bytes);
+        println!(
+            "  Filesystem-accounted allocated bytes: {}",
+            view.allocated_bytes
+        );
+    }
+    if !report.diagnostic_issues.is_empty() {
+        println!("Diagnostic issues: {}", report.diagnostic_issues.len());
+        for issue in &report.diagnostic_issues {
+            println!("- {}: {}", issue.path.display(), issue.reason);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn native_path_hex(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+
+    encode_hex(path.as_os_str().as_bytes())
+}
+
+#[cfg(target_os = "windows")]
+fn native_path_hex(path: &Path) -> String {
+    use std::os::windows::ffi::OsStrExt;
+
+    let bytes = path
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    encode_hex(&bytes)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn native_path_hex(path: &Path) -> String {
+    encode_hex(path.to_string_lossy().as_bytes())
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+fn display_git_bytes(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+const fn native_path_encoding() -> &'static str {
+    #[cfg(unix)]
+    return "unix-bytes-hex";
+    #[cfg(target_os = "windows")]
+    return "windows-utf16le-hex";
+    #[cfg(not(any(unix, target_os = "windows")))]
+    return "utf8-lossy-bytes-hex";
+}
+
 fn print_storage_accounting(state_directory: &Path, report: &riftri_core::StorageAccountingReport) {
     println!("Riftri storage status");
     println!("State: {}", state_directory.display());
@@ -1321,6 +1485,8 @@ mod tests {
     use super::{
         Cli, Command, OverlayFsCommand, ShellCommand, ShellKind, WorktreeCommand, failure_receipt,
     };
+    #[cfg(unix)]
+    use super::{native_path_encoding, native_path_hex};
 
     #[test]
     fn help_uses_the_public_product_description() {
@@ -1467,6 +1633,32 @@ mod tests {
 
     #[test]
     fn parses_worktree_removal_and_storage_status() {
+        let list = Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "list",
+            "--repository",
+            "../app",
+            "--state-dir",
+            "../state",
+            "--json",
+        ])
+        .expect("parse managed worktree inventory");
+        let Command::Worktree {
+            command:
+                WorktreeCommand::List {
+                    repository,
+                    state_dir,
+                    json,
+                },
+        } = list.command
+        else {
+            panic!("unexpected worktree list command");
+        };
+        assert_eq!(repository, Path::new("../app"));
+        assert_eq!(state_dir.as_deref(), Some(Path::new("../state")));
+        assert!(json);
+
         let remove = Cli::try_parse_from([
             "riftri",
             "worktree",
@@ -1565,6 +1757,17 @@ mod tests {
         assert_eq!(repository, Path::new("../app"));
         assert!(state_dir.is_none());
         assert!(apply);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_path_encoding_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new(OsStr::from_bytes(b"/worktree-\xff"));
+
+        assert_eq!(native_path_encoding(), "unix-bytes-hex");
+        assert_eq!(native_path_hex(path), "2f776f726b747265652dff");
     }
 
     #[test]
