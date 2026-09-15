@@ -133,13 +133,6 @@ enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-
-    /// Repair operations in an explicitly selected Riftri state directory.
-    Recover {
-        /// Riftri state directory containing operation journals.
-        #[arg(long)]
-        state_dir: PathBuf,
-    },
 }
 
 impl Command {
@@ -153,7 +146,7 @@ impl Command {
             Self::Doctor { .. } => "doctor",
             Self::Backends { .. } => "backends",
             Self::Status { .. } => "status",
-            Self::Repair { .. } | Self::Recover { .. } => "repair",
+            Self::Repair { .. } => "repair",
             Self::Gc { .. } => "garbage-collection",
             Self::State { .. } => "state",
             Self::Worktree { command } => match command {
@@ -599,10 +592,6 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Journal: {}", result.journal_path.display());
             }
         },
-        Command::Recover { state_dir } => {
-            let report = riftri_core::recover_incomplete_operations(&state_dir)?;
-            print_recovery_report(&state_dir, &report)?;
-        }
     }
 
     Ok(())
