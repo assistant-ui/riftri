@@ -1,38 +1,67 @@
 import { createServer } from "node:http";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Preview the actual finalized build, including its public file response headers.
-const output = fileURLToPath(new URL("../.vercel/output/", import.meta.url));
-const root = await realpath(path.join(output, "static"));
-const config = JSON.parse(await readFile(path.join(output, "config.json"), "utf8"));
-const port = Number(process.env.RIFTRI_PREVIEW_PORT || 4318);
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".json": "application/json", ".md": "text/plain", ".sh": "text/plain", ".ps1": "text/plain" };
 
-const server = createServer(async (request, response) => {
-  if (!["GET", "HEAD"].includes(request.method)) {
-    response.writeHead(405, { Allow: "GET, HEAD" }).end();
-    return;
-  }
-  try {
-    const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
-    const file = await realpath(path.join(root, pathname === "/" ? "index.html" : pathname));
+export async function createStaticPreview(output = fileURLToPath(new URL("../.vercel/output/", import.meta.url))) {
+  const root = await realpath(path.join(output, "static"));
+  const config = JSON.parse(await readFile(path.join(output, "config.json"), "utf8"));
+  if (config.version !== 3) throw new Error("Expected Build Output API version 3");
+  const aliases = new Map(Object.entries(config.overrides || {})
+    .filter(([, value]) => typeof value.path === "string")
+    .map(([file, value]) => [`/${value.path}`, file]));
+  const routes = config.routes || [];
+  const errorIndex = routes.findIndex((route) => route.handle === "error");
+  const errorRoutes = errorIndex < 0 ? [] : routes.slice(errorIndex + 1);
+
+  async function resolveFile(pathname) {
+    const file = await realpath(path.join(root, aliases.get(pathname) ?? (pathname === "/" ? "index.html" : pathname)));
     const relative = path.relative(root, file);
-    if (relative.startsWith("..") || path.isAbsolute(relative)) {
-      response.writeHead(403).end();
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+      throw Object.assign(new Error("Outside static root"), { code: "FORBIDDEN" });
+    }
+    return { file, bytes: await readFile(file) };
+  }
+
+  return createServer(async (request, response) => {
+    if (!["GET", "HEAD"].includes(request.method)) {
+      response.writeHead(405, { Allow: "GET, HEAD" }).end();
       return;
     }
-    const bytes = await readFile(file);
-    const headers = { "Content-Type": types[path.extname(file)] || "application/octet-stream" };
-    for (const route of config.routes || []) {
-      if (route.src && route.headers && new RegExp(route.src).test(pathname)) Object.assign(headers, route.headers);
+    try {
+      const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+      let result;
+      let status = 200;
+      try {
+        result = await resolveFile(pathname);
+      } catch (error) {
+        if (!["ENOENT", "ENOTDIR", "EISDIR"].includes(error.code)) throw error;
+        const route = errorRoutes.find((entry) => entry.status === 404 && entry.src && entry.dest && new RegExp(entry.src).test(pathname));
+        if (!route) throw error;
+        result = await resolveFile(route.dest);
+        status = 404;
+      }
+      const headers = { "Content-Type": types[path.extname(result.file)] || "application/octet-stream" };
+      for (const route of routes) {
+        if (route.handle) break;
+        if (route.src && route.headers && new RegExp(route.src).test(pathname)) Object.assign(headers, route.headers);
+      }
+      // A missing installer/Markdown URL must not relabel the error page as text.
+      if (status === 404) headers["Content-Type"] = "text/html; charset=utf-8";
+      response.writeHead(status, { ...headers, "Content-Length": result.bytes.length });
+      response.end(request.method === "HEAD" ? undefined : result.bytes);
+    } catch (error) {
+      const status = error.code === "FORBIDDEN" ? 403 : error instanceof URIError ? 400 : ["ENOENT", "ENOTDIR", "EISDIR"].includes(error.code) ? 404 : 500;
+      response.writeHead(status, { "Content-Type": "text/plain" }).end(request.method === "HEAD" ? undefined : status === 404 ? "Not found" : "Request failed");
     }
-    response.writeHead(200, { ...headers, "Content-Length": bytes.length });
-    response.end(request.method === "HEAD" ? undefined : bytes);
-  } catch {
-    response.writeHead(404, { "Content-Type": "text/plain" }).end("Not found");
-  }
-});
+  });
+}
 
-server.listen(port, "127.0.0.1", () => console.log(`Riftri preview: http://127.0.0.1:${port}`));
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  const port = Number(process.env.RIFTRI_PREVIEW_PORT || 4318);
+  const server = await createStaticPreview();
+  server.listen(port, "127.0.0.1", () => console.log(`Riftri preview: http://127.0.0.1:${server.address().port}`));
+}
