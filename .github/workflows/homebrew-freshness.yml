@@ -1,0 +1,90 @@
+name: Homebrew freshness
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "Formula/riftri.rb"
+      - ".github/workflows/homebrew-freshness.yml"
+  schedule:
+    # Daily, because the formula goes stale the moment a release publishes and
+    # the drift guard in package/test/homebrew-formula.test.js cannot see a
+    # newer tag — it only proves the formula is self-consistent.
+    - cron: "19 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: homebrew-freshness-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formula-tracks-latest-release:
+    name: Formula tracks the latest release
+    runs-on: ubuntu-24.04
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare the formula version against the latest release
+        run: |
+          set -euo pipefail
+          formula_version="$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/riftri.rb)"
+          if [ -z "${formula_version}" ]; then
+            echo "::error file=Formula/riftri.rb::Could not read a version from the formula."
+            exit 1
+          fi
+          latest_tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
+          latest_version="${latest_tag#v}"
+          echo "formula: ${formula_version}"
+          echo "latest release: ${latest_version} (${latest_tag})"
+          if [ "${formula_version}" != "${latest_version}" ]; then
+            echo "::error file=Formula/riftri.rb::The Homebrew formula pins ${formula_version} but the latest release is ${latest_version}." \
+              "Regenerate it: gh release download ${latest_tag} --repo ${GITHUB_REPOSITORY} --pattern SHA256SUMS --dir /tmp/riftri" \
+              "&& node package/scripts/update-homebrew-formula.mjs ${latest_version} /tmp/riftri/SHA256SUMS"
+            exit 1
+          fi
+          echo "LATEST_TAG=${latest_tag}" >> "${GITHUB_ENV}"
+
+      - name: Verify the pinned checksums against the published manifest
+        run: |
+          set -euo pipefail
+          # The formula is only trustworthy if its pins still match what the
+          # release actually publishes, so compare every archive it references
+          # rather than trusting that the generator was run.
+          gh release download "${LATEST_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern SHA256SUMS --dir release --clobber
+          awk '
+            /^ *url "/ {
+              url = $2; gsub(/"/, "", url)
+              count = split(url, segments, "/")
+              archive = segments[count]
+            }
+            /^ *sha256 "/ { sha = $2; gsub(/"/, "", sha); print archive, sha }
+          ' Formula/riftri.rb > pinned.txt
+          if [ ! -s pinned.txt ]; then
+            echo "::error file=Formula/riftri.rb::No pinned archives were found in the formula."
+            exit 1
+          fi
+          failed=0
+          while read -r archive pinned; do
+            published="$(awk -v name="${archive}" '$2 == name { print $1 }' release/SHA256SUMS)"
+            if [ -z "${published}" ]; then
+              failed=1
+              echo "::error file=Formula/riftri.rb::${archive} is pinned by the formula but absent from the ${LATEST_TAG} SHA256SUMS."
+            elif [ "${published}" != "${pinned}" ]; then
+              failed=1
+              echo "::error file=Formula/riftri.rb::${archive} pins ${pinned} but the release publishes ${published}." \
+                "Regenerate the formula with package/scripts/update-homebrew-formula.mjs."
+            else
+              echo "${archive}: matches the published checksum."
+            fi
+          done < pinned.txt
+          exit "${failed}"
