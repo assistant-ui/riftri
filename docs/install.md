@@ -254,8 +254,8 @@ The formula is generated, not hand-written. After a release, regenerate it
 from that tag's published checksums:
 
 ```sh
-gh release download v0.2.2 --repo assistant-ui/riftri --pattern SHA256SUMS --dir /tmp/riftri
-node package/scripts/update-homebrew-formula.mjs 0.2.2 /tmp/riftri/SHA256SUMS
+gh release download v0.2.3 --repo assistant-ui/riftri --pattern SHA256SUMS --dir /tmp/riftri
+node package/scripts/update-homebrew-formula.mjs 0.2.3 /tmp/riftri/SHA256SUMS
 ```
 
 `package/test/homebrew-formula.test.js` fails if the checked-in formula stops
