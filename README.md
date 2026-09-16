@@ -9,12 +9,10 @@ agents working on several tasks at once.
 [![CI](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml/badge.svg)](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml)
 
 > [!WARNING]
-> Riftri is experimental, pre-release software. Keep important work committed
-> or backed up. Optimized worktree operations require a writable APFS volume on
-> macOS, Btrfs/reflink-enabled XFS or OverlayFS on Linux, or ReFS on Windows.
-> OverlayFS requires either an already mount-capable namespace or the explicit
-> system helper described below. Broader Windows filesystem support is still in
-> development.
+> Riftri is experimental, pre-release software. Keep important work committed or
+> backed up. Optimized worktrees need APFS on macOS, Btrfs or reflink-enabled
+> XFS or OverlayFS on Linux, or ReFS on Windows — see
+> [what works today](#what-works-today).
 
 ## Why Riftri?
 
@@ -31,25 +29,19 @@ Riftri keeps normal Git behavior while making those checkouts lightweight:
 - Interrupted creation and cleanup operations can be recovered safely.
 
 Riftri does not replace Git, manage branches, or sit between applications and
-the filesystem. For how it relates to plain `git worktree`, reference clones,
+the filesystem. For how it compares to plain `git worktree`, reference clones,
 manual reflink copies, and per-agent containers, see the
 [comparison with alternatives](docs/comparison.md).
 
-## Installation
+## Install
 
-On macOS or Linux, install the standalone native CLI with Bash:
+macOS and Linux:
 
 ```sh
 curl -fsSL https://riftri.dev/install.sh | bash
 ```
 
-The installer verifies SHA-256, checks the binary version, and installs to
-`~/.local/bin`. Follow its printed PATH command to use it in your current shell.
-It does not edit shell profiles, use sudo, or activate Git interception.
-[Read the script](package/install.sh) before running it, or download it for review
-first as described in the [installation guide](docs/install.md#bash-installer).
-
-On Windows, download and run the checksum-verifying PowerShell installer:
+Windows PowerShell:
 
 ```powershell
 $Installer = Join-Path $env:TEMP 'riftri-install.ps1'
@@ -57,46 +49,34 @@ Invoke-WebRequest https://riftri.dev/install.ps1 -OutFile $Installer
 & $Installer
 ```
 
-It installs the matching x64 or ARM64 executable in a per-user directory and
-does not edit PowerShell profiles or persistent `PATH`. You can inspect
-[`package/install.ps1`](package/install.ps1) before running it. Manual downloads
-remain available from [GitHub Releases](https://github.com/assistant-ui/riftri/releases).
-**Node.js and npm are not required.** See the [direct-download installation
-guide](docs/install.md) for all eight targets and checksum-verification commands.
+Both installers verify SHA-256 and the binary version, install to a per-user
+directory, and never use sudo, edit shell profiles, or activate Git
+interception. Node.js is not required. Read
+[`install.sh`](package/install.sh) or [`install.ps1`](package/install.ps1)
+first if you prefer, and see the [installation guide](docs/install.md) for all
+eight targets, manual downloads, and checksum verification.
 
-The npm launcher is a separate distribution channel. It is not currently
-available because the initial publication is incomplete; use the verified
-standalone installer or GitHub release assets for now. GitHub and npm
-publication complete independently, so this notice will be removed only after
-the launcher and all eight native packages are present and verified on npm.
-
-Or build it from source:
+Or build from source:
 
 ```console
 $ cargo build --release -p riftri-cli
 $ ./target/release/riftri doctor
 ```
 
-The npm package is a small launcher for the same prebuilt Rust binary. Builds
-are provided for macOS, Linux, and Windows, but optimized worktree creation is
-currently available on APFS, supported Linux reflink volumes, caller-visible
-OverlayFS mounts, and ReFS, subject to the selected release's capabilities.
-Installing the Windows CLI on NTFS does not add an NTFS worktree backend.
+The npm launcher is a separate distribution channel. It is not currently
+available because the initial publication is incomplete; use the verified
+standalone installer or GitHub release assets for now.
 
 ## Quick start
 
-Check whether the current repository and destination are compatible:
+Check that the repository and destination are compatible — this creates
+nothing:
 
 ```console
 $ riftri doctor --destination ../app-auth
 ```
 
-The readiness summary names the backend Riftri would select, confirms whether
-copy-on-write is available, reports OverlayFS helper state when relevant, and
-gives the next command or a concrete remedy. The check does not create Riftri
-state or Git worktree metadata.
-
-Create an optimized worktree explicitly:
+Then create a worktree:
 
 ```console
 $ riftri worktree add ../app-auth -b feature/auth main
@@ -104,207 +84,93 @@ $ cd ../app-auth
 $ git status
 ```
 
-Attach an existing local branch without creating a replacement branch:
+To attach an existing branch instead, drop the `-b` flag:
 
 ```console
 $ riftri worktree add ../app-auth feature/auth
 ```
 
-The new directory behaves like any other Git worktree. Riftri shares unchanged
-data through an immutable native base; files allocate private storage as they
-are changed.
+The new directory behaves like any other Git worktree.
 
 ## Use normal `git worktree` commands
 
-Activate Riftri's Git shim in the current shell, then enable each repository
-that should use optimized worktrees:
+Activate the Git shim in your shell, then opt in each repository:
 
 ```console
 $ eval "$(riftri shell hook zsh)"
 $ cd app
 $ riftri enable
 $ git worktree add -b feature/auth ../app-auth main
-$ git worktree add ../existing-auth feature/existing-auth
 ```
 
-In Windows PowerShell, explicitly evaluate the equivalent session hook:
-
-```powershell
-Invoke-Expression ((riftri shell hook powershell) -join [Environment]::NewLine)
-Set-Location app
-riftri enable
-git worktree add -b feature/auth ../app-auth main
-```
-
-The shell hook may be added to your shell profile if you want it available in
-every new shell. This does **not** enable Riftri for every repository:
-`riftri enable` is still required in each repository. Commands in repositories
-that are not enabled go directly to the real Git executable. Riftri never edits
-shell startup files automatically.
-
-For a single agent or command tree, use process-scoped activation instead:
+For a single agent or command tree, skip the shell hook entirely:
 
 ```console
 $ riftri enable
 $ riftri exec -- claude
 ```
 
-Use `riftri disable` to opt a repository out. Use `riftri shell status` to
-inspect activation, or deactivate the shim in the current shell with:
+Activating the shell hook does **not** enable Riftri everywhere: `riftri enable`
+is still required per repository, and other repositories go straight to real
+Git. Use `riftri disable` to opt out and `riftri shell status` to inspect
+activation.
 
-```console
-$ eval "$(riftri shell deactivate zsh)"
-```
-
-In PowerShell, deactivate the current session with:
-
-```powershell
-Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
-```
-
-See [Global shell activation](docs/global-activation.md) for shell setup,
-compatibility details, and edge cases involving IDEs, containers, aliases, and
-Git wrappers. For harness setup — Claude Code, Codex, containers, parallel
-agents, and the machine-readable output contract — see the
+PowerShell setup, IDE and container edge cases, and agent harness integration
+are covered in [global activation](docs/global-activation.md) and the
 [agent integration guide](docs/agent-integration.md).
 
-## Supported today
+## What works today
 
-On macOS with APFS, Linux with Btrfs or reflink-enabled XFS, and Windows with
-ReFS, Riftri supports:
+| Platform | Backend | Status |
+| --- | --- | --- |
+| macOS | APFS clones | Supported |
+| Linux | Btrfs / reflink-enabled XFS | Supported |
+| Linux | OverlayFS | Experimental |
+| Windows | ReFS block clones | Supported |
 
-- Optimized creation of real linked worktrees.
-- Repository-scoped and process-scoped Git interception.
-- Clean worktree removal plus snapshot-guarded forced removal, move, and prune
-  operations.
-- Explicit compaction of pristine native-COW worktrees.
-- Reusable immutable bases with disk-usage reporting.
-- Journaled recovery, repair, and garbage collection.
-- Safe compatibility checks before any worktree is created.
-- Canonical Git LFS checkouts from already-fetched, SHA-256-verified local
-  objects.
+On those backends Riftri creates real linked worktrees, intercepts Git per
+repository or per process, removes, moves, prunes, and compacts them, reuses
+immutable bases with disk accounting, and recovers from interruption through
+journaled repair and garbage collection.
 
-Linux OverlayFS is also available experimentally when the add-time probe proves
-that the current mount namespace can host a persistent view. On a normal Linux
-shell without mount capability, install Riftri's narrow helper once:
+OverlayFS additionally needs either a mount-capable namespace or a one-time
+helper. The helper is installed system-wide but intercepts nothing on its own,
+and `riftri enable` remains a separate per-repository choice:
 
 ```console
 $ sudo riftri overlayfs install-helper
 ```
 
-The helper is available system-wide, but it does not intercept Git or enable
-any repository. `riftri enable` remains a separate per-repository choice. The
-root-owned helper accepts only validated OverlayFS mount, exact
-identity-checked unmount, and disposable work-directory reset requests for
-directories owned by the calling user; capability-probe files remain owned and
-verified by that user;
-Git, agents, editors, builds, and normal file access continue to run without
-elevation. Use `--replace` when upgrading an existing helper.
+**Riftri fails closed.** When a checkout cannot be reproduced exactly — custom
+filters, sparse checkout, submodules, external attributes, or non-canonical
+[Git LFS](docs/git-lfs.md) setups — it stops before changing anything rather
+than silently falling back to a full copy. See
+[how Riftri stays safe](docs/safety.md).
 
-OverlayFS supports the same real-worktree creation, clean removal, isolation,
-crash recovery, and explicit repair after a reboot. Mounted-view moves are
-rejected before mutation. If neither reflinks, a mount-capable namespace, nor a
-valid helper is available, Riftri stops before mutation and never silently
-creates a full-copy worktree.
-
-Riftri deliberately stops with a clear explanation when a checkout cannot yet
-be reproduced safely—for example, repositories using custom filters, extended
-or custom-storage Git LFS configurations, sparse checkout, submodules, or
-external attributes. Git LFS objects must already be fetched; Riftri does not
-perform network access during worktree creation. It never silently replaces an
-optimized operation with a full worktree copy. See the exact
-[Git LFS compatibility profile](docs/git-lfs.md).
-
-Useful commands:
+## Common commands
 
 ```console
-$ riftri doctor
-$ riftri worktree list
-$ riftri worktree list --json
-$ riftri status
-$ riftri repair
+$ riftri doctor                      # check compatibility
+$ riftri worktree list               # managed worktrees and their disk use
+$ riftri status                      # bases, references, and accounting
 $ riftri worktree compact ../app-auth
-$ riftri gc
-$ riftri gc --apply
-$ riftri state forget-missing /absolute/path/to/removed-state
-$ riftri completions zsh
+$ riftri repair                      # resume or roll back interrupted work
+$ riftri gc --apply                  # delete unreferenced bases
 ```
 
-`riftri completions <shell>` prints a completion script for bash, zsh, fish,
-elvish, or PowerShell on stdout. Evaluate it in your shell profile or write it
-to your shell's completion directory; generation is offline and deterministic.
+Every command that reports or changes state accepts `--json`, and any command
+accepts `--json-errors` to emit a versioned failure receipt, so automation never
+has to scrape human text. The full reference is in [docs/cli.md](docs/cli.md).
 
-Clean removal remains the default. To intentionally discard tracked,
-untracked, and ignored changes in one managed worktree, use either
-`riftri worktree remove --force <path>` or enabled Git interception with
-`git worktree remove --force <path>`. Riftri records an exact content snapshot
-before deletion; if the view changes after that intent, deletion and recovery
-stop and preserve it for inspection.
+## Documentation
 
-Automation can add `--json-errors` anywhere in a command. A failure is then
-written to stderr as one versioned JSON receipt with a stable code, category,
-operation, optional durable phase, cleanup disposition, and recovery guidance.
-Normal successful output and default human-readable errors are unchanged.
+[docs/README.md](docs/README.md) indexes everything. Start with:
 
-Successful results are machine-readable too: `doctor`, `backends`, `status`,
-`repair`, `gc`, and every `worktree` subcommand accept `--json` and print one
-versioned report on stdout, using the same stable schema conventions as
-`riftri worktree list --json`. Combined with `--json-errors`, an automation
-harness can parse every Riftri outcome without scraping human text.
-
-If a custom state directory was removed outside Riftri, lifecycle interception
-continues to fail closed. Remove that exact stale repository-local registration
-explicitly with `riftri state forget-missing`; existing state directories are
-never accepted by this command.
-
-## How disk sharing works
-
-Riftri prepares one immutable base for an exact Git tree. It creates native
-APFS clones, Linux reflinks, or ReFS block clones from it, or exposes it as an
-OverlayFS lower layer with a private writable upper. Unchanged contents are not
-materialized again; worktrees are lightweight—not free—and private disk use
-grows as they diverge.
-
-After edits have been reverted or committed, a long-lived native-COW view may
-still retain private filesystem blocks. `riftri worktree compact <path>`
-replaces a pristine managed view with a fresh clone of its exact current tree
-while preserving its Git worktree registration, branch, and HEAD. It refuses
-tracked, untracked, and ignored entries, and its swap is journaled for
-`riftri repair`. Active OverlayFS views are not compacted yet.
-
-`riftri worktree list` shows only active Riftri-managed worktrees, including
-their repository, current Git HEAD and branch, storage backend, immutable base,
-and filesystem-accounted allocation. `--json` provides a versioned schema for
-automation and includes exact native-path and raw-ref hexadecimal encodings.
-Ordinary unmanaged Git worktrees remain visible through `git worktree list`.
-
-`riftri status` reports the complete storage and lifecycle accounting view. For
-details on measuring physical sharing, see
-[APFS allocation evidence](docs/allocation-evidence.md) and
-[Linux reflink verification](docs/linux-reflink.md), or see
-[Windows ReFS support](docs/windows-refs.md) for that backend's requirements.
-The tested metadata guarantees and platform boundaries are documented in
-[Backend guarantees and metadata profiles](docs/backend-guarantees.md), with
-the detailed integration cases in
-[Filesystem metadata compatibility](docs/filesystem-compatibility.md).
-
-## Project status
-
-The macOS/APFS, Linux reflink, Linux OverlayFS, and Windows/ReFS implementations
-include worktree creation, process-scoped Git interception, lifecycle recovery,
-cleanup, and disk accounting. Broader checkout compatibility, ordinary Windows
-filesystem alternatives, and managed environments remain roadmap work.
-
-Development plans and design details live in:
-
-- [Project definition](PROJECT.md)
-- [Roadmap](ROADMAP.md)
-- [Architecture](docs/architecture.md)
-- [How Riftri stays safe](docs/safety.md)
-- [Design decisions](docs/decisions.md)
-- [Backend guarantees](docs/backend-guarantees.md)
-- [Native COW benchmark](docs/benchmarks.md)
-- [Release process](RELEASING.md)
+- [Architecture](docs/architecture.md) — immutable bases, transactions, journals
+- [How Riftri stays safe](docs/safety.md) — fail-closed rules and real-filesystem CI
+- [Troubleshooting](docs/troubleshooting.md) — symptom-first fixes
+- [CLI reference](docs/cli.md) · [Installation](docs/install.md) · [Benchmarks](docs/benchmarks.md)
+- [Project definition](PROJECT.md) · [Roadmap](ROADMAP.md) · [Releasing](RELEASING.md)
 
 ## Contributing
 
@@ -317,10 +183,5 @@ $ cargo test --workspace
 $ npm test
 $ npm run smoke:installed
 ```
-
-The installed-package smoke test packs both npm artifacts, installs them into
-an isolated global prefix without registry access, and exercises the resulting
-`riftri` command. Native-backend CI also runs the complete add, edit, remove,
-status, and collection workflow from that installed command.
 
 Riftri is licensed under the [MIT License](LICENSE).
