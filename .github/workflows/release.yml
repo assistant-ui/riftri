@@ -146,7 +146,8 @@ jobs:
 
   publish:
     name: Publish npm packages
-    if: github.event_name == 'push'
+    # Enable only after npm resolves the documented package-name security rejection.
+    if: github.event_name == 'push' && vars.NPM_PUBLISH_ENABLED == 'true'
     needs: stage
     runs-on: ubuntu-24.04
     permissions:
