@@ -48,15 +48,19 @@ enum UnsafeCheckoutCase {
     RepositoryAttributes,
     SparseCheckout,
     SubmoduleGitlink,
+    SourceBranchConfiguration,
+    LinkedWorktreeConfiguration,
 }
 
 impl UnsafeCheckoutCase {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::NonCanonicalGitLfs,
         Self::NestedEncoding,
         Self::RepositoryAttributes,
         Self::SparseCheckout,
         Self::SubmoduleGitlink,
+        Self::SourceBranchConfiguration,
+        Self::LinkedWorktreeConfiguration,
     ];
 
     fn name(self) -> &'static str {
@@ -66,6 +70,8 @@ impl UnsafeCheckoutCase {
             Self::RepositoryAttributes => "repository-attributes",
             Self::SparseCheckout => "sparse-checkout",
             Self::SubmoduleGitlink => "submodule-gitlink",
+            Self::SourceBranchConfiguration => "source-branch-configuration",
+            Self::LinkedWorktreeConfiguration => "linked-worktree-configuration",
         }
     }
 
@@ -76,6 +82,9 @@ impl UnsafeCheckoutCase {
             Self::RepositoryAttributes => "effective-attributes",
             Self::SparseCheckout => "sparse-checkout",
             Self::SubmoduleGitlink => "submodules",
+            Self::SourceBranchConfiguration | Self::LinkedWorktreeConfiguration => {
+                "checkout-configuration"
+            }
         }
     }
 
@@ -142,6 +151,32 @@ impl UnsafeCheckoutCase {
                 )
                 .expect("write submodule metadata");
                 fixture.commit(&[".gitmodules"], "submodule gitlink");
+            }
+            Self::SourceBranchConfiguration | Self::LinkedWorktreeConfiguration => {
+                fs::write(fixture.repository.join(".gitattributes"), "*.txt text\n")
+                    .expect("write text attributes");
+                fixture.commit(&[".gitattributes"], "text attributes");
+                let (condition, common_eol, included_eol) = match self {
+                    Self::SourceBranchConfiguration => {
+                        let branch = git(&fixture.repository, &["symbolic-ref", "--short", "HEAD"]);
+                        assert!(branch.status.success());
+                        let branch = String::from_utf8(branch.stdout).expect("UTF-8 branch");
+                        (format!("onbranch:{}", branch.trim()), "crlf", "lf")
+                    }
+                    _ => ("gitdir:**/worktrees/**".to_owned(), "lf", "crlf"),
+                };
+                let included = fixture._directory.path().join("checkout-config");
+                fs::write(&included, format!("[core]\n eol = {included_eol}\n"))
+                    .expect("write conditional checkout configuration");
+                assert_git_success(&fixture.repository, &["config", "core.eol", common_eol]);
+                assert_git_success(
+                    &fixture.repository,
+                    &[
+                        "config",
+                        &format!("includeIf.{condition}.path"),
+                        included.to_str().expect("UTF-8 configuration path"),
+                    ],
+                );
             }
         }
     }

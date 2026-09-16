@@ -2797,6 +2797,13 @@ fn analyze_resolved_repository_compatibility(
         .map(|entry| entry.path.clone())
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
+    if git.has_config_matching(repository, r"^includeif\..*\.path$")? {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+            explanation: "conditional Git configuration includes can change checkout settings between worktrees and are not supported yet"
+                .to_owned(),
+        });
+    }
     let mut has_submodules = false;
     for entry in &entries {
         if entry.path == Path::new(".gitmodules") || entry.object_kind == b"commit" {
