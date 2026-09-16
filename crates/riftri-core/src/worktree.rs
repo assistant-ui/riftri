@@ -1525,7 +1525,7 @@ fn remove_worktree_with_mode(
     let store = RemovalJournalStore::create(&state_directory)?;
     let operation_id = allocate_removal_operation_id(&store)?;
     let paths = RemovalJournalPaths {
-        repository: &repository_root,
+        repository: &managed.repository,
         destination: &destination,
         base_path: &managed.base_path,
     };
@@ -1666,7 +1666,7 @@ fn move_worktree_inner(
     let journal = MoveJournalRecord::new(
         operation_id,
         MoveJournalPaths {
-            repository: &repository_root,
+            repository: &managed.repository,
             source: &source,
             destination: &destination,
         },
@@ -1808,7 +1808,7 @@ fn compact_worktree_inner(
     let mut journal = CompactJournalRecord::new(
         operation_id,
         CompactJournalPaths {
-            repository: &repository_root,
+            repository: &managed.repository,
             destination: &destination,
             replacement: &replacement,
             quarantine: &quarantine,
@@ -7243,6 +7243,7 @@ mod tests {
             let fixture = tempdir().expect("fixture");
             let repository = fixture.path().join("repository");
             let destination = fixture.path().join("worktree");
+            let caller = fixture.path().join("caller");
             let state = fixture.path().join("state");
             fs::create_dir(&repository).expect("create repository");
             git(&repository, &["init", "--quiet"]);
@@ -7255,6 +7256,10 @@ mod tests {
             fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
             git(&repository, &["add", "--", "tracked.txt"]);
             git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            git(
+                &repository,
+                &["worktree", "add", "--detach", caller.to_str().unwrap()],
+            );
             add_worktree_inner(
                 AddWorktreeRequest {
                     repository: repository.clone(),
@@ -7273,7 +7278,7 @@ mod tests {
 
             compact_worktree_inner(
                 CompactWorktreeRequest {
-                    repository: repository.clone(),
+                    repository: caller,
                     destination: destination.clone(),
                     state_dir: Some(state.clone()),
                 },
@@ -9070,6 +9075,7 @@ mod tests {
             let fixture = tempdir().expect("fixture");
             let repository = fixture.path().join("repository");
             let destination = fixture.path().join("worktree");
+            let caller = fixture.path().join("caller");
             let state = fixture.path().join("state");
             fs::create_dir(&repository).expect("create repository");
             git(&repository, &["init", "--quiet"]);
@@ -9082,6 +9088,10 @@ mod tests {
             fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
             git(&repository, &["add", "--", "tracked.txt"]);
             git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            git(
+                &repository,
+                &["worktree", "add", "--detach", caller.to_str().unwrap()],
+            );
             add_worktree_inner(
                 AddWorktreeRequest {
                     repository: repository.clone(),
@@ -9099,7 +9109,7 @@ mod tests {
 
             let error = remove_worktree_inner(
                 RemoveWorktreeRequest {
-                    repository,
+                    repository: caller,
                     destination: destination.clone(),
                     state_dir: Some(state.clone()),
                 },
@@ -9421,6 +9431,7 @@ mod tests {
             let repository = fixture.path().join("repository");
             let source = fixture.path().join("source");
             let destination = fixture.path().join("destination");
+            let caller = fixture.path().join("caller");
             let state = fixture.path().join("state");
             fs::create_dir(&repository).expect("create repository");
             git(&repository, &["init", "--quiet"]);
@@ -9433,6 +9444,10 @@ mod tests {
             fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
             git(&repository, &["add", "--", "tracked.txt"]);
             git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            git(
+                &repository,
+                &["worktree", "add", "--detach", caller.to_str().unwrap()],
+            );
             add_worktree_inner(
                 AddWorktreeRequest {
                     repository: repository.clone(),
@@ -9451,7 +9466,7 @@ mod tests {
 
             let error = move_worktree_inner(
                 MoveWorktreeRequest {
-                    repository: repository.clone(),
+                    repository: caller,
                     source: source.clone(),
                     destination: destination.clone(),
                     state_dir: Some(state.clone()),
