@@ -1,15 +1,24 @@
 {
   "name": "riftri-darwin-arm64",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Riftri native binary for macOS ARM64",
   "license": "MIT",
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "files": ["bin/riftri"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/riftri"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/assistant-ui/riftri.git",
     "directory": "package/platforms/riftri-darwin-arm64"
   },
-  "publishConfig": { "access": "public", "provenance": true }
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
 }

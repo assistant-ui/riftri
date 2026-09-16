@@ -5,6 +5,40 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## 0.2.3 - 2026-09-16
+
+This release changes documentation, tests, and tooling only. The CLI itself is
+unchanged since 0.2.2: no behaviour, output, or on-disk format differs, and
+upgrading is optional.
+
+### Added
+
+- `docs/build-caches.md` explains which dependency stores are safe to share
+  across parallel worktrees and which working directories never are, since
+  untracked dependency and build directories are outside the Git tree and are
+  therefore never shared by copy-on-write.
+- A Homebrew formula at `Formula/riftri.rb`, generated from a release's
+  published checksums by `package/scripts/update-homebrew-formula.mjs`, with a
+  scheduled check that fails when it falls behind the latest release or pins a
+  checksum the release does not publish.
+- Test coverage for the destination path preflight across non-ASCII case
+  folding, both Unicode normalization forms, and colliding directory
+  components, verified against the behaviour of the destination volume itself.
+
+### Changed
+
+- The README is roughly half its previous length; reference material it
+  duplicated now lives in the `docs/` pages that own it.
+- `docs/filesystem-compatibility.md` documents the destination path preflight
+  and its scope instead of deferring case folding and normalization to a
+  future compatibility slice.
+
+### Fixed
+
+- The Markdown link checker no longer deadlocks pull requests that add a
+  document, which previously could not link to themselves at `main` until after
+  merging.
+
 ## 0.2.2 - 2026-09-16
 
 ### Added
