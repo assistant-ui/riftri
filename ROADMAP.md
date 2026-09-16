@@ -210,8 +210,9 @@ Outcome: cover real-world repositories and long-lived worktrees.
 - Sparse-checkout profiles.
 - Submodule policy and support.
 - Symlinks, executable modes, xattrs, and case-sensitivity testing. (native
-  Unix metadata-isolation matrix and ASCII case-collision preflight complete;
-  non-ASCII case folding and normalization remain in progress)
+  Unix metadata-isolation matrix complete; the preflight replays ASCII
+  case-collision, non-ASCII case-folding, and Unicode-normalization candidates
+  against the real destination volume, covering file and directory components)
 - Clean-worktree compaction onto a new immutable base. (complete for APFS,
   Linux reflink, and ReFS native-COW views; OverlayFS upper-layer reset remains)
 - Shared dependency and build-cache guidance without sharing unsafe writable

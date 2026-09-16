@@ -7598,6 +7598,85 @@ mod tests {
         ]));
     }
 
+    /// Whether the volume holding `directory` distinguishes two paths that
+    /// differ only by the given spellings. Case folding and Unicode
+    /// normalization are destination properties, so the expected outcome of
+    /// the probe is discovered instead of assumed.
+    fn destination_distinguishes(directory: &Path, first: &str, second: &str) -> bool {
+        let reference = directory.join("reference");
+        fs::create_dir(&reference).expect("create path-semantics probe root");
+        fs::create_dir(reference.join(first)).expect("create path-semantics probe");
+        // Files and directories share one namespace, so creating the second
+        // spelling as a directory answers the question for either kind.
+        let distinct = fs::create_dir(reference.join(second)).is_ok();
+        fs::remove_dir_all(&reference).expect("remove path-semantics probe");
+        distinct
+    }
+
+    /// Two spellings that collide on the destination cannot both be checked
+    /// out, so the probe must refuse the tree before anything is created.
+    /// Where they stay distinct — a case-sensitive, normalization-preserving
+    /// volume — the same tree must be accepted.
+    fn assert_path_pair_matches_destination(first: &str, second: &str, aliases: (&str, &str)) {
+        let fixture = tempfile::tempdir().expect("create probe fixture");
+        let destination = fixture.path().join("worktree");
+        let paths = [PathBuf::from(first), PathBuf::from(second)];
+
+        assert!(
+            super::needs_destination_path_probe(&paths),
+            "{first:?} and {second:?} must reach the destination probe"
+        );
+
+        let result = super::validate_destination_path_semantics(&paths, &destination);
+        if destination_distinguishes(fixture.path(), aliases.0, aliases.1) {
+            assert!(
+                result.is_ok(),
+                "{first:?} and {second:?} are distinct here: {result:?}"
+            );
+        } else {
+            let Err(crate::WorktreeError::Unsupported(message)) = result else {
+                panic!("{first:?} and {second:?} collide here but were accepted: {result:?}");
+            };
+            assert!(message.contains("cannot coexist"), "{message}");
+        }
+        assert!(
+            !destination.exists(),
+            "the probe must not create the destination"
+        );
+    }
+
+    #[test]
+    fn non_ascii_case_aliases_follow_the_destination_filesystem() {
+        // Lowercasing "Ä" is beyond the ASCII fast path, so this pair only
+        // fails closed because the probe asks the filesystem itself.
+        assert_path_pair_matches_destination("Ä.txt", "ä.txt", ("Ä.txt", "ä.txt"));
+    }
+
+    #[test]
+    fn unicode_normalization_aliases_follow_the_destination_filesystem() {
+        // Same grapheme, composed (U+00E9) versus decomposed (U+0065 U+0301).
+        assert_path_pair_matches_destination(
+            "caf\u{e9}.txt",
+            "cafe\u{301}.txt",
+            ("caf\u{e9}.txt", "cafe\u{301}.txt"),
+        );
+    }
+
+    #[test]
+    fn non_ascii_directory_prefixes_follow_the_destination_filesystem() {
+        // A colliding parent must be caught while creating directories, before
+        // any leaf is reached.
+        assert_path_pair_matches_destination("Ü/one.txt", "ü/two.txt", ("Ü", "ü"));
+    }
+
+    #[test]
+    fn distinct_non_ascii_paths_stay_supported() {
+        let fixture = tempfile::tempdir().expect("create probe fixture");
+        let paths = [PathBuf::from("café.txt"), PathBuf::from("naïve.txt")];
+        super::validate_destination_path_semantics(&paths, &fixture.path().join("worktree"))
+            .expect("unrelated non-ASCII paths are representable");
+    }
+
     #[test]
     fn add_operation_lock_is_exclusive_and_released_on_drop() {
         let fixture = tempfile::tempdir().unwrap();
