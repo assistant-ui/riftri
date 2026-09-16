@@ -37,7 +37,11 @@ $ pnpm install
 $ pnpm dev
 ```
 
-Quality checks:
+Sharing metadata points to the canonical `https://riftri.dev/` homepage and a
+1200×630 PNG card at `/og.png`. Edit `assets/og.svg` and run
+`pnpm generate:sharing-card` to regenerate the committed PNG. No image server is needed.
+
+Quality checks (including browser-test TypeScript):
 
 Sharing metadata points to the canonical `https://riftri.dev/` homepage and a
 1200×630 PNG card at `/og.png`. Edit `assets/og.svg` and run
@@ -63,6 +67,22 @@ and numbers stay fixed to the recorded APFS reference measurement; the rotating
 names describe platform support, not additional measured results. Clicking
 the backend name pauses or resumes its animation. Reduced-motion preferences
 show a static label, with all supported backends available to screen readers.
+
+Browser regression coverage runs against the finalized production output:
+
+```console
+$ pnpm exec playwright install chromium
+$ pnpm build
+$ pnpm test:browser
+```
+
+The suite checks desktop, tablet, and phone layouts, keyboard navigation,
+clipboard success/retry/repeated-click timing, diagram motion controls,
+Windows setup, sharing metadata, and inline Markdown navigation. Its Markdown
+navigation test routes the canonical URL to the local build's exact response,
+so CI does not depend on the public deployment. Screenshots and failure traces
+are retained in `test-results/` and uploaded by CI. Run `pnpm preview:static`
+to inspect that same build at `http://127.0.0.1:4318` without a dev runtime.
 
 To publish the tested site from this directory:
 
