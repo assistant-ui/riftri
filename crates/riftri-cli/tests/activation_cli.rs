@@ -964,7 +964,7 @@ fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
 #[test]
 fn powershell_hook_is_session_scoped_idempotent_and_reversible() {
     let fixture = RepositoryFixture::new();
-    let cache = fixture.directory.path().join("cache with ' quote");
+    let cache = Path::new("cache with ' quote");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
     let script = r#"
 $hook = (& $env:RIFTRI_TEST_BIN shell hook powershell) -join [Environment]::NewLine
@@ -972,12 +972,14 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Invoke-Expression $hook
 Invoke-Expression $hook
 $shimDirectory = Join-Path $env:RIFTRI_CACHE_DIR 'shims\v1'
+$shimDirectory = (Resolve-Path $shimDirectory).Path
 $shim = Join-Path $shimDirectory 'git.exe'
 $matches = @($env:PATH -split ';' | Where-Object { $_ -eq $shimDirectory }).Count
 if ($matches -ne 1) { exit 41 }
 Write-Output "shim=$((Get-Command git -CommandType Application).Source)"
 & powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'git --version; exit $LASTEXITCODE'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Set-Location $env:RIFTRI_TEST_REPOSITORY
 & $env:RIFTRI_TEST_BIN shell status $env:RIFTRI_TEST_REPOSITORY
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $deactivate = (& $env:RIFTRI_TEST_BIN shell deactivate powershell) -join [Environment]::NewLine
@@ -985,6 +987,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Invoke-Expression $deactivate
 if (Test-Path Env:RIFTRI_SHIM_ACTIVE) { exit 42 }
 if (Test-Path Env:RIFTRI_REAL_GIT) { exit 43 }
+if (Test-Path Env:RIFTRI_SHELL_SHIM_DIR) { exit 45 }
 if ((Get-Command git -CommandType Application).Source -eq $shim) { exit 44 }
 Write-Output 'deactivated=true'
 "#;
@@ -996,9 +999,10 @@ Write-Output 'deactivated=true'
             "-Command",
             script,
         ])
+        .current_dir(fixture.directory.path())
         .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
         .env("RIFTRI_TEST_REPOSITORY", &fixture.repository)
-        .env("RIFTRI_CACHE_DIR", &cache)
+        .env("RIFTRI_CACHE_DIR", cache)
         .output()
         .expect("activate, inspect, and deactivate PowerShell hook");
 
