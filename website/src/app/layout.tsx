@@ -5,13 +5,16 @@ const siteUrl = "https://riftri.dev";
 const title = "Riftri — Lightweight Git workspaces";
 const description =
   "Real, isolated Git worktrees for parallel development without eagerly duplicating every unchanged file.";
+// Link previews truncate long copy, so social surfaces get a shorter line.
+const socialDescription = "Real Git worktrees. Shared unchanged files. Private edits.";
+const sharingCardUrl = "https://riftri.dev/og.png";
 
 export const metadata: Metadata = {
   metadataBase: siteUrl,
   title,
   description,
   alternates: {
-    canonical: siteUrl,
+    canonical: "https://riftri.dev/",
   },
   robots: {
     index: true,
@@ -19,17 +22,30 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    url: siteUrl,
+    url: "https://riftri.dev/",
     siteName: "Riftri",
     title,
-    description,
+    description: socialDescription,
+    images: [
+      {
+        url: sharingCardUrl,
+        width: 1200,
+        height: 630,
+        type: "image/png",
+        alt: "Riftri: one immutable base shared by three isolated Git worktrees, each with private edits.",
+      },
+    ],
   },
-  // Summary rather than summary_large_image: the only brand asset is an SVG
-  // favicon, and social crawlers do not render SVG previews.
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title,
-    description,
+    description: socialDescription,
+    images: [
+      {
+        url: sharingCardUrl,
+        alt: "Riftri: shared unchanged files, private edits.",
+      },
+    ],
   },
   icons: {
     icon: [{ url: "/favicon.svg", type: "image/svg+xml", sizes: "any" }],

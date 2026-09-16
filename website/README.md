@@ -39,6 +39,10 @@ $ pnpm dev
 
 Quality checks:
 
+Sharing metadata points to the canonical `https://riftri.dev/` homepage and a
+1200×630 PNG card at `/og.png`. Edit `assets/og.svg` and run
+`pnpm generate:sharing-card` to regenerate the committed PNG. No image server is needed.
+
 ```console
 $ pnpm exec farm generate --check
 $ pnpm type-check
