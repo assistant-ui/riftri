@@ -14,8 +14,9 @@ use std::path::Path;
 use std::process::Command;
 
 use riftri_core::{
-    AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree, garbage_collect,
-    remove_worktree, storage_accounting,
+    AddWorktreeRequest, CompactWorktreeRequest, MoveWorktreeRequest, RemoveWorktreeRequest,
+    WorktreeMode, add_worktree, compact_worktree, force_remove_worktree, garbage_collect,
+    move_worktree, recover_incomplete_operations, remove_worktree, storage_accounting,
 };
 
 mod support;
@@ -124,6 +125,96 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
         "unexpected state issues: {:?}",
         after.diagnostic_issues
     );
+}
+
+#[test]
+fn pending_move_blocks_lifecycle_changes_until_repair() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let source = fixture.path().join("source");
+    let destination = fixture.path().join("destination");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+    add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::Detached,
+        state_dir: Some(state.clone()),
+    })
+    .expect("create managed worktree");
+
+    git(&repository, &["worktree", "lock", source.to_str().unwrap()]);
+    let request = MoveWorktreeRequest {
+        repository: repository.clone(),
+        source: source.clone(),
+        destination: destination.clone(),
+        state_dir: Some(state.clone()),
+    };
+    move_worktree(request.clone()).expect_err("Git rejects the locked worktree");
+    assert_eq!(storage_accounting(&state).unwrap().pending_moves, 1);
+    git(
+        &repository,
+        &["worktree", "unlock", source.to_str().unwrap()],
+    );
+
+    remove_worktree(RemoveWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("removal must preserve the pending move source");
+    force_remove_worktree(RemoveWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("forced removal must preserve the pending move source");
+    compact_worktree(CompactWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("compaction must wait for the pending move");
+    move_worktree(request).expect_err("a second move must wait for repair");
+    assert_eq!(
+        fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert!(!destination.exists());
+
+    let recovered = recover_incomplete_operations(&state).expect("repair pending move");
+    assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+    assert_eq!(recovered.recovered_moves, 1);
+    assert!(!source.exists());
+    assert_eq!(
+        fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert!(git(&destination, &["status", "--porcelain"]).is_empty());
+    compact_worktree(CompactWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect("completed moves do not block compaction");
+    remove_worktree(RemoveWorktreeRequest {
+        repository,
+        destination: destination.clone(),
+        state_dir: Some(state),
+    })
+    .expect("completed moves do not block removal");
+    assert!(!destination.exists());
 }
 
 #[cfg(unix)]

@@ -296,6 +296,10 @@ all inconsistent states, and atomically relocates the active add-journal
 reference. The source and destination must be on the same native COW-capable
 volume.
 
+If a move journal is incomplete, Riftri rejects removal, forced removal,
+compaction, and another move of that managed worktree. This keeps the worktree
+intact for `riftri repair`, including after Git rejects a locked worktree move.
+
 ## Compaction-operation journal state machine
 
 Explicit compaction of a pristine native-COW view uses a separate journal under

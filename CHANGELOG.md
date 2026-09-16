@@ -5,6 +5,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Managed removal, forced removal, and compaction reject worktrees with an
+  incomplete move journal until repair completes the move.
+
 ## 0.2.3 - 2026-09-16
 
 This release changes documentation, tests, and tooling only. The CLI itself is
