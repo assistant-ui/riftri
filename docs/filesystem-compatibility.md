@@ -39,5 +39,18 @@ Developer Mode required to create symlinks; Riftri still fails closed when an
 active checkout configuration is outside its supported profile.
 
 Case folding and Unicode normalization are destination-filesystem properties.
-They remain a separate compatibility slice because a tree that is valid on a
-case-sensitive volume may be unrepresentable on a case-insensitive one.
+A tree that is valid on a case-sensitive volume may be unrepresentable on a
+case-insensitive one, so Riftri decides per destination instead of modelling
+Unicode itself: any tree containing a non-ASCII path, or an ASCII path that
+case-folds onto another, is replayed into a throwaway directory beside the
+destination before anything is created. Two tree paths that the volume folds
+together fail that replay, and the add stops with `cannot coexist on the
+destination filesystem`.
+
+This covers non-ASCII case aliases (`Ä.txt` against `ä.txt`) and both Unicode
+normalization forms of one grapheme — composed `café.txt` (U+00E9) against
+decomposed `café.txt` (U+0065 U+0301) — including collisions in directory
+components rather than file names. A colliding directory pair is refused even when its leaf files
+differ, because the checkout would otherwise place two distinct Git
+directories in one filesystem directory. Identical rules apply to Windows.
+Trees whose non-ASCII paths stay distinct on the destination are unaffected.
