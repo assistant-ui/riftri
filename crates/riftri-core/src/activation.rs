@@ -1438,6 +1438,52 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn activation_preserves_trailing_line_endings_in_repository_paths() {
+        let fixture = tempdir().expect("temporary directory");
+        let neighbor = fixture.path().join("repository");
+        fs::create_dir(&neighbor).expect("create neighboring repository");
+        git(&neighbor, &["init", "--quiet"]);
+        let client = riftri_git::Git::default();
+
+        for suffix in ["\n", "\r", "\r\n"] {
+            let repository = fixture.path().join(format!("repository{suffix}"));
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+
+            enable_repository(&repository).expect("enable selected repository");
+            assert_eq!(
+                client
+                    .local_config_bool(&repository, "riftri.enabled")
+                    .unwrap(),
+                Some(true)
+            );
+            assert_eq!(
+                client
+                    .local_config_bool(&neighbor, "riftri.enabled")
+                    .unwrap(),
+                None
+            );
+
+            git(&neighbor, &["config", "riftri.enabled", "true"]);
+            disable_repository(&repository).expect("disable selected repository");
+            assert_eq!(
+                client
+                    .local_config_bool(&repository, "riftri.enabled")
+                    .unwrap(),
+                None
+            );
+            assert_eq!(
+                client
+                    .local_config_bool(&neighbor, "riftri.enabled")
+                    .unwrap(),
+                Some(true)
+            );
+            git(&neighbor, &["config", "--unset", "riftri.enabled"]);
+        }
+    }
+
     #[test]
     fn enabled_standard_add_is_planned_as_an_optimized_worktree() {
         let fixture = repository_fixture();

@@ -1148,7 +1148,7 @@ impl Git {
         context: &'static str,
     ) -> Result<PathBuf, GitError> {
         let output = self.run(path, arguments)?;
-        let bytes = trim_line_endings(&output.stdout);
+        let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
         if bytes.is_empty() {
             return Err(GitError::InvalidOutput {
                 context,
