@@ -6,11 +6,12 @@ type SectionLinkProps = Omit<ComponentProps<"a">, "href"> & {
   href: `#${string}`;
 };
 
-function scrollToSection(hash: string) {
+function scrollToSection(hash: string, moveFocus = false) {
   const target = document.getElementById(hash.slice(1));
   if (!target) return false;
 
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (moveFocus) target.focus({ preventScroll: true });
   target.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
   return true;
 }
@@ -27,9 +28,9 @@ export function SectionLink({ href, onClick, ...props }: SectionLinkProps) {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
     }
-    if (!scrollToSection(href)) return;
+    if (!scrollToSection(href, true)) return;
     event.preventDefault();
-    window.history.pushState(null, "", href);
+    if (window.location.hash !== href) window.history.pushState(null, "", href);
   }
 
   return <a href={href} onClick={handleClick} {...props} />;
