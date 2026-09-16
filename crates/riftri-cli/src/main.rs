@@ -5,11 +5,34 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+const CLI_EXAMPLES: &str = "\
+Examples:
+  riftri enable                            Opt the current repository in
+  riftri worktree add ../feature -b f/x    Create a COW-backed worktree
+  riftri worktree remove ../feature        Safely remove it again
+  riftri gc --apply                        Delete unreferenced bases
+  riftri doctor --json                     Inspect Git and storage support
+
+Run `riftri <command> --help` for details on one command.";
+
+const CLI_ENVIRONMENT: &str = "\
+Environment:
+  RIFTRI_BYPASS=1        Route one intercepted Git command to ordinary Git.
+  RIFTRI_CACHE_DIR=PATH  Directory holding the shell-activation Git shim
+                         (defaults to the platform cache directory).
+
+RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE are set by riftri itself inside
+activated scopes; RIFTRI_REQUIRE_* variables only make the test suites fail
+instead of falling back. See docs/agent-integration.md for the automation
+contract.";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "riftri",
     version,
-    about = "Lightweight Git workspaces for parallel development"
+    about = "Lightweight Git workspaces for parallel development",
+    after_help = CLI_EXAMPLES,
+    after_long_help = format!("{CLI_EXAMPLES}\n\n{CLI_ENVIRONMENT}")
 )]
 struct Cli {
     /// Emit command failures as one machine-readable JSON receipt on stderr.
@@ -59,6 +82,19 @@ enum Command {
         command: ShellCommand,
     },
 
+    /// Print a shell completion script for riftri commands on stdout.
+    Completions {
+        /// Shell whose completion script should be emitted.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+
+    /// Write one troff man page per riftri command into a directory.
+    Man {
+        /// Existing or new directory that receives the man pages.
+        directory: PathBuf,
+    },
+
     /// Inspect Git and show the planned storage path without changing anything.
     Doctor {
         /// Repository path to inspect.
@@ -94,6 +130,10 @@ enum Command {
         /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Safely resume or roll back interrupted journaled operations.
@@ -105,6 +145,10 @@ enum Command {
         /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Plan or apply collection of immutable bases with no journaled references.
@@ -120,6 +164,14 @@ enum Command {
         /// Apply the collection plan. Without this flag, nothing is deleted.
         #[arg(long)]
         apply: bool,
+
+        /// Skip the interactive confirmation before applying the plan.
+        #[arg(long, requires = "apply")]
+        yes: bool,
+
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Manage repository-local Riftri state registrations.
@@ -133,13 +185,6 @@ enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-
-    /// Repair operations in an explicitly selected Riftri state directory.
-    Recover {
-        /// Riftri state directory containing operation journals.
-        #[arg(long)]
-        state_dir: PathBuf,
-    },
 }
 
 impl Command {
@@ -150,10 +195,12 @@ impl Command {
             Self::Exec { .. } => "exec",
             Self::Overlayfs { .. } => "overlayfs-helper-install",
             Self::Shell { .. } => "shell",
+            Self::Completions { .. } => "completions",
+            Self::Man { .. } => "man",
             Self::Doctor { .. } => "doctor",
             Self::Backends { .. } => "backends",
             Self::Status { .. } => "status",
-            Self::Repair { .. } | Self::Recover { .. } => "repair",
+            Self::Repair { .. } => "repair",
             Self::Gc { .. } => "garbage-collection",
             Self::State { .. } => "state",
             Self::Worktree { command } => match command {
@@ -191,7 +238,7 @@ enum WorktreeCommand {
         path: PathBuf,
 
         /// Create and check out a new branch.
-        #[arg(short = 'b', value_name = "BRANCH", conflicts_with = "detach")]
+        #[arg(short = 'b', long, value_name = "BRANCH", conflicts_with = "detach")]
         branch: Option<OsString>,
 
         /// Create a detached worktree instead of a branch.
@@ -209,6 +256,10 @@ enum WorktreeCommand {
         /// Riftri state directory; defaults to <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Safely remove a Riftri-managed linked worktree.
@@ -227,6 +278,14 @@ enum WorktreeCommand {
         /// Discard current changes after recording an exact recovery snapshot.
         #[arg(long, short = 'f')]
         force: bool,
+
+        /// Skip the interactive confirmation before a forced removal.
+        #[arg(long, requires = "force")]
+        yes: bool,
+
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Move a Riftri-managed linked worktree with recoverable metadata updates.
@@ -241,6 +300,9 @@ enum WorktreeCommand {
         /// Riftri state directory; defaults to <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Replace a pristine managed worktree with a fresh native COW view.
@@ -253,6 +315,9 @@ enum WorktreeCommand {
         /// Riftri state directory; defaults to <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Prune stale unmanaged Git metadata without risking managed worktrees.
@@ -263,6 +328,9 @@ enum WorktreeCommand {
         /// Riftri state directory; defaults to <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -337,14 +405,53 @@ fn main() -> Result<()> {
 
     match run(cli) {
         Ok(()) => Ok(()),
-        Err(error) if json_errors => {
-            eprintln!(
-                "{}",
-                serde_json::to_string(&failure_receipt(operation, &error))?
-            );
-            std::process::exit(1);
+        Err(error) => {
+            if json_errors {
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&failure_receipt(operation, &error))?
+                );
+            } else {
+                eprintln!("Error: {error:?}");
+            }
+            std::process::exit(failure_exit_code(&error));
         }
-        Err(error) => Err(error),
+    }
+}
+
+/// Exit codes: 0 success, 1 operational failure, 2 command-line usage error
+/// (clap), 3 policy refusal. Mirrors the receipt `category` field.
+fn failure_exit_code(error: &anyhow::Error) -> i32 {
+    match error
+        .downcast_ref::<riftri_core::WorktreeError>()
+        .map(worktree_failure_fields)
+    {
+        Some((_, "policy", ..)) => 3,
+        _ => 1,
+    }
+}
+
+/// Ask before a destructive action when running interactively. Non-interactive
+/// callers (agents, CI) are never prompted so existing automation is
+/// unaffected; `--yes` skips the prompt for interactive scripts.
+fn confirm_destructive_action(warning: &str, yes: bool) -> Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    if yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return Ok(());
+    }
+    let mut stderr = std::io::stderr().lock();
+    write!(stderr, "{warning} Continue? [y/N] ").context("write confirmation prompt")?;
+    stderr.flush().context("flush confirmation prompt")?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .context("read confirmation answer")?;
+    if matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES") {
+        Ok(())
+    } else {
+        anyhow::bail!("aborted without confirmation; pass --yes to skip the prompt")
     }
 }
 
@@ -413,6 +520,19 @@ fn run(cli: Cli) -> Result<()> {
             },
             ShellCommand::Status { repository } => print_shell_status(&repository)?,
         },
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+
+            clap_complete::generate(shell, &mut Cli::command(), "riftri", &mut std::io::stdout());
+        }
+        Command::Man { directory } => {
+            use clap::CommandFactory;
+
+            std::fs::create_dir_all(&directory)
+                .with_context(|| format!("create man page directory {}", directory.display()))?;
+            clap_mangen::generate_to(Cli::command(), &directory).context("write man pages")?;
+            println!("Man pages written to {}", directory.display());
+        }
         Command::Doctor {
             path,
             destination,
@@ -454,27 +574,37 @@ fn run(cli: Cli) -> Result<()> {
         Command::Status {
             repository,
             state_dir,
+            json,
         } => {
             let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::storage_accounting(&state_directory)?;
-            print_storage_accounting(&state_directory, &report);
+            print_storage_accounting(&state_directory, &report, json)?;
         }
         Command::Repair {
             repository,
             state_dir,
+            json,
         } => {
             let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::recover_incomplete_operations(&state_directory)?;
-            print_recovery_report(&state_directory, &report)?;
+            print_recovery_report(&state_directory, &report, json)?;
         }
         Command::Gc {
             repository,
             state_dir,
             apply,
+            yes,
+            json,
         } => {
+            if apply {
+                confirm_destructive_action(
+                    "riftri gc --apply permanently deletes every base in the plan.",
+                    yes,
+                )?;
+            }
             let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::garbage_collect(&state_directory, apply)?;
-            print_garbage_collection_report(&state_directory, &report);
+            print_garbage_collection_report(&state_directory, &report, json)?;
         }
         Command::State { command } => match command {
             StateCommand::ForgetMissing { path, repository } => {
@@ -500,6 +630,7 @@ fn run(cli: Cli) -> Result<()> {
                 revision,
                 repository,
                 state_dir,
+                json,
             } => {
                 let (mode, revision) = match (branch, detach, revision) {
                     (Some(branch), false, revision) => (
@@ -523,14 +654,22 @@ fn run(cli: Cli) -> Result<()> {
                     mode,
                     state_dir,
                 })?;
-                print_add_result(&result);
+                print_add_result(&result, json)?;
             }
             WorktreeCommand::Remove {
                 path,
                 repository,
                 state_dir,
                 force,
+                yes,
+                json,
             } => {
+                if force {
+                    confirm_destructive_action(
+                        "riftri worktree remove --force discards uncommitted changes after recording a recovery snapshot.",
+                        yes,
+                    )?;
+                }
                 let request = riftri_core::RemoveWorktreeRequest {
                     repository,
                     destination: path,
@@ -541,22 +680,14 @@ fn run(cli: Cli) -> Result<()> {
                 } else {
                     riftri_core::remove_worktree(request)?
                 };
-                if force {
-                    println!(
-                        "Force-removed Riftri-backed Git worktree after snapshot verification"
-                    );
-                } else {
-                    println!("Removed Riftri-backed Git worktree");
-                }
-                println!("Destination: {}", result.destination.display());
-                println!("Retained immutable base: {}", result.base_path.display());
-                println!("Journal: {}", result.journal_path.display());
+                print_remove_result(&result, force, json)?;
             }
             WorktreeCommand::Move {
                 source,
                 destination,
                 repository,
                 state_dir,
+                json,
             } => {
                 let result = riftri_core::move_worktree(riftri_core::MoveWorktreeRequest {
                     repository,
@@ -564,45 +695,33 @@ fn run(cli: Cli) -> Result<()> {
                     destination,
                     state_dir,
                 })?;
-                println!("Moved Riftri-backed Git worktree");
-                println!("Source: {}", result.source.display());
-                println!("Destination: {}", result.destination.display());
-                println!("Retained immutable base: {}", result.base_path.display());
-                println!("Journal: {}", result.journal_path.display());
+                print_move_result(&result, json)?;
             }
             WorktreeCommand::Compact {
                 path,
                 repository,
                 state_dir,
+                json,
             } => {
                 let result = riftri_core::compact_worktree(riftri_core::CompactWorktreeRequest {
                     repository,
                     destination: path,
                     state_dir,
                 })?;
-                println!("Compacted Riftri-backed Git worktree");
-                println!("Destination: {}", result.destination.display());
-                println!("Commit: {}", result.commit.as_str());
-                println!("Immutable base: {}", result.base_path.display());
-                println!("Reused immutable base: {}", result.reused_base);
-                println!("Journal: {}", result.journal_path.display());
+                print_compact_result(&result, json)?;
             }
             WorktreeCommand::Prune {
                 repository,
                 state_dir,
+                json,
             } => {
                 let result = riftri_core::prune_worktrees(riftri_core::PruneWorktreesRequest {
                     repository,
                     state_dir,
                 })?;
-                println!("Pruned stale Git worktree metadata");
-                println!("Journal: {}", result.journal_path.display());
+                print_prune_result(&result, json)?;
             }
         },
-        Command::Recover { state_dir } => {
-            let report = riftri_core::recover_incomplete_operations(&state_dir)?;
-            print_recovery_report(&state_dir, &report)?;
-        }
     }
 
     Ok(())
@@ -944,7 +1063,44 @@ fn print_shell_status(repository: &Path) -> Result<()> {
 fn print_recovery_report(
     state_directory: &Path,
     report: &riftri_core::RecoveryReport,
+    json: bool,
 ) -> Result<()> {
+    if json {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "state_directory": state_directory.display().to_string(),
+            "state_directory_native_hex": native_path_hex(state_directory),
+            "native_path_encoding": native_path_encoding(),
+            "scanned": report.scanned,
+            "busy_adds": report.busy_adds,
+            "active": report.active,
+            "recovered_mounts": report.recovered_mounts,
+            "recovered_adds": report.recovered,
+            "completed_removals": report.completed_removals,
+            "recovered_removals": report.recovered_removals,
+            "completed_moves": report.completed_moves,
+            "recovered_moves": report.recovered_moves,
+            "completed_compactions": report.completed_compactions,
+            "recovered_compactions": report.recovered_compactions,
+            "completed_prunes": report.completed_prunes,
+            "recovered_prunes": report.recovered_prunes,
+            "completed_collections": report.completed_collections,
+            "recovered_collections": report.recovered_collections,
+            "errors": report.errors,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize recovery report")?
+        );
+        if !report.errors.is_empty() {
+            anyhow::bail!(
+                "{} operation(s) need manual attention; no changed worktree was deleted",
+                report.errors.len()
+            );
+        }
+        return Ok(());
+    }
+
     println!("Riftri repair");
     println!("State: {}", state_directory.display());
     println!("Scanned operations: {}", report.scanned);
@@ -1041,7 +1197,29 @@ fn run_git_shim() -> Result<i32> {
     }
 }
 
-fn print_add_result(result: &riftri_core::AddWorktreeResult) {
+fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Result<()> {
+    if json {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "native_path_encoding": native_path_encoding(),
+            "destination": result.destination.display().to_string(),
+            "destination_native_hex": native_path_hex(&result.destination),
+            "commit": result.commit.as_str(),
+            "tree": result.tree.as_str(),
+            "backend": result.backend,
+            "base_path": result.base_path.display().to_string(),
+            "base_path_native_hex": native_path_hex(&result.base_path),
+            "reused_base": result.reused_base,
+            "journal_path": result.journal_path.display().to_string(),
+            "journal_path_native_hex": native_path_hex(&result.journal_path),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize add result")?
+        );
+        return Ok(());
+    }
+
     println!(
         "Created {}-backed Git worktree",
         result.backend.display_name()
@@ -1059,6 +1237,154 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult) {
         }
     );
     println!("Journal: {}", result.journal_path.display());
+    Ok(())
+}
+
+fn print_remove_result(
+    result: &riftri_core::RemoveWorktreeResult,
+    forced: bool,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "native_path_encoding": native_path_encoding(),
+            "destination": result.destination.display().to_string(),
+            "destination_native_hex": native_path_hex(&result.destination),
+            "forced": forced,
+            "base_path": result.base_path.display().to_string(),
+            "base_path_native_hex": native_path_hex(&result.base_path),
+            "journal_path": result.journal_path.display().to_string(),
+            "journal_path_native_hex": native_path_hex(&result.journal_path),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize remove result")?
+        );
+        return Ok(());
+    }
+
+    if forced {
+        println!("Force-removed Riftri-backed Git worktree after snapshot verification");
+    } else {
+        println!("Removed Riftri-backed Git worktree");
+    }
+    println!("Destination: {}", result.destination.display());
+    println!("Retained immutable base: {}", result.base_path.display());
+    println!("Journal: {}", result.journal_path.display());
+    Ok(())
+}
+
+fn print_move_result(result: &riftri_core::MoveWorktreeResult, json: bool) -> Result<()> {
+    if json {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "native_path_encoding": native_path_encoding(),
+            "source": result.source.display().to_string(),
+            "source_native_hex": native_path_hex(&result.source),
+            "destination": result.destination.display().to_string(),
+            "destination_native_hex": native_path_hex(&result.destination),
+            "base_path": result.base_path.display().to_string(),
+            "base_path_native_hex": native_path_hex(&result.base_path),
+            "journal_path": result.journal_path.display().to_string(),
+            "journal_path_native_hex": native_path_hex(&result.journal_path),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize move result")?
+        );
+        return Ok(());
+    }
+
+    println!("Moved Riftri-backed Git worktree");
+    println!("Source: {}", result.source.display());
+    println!("Destination: {}", result.destination.display());
+    println!("Retained immutable base: {}", result.base_path.display());
+    println!("Journal: {}", result.journal_path.display());
+    Ok(())
+}
+
+fn print_compact_result(result: &riftri_core::CompactWorktreeResult, json: bool) -> Result<()> {
+    if json {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "native_path_encoding": native_path_encoding(),
+            "destination": result.destination.display().to_string(),
+            "destination_native_hex": native_path_hex(&result.destination),
+            "commit": result.commit.as_str(),
+            "tree": result.tree.as_str(),
+            "old_base_path": result.old_base_path.display().to_string(),
+            "old_base_path_native_hex": native_path_hex(&result.old_base_path),
+            "base_path": result.base_path.display().to_string(),
+            "base_path_native_hex": native_path_hex(&result.base_path),
+            "reused_base": result.reused_base,
+            "journal_path": result.journal_path.display().to_string(),
+            "journal_path_native_hex": native_path_hex(&result.journal_path),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize compact result")?
+        );
+        return Ok(());
+    }
+
+    println!("Compacted Riftri-backed Git worktree");
+    println!("Destination: {}", result.destination.display());
+    println!("Commit: {}", result.commit.as_str());
+    println!("Immutable base: {}", result.base_path.display());
+    println!("Reused immutable base: {}", result.reused_base);
+    println!("Journal: {}", result.journal_path.display());
+    Ok(())
+}
+
+fn print_prune_result(result: &riftri_core::PruneWorktreesResult, json: bool) -> Result<()> {
+    if json {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "native_path_encoding": native_path_encoding(),
+            "journal_path": result.journal_path.display().to_string(),
+            "journal_path_native_hex": native_path_hex(&result.journal_path),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize prune result")?
+        );
+        return Ok(());
+    }
+
+    println!("Pruned stale Git worktree metadata");
+    println!("Journal: {}", result.journal_path.display());
+    Ok(())
+}
+
+fn worktree_view_json(view: &riftri_core::ViewStorageAccounting) -> serde_json::Value {
+    serde_json::json!({
+        "repository": view.repository.display().to_string(),
+        "repository_native_hex": native_path_hex(&view.repository),
+        "path": view.destination.display().to_string(),
+        "path_native_hex": native_path_hex(&view.destination),
+        "head": view.head.as_str(),
+        "branch": view.branch.as_deref().map(display_git_bytes),
+        "branch_hex": view.branch.as_deref().map(encode_hex),
+        "detached": view.detached,
+        "locked_reason": view.locked_reason.as_deref().map(display_git_bytes),
+        "locked_reason_hex": view.locked_reason.as_deref().map(encode_hex),
+        "prunable_reason": view.prunable_reason.as_deref().map(display_git_bytes),
+        "prunable_reason_hex": view.prunable_reason.as_deref().map(encode_hex),
+        "backend": view.backend,
+        "base_path": view.base_path.display().to_string(),
+        "base_path_native_hex": native_path_hex(&view.base_path),
+        "logical_bytes": view.logical_bytes,
+        "allocated_bytes": view.allocated_bytes,
+    })
+}
+
+fn diagnostic_issue_json(issue: &riftri_core::StateDiagnosticIssue) -> serde_json::Value {
+    serde_json::json!({
+        "path": issue.path.display().to_string(),
+        "path_native_hex": native_path_hex(&issue.path),
+        "reason": issue.reason,
+    })
 }
 
 fn print_worktree_inventory(
@@ -1070,38 +1396,12 @@ fn print_worktree_inventory(
         let worktrees = report
             .views
             .iter()
-            .map(|view| {
-                serde_json::json!({
-                    "repository": view.repository.display().to_string(),
-                    "repository_native_hex": native_path_hex(&view.repository),
-                    "path": view.destination.display().to_string(),
-                    "path_native_hex": native_path_hex(&view.destination),
-                    "head": view.head.as_str(),
-                    "branch": view.branch.as_deref().map(display_git_bytes),
-                    "branch_hex": view.branch.as_deref().map(encode_hex),
-                    "detached": view.detached,
-                    "locked_reason": view.locked_reason.as_deref().map(display_git_bytes),
-                    "locked_reason_hex": view.locked_reason.as_deref().map(encode_hex),
-                    "prunable_reason": view.prunable_reason.as_deref().map(display_git_bytes),
-                    "prunable_reason_hex": view.prunable_reason.as_deref().map(encode_hex),
-                    "backend": view.backend,
-                    "base_path": view.base_path.display().to_string(),
-                    "base_path_native_hex": native_path_hex(&view.base_path),
-                    "logical_bytes": view.logical_bytes,
-                    "allocated_bytes": view.allocated_bytes,
-                })
-            })
+            .map(worktree_view_json)
             .collect::<Vec<_>>();
         let diagnostic_issues = report
             .diagnostic_issues
             .iter()
-            .map(|issue| {
-                serde_json::json!({
-                    "path": issue.path.display().to_string(),
-                    "path_native_hex": native_path_hex(&issue.path),
-                    "reason": issue.reason,
-                })
-            })
+            .map(diagnostic_issue_json)
             .collect::<Vec<_>>();
         let output = serde_json::json!({
             "schema_version": 1,
@@ -1138,10 +1438,10 @@ fn print_worktree_inventory(
         }
         println!("  Backend: {}", view.backend.display_name());
         println!("  Immutable base: {}", view.base_path.display());
-        println!("  Logical bytes: {}", view.logical_bytes);
+        println!("  Logical: {}", display_byte_count(view.logical_bytes));
         println!(
-            "  Filesystem-accounted allocated bytes: {}",
-            view.allocated_bytes
+            "  Filesystem-accounted allocated: {}",
+            display_byte_count(view.allocated_bytes)
         );
     }
     if !report.diagnostic_issues.is_empty() {
@@ -1191,6 +1491,27 @@ fn display_git_bytes(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// Exact byte count first, with a binary-unit rendering for readability once
+/// the count reaches one KiB. JSON reports keep raw integers.
+fn display_byte_count(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} bytes");
+    }
+    let mut value = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let rendered = if value >= 100.0 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.1}")
+    };
+    format!("{bytes} bytes ({rendered} {})", UNITS[unit])
+}
+
 const fn native_path_encoding() -> &'static str {
     #[cfg(unix)]
     return "unix-bytes-hex";
@@ -1200,7 +1521,71 @@ const fn native_path_encoding() -> &'static str {
     return "utf8-lossy-bytes-hex";
 }
 
-fn print_storage_accounting(state_directory: &Path, report: &riftri_core::StorageAccountingReport) {
+fn print_storage_accounting(
+    state_directory: &Path,
+    report: &riftri_core::StorageAccountingReport,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let bases = report
+            .bases
+            .iter()
+            .map(|base| {
+                serde_json::json!({
+                    "path": base.path.display().to_string(),
+                    "path_native_hex": native_path_hex(&base.path),
+                    "reference_count": base.reference_count,
+                    "in_use": base.reference_count > 0,
+                    "logical_bytes": base.logical_bytes,
+                    "allocated_bytes": base.allocated_bytes,
+                })
+            })
+            .collect::<Vec<_>>();
+        let worktrees = report
+            .views
+            .iter()
+            .map(worktree_view_json)
+            .collect::<Vec<_>>();
+        let diagnostic_issues = report
+            .diagnostic_issues
+            .iter()
+            .map(diagnostic_issue_json)
+            .collect::<Vec<_>>();
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "state_directory": state_directory.display().to_string(),
+            "state_directory_native_hex": native_path_hex(state_directory),
+            "native_path_encoding": native_path_encoding(),
+            "operations": {
+                "active_views": report.active_views,
+                "pending_adds": report.pending_adds,
+                "completed_removals": report.completed_removals,
+                "pending_removals": report.pending_removals,
+                "completed_moves": report.completed_moves,
+                "pending_moves": report.pending_moves,
+                "completed_compactions": report.completed_compactions,
+                "cancelled_compactions": report.cancelled_compactions,
+                "pending_compactions": report.pending_compactions,
+                "completed_prunes": report.completed_prunes,
+                "pending_prunes": report.pending_prunes,
+                "completed_collections": report.completed_collections,
+                "cancelled_collections": report.cancelled_collections,
+                "pending_collections": report.pending_collections,
+                "coordination_locks": report.coordination_locks,
+            },
+            "bases": bases,
+            "worktrees": worktrees,
+            "diagnostic_issues": diagnostic_issues,
+            "total_logical_bytes": report.total_logical_bytes,
+            "total_allocated_bytes": report.total_allocated_bytes,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize storage status")?
+        );
+        return Ok(());
+    }
+
     println!("Riftri storage status");
     println!("State: {}", state_directory.display());
     println!("Active views: {}", report.active_views);
@@ -1247,22 +1632,22 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
             "in use"
         };
         println!(
-            "- {}: refs={}, logical={} bytes, filesystem-accounted allocated={} bytes, state={}",
+            "- {}: refs={}, logical={}, filesystem-accounted allocated={}, state={}",
             base.path.display(),
             base.reference_count,
-            base.logical_bytes,
-            base.allocated_bytes,
+            display_byte_count(base.logical_bytes),
+            display_byte_count(base.allocated_bytes),
             state
         );
     }
     println!("Active view storage:");
     for view in &report.views {
         println!(
-            "- {}: backend={}, logical={} bytes, filesystem-accounted allocated={} bytes, base={}",
+            "- {}: backend={}, logical={}, filesystem-accounted allocated={}, base={}",
             view.destination.display(),
             view.backend.display_name(),
-            view.logical_bytes,
-            view.allocated_bytes,
+            display_byte_count(view.logical_bytes),
+            display_byte_count(view.allocated_bytes),
             view.base_path.display()
         );
     }
@@ -1273,18 +1658,76 @@ fn print_storage_accounting(state_directory: &Path, report: &riftri_core::Storag
     if !report.diagnostic_issues.is_empty() {
         println!("Attention: Riftri preserves unexplained state; inspect it before manual cleanup");
     }
-    println!("Total logical: {} bytes", report.total_logical_bytes);
     println!(
-        "Total filesystem-accounted allocated: {} bytes",
-        report.total_allocated_bytes
+        "Total logical: {}",
+        display_byte_count(report.total_logical_bytes)
+    );
+    println!(
+        "Total filesystem-accounted allocated: {}",
+        display_byte_count(report.total_allocated_bytes)
     );
     print_allocation_note();
+    Ok(())
 }
 
 fn print_garbage_collection_report(
     state_directory: &Path,
     report: &riftri_core::GarbageCollectionReport,
-) {
+    json: bool,
+) -> Result<()> {
+    if json {
+        let candidates = report
+            .candidates
+            .iter()
+            .map(|candidate| {
+                serde_json::json!({
+                    "base_path": candidate.base_path.display().to_string(),
+                    "base_path_native_hex": native_path_hex(&candidate.base_path),
+                    "logical_bytes": candidate.logical_bytes,
+                    "allocated_bytes": candidate.allocated_bytes,
+                })
+            })
+            .collect::<Vec<_>>();
+        let collected = report
+            .collected
+            .iter()
+            .map(|path| {
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "path_native_hex": native_path_hex(path),
+                })
+            })
+            .collect::<Vec<_>>();
+        let skipped_in_use = report
+            .skipped_in_use
+            .iter()
+            .map(|path| {
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "path_native_hex": native_path_hex(path),
+                })
+            })
+            .collect::<Vec<_>>();
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "state_directory": state_directory.display().to_string(),
+            "state_directory_native_hex": native_path_hex(state_directory),
+            "native_path_encoding": native_path_encoding(),
+            "applied": report.applied,
+            "candidates": candidates,
+            "collected": collected,
+            "skipped_in_use": skipped_in_use,
+            "resumed_collections": report.resumed_collections,
+            "removed_logical_bytes": report.removed_logical_bytes,
+            "removed_allocated_bytes": report.removed_allocated_bytes,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize collection report")?
+        );
+        return Ok(());
+    }
+
     println!("Riftri garbage collection");
     println!("State: {}", state_directory.display());
     println!(
@@ -1298,10 +1741,10 @@ fn print_garbage_collection_report(
     println!("Eligible bases: {}", report.candidates.len());
     for candidate in &report.candidates {
         println!(
-            "- {}: logical={} bytes, filesystem-accounted allocated={} bytes",
+            "- {}: logical={}, filesystem-accounted allocated={}",
             candidate.base_path.display(),
-            candidate.logical_bytes,
-            candidate.allocated_bytes
+            display_byte_count(candidate.logical_bytes),
+            display_byte_count(candidate.allocated_bytes)
         );
     }
     println!("Collected bases: {}", report.collected.len());
@@ -1310,15 +1753,19 @@ fn print_garbage_collection_report(
         "Skipped because now in use: {}",
         report.skipped_in_use.len()
     );
-    println!("Removed logical bytes: {}", report.removed_logical_bytes);
     println!(
-        "Removed filesystem-accounted allocated bytes: {}",
-        report.removed_allocated_bytes
+        "Removed logical: {}",
+        display_byte_count(report.removed_logical_bytes)
+    );
+    println!(
+        "Removed filesystem-accounted allocated: {}",
+        display_byte_count(report.removed_allocated_bytes)
     );
     print_allocation_note();
     if !report.applied && !report.candidates.is_empty() {
         println!("Nothing was deleted; rerun with `riftri gc --apply` to collect this plan");
     }
+    Ok(())
 }
 
 fn print_allocation_note() {
@@ -1514,6 +1961,129 @@ mod tests {
     }
 
     #[test]
+    fn parses_stable_json_flags_on_lifecycle_commands() {
+        let status = Cli::try_parse_from(["riftri", "status", "--json"])
+            .expect("parse status with JSON output");
+        let Command::Status { json, .. } = status.command else {
+            panic!("unexpected status command");
+        };
+        assert!(json);
+
+        let repair = Cli::try_parse_from(["riftri", "repair", "--json"])
+            .expect("parse repair with JSON output");
+        let Command::Repair { json, .. } = repair.command else {
+            panic!("unexpected repair command");
+        };
+        assert!(json);
+
+        let gc = Cli::try_parse_from(["riftri", "gc", "--apply", "--json"])
+            .expect("parse gc with JSON output");
+        let Command::Gc { apply, json, .. } = gc.command else {
+            panic!("unexpected gc command");
+        };
+        assert!(apply);
+        assert!(json);
+
+        for arguments in [
+            &[
+                "riftri", "worktree", "add", "../view", "-b", "topic", "--json",
+            ][..],
+            &["riftri", "worktree", "remove", "../view", "--json"][..],
+            &[
+                "riftri", "worktree", "move", "../view", "../moved", "--json",
+            ][..],
+            &["riftri", "worktree", "compact", "../view", "--json"][..],
+            &["riftri", "worktree", "prune", "--json"][..],
+        ] {
+            let cli = Cli::try_parse_from(arguments).expect("parse worktree command with JSON");
+            let Command::Worktree { command } = cli.command else {
+                panic!("unexpected worktree command");
+            };
+            let json = match command {
+                WorktreeCommand::Add { json, .. }
+                | WorktreeCommand::Remove { json, .. }
+                | WorktreeCommand::Move { json, .. }
+                | WorktreeCommand::Compact { json, .. }
+                | WorktreeCommand::Prune { json, .. }
+                | WorktreeCommand::List { json, .. } => json,
+            };
+            assert!(json, "JSON flag not parsed for {arguments:?}");
+        }
+    }
+
+    #[test]
+    fn parses_the_branch_long_flag_as_an_alias_for_b() {
+        let cli = Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "add",
+            "../view",
+            "--branch",
+            "feature/topic",
+        ])
+        .expect("parse worktree add with --branch");
+        let Command::Worktree {
+            command: WorktreeCommand::Add { branch, .. },
+        } = cli.command
+        else {
+            panic!("unexpected worktree command");
+        };
+        assert_eq!(branch.as_deref(), Some(OsStr::new("feature/topic")));
+    }
+
+    #[test]
+    fn byte_counts_render_exact_values_with_binary_units() {
+        use super::display_byte_count;
+
+        assert_eq!(display_byte_count(0), "0 bytes");
+        assert_eq!(display_byte_count(1023), "1023 bytes");
+        assert_eq!(display_byte_count(1024), "1024 bytes (1.0 KiB)");
+        assert_eq!(display_byte_count(1_572_864), "1572864 bytes (1.5 MiB)");
+        assert_eq!(
+            display_byte_count(214_748_364_800),
+            "214748364800 bytes (200 GiB)"
+        );
+    }
+
+    #[test]
+    fn parses_shell_completion_generation() {
+        let cli = Cli::try_parse_from(["riftri", "completions", "zsh"])
+            .expect("parse completions command");
+        assert_eq!(cli.command.operation_name(), "completions");
+
+        Cli::try_parse_from(["riftri", "completions"])
+            .expect_err("completions requires an explicit shell");
+    }
+
+    #[test]
+    fn parses_man_page_generation() {
+        let cli = Cli::try_parse_from(["riftri", "man", "../man"]).expect("parse man command");
+        assert_eq!(cli.command.operation_name(), "man");
+        let Command::Man { directory } = cli.command else {
+            panic!("unexpected man command");
+        };
+        assert_eq!(directory, std::path::PathBuf::from("../man"));
+
+        Cli::try_parse_from(["riftri", "man"])
+            .expect_err("man requires an explicit output directory");
+    }
+
+    #[test]
+    fn writes_one_man_page_per_command() {
+        use clap::CommandFactory;
+
+        let directory = tempfile::tempdir().expect("create temporary directory");
+        clap_mangen::generate_to(Cli::command(), directory.path()).expect("generate man pages");
+
+        for page in ["riftri.1", "riftri-completions.1", "riftri-worktree-add.1"] {
+            assert!(
+                directory.path().join(page).is_file(),
+                "missing man page {page}"
+            );
+        }
+    }
+
+    #[test]
     fn failure_receipt_has_a_stable_policy_shape() {
         let error = anyhow::Error::new(riftri_core::WorktreeError::InvalidRequest(
             "destination already exists".to_owned(),
@@ -1529,6 +2099,51 @@ mod tests {
         assert_eq!(receipt["recovery"], "not-required");
         assert!(receipt["phase"].is_null());
         assert!(receipt["nextCommand"].is_null());
+    }
+
+    #[test]
+    fn policy_failures_exit_with_a_distinct_code() {
+        use super::failure_exit_code;
+
+        let policy = anyhow::Error::new(riftri_core::WorktreeError::InvalidRequest(
+            "destination already exists".to_owned(),
+        ));
+        assert_eq!(failure_exit_code(&policy), 3);
+
+        let unsupported = anyhow::Error::new(riftri_core::WorktreeError::Unsupported(
+            "sparse checkout".to_owned(),
+        ));
+        assert_eq!(failure_exit_code(&unsupported), 3);
+
+        let operational = anyhow::anyhow!("disk on fire");
+        assert_eq!(failure_exit_code(&operational), 1);
+    }
+
+    #[test]
+    fn confirmation_never_prompts_without_a_terminal() {
+        // Test harnesses run without a TTY on stdin, so both the `--yes` and
+        // the plain path must return without blocking on input.
+        super::confirm_destructive_action("would delete things.", true).expect("--yes path");
+        super::confirm_destructive_action("would delete things.", false).expect("non-tty path");
+    }
+
+    #[test]
+    fn skipping_confirmation_requires_the_destructive_flag() {
+        assert!(Cli::try_parse_from(["riftri", "gc", "--yes"]).is_err());
+        assert!(Cli::try_parse_from(["riftri", "gc", "--apply", "--yes"]).is_ok());
+        assert!(Cli::try_parse_from(["riftri", "worktree", "remove", "w", "--yes"]).is_err());
+        assert!(
+            Cli::try_parse_from(["riftri", "worktree", "remove", "w", "--force", "--yes"]).is_ok()
+        );
+    }
+
+    #[test]
+    fn long_help_documents_examples_and_environment() {
+        use clap::CommandFactory;
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("Examples:"), "{help}");
+        assert!(help.contains("RIFTRI_BYPASS"), "{help}");
     }
 
     #[test]
@@ -1675,6 +2290,8 @@ mod tests {
                     repository,
                     state_dir,
                     force,
+                    yes: _,
+                    json,
                 },
         } = remove.command
         else {
@@ -1684,6 +2301,7 @@ mod tests {
         assert_eq!(repository, Path::new("../app"));
         assert!(state_dir.is_none());
         assert!(!force);
+        assert!(!json);
 
         let forced =
             Cli::try_parse_from(["riftri", "worktree", "remove", "--force", "../app-auth"])
@@ -1711,6 +2329,7 @@ mod tests {
                     path,
                     repository,
                     state_dir,
+                    json,
                 },
         } = compact.command
         else {
@@ -1719,30 +2338,35 @@ mod tests {
         assert_eq!(path, Path::new("../app-auth"));
         assert_eq!(repository, Path::new("../app"));
         assert!(state_dir.is_none());
+        assert!(!json);
 
         let status =
             Cli::try_parse_from(["riftri", "status", "../app"]).expect("parse storage status");
         let Command::Status {
             repository,
             state_dir,
+            json,
         } = status.command
         else {
             panic!("unexpected status command");
         };
         assert_eq!(repository, Path::new("../app"));
         assert!(state_dir.is_none());
+        assert!(!json);
 
         let repair = Cli::try_parse_from(["riftri", "repair", "../app", "--state-dir", "../state"])
             .expect("parse lifecycle repair");
         let Command::Repair {
             repository,
             state_dir,
+            json,
         } = repair.command
         else {
             panic!("unexpected repair command");
         };
         assert_eq!(repository, Path::new("../app"));
         assert_eq!(state_dir.as_deref(), Some(Path::new("../state")));
+        assert!(!json);
 
         let gc = Cli::try_parse_from(["riftri", "gc", "../app", "--apply"])
             .expect("parse garbage collection");
@@ -1750,6 +2374,8 @@ mod tests {
             repository,
             state_dir,
             apply,
+            yes: _,
+            json,
         } = gc.command
         else {
             panic!("unexpected garbage-collection command");
@@ -1757,6 +2383,7 @@ mod tests {
         assert_eq!(repository, Path::new("../app"));
         assert!(state_dir.is_none());
         assert!(apply);
+        assert!(!json);
     }
 
     #[cfg(unix)]

@@ -1,0 +1,69 @@
+name: Installer parity
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "package/install.sh"
+      - "package/install.ps1"
+      - ".github/workflows/installer-parity.yml"
+  schedule:
+    # Weekly sweep so a stale manual `vercel deploy` is caught even when the
+    # installers have not changed recently (see #118 §4).
+    - cron: "43 5 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-parity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deployed-installer-parity:
+    name: Deployed installers match repo
+    runs-on: ubuntu-24.04
+
+    env:
+      DEPLOY_BASE_URL: https://riftri.dev
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download deployed installers
+        run: |
+          set -euo pipefail
+          mkdir -p deployed
+          for file in install.sh install.ps1; do
+            url="${DEPLOY_BASE_URL}/${file}"
+            status="$(curl -sS -o /dev/null -w '%{http_code}' -I "${url}")"
+            if [ "${status}" != "200" ]; then
+              echo "::error::HEAD ${url} returned HTTP ${status} (expected 200)." \
+                "The deployment may be missing or broken; redeploy the website with \`vercel deploy\`."
+              exit 1
+            fi
+            # Bypass shared caches so a fresh redeploy is picked up immediately.
+            curl -fsSL -H 'Cache-Control: no-cache' "${url}" -o "deployed/${file}"
+          done
+
+      - name: Diff deployed installers against repo copies
+        run: |
+          set -euo pipefail
+          # package/install.sh and package/install.ps1 are the canonical copies;
+          # package/scripts/stage-website-installer.mjs copies them verbatim into
+          # website/public/ at build time, so the deployed files must be
+          # byte-identical to the repo.
+          failed=0
+          for file in install.sh install.ps1; do
+            if diff -u "package/${file}" "deployed/${file}"; then
+              echo "${file}: deployed copy matches the repo."
+            else
+              failed=1
+              echo "::error file=package/${file}::Deployed ${DEPLOY_BASE_URL}/${file} does not match package/${file}." \
+                "The Vercel deployment is stale; redeploy the website with \`vercel deploy\` (which stages the installers via package/scripts/stage-website-installer.mjs)."
+            fi
+          done
+          exit "${failed}"

@@ -227,22 +227,29 @@ grows; shared worktrees are lightweight, not free.
 
 The detailed documentation lives with the code on GitHub. These links follow
 `main`; use the matching release tag when you need version-specific behavior.
+The [documentation index](https://github.com/assistant-ui/riftri/blob/main/docs/README.md)
+maps every document in one place.
 
 ### Setup and platform guides
 
+- [CLI reference](https://github.com/assistant-ui/riftri/blob/main/docs/cli.md): every command, argument, and flag, plus the shared JSON output conventions.
 - [Installation](https://github.com/assistant-ui/riftri/blob/main/docs/install.md): standalone installers, manual downloads, updates, and uninstalling.
 - [Shell and process activation](https://github.com/assistant-ui/riftri/blob/main/docs/global-activation.md): opt-in Git interception and shell compatibility.
+- [Agent integration](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md): harness setup, the JSON automation contract, and the parallel-agent lifecycle.
 - [Linux reflinks](https://github.com/assistant-ui/riftri/blob/main/docs/linux-reflink.md): Btrfs and XFS support and verification.
 - [Linux OverlayFS](https://github.com/assistant-ui/riftri/blob/main/docs/linux-overlayfs.md): mount requirements, helper setup, and recovery.
 - [Windows ReFS](https://github.com/assistant-ui/riftri/blob/main/docs/windows-refs.md): Windows backend requirements and testing.
 - [Git LFS](https://github.com/assistant-ui/riftri/blob/main/docs/git-lfs.md): accepted pointers, local object requirements, and limitations.
+- [Troubleshooting and FAQ](https://github.com/assistant-ui/riftri/blob/main/docs/troubleshooting.md): symptom-first answers for refused operations, activation gaps, recovery, and disk usage.
 
 ### Architecture and guarantees
 
+- [How Riftri stays safe](https://github.com/assistant-ui/riftri/blob/main/docs/safety.md): fail-closed refusals, real-filesystem CI, honest benchmarks, and supply-chain measures.
 - [Architecture](https://github.com/assistant-ui/riftri/blob/main/docs/architecture.md): components, immutable bases, transactions, and journal state machines.
 - [Design decisions](https://github.com/assistant-ui/riftri/blob/main/docs/decisions.md): settled choices and open questions.
 - [Backend guarantees](https://github.com/assistant-ui/riftri/blob/main/docs/backend-guarantees.md): storage contracts and metadata profiles.
 - [Filesystem compatibility](https://github.com/assistant-ui/riftri/blob/main/docs/filesystem-compatibility.md): permissions, symlinks, extended attributes, and platform boundaries.
+- [Comparison with alternatives](https://github.com/assistant-ui/riftri/blob/main/docs/comparison.md): Riftri versus plain `git worktree`, reference clones, manual reflink copies, and containers.
 
 ### Measurements and optimization work
 

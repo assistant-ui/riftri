@@ -31,7 +31,9 @@ Riftri keeps normal Git behavior while making those checkouts lightweight:
 - Interrupted creation and cleanup operations can be recovered safely.
 
 Riftri does not replace Git, manage branches, or sit between applications and
-the filesystem.
+the filesystem. For how it relates to plain `git worktree`, reference clones,
+manual reflink copies, and per-agent containers, see the
+[comparison with alternatives](docs/comparison.md).
 
 ## Installation
 
@@ -162,7 +164,9 @@ Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::New
 
 See [Global shell activation](docs/global-activation.md) for shell setup,
 compatibility details, and edge cases involving IDEs, containers, aliases, and
-Git wrappers.
+Git wrappers. For harness setup — Claude Code, Codex, containers, parallel
+agents, and the machine-readable output contract — see the
+[agent integration guide](docs/agent-integration.md).
 
 ## Supported today
 
@@ -223,7 +227,12 @@ $ riftri worktree compact ../app-auth
 $ riftri gc
 $ riftri gc --apply
 $ riftri state forget-missing /absolute/path/to/removed-state
+$ riftri completions zsh
 ```
+
+`riftri completions <shell>` prints a completion script for bash, zsh, fish,
+elvish, or PowerShell on stdout. Evaluate it in your shell profile or write it
+to your shell's completion directory; generation is offline and deterministic.
 
 Clean removal remains the default. To intentionally discard tracked,
 untracked, and ignored changes in one managed worktree, use either
@@ -236,6 +245,12 @@ Automation can add `--json-errors` anywhere in a command. A failure is then
 written to stderr as one versioned JSON receipt with a stable code, category,
 operation, optional durable phase, cleanup disposition, and recovery guidance.
 Normal successful output and default human-readable errors are unchanged.
+
+Successful results are machine-readable too: `doctor`, `backends`, `status`,
+`repair`, `gc`, and every `worktree` subcommand accept `--json` and print one
+versioned report on stdout, using the same stable schema conventions as
+`riftri worktree list --json`. Combined with `--json-errors`, an automation
+harness can parse every Riftri outcome without scraping human text.
 
 If a custom state directory was removed outside Riftri, lifecycle interception
 continues to fail closed. Remove that exact stale repository-local registration
@@ -285,6 +300,7 @@ Development plans and design details live in:
 - [Project definition](PROJECT.md)
 - [Roadmap](ROADMAP.md)
 - [Architecture](docs/architecture.md)
+- [How Riftri stays safe](docs/safety.md)
 - [Design decisions](docs/decisions.md)
 - [Backend guarantees](docs/backend-guarantees.md)
 - [Native COW benchmark](docs/benchmarks.md)

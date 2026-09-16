@@ -86,6 +86,20 @@ The checksum detects corrupted or mismatched downloads; it is not a separate
 signature or a notarization claim. Obtain both files over HTTPS from the
 expected repository. Stop if checksum verification fails.
 
+Releases after v0.2.1 also publish signed build provenance through GitHub
+artifact attestations, which proves an asset was built by this repository's
+release workflow. With the [GitHub CLI](https://cli.github.com/) installed,
+verify a downloaded archive (or `SHA256SUMS`) before unpacking it:
+
+```sh
+gh attestation verify riftri-darwin-arm64-v0.3.0.tar.gz --repo assistant-ui/riftri
+```
+
+The command fails if the file was not produced by a tagged release build of
+`assistant-ui/riftri`. Attestation complements the checksum: the checksum
+proves integrity against `SHA256SUMS`, and the attestation proves both were
+built and published by the expected workflow.
+
 ## macOS and Linux
 
 Choose `platform` from the table above, without the version and `.tar.gz`
@@ -224,6 +238,29 @@ filesystem or checkout features fail before mutation, without a silent
 full-copy fallback. Continue with the [quick start](../README.md#quick-start)
 only after reviewing the diagnostic. Repository-local `riftri enable` and
 process-scoped or explicitly evaluated shell activation remain separate choices.
+
+## Homebrew
+
+[`Formula/riftri.rb`](../Formula/riftri.rb) installs the published release
+archive for macOS and Linux on both architectures, verifying its SHA-256 the
+same way the other channels do. Until a tap repository exists, install it
+directly from a checkout:
+
+```sh
+brew install --formula ./Formula/riftri.rb
+```
+
+The formula is generated, not hand-written. After a release, regenerate it
+from that tag's published checksums:
+
+```sh
+gh release download v0.2.1 --repo assistant-ui/riftri --pattern SHA256SUMS --dir /tmp/riftri
+node package/scripts/update-homebrew-formula.mjs 0.2.1 /tmp/riftri/SHA256SUMS
+```
+
+`package/test/homebrew-formula.test.js` fails if the checked-in formula stops
+matching what the generator produces, so a partial bump or a hand edit is
+caught in CI rather than at install time.
 
 ## npm is a separate channel
 
