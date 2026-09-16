@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## 0.2.2 - 2026-09-16
+
 ### Added
 
 - Checkout-neutral GitHub linguist metadata attributes (`linguist-generated`,
@@ -27,6 +29,40 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Explicitly evaluated PowerShell activation and deactivation provide the same
   repository-gated normal Git interception as sh, bash, and zsh without editing
   PowerShell profiles or persistent `PATH`.
+- Shell completion generation, generated man pages, and a Homebrew formula
+  generator backed by checksummed native release archives.
+- Stable JSON success reports for lifecycle commands, binary-unit byte counts,
+  and a `--branch` alias for explicit adds.
+- CLI confirmation prompts, distinct error exit codes, and practical help
+  examples; documentation now includes a CLI reference, troubleshooting,
+  comparisons, and agent integration guidance.
+
+### Fixed
+
+- Website animation controls now keep their accessible Pause/Resume labels in
+  sync, clipboard feedback restarts on every copy, and keyboard navigation
+  moves focus to the requested section.
+- The local static preview now follows branded 404 routes and file overrides,
+  while preserving response headers and rejecting paths outside its output.
+- Improved website text contrast, Windows installation instructions, sharing
+  metadata, and inline access to the Markdown guide at `riftri.dev/index.md`.
+
+### Compatibility
+
+- The redundant `riftri recover` command was removed; use `riftri repair` for
+  repository-aware recovery. Scripts should also account for the documented
+  distinct error exit codes. Destructive confirmations apply only in terminals;
+  `--yes` explicitly skips those prompts.
+
+### Release
+
+- Native GitHub release assets include signed build-provenance attestations.
+  npm publication remains paused pending registry review; standalone downloads
+  and the Bash and PowerShell installers remain available.
+- CI now checks the minimum Rust version, dependency policy, code coverage,
+  Markdown links, browser interactions, and public deployment contents.
+- Production website verification checks the deployed revision, installers,
+  Markdown response, sharing assets, and branded error page.
 
 ## 0.2.1 - 2026-09-13
 

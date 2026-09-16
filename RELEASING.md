@@ -20,7 +20,9 @@ versions, prepares and verifies the native archives, and uploads those exact
 archives plus `SHA256SUMS` as the distinct `github-release-assets` workflow
 artifact (retained for seven days). After all staging checks pass:
 
-- `publish` publishes npm packages with `contents: read` and `id-token: write`.
+- `publish` publishes npm packages with `contents: read` and `id-token: write`
+  only when the repository variable `NPM_PUBLISH_ENABLED` is exactly `true`.
+  It is paused by default while the registry security rejection is unresolved.
 - `github-release` downloads the staged assets, verifies the exact eight-archive
   set and every checksum, and creates the GitHub release with `contents: write`.
   It has no npm token or OIDC publishing permission and does not depend on npm.
@@ -51,7 +53,10 @@ publishing the six macOS and Linux native packages. The Windows x64 package and
 main launcher were not attempted. The corresponding GitHub release completed
 with all eight native archives and checksums. Resolve the registry rejection
 before retrying the failed npm job; do not rename packages, create another tag,
-or advertise npm availability as a workaround.
+or advertise npm availability as a workaround. New releases may still ship
+through GitHub direct downloads without attempting npm publication. After npm
+confirms the rejection is resolved, a maintainer can explicitly set the
+repository variable `NPM_PUBLISH_ENABLED=true` before resuming that channel.
 
 ## Package layout
 

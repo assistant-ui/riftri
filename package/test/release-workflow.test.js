@@ -56,7 +56,7 @@ test("manual release rehearsals cannot receive publishing permissions", async ()
   assert.doesNotMatch(stage, /Publish npm packages/);
   assert.doesNotMatch(stage, /gh release/);
 
-  assert.match(publish, /^    if: github\.event_name == 'push'$/m);
+  assert.match(publish, /^    if: github\.event_name == 'push' && vars\.NPM_PUBLISH_ENABLED == 'true'$/m);
   assert.match(publish, /^      contents: read$/m);
   assert.match(publish, /^      id-token: write$/m);
   assert.match(publish, /Publish npm packages/);
@@ -70,6 +70,14 @@ test("manual release rehearsals cannot receive publishing permissions", async ()
   assert.match(githubRelease, /^      attestations: write$/m);
   assert.match(githubRelease, /Attest build provenance for release assets/);
   assert.doesNotMatch(githubRelease, /NPM_TOKEN|npm publish|registry\.npmjs\.org/);
+});
+
+test("npm publication stays paused until registry review explicitly enables it", async () => {
+  const workflow = await releaseWorkflow();
+  const publish = jobSource(workflow, "publish");
+  const githubRelease = jobSource(workflow, "github-release");
+  assert.match(publish, /^    if: github\.event_name == 'push' && vars\.NPM_PUBLISH_ENABLED == 'true'$/m);
+  assert.doesNotMatch(githubRelease, /NPM_PUBLISH_ENABLED/);
 });
 
 test("direct downloads publish independently of npm from the inspected staged assets", async () => {
