@@ -83,6 +83,9 @@ navigation test routes the canonical URL to the local build's exact response,
 so CI does not depend on the public deployment. Screenshots and failure traces
 are retained in `test-results/` and uploaded by CI. Run `pnpm preview:static`
 to inspect that same build at `http://127.0.0.1:4318` without a dev runtime.
+The preview honors the finalized static-file overrides and error-phase 404
+route, including its status, HTML body, and HEAD behavior. It is a preview of
+this site's static output, not a general Vercel routing emulator.
 
 To publish the tested site from this directory:
 
