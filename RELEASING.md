@@ -123,6 +123,11 @@ restartable: package versions already present in npm are detected and skipped.
    dependencies remain local `file:` references; release staging converts them
    to exact registry versions in the published manifest.
 2. Move relevant entries from `Unreleased` in `CHANGELOG.md` to a dated version.
+   Update the pinned examples and the archive table in
+   [docs/install.md](docs/install.md) to the new version;
+   `package/test/install-guide-version.test.js` fails until they match. Leave
+   statements about when a capability first shipped — they are facts about that
+   release, not examples, and the test keeps an explicit allowlist for them.
 3. Regenerate and review lockfile metadata when needed, then run the complete
    local checks:
 
