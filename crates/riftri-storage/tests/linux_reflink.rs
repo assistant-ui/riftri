@@ -129,11 +129,11 @@ fn cached_clone_consumes_materially_less_new_space_than_its_logical_size() {
     let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     let mut block = [0_u8; 64 * 1024];
     for _ in 0..(LOGICAL_BYTES / block.len()) {
-        for chunk in block.chunks_exact_mut(8) {
+        for chunk in block.as_chunks_mut::<8>().0 {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
-            chunk.copy_from_slice(&state.to_le_bytes());
+            *chunk = state.to_le_bytes();
         }
         file.write_all(&block).expect("write payload block");
     }

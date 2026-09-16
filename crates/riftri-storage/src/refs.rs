@@ -410,7 +410,7 @@ fn cluster_size(path: &Path) -> std::io::Result<u64> {
         return Err(std::io::Error::last_os_error());
     }
     let size = u64::from(sectors_per_cluster) * u64::from(bytes_per_sector);
-    if size == 0 || size > PROBE_BYTES as u64 || PROBE_BYTES as u64 % size != 0 {
+    if size == 0 || size > PROBE_BYTES as u64 || !(PROBE_BYTES as u64).is_multiple_of(size) {
         return Err(std::io::Error::other(format!(
             "unsupported ReFS cluster size {size}"
         )));

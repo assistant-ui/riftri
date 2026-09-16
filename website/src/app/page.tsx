@@ -8,6 +8,9 @@ import { StorageMap } from "../components/storage-map";
 const githubUrl = "https://github.com/assistant-ui/riftri";
 const agentbaseUrl = "https://agentbase.dev";
 const installCommand = "curl -fsSL https://riftri.dev/install.sh | bash";
+const powershellInstall = `$Installer = Join-Path $env:TEMP 'riftri-install.ps1'
+Invoke-WebRequest https://riftri.dev/install.ps1 -OutFile $Installer
+Get-Content $Installer`;
 
 export const metadata: Metadata = {
   title: "Riftri — Lightweight Git workspaces for parallel development",
@@ -165,7 +168,7 @@ function Savings() {
 const startSteps = [
   {
     index: "01",
-    title: "Install on macOS or Linux",
+    title: "Install the CLI",
     description: "Downloads the native CLI and verifies SHA-256. No Node.js required.",
     command: installCommand,
   },
@@ -185,11 +188,11 @@ const startSteps = [
 
 function GetStarted() {
   return (
-    <section className="content-section start-section" id="start">
+    <section className="content-section start-section" id="start" tabIndex={-1} aria-labelledby="start-title">
       <div className="section-heading split-heading">
         <div>
           <GraphLabel index="03">QUICK START</GraphLabel>
-          <h2>Create a Riftri worktree</h2>
+          <h2 id="start-title">Create a Riftri worktree</h2>
         </div>
         <p>
           Install the CLI, then run the support check from a Git repository. Riftri stops
@@ -205,7 +208,24 @@ function GetStarted() {
               <strong>{step.title}</strong>
               <p>{step.description}</p>
             </div>
-            <CopyCommand command={step.command} label="COPY" compact />
+            {step.index === "01" ? (
+              <div className="install-options">
+                <p className="install-platform">macOS / Linux</p>
+                <CopyCommand command={step.command} label="COPY" compact />
+                <details className="windows-install">
+                  <summary>Windows / PowerShell</summary>
+                  <p>Download the installer and review its contents.</p>
+                  <CopyCommand command={powershellInstall} compact multiline prompt="PS" />
+                  <p>After reviewing, run it in the same PowerShell session:</p>
+                  <CopyCommand command="& $Installer" compact prompt="PS" />
+                  <p>
+                    Installs per user; follow its printed PATH command. Optimized worktrees
+                    require a ReFS volume, not ordinary NTFS. No administrator access is
+                    needed to install the CLI.
+                  </p>
+                </details>
+              </div>
+            ) : <CopyCommand command={step.command} label="COPY" compact />}
           </li>
         ))}
       </ol>

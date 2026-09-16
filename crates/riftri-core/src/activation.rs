@@ -1158,14 +1158,14 @@ fn plan_enabled_remove(
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
-    if optimization_compatible {
-        if let Some((request, force)) = parse_enabled_remove(repository, arguments)? {
-            return Ok(if force {
-                GitProxyPlan::OptimizedForceRemove(request)
-            } else {
-                GitProxyPlan::OptimizedRemove(request)
-            });
-        }
+    if optimization_compatible
+        && let Some((request, force)) = parse_enabled_remove(repository, arguments)?
+    {
+        return Ok(if force {
+            GitProxyPlan::OptimizedForceRemove(request)
+        } else {
+            GitProxyPlan::OptimizedRemove(request)
+        });
     }
     guard_managed_path_lifecycle(repository, arguments, "remove")?;
     Ok(GitProxyPlan::Passthrough)
@@ -1205,10 +1205,8 @@ fn plan_enabled_move(
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
-    if optimization_compatible {
-        if let Some(request) = parse_enabled_move(repository, arguments)? {
-            return Ok(GitProxyPlan::OptimizedMove(request));
-        }
+    if optimization_compatible && let Some(request) = parse_enabled_move(repository, arguments)? {
+        return Ok(GitProxyPlan::OptimizedMove(request));
     }
     guard_managed_path_lifecycle(repository, arguments, "move")?;
     Ok(GitProxyPlan::Passthrough)

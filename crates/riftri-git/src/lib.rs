@@ -1302,18 +1302,20 @@ pub fn parse_attribute_records(input: &[u8]) -> Result<Vec<GitAttribute>, GitErr
     }
 
     fields
-        .chunks_exact(3)
-        .map(|fields| {
-            if fields[0].is_empty() || fields[1].is_empty() {
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|[path, name, value]| {
+            if path.is_empty() || name.is_empty() {
                 return Err(GitError::InvalidOutput {
                     context: "Git attribute record",
                     detail: "path and attribute name must not be empty".to_owned(),
                 });
             }
             Ok(GitAttribute {
-                path: PathBuf::from(os_string_from_git(fields[0], "attribute path")?),
-                name: fields[1].to_vec(),
-                value: fields[2].to_vec(),
+                path: PathBuf::from(os_string_from_git(path, "attribute path")?),
+                name: name.to_vec(),
+                value: value.to_vec(),
             })
         })
         .collect()
@@ -1759,6 +1761,29 @@ mod tests {
         assert_eq!(repository.clean, Some(true));
     }
 
+    /// Spawning a freshly written script can fail with ETXTBSY when a
+    /// concurrent test forks while the writer's descriptor is still duplicated
+    /// into a not-yet-exec'd child. A busy failure means the script never ran,
+    /// so retrying the whole attempt is safe, and one success proves the racy
+    /// descriptor is gone for the rest of the test.
+    #[cfg(unix)]
+    fn retry_while_wrapper_is_busy<T>(
+        mut attempt: impl FnMut() -> Result<T, crate::GitError>,
+    ) -> Result<T, crate::GitError> {
+        let mut retries = 0;
+        loop {
+            match attempt() {
+                Err(crate::GitError::Start { ref source, .. })
+                    if source.kind() == std::io::ErrorKind::ExecutableFileBusy && retries < 50 =>
+                {
+                    retries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => break result,
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolves_tree_from_commit_even_when_the_revision_moves() {
@@ -1770,18 +1795,22 @@ mod tests {
             .expect("original revision");
         fs::write(fixture.path().join("tracked.txt"), "new tree\n").expect("change tree");
         git(fixture.path(), &["commit", "-am", "second", "--quiet"]);
-        git(
-            fixture.path(),
-            &["branch", "moving", original.commit.as_str()],
-        );
         let wrapper = fixture.path().join("moving-git");
         fs::write(&wrapper, "#!/bin/sh\nif [ \"$4\" = 'moving^{commit}' ]; then\n  git \"$@\" || exit\n  git update-ref refs/heads/moving HEAD\nelse\n  exec git \"$@\"\nfi\n")
             .expect("write Git wrapper");
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
 
-        let resolved = Git::new(wrapper)
-            .resolve_revision(fixture.path(), OsStr::new("moving"))
-            .expect("resolve moving ref");
+        let moving_git = Git::new(wrapper);
+        let resolved = retry_while_wrapper_is_busy(|| {
+            // Re-pin the moving ref so the scenario is intact even if a retry
+            // follows a partial resolution.
+            git(
+                fixture.path(),
+                &["branch", "--force", "moving", original.commit.as_str()],
+            );
+            moving_git.resolve_revision(fixture.path(), OsStr::new("moving"))
+        })
+        .expect("resolve moving ref");
         assert_eq!(resolved.commit, original.commit);
         assert_eq!(resolved.tree, original.tree);
     }
@@ -2305,6 +2334,8 @@ mod tests {
         fs::write(&wrapper, "#!/bin/sh\nfixture=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd) || exit\nexport GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL=\"$fixture/global-config\"\nexport GIT_CONFIG_COUNT=1\nexport GIT_CONFIG_KEY_0=riftri-test.command\nexport GIT_CONFIG_VALUE_0=environment\nexec git -c riftri-test.command=command-line \"$@\"\n").unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
         let scoped = Git::new(wrapper);
+        retry_while_wrapper_is_busy(|| scoped.config_value(fixture.path(), "riftri.enabled"))
+            .expect("warm up the scoped Git wrapper");
         let keys = [
             "riftri-test.scope",
             "riftri-test.global",

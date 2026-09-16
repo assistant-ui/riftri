@@ -12,9 +12,15 @@ import "@farm.js/core/css";
  * Regenerated on dev start and when routes change.
  * Set suppressLintOnLink: true in farm.config.ts to accept any string on Link href.
  */
-export type RoutePath = "/";
-export type RoutePattern = "/";
-export type RouteModulePattern = "/";
+export type RoutePath =
+  | "/"
+  | "/404";
+export type RoutePattern =
+  | "/"
+  | "/404";
+export type RouteModulePattern =
+  | "/"
+  | "/404";
 declare module "@farm.js/core/client" {
   interface LinkDefaultRoute {
     _: import("./farm").RoutePath;
