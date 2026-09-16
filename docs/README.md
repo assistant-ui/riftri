@@ -25,6 +25,8 @@ add it to that overview's documentation index — CI enforces the link.
   fail-closed boundaries.
 - [troubleshooting.md](troubleshooting.md) — symptom-first answers: refused
   operations, activation gaps, recovery, disk usage, and installation.
+- [build-caches.md](build-caches.md) — which dependency stores are safe to
+  share across parallel worktrees, and which directories never are.
 
 ## Concepts and guarantees
 
