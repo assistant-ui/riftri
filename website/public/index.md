@@ -241,6 +241,7 @@ maps every document in one place.
 - [Windows ReFS](https://github.com/assistant-ui/riftri/blob/main/docs/windows-refs.md): Windows backend requirements and testing.
 - [Git LFS](https://github.com/assistant-ui/riftri/blob/main/docs/git-lfs.md): accepted pointers, local object requirements, and limitations.
 - [Troubleshooting and FAQ](https://github.com/assistant-ui/riftri/blob/main/docs/troubleshooting.md): symptom-first answers for refused operations, activation gaps, recovery, and disk usage.
+- [Dependencies and build caches](https://github.com/assistant-ui/riftri/blob/main/docs/build-caches.md): which dependency stores are safe to share across parallel worktrees, and which directories never are.
 
 ### Architecture and guarantees
 
