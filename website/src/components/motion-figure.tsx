@@ -27,7 +27,7 @@ export function MotionFigure({ className, label, note, children }: {
         <span>{note}</span>
         <button
           type="button"
-          aria-label={reducedMotion ? `${label} motion disabled by preference` : `Pause ${label} animation`}
+          aria-label={reducedMotion ? `${label} motion disabled by preference` : `${paused ? "Resume" : "Pause"} ${label} animation`}
           aria-pressed={paused}
           disabled={reducedMotion}
           onClick={() => setPaused((value) => !value)}
