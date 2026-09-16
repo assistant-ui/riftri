@@ -109,15 +109,20 @@ test("both example diagrams can pause and resume", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto("/");
   for (const name of ["worktree example", "storage backend"]) {
-    const button = page.getByRole("button", { name: `Pause ${name} animation`, exact: true });
+    const figure = page.locator(name === "worktree example" ? ".storage-map" : ".materialization-map");
+    const button = figure.getByRole("button");
+    await expect(button).toHaveAccessibleName(`Pause ${name} animation`);
     await expect(button).toBeEnabled();
     await button.click();
+    await expect(button).toHaveAccessibleName(`Resume ${name} animation`);
+    await expect(button).toHaveText("Resume");
     await expect(button).toHaveAttribute("aria-pressed", "true");
-    const figure = button.locator("xpath=ancestor::figure");
     await expect(figure).toHaveAttribute("data-paused", "true");
     const states = await figure.locator(".track-counter, .backend-cycle-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationPlayState));
     expect(states.every((state) => state === "paused")).toBe(true);
     await button.click();
+    await expect(button).toHaveAccessibleName(`Pause ${name} animation`);
+    await expect(button).toHaveText("Pause");
     await expect(button).toHaveAttribute("aria-pressed", "false");
   }
 });
