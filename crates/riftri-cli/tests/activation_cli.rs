@@ -1187,6 +1187,36 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
             .stdout
             .is_empty()
     );
+
+    let other = RepositoryFixture::new();
+    assert!(riftri(&other.repository, &["enable"]).status.success());
+    for options in [
+        &["--git-dir=.git"][..],
+        &["--git-dir", ".git"][..],
+        &["--work-tree=."][..],
+        &["--work-tree", "."][..],
+    ] {
+        let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(options)
+            .arg("-C")
+            .arg(fixture.directory.path())
+            .args(["-C", "repository", "worktree", "remove"])
+            .arg(&destination)
+            .current_dir(&other.repository)
+            .output()
+            .expect("guard removal after directory changes");
+
+        assert!(
+            !removal.status.success(),
+            "{options:?} bypassed the managed removal guard"
+        );
+        assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+        assert!(destination.is_dir());
+        let status = git(&destination, &["status", "--porcelain=v1"]);
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+    }
 }
 
 #[cfg(target_os = "macos")]
