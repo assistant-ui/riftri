@@ -40,6 +40,9 @@ test("website finalization preserves installers and Markdown without a server ru
   assert.equal(fs.existsSync(path.join(output, "nitro.json")), false);
   const config = JSON.parse(fs.readFileSync(path.join(output, "config.json"), "utf8"));
   assert.equal(config.version, 3);
+  const { currentRevision } = await import("../scripts/verify-website.mjs");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(output, "static/build-info.json"), "utf8")), { revision: currentRevision() });
+  assert.equal(config.routes.find((route) => route.src === "^/build-info\\.json$").headers["Cache-Control"], "no-store");
   assert.deepEqual(config.overrides, {
     "index.html": { path: "" },
     "404/index.html": { path: "404" },

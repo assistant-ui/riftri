@@ -43,10 +43,6 @@ Sharing metadata points to the canonical `https://riftri.dev/` homepage and a
 
 Quality checks (including browser-test TypeScript):
 
-Sharing metadata points to the canonical `https://riftri.dev/` homepage and a
-1200×630 PNG card at `/og.png`. Edit `assets/og.svg` and run
-`pnpm generate:sharing-card` to regenerate the committed PNG. No image server is needed.
-
 ```console
 $ pnpm exec farm generate --check
 $ pnpm type-check
@@ -89,9 +85,17 @@ To publish the tested site from this directory:
 ```console
 $ vercel link --yes --project riftri --scope assistant-ui
 $ vercel pull --yes --environment=production --scope assistant-ui
-$ pnpm build
-$ vercel deploy --prebuilt --prod --scope assistant-ui
+$ pnpm deploy:production
 ```
+
+Use a clean, committed checkout. The deployment command type-checks, builds,
+runs the existing Chromium suite, publishes the exact tested output, and runs
+`pnpm verify:production`. The public `/build-info.json` records the build's Git
+revision. Verification compares it with the checkout and checks the homepage,
+inline Markdown, byte-identical installers and public assets, and branded 404.
+A failed verification exits nonzero; it does not silently roll back or redeploy.
+The Website deployment check workflow also verifies successful production
+deployment events and can be run manually against the intended deployed ref.
 
 The Farm.js build already generates Vercel Build Output API artifacts under
 `.vercel/output`. Keep the downloaded project settings and environment files

@@ -1,6 +1,7 @@
 import { access, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { currentRevision } from "./verify-website.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -61,6 +62,8 @@ export async function finalizeStaticWebsite(
     (route) => route.headers?.["Cache-Control"]?.includes("immutable"),
   );
 
+  await writeFile(path.join(staticDirectory, "build-info.json"), `${JSON.stringify({ revision: currentRevision() })}\n`);
+
   await rm(path.join(outputDirectory, "functions"), { recursive: true, force: true });
   await rm(path.join(outputDirectory, "nitro.json"), { force: true });
 
@@ -71,6 +74,7 @@ export async function finalizeStaticWebsite(
       "404/index.html": { path: "404" },
     },
     routes: [
+      { src: "^/build-info\\.json$", headers: { "Cache-Control": "no-store", "Content-Type": "application/json" }, continue: true },
       installerRoute,
       markdownRoute,
       immutableAssetRoute,
