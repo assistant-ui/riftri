@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "verify:production": "node ../package/scripts/verify-website.mjs",
+    "deploy:production": "pnpm type-check && pnpm build && pnpm test:browser && vercel deploy --prebuilt --prod --yes --scope assistant-ui && pnpm verify:production",
     "test:browser": "playwright test",
     "preview:static": "node scripts/serve-static.mjs",
     "generate:sharing-card": "node scripts/generate-sharing-card.mjs",
