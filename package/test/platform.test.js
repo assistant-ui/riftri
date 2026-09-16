@@ -3,7 +3,8 @@
 const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
+const { once } = require("node:events");
 const { access, mkdtemp, readFile, rm } = require("node:fs/promises");
 const { test } = require("node:test");
 const { version } = require("../../package.json");
@@ -136,3 +137,38 @@ test("launcher preserves Rust CLI failures", () => {
   assert.equal(result.status, 2);
   assert.match(result.stderr, /unrecognized subcommand/);
 });
+
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  test(`launcher forwards PID-directed ${signal} to native Riftri`, {
+    skip: process.platform === "win32",
+    timeout: 10000,
+  }, async (t) => {
+    const repositoryRoot = path.resolve(__dirname, "..", "..");
+    const directory = await mkdtemp(path.join(os.tmpdir(), "riftri-signal-"));
+    t.after(() => rm(directory, { recursive: true, force: true }));
+    const child = spawn(process.execPath, [
+      path.join(repositoryRoot, "package", "bin", "riftri.js"),
+      "exec", "--", process.execPath, "-e",
+      "console.log(process.ppid); setTimeout(() => {}, 1500);",
+    ], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        HOME: directory,
+        XDG_STATE_HOME: directory,
+        RIFTRI_BINARY: path.join(repositoryRoot, "target", "debug", "riftri"),
+      },
+    });
+    t.after(() => child.kill("SIGKILL"));
+    const exited = once(child, "exit", { signal: t.signal });
+    const [ready] = await once(child.stdout, "data", { signal: t.signal });
+    const nativePid = Number(ready.toString().trim());
+    assert.ok(Number.isInteger(nativePid) && nativePid > 0);
+
+    child.kill(signal);
+    const [code, exitSignal] = await exited;
+    assert.equal(code, null);
+    assert.equal(exitSignal, signal);
+    assert.throws(() => process.kill(nativePid, 0), { code: "ESRCH" });
+  });
+}

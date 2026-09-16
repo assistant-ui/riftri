@@ -2,7 +2,7 @@
 
 "use strict";
 
-const { spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
 const { resolveBinary } = require("../lib/platform.js");
 
 function fail(message) {
@@ -17,21 +17,32 @@ try {
   fail(error instanceof Error ? error.message : String(error));
 }
 
-const result = spawnSync(binary, process.argv.slice(2), {
+const child = spawn(binary, process.argv.slice(2), {
   stdio: "inherit",
   windowsHide: false,
 });
 
-if (result.error) {
-  fail(`could not start the native executable at ${binary}: ${result.error.message}`);
+const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
+const forwardSignal = (signal) => child.kill(signal);
+for (const signal of signals) {
+  process.on(signal, forwardSignal);
 }
 
-if (result.signal) {
-  try {
-    process.kill(process.pid, result.signal);
-  } catch {
-    fail(`native executable stopped after signal ${result.signal}`);
+child.on("error", (error) => {
+  fail(`could not start the native executable at ${binary}: ${error.message}`);
+});
+
+child.on("exit", (code, signal) => {
+  for (const forwardedSignal of signals) {
+    process.removeListener(forwardedSignal, forwardSignal);
   }
-} else {
-  process.exit(result.status ?? 1);
-}
+  if (signal) {
+    try {
+      process.kill(process.pid, signal);
+    } catch {
+      fail(`native executable stopped after signal ${signal}`);
+    }
+  } else {
+    process.exit(code ?? 1);
+  }
+});
