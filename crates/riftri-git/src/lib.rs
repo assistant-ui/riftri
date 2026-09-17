@@ -421,11 +421,11 @@ impl Git {
     /// Read simple `section.variable` keys in one Git process, with normal
     /// configuration precedence and the same raw values as `config_value`.
     ///
-    /// Keys are case-insensitive and returned lowercase. This supports the
-    /// conservative ASCII subset needed by checkout configuration, including
-    /// subsection keys such as `filter.lfs.clean`. Missing keys are absent,
-    /// while empty values and implicit booleans are present with empty bytes,
-    /// as with `--get`.
+    /// Section and variable names are case-insensitive and returned lowercase.
+    /// Subsection names keep their case in selectors and returned keys.
+    /// This accepts a conservative ASCII subset, including subsection keys
+    /// such as `filter.Mixed.clean`. Missing keys are absent. Empty values and
+    /// implicit booleans are present with empty bytes, as with `--get`.
     /// The result is operation-local: no answers are cached between calls.
     pub fn config_values(
         &self,
@@ -456,7 +456,11 @@ impl Git {
                         detail: "batch reads require simple section.variable keys".to_owned(),
                     });
                 }
-                Ok(key.to_ascii_lowercase())
+                let mut key = (*key).to_owned();
+                key[..components[0].len()].make_ascii_lowercase();
+                let variable = key.rfind('.').expect("validated configuration key") + 1;
+                key[variable..].make_ascii_lowercase();
+                Ok(key)
             })
             .collect::<Result<Vec<_>, _>>()?;
         // Validation above excludes regexp metacharacters other than the one
@@ -1685,6 +1689,41 @@ mod tests {
             values.get("filter.lfs.process").map(Vec::as_slice),
             Some(&b"git-lfs filter-process"[..])
         );
+    }
+
+    #[test]
+    fn batched_configuration_preserves_subsection_case() {
+        let fixture = RepositoryFixture::unborn();
+        for (key, value) in [
+            ("filter.Mixed.clean", "cat"),
+            ("filter.mixed.clean", "lowercase"),
+            ("filter.Mixed.Part.clean", "dotted"),
+        ] {
+            git(fixture.path(), &["config", key, value]);
+        }
+        let git = Git::default();
+        let values = git
+            .config_values(
+                fixture.path(),
+                &[
+                    "FILTER.Mixed.CLEAN",
+                    "filter.mixed.clean",
+                    "Filter.Mixed.Part.Clean",
+                    "filter.MIXED.clean",
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            values,
+            std::collections::BTreeMap::from([
+                ("filter.Mixed.clean".to_owned(), b"cat".to_vec()),
+                ("filter.mixed.clean".to_owned(), b"lowercase".to_vec()),
+                ("filter.Mixed.Part.clean".to_owned(), b"dotted".to_vec()),
+            ])
+        );
+        for (key, value) in values {
+            assert_eq!(git.config_value(fixture.path(), &key).unwrap(), Some(value));
+        }
     }
 
     fn git(path: &Path, arguments: &[&str]) {
