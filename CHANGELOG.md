@@ -5,6 +5,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- `riftri worktree list --all-states` inventories managed worktrees across the
+  default state location and every state directory the repository registers,
+  so worktrees created with a custom `--state-dir` are discoverable without
+  repeating the path. The default single-state scope is unchanged. The new
+  scope's JSON report uses `schema_version` 2, names each worktree's owning
+  state directory, deduplicates equivalent registrations, filters shared state
+  directories to the queried repository, and reports missing, non-absolute, or
+  symlinked registrations as diagnostic entries without traversing them.
+  Discovery stays strictly read-only.
+
 ### Changed
 
 - `riftri state unregister <PATH>` replaces the displayed `state forget-missing`

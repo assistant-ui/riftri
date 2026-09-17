@@ -227,6 +227,11 @@ enum WorktreeCommand {
         #[arg(long)]
         state_dir: Option<PathBuf>,
 
+        /// Inspect every state directory the repository registers, including
+        /// the default location, and report unusable registrations.
+        #[arg(long, conflicts_with = "state_dir")]
+        all_states: bool,
+
         /// Emit stable machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -618,11 +623,17 @@ fn run(cli: Cli) -> Result<()> {
             WorktreeCommand::List {
                 repository,
                 state_dir,
+                all_states,
                 json,
             } => {
-                let state_directory = resolve_state_directory(&repository, state_dir)?;
-                let report = riftri_core::storage_accounting(&state_directory)?;
-                print_worktree_inventory(&state_directory, &report, json)?;
+                if all_states {
+                    let inventory = riftri_core::worktree_inventory_across_states(&repository)?;
+                    print_all_states_worktree_inventory(&inventory, json)?;
+                } else {
+                    let state_directory = resolve_state_directory(&repository, state_dir)?;
+                    let report = riftri_core::storage_accounting(&state_directory)?;
+                    print_worktree_inventory(&state_directory, &report, json)?;
+                }
             }
             WorktreeCommand::Add {
                 path,
@@ -1424,30 +1435,140 @@ fn print_worktree_inventory(
     println!("Managed worktrees: {}", report.views.len());
     for view in &report.views {
         println!("- {}", view.destination.display());
-        println!("  Repository: {}", view.repository.display());
-        println!("  Head: {}", view.head.as_str());
-        if let Some(branch) = &view.branch {
-            println!("  Branch: {}", display_git_bytes(branch));
-        } else if view.detached {
-            println!("  Branch: detached");
-        }
-        if let Some(reason) = &view.locked_reason {
-            println!("  Locked: {}", display_git_bytes(reason));
-        }
-        if let Some(reason) = &view.prunable_reason {
-            println!("  Prunable: {}", display_git_bytes(reason));
-        }
-        println!("  Backend: {}", view.backend.display_name());
-        println!("  Immutable base: {}", view.base_path.display());
-        println!("  Logical: {}", display_byte_count(view.logical_bytes));
-        println!(
-            "  Filesystem-accounted allocated: {}",
-            display_byte_count(view.allocated_bytes)
-        );
+        print_worktree_view_details(view, None);
     }
     if !report.diagnostic_issues.is_empty() {
         println!("Diagnostic issues: {}", report.diagnostic_issues.len());
         for issue in &report.diagnostic_issues {
+            println!("- {}: {}", issue.path.display(), issue.reason);
+        }
+    }
+    Ok(())
+}
+
+fn print_worktree_view_details(view: &riftri_core::ViewStorageAccounting, state: Option<&Path>) {
+    if let Some(state) = state {
+        println!("  State: {}", state.display());
+    }
+    println!("  Repository: {}", view.repository.display());
+    println!("  Head: {}", view.head.as_str());
+    if let Some(branch) = &view.branch {
+        println!("  Branch: {}", display_git_bytes(branch));
+    } else if view.detached {
+        println!("  Branch: detached");
+    }
+    if let Some(reason) = &view.locked_reason {
+        println!("  Locked: {}", display_git_bytes(reason));
+    }
+    if let Some(reason) = &view.prunable_reason {
+        println!("  Prunable: {}", display_git_bytes(reason));
+    }
+    println!("  Backend: {}", view.backend.display_name());
+    println!("  Immutable base: {}", view.base_path.display());
+    println!("  Logical: {}", display_byte_count(view.logical_bytes));
+    println!(
+        "  Filesystem-accounted allocated: {}",
+        display_byte_count(view.allocated_bytes)
+    );
+}
+
+fn print_all_states_worktree_inventory(
+    inventory: &riftri_core::AllStatesWorktreeInventory,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let state_directories = inventory
+            .states
+            .iter()
+            .map(|state| {
+                serde_json::json!({
+                    "path": state.state_directory.display().to_string(),
+                    "path_native_hex": native_path_hex(&state.state_directory),
+                    "source": state.source.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let worktrees = inventory
+            .states
+            .iter()
+            .flat_map(|state| {
+                state.views.iter().map(|view| {
+                    let mut value = worktree_view_json(view);
+                    value["state_directory"] =
+                        serde_json::Value::from(state.state_directory.display().to_string());
+                    value["state_directory_native_hex"] =
+                        serde_json::Value::from(native_path_hex(&state.state_directory));
+                    value
+                })
+            })
+            .collect::<Vec<_>>();
+        let diagnostic_issues = inventory
+            .registration_issues
+            .iter()
+            .map(|issue| {
+                let mut value = diagnostic_issue_json(issue);
+                value["state_directory"] = serde_json::Value::Null;
+                value
+            })
+            .chain(inventory.states.iter().flat_map(|state| {
+                state.diagnostic_issues.iter().map(|issue| {
+                    let mut value = diagnostic_issue_json(issue);
+                    value["state_directory"] =
+                        serde_json::Value::from(state.state_directory.display().to_string());
+                    value
+                })
+            }))
+            .collect::<Vec<_>>();
+        let output = serde_json::json!({
+            "schema_version": 2,
+            "scope": "all-registered-states",
+            "native_path_encoding": native_path_encoding(),
+            "state_directories": state_directories,
+            "worktrees": worktrees,
+            "diagnostic_issues": diagnostic_issues,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
+        );
+        return Ok(());
+    }
+
+    println!("Riftri managed worktrees (all registered states)");
+    println!("State directories: {}", inventory.states.len());
+    for state in &inventory.states {
+        println!(
+            "- {} ({})",
+            state.state_directory.display(),
+            state.source.as_str()
+        );
+    }
+    let total_views = inventory
+        .states
+        .iter()
+        .map(|state| state.views.len())
+        .sum::<usize>();
+    println!("Managed worktrees: {total_views}");
+    for state in &inventory.states {
+        for view in &state.views {
+            println!("- {}", view.destination.display());
+            print_worktree_view_details(view, Some(&state.state_directory));
+        }
+    }
+    let total_issues = inventory.registration_issues.len()
+        + inventory
+            .states
+            .iter()
+            .map(|state| state.diagnostic_issues.len())
+            .sum::<usize>();
+    if total_issues > 0 {
+        println!("Diagnostic issues: {total_issues}");
+        for issue in inventory.registration_issues.iter().chain(
+            inventory
+                .states
+                .iter()
+                .flat_map(|state| state.diagnostic_issues.iter()),
+        ) {
             println!("- {}: {}", issue.path.display(), issue.reason);
         }
     }
@@ -2276,6 +2397,7 @@ mod tests {
                 WorktreeCommand::List {
                     repository,
                     state_dir,
+                    all_states,
                     json,
                 },
         } = list.command
@@ -2284,7 +2406,34 @@ mod tests {
         };
         assert_eq!(repository, Path::new("../app"));
         assert_eq!(state_dir.as_deref(), Some(Path::new("../state")));
+        assert!(!all_states);
         assert!(json);
+
+        let all_states = Cli::try_parse_from(["riftri", "worktree", "list", "--all-states"])
+            .expect("parse all-states inventory");
+        let Command::Worktree {
+            command:
+                WorktreeCommand::List {
+                    all_states,
+                    state_dir,
+                    ..
+                },
+        } = all_states.command
+        else {
+            panic!("unexpected all-states list command");
+        };
+        assert!(all_states);
+        assert!(state_dir.is_none());
+
+        Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "list",
+            "--all-states",
+            "--state-dir",
+            "../state",
+        ])
+        .expect_err("--all-states conflicts with an explicit --state-dir");
 
         let remove = Cli::try_parse_from([
             "riftri",
