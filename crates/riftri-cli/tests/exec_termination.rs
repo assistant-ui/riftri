@@ -17,7 +17,10 @@ fn exec_propagates_normal_exit_status() {
 
 #[cfg(unix)]
 mod unix {
+    use std::fs::File;
     use std::io::{BufRead, BufReader};
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::process::CommandExt;
     use std::path::Path;
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -156,6 +159,140 @@ mod unix {
         let pids = exec.read_pids(1);
         assert_eq!(exec.wait_exit_code(), 0);
         assert_terminates(pids[0], "scoped command");
+    }
+
+    /// ioctl request numbers are `c_ulong` on the platforms these tests run
+    /// on, while the type of the libc constant varies by target.
+    #[allow(clippy::unnecessary_cast)]
+    const TIOCSCTTY_REQUEST: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
+
+    /// Open a fresh pseudo-terminal pair, returning `(master, slave)`.
+    fn open_pty() -> (File, File) {
+        let mut master: libc::c_int = -1;
+        let mut slave: libc::c_int = -1;
+        // SAFETY: openpty only writes the two descriptor out-parameters; the
+        // name, termios, and winsize pointers are optional and null.
+        let result = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(result, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: openpty returned exclusive ownership of both descriptors.
+        unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) }
+    }
+
+    /// A spawned `riftri exec` that is the session leader of a fresh
+    /// pseudo-terminal, matching interactive usage: every standard descriptor
+    /// is the pty slave, the pty is the controlling terminal, and the scoped
+    /// command shares riftri's foreground process group.
+    struct InteractiveExec {
+        riftri: Child,
+        output: BufReader<File>,
+        shim_root: TempDir,
+    }
+
+    impl InteractiveExec {
+        fn spawn(script: &str) -> Self {
+            let shim_root = tempfile::tempdir().expect("create private TMPDIR");
+            let (master, slave) = open_pty();
+            let mut command = Command::new(env!("CARGO_BIN_EXE_riftri"));
+            command
+                .args(["exec", "--", "/bin/sh", "-c", script])
+                .env("TMPDIR", shim_root.path())
+                .stdin(Stdio::from(slave.try_clone().expect("duplicate pty slave")))
+                .stdout(Stdio::from(slave.try_clone().expect("duplicate pty slave")))
+                .stderr(Stdio::from(slave));
+            // SAFETY: the closure runs in the forked child before exec and
+            // calls only async-signal-safe functions.
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    // Adopt the pty as the controlling terminal; the fresh
+                    // session leader's process group becomes the terminal's
+                    // foreground process group.
+                    if libc::ioctl(0, TIOCSCTTY_REQUEST, 0) == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+            let riftri = command.spawn().expect("start riftri exec on a pty");
+            InteractiveExec {
+                riftri,
+                output: BufReader::new(master),
+                shim_root,
+            }
+        }
+
+        fn pid(&self) -> i32 {
+            i32::try_from(self.riftri.id()).expect("riftri PID fits i32")
+        }
+
+        /// Read pty output lines until `marker` appears on its own line.
+        fn await_marker(&mut self, marker: &str) {
+            loop {
+                let mut line = String::new();
+                let read = self.output.read_line(&mut line).expect("read pty output");
+                assert!(read > 0, "pty closed before {marker:?} appeared");
+                if line.trim() == marker {
+                    return;
+                }
+            }
+        }
+
+        fn wait_exit_code(mut self) -> i32 {
+            let status = self.riftri.wait().expect("wait for riftri exec");
+            let code = status.code().expect("riftri exec exits with a code");
+            assert_shim_removed(self.shim_root.path());
+            code
+        }
+    }
+
+    /// Keyboard-style SIGINT to the foreground process group must not kill
+    /// riftri while the scoped command catches the interrupt and keeps
+    /// running: riftri stays alive, keeps waiting for the command's real
+    /// exit, propagates its status, and still removes the temporary Git shim.
+    #[test]
+    fn interactive_sigint_survivor_keeps_riftri_waiting() {
+        let mut exec = InteractiveExec::spawn(
+            "trap 'trapped=1' INT\n\
+             echo READY\n\
+             while [ -z \"${trapped-}\" ]; do /bin/sleep 0.1 || :; done\n\
+             echo TRAPPED\n\
+             /bin/sleep 0.5\n\
+             exit 7\n",
+        );
+        exec.await_marker("READY");
+        let riftri_pid = exec.pid();
+        // The session leader's PID doubles as the foreground process group
+        // ID, so this is exactly the delivery a terminal performs for Ctrl-C.
+        signal(-riftri_pid, libc::SIGINT);
+        exec.await_marker("TRAPPED");
+        assert_eq!(
+            // SAFETY: signal 0 only probes for existence.
+            unsafe { libc::kill(riftri_pid, 0) },
+            0,
+            "riftri must survive the foreground SIGINT"
+        );
+        assert_eq!(exec.wait_exit_code(), 7);
+    }
+
+    /// When the scoped command does die from the foreground SIGINT, riftri
+    /// reflects the conventional 130 exit status instead of dying alongside
+    /// the command, and the shim is still cleaned up.
+    #[test]
+    fn interactive_sigint_death_propagates_130() {
+        let mut exec = InteractiveExec::spawn("echo READY; exec /bin/sleep 30");
+        exec.await_marker("READY");
+        signal(-exec.pid(), libc::SIGINT);
+        assert_eq!(exec.wait_exit_code(), 128 + libc::SIGINT);
     }
 }
 

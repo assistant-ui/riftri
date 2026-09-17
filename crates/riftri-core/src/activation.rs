@@ -404,9 +404,10 @@ fn execute_scoped_command_from(
 }
 
 /// Run the scoped command to completion while honoring the termination
-/// contract: SIGTERM, SIGINT, and SIGHUP delivered to Riftri are forwarded to
-/// the scoped command, Riftri keeps waiting so the temporary Git shim is
-/// removed, and the command's exit status is propagated unchanged.
+/// contract: termination signals delivered to Riftri are forwarded to the
+/// scoped command or left for the command to decide, Riftri keeps waiting so
+/// the temporary Git shim is removed, and the command's exit status is
+/// propagated unchanged.
 ///
 /// Supervised invocations — no controlling terminal owned in the foreground —
 /// run the command in its own process group and forward signals to that whole
@@ -414,8 +415,13 @@ fn execute_scoped_command_from(
 /// processes. Interactive foreground invocations keep the command in Riftri's
 /// process group so terminal job control and keyboard signal delivery are
 /// unchanged; SIGTERM and SIGHUP are then forwarded to the command itself,
-/// while SIGINT is left to the terminal, which already delivers it to the
-/// whole foreground process group.
+/// while SIGINT and SIGQUIT are ignored by Riftri for the duration of the
+/// wait, exactly like a shell waiting on a foreground job: the terminal
+/// already delivers both to the whole foreground process group, so the
+/// command alone decides whether the interrupt is fatal, and a command that
+/// catches Ctrl-C keeps running under an intact wrapper whose shim cleanup
+/// and exit-status propagation still happen. All dispositions are restored
+/// after the command is reaped.
 #[cfg(unix)]
 fn wait_for_scoped_child(
     command: &mut Command,
@@ -427,15 +433,45 @@ fn wait_for_scoped_child(
     if !interactive {
         command.process_group(0);
     }
-    let forwarded: &[libc::c_int] = if interactive {
-        // The terminal already delivers keyboard-generated SIGINT to the whole
-        // foreground process group, which includes the command; forwarding it
-        // again would deliver the same interrupt twice.
-        &[libc::SIGTERM, libc::SIGHUP]
+    // SIGQUIT gets the same treatment as SIGINT in interactive mode because it
+    // is the other keyboard-generated termination signal (Ctrl-\) that the
+    // terminal delivers to the whole foreground process group: a command that
+    // catches or ignores it must not lose its wrapper either. In supervised
+    // mode SIGQUIT keeps its default disposition, unchanged from the original
+    // forwarding contract.
+    let (forwarded, ignored): (&[libc::c_int], &[libc::c_int]) = if interactive {
+        // The terminal already delivers keyboard-generated SIGINT and SIGQUIT
+        // to the whole foreground process group, which includes the command;
+        // forwarding either would deliver the same interrupt twice, and dying
+        // from either would orphan a command that chose to survive it.
+        (
+            &[libc::SIGTERM, libc::SIGHUP],
+            &[libc::SIGINT, libc::SIGQUIT],
+        )
     } else {
-        &[libc::SIGTERM, libc::SIGINT, libc::SIGHUP]
+        (&[libc::SIGTERM, libc::SIGINT, libc::SIGHUP], &[])
     };
-    let guard = scoped_child_signals::ForwardingGuard::install(forwarded)?;
+    let guard = scoped_child_signals::ForwardingGuard::install(forwarded, ignored)?;
+    // An ignored disposition — unlike a caught handler — survives exec, so
+    // without correction the command would inherit SIG_IGN and never see
+    // Ctrl-C at all. Restore the dispositions Riftri itself inherited in the
+    // child: SIG_IGN stays SIG_IGN, anything else becomes SIG_DFL (a caught
+    // handler cannot cross exec anyway).
+    let inherited = guard.inherited_dispositions(ignored);
+    if !inherited.is_empty() {
+        // SAFETY: the closure runs in the forked child before exec and calls
+        // only the async-signal-safe signal(2).
+        unsafe {
+            command.pre_exec(move || {
+                for &(signal, handler) in &inherited {
+                    if libc::signal(signal, handler) == libc::SIG_ERR {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = command.spawn().map_err(|error| {
         process_error(format!(
             "start process-scoped command {}: {error}",
@@ -515,37 +551,75 @@ mod scoped_child_signals {
         }
     }
 
-    /// Installs forwarding handlers for the given signals and restores the
-    /// previous dispositions when dropped.
+    /// Installs forwarding handlers for the `forwarded` signals, ignores the
+    /// `ignored` signals, and restores the previous dispositions when
+    /// dropped.
     pub(super) struct ForwardingGuard {
         previous: Vec<(libc::c_int, libc::sigaction)>,
     }
 
     impl ForwardingGuard {
-        pub(super) fn install(signals: &[libc::c_int]) -> Result<Self, ActivationError> {
+        pub(super) fn install(
+            forwarded: &[libc::c_int],
+            ignored: &[libc::c_int],
+        ) -> Result<Self, ActivationError> {
             let mut guard = ForwardingGuard {
-                previous: Vec::with_capacity(signals.len()),
+                previous: Vec::with_capacity(forwarded.len() + ignored.len()),
             };
-            for &signal in signals {
-                // SAFETY: the action structures are zero-initialized before
-                // every field sigaction reads is assigned, and the handler is
-                // async-signal-safe.
-                unsafe {
-                    let mut action: libc::sigaction = std::mem::zeroed();
-                    action.sa_sigaction = forward_signal as *const () as usize;
-                    action.sa_flags = libc::SA_RESTART;
-                    libc::sigemptyset(&mut action.sa_mask);
-                    let mut previous: libc::sigaction = std::mem::zeroed();
-                    if libc::sigaction(signal, &action, &mut previous) != 0 {
-                        return Err(process_error(format!(
-                            "install termination forwarding for signal {signal}: {}",
-                            std::io::Error::last_os_error()
-                        )));
-                    }
-                    guard.previous.push((signal, previous));
-                }
+            for &signal in forwarded {
+                guard.replace_disposition(signal, forward_signal as *const () as usize)?;
+            }
+            for &signal in ignored {
+                guard.replace_disposition(signal, libc::SIG_IGN)?;
             }
             Ok(guard)
+        }
+
+        fn replace_disposition(
+            &mut self,
+            signal: libc::c_int,
+            handler: libc::sighandler_t,
+        ) -> Result<(), ActivationError> {
+            // SAFETY: the action structures are zero-initialized before every
+            // field sigaction reads is assigned, and the handler is either
+            // SIG_IGN or an async-signal-safe function.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = handler;
+                action.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut action.sa_mask);
+                let mut previous: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(signal, &action, &mut previous) != 0 {
+                    return Err(process_error(format!(
+                        "install termination handling for signal {signal}: {}",
+                        std::io::Error::last_os_error()
+                    )));
+                }
+                self.previous.push((signal, previous));
+            }
+            Ok(())
+        }
+
+        /// For each requested signal, the disposition a child spawned now
+        /// should start from: the disposition Riftri itself inherited if that
+        /// was SIG_IGN, and SIG_DFL otherwise, because a caught handler never
+        /// survives exec while an ignore does.
+        pub(super) fn inherited_dispositions(
+            &self,
+            signals: &[libc::c_int],
+        ) -> Vec<(libc::c_int, libc::sighandler_t)> {
+            self.previous
+                .iter()
+                .filter(|(signal, _)| signals.contains(signal))
+                .map(|&(signal, previous)| {
+                    let handler = if previous.sa_sigaction == libc::SIG_IGN {
+                        libc::SIG_IGN
+                    } else {
+                        libc::SIG_DFL
+                    };
+                    (signal, handler)
+                })
+                .collect()
         }
 
         /// Publish the forwarding target and deliver any signal that arrived
