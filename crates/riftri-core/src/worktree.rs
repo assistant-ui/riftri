@@ -1757,7 +1757,15 @@ fn compact_worktree_inner(
     })?;
     let resolved = git.resolve_revision(&destination, OsStr::new("HEAD"))?;
     verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)?;
-    let compatibility = validate_resolved_compatibility(&git, &destination, &resolved)?;
+    // `verify_compaction_source` proved above that `destination` is one of
+    // this repository's registered linked worktrees, so it shares the same
+    // common Git directory that `inspect_repository` resolved.
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &destination,
+        &repository.identity.common_git_dir,
+        &resolved,
+    )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
     #[cfg(target_os = "windows")]
@@ -1953,7 +1961,12 @@ fn add_worktree_inner(
             )));
         }
     }
-    let compatibility = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &repository_root,
+        &repository.identity.common_git_dir,
+        &resolved,
+    )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     let selected_backend = supported_worktree_backend(&destination)?;
     let destination_volume = &selected_backend.volume;
@@ -2206,6 +2219,10 @@ fn perform_add(
         AddWorktreePhase::IndexSynchronized,
         fail_after,
     )?;
+    // This clean check is also the index refresh: `git status` performs the
+    // full stat-and-content comparison that a separate `update-index
+    // --refresh` used to run, so any divergence between the cloned view and
+    // the exact tree still fails the add before activation.
     if !git.worktree_is_clean(destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "new worktree {} is not clean; it was not activated",
@@ -2623,9 +2640,11 @@ fn prepare_base(
 fn validate_resolved_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     resolved: &ResolvedRevision,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
-    let analysis = analyze_resolved_repository_compatibility(git, repository, resolved)?;
+    let analysis =
+        analyze_resolved_repository_compatibility(git, repository, common_git_dir, resolved)?;
     if let Some(blocker) = analysis.report.blockers.first() {
         return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
     }
@@ -2770,23 +2789,26 @@ fn ascii_lowercase_path(path: &Path) -> PathBuf {
 pub(crate) fn inspect_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<RepositoryCompatibilityReport, WorktreeError> {
-    Ok(analyze_repository_compatibility(git, repository, revision)?.report)
+    Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
 fn analyze_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let resolved = git.resolve_revision(repository, revision)?;
-    analyze_resolved_repository_compatibility(git, repository, &resolved)
+    analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved)
 }
 
 fn analyze_resolved_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     resolved: &ResolvedRevision,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let entries = git.list_tree(repository, &resolved.tree)?;
@@ -2810,7 +2832,14 @@ fn analyze_resolved_repository_compatibility(
     }
     let mut lfs_paths = Vec::new();
 
-    let info_attributes_path = git.info_attributes_path(repository)?;
+    // Callers pass the common Git directory that `inspect_repository` already
+    // resolved with `rev-parse --path-format=absolute --git-common-dir`, the
+    // exact command `Git::info_attributes_path` would re-run here; joining the
+    // fixed relative path avoids one Git invocation without changing which
+    // file is inspected. `--git-path` is still avoided because its absolute
+    // form can resolve a symlink at the final path and hide it from the
+    // symlink-refusing metadata checks below.
+    let info_attributes_path = common_git_dir.join("info/attributes");
     // Only an absent or empty regular file is supported. Inspect its metadata
     // without reading contents: FIFOs must not block, symlinks must not escape
     // this path, and a large unsupported file needs no memory allocation.
@@ -2853,8 +2882,13 @@ fn analyze_resolved_repository_compatibility(
             false
         }
     };
-    if info_attributes_safe {
-        let mut in_tree = git.in_tree_attributes_for_paths(repository, &resolved.tree, &paths)?;
+    if info_attributes_safe && !paths.is_empty() {
+        // Both attribute passes query the same exact tree, so populate one
+        // temporary index once instead of running `git read-tree` twice; the
+        // isolated and effective environments still apply per `check-attr`
+        // query, which never writes the shared index.
+        let tree_index = git.tree_attribute_index(repository, &resolved.tree)?;
+        let mut in_tree = git.in_tree_attributes_for_index(repository, &tree_index, &paths)?;
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
             Err(explanation) => {
@@ -2865,8 +2899,7 @@ fn analyze_resolved_repository_compatibility(
             }
         }
 
-        let mut effective =
-            git.effective_attributes_for_tree_paths(repository, &resolved.tree, &paths)?;
+        let mut effective = git.effective_attributes_for_index(repository, &tree_index, &paths)?;
         in_tree.sort_unstable();
         effective.sort_unstable();
         if effective != in_tree {
@@ -7515,9 +7548,18 @@ mod tests {
         for (autocrlf, compatible) in [("false", true), ("true", false)] {
             git.set_local_config(repository, "core.autocrlf", std::ffi::OsStr::new(autocrlf))
                 .unwrap();
-            let analysis =
-                super::analyze_resolved_repository_compatibility(&git, repository, &resolved)
-                    .unwrap();
+            let common_git_dir = git
+                .inspect_repository(repository)
+                .unwrap()
+                .identity
+                .common_git_dir;
+            let analysis = super::analyze_resolved_repository_compatibility(
+                &git,
+                repository,
+                &common_git_dir,
+                &resolved,
+            )
+            .unwrap();
             // Reconstruct the previous, individual-read profile independently.
             let mut profile = Sha256::new();
             profile.update(b"riftri-checkout-profile-v3-lfs\0");
@@ -7799,9 +7841,16 @@ mod tests {
         fs::write(&empty, "").expect("empty file");
         symlink(&empty, &attributes).expect("symlink attributes");
         let inspect = || {
+            let git = Git::default();
+            let common_git_dir = git
+                .inspect_repository(fixture.path())
+                .expect("inspect fixture repository")
+                .identity
+                .common_git_dir;
             super::inspect_repository_compatibility(
-                &Git::default(),
+                &git,
                 fixture.path(),
+                &common_git_dir,
                 std::ffi::OsStr::new("HEAD"),
             )
             .expect("compatibility report")

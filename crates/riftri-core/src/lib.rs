@@ -478,7 +478,12 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
         }
         Some(repository) => match repository.root.as_deref() {
             Some(root) if repository.head_commit.is_some() => {
-                match worktree::inspect_repository_compatibility(&git, root, OsStr::new("HEAD")) {
+                match worktree::inspect_repository_compatibility(
+                    &git,
+                    root,
+                    &repository.identity.common_git_dir,
+                    OsStr::new("HEAD"),
+                ) {
                     Ok(report) => Diagnostic::success(report),
                     Err(error) => Diagnostic::failure(error.to_string()),
                 }
