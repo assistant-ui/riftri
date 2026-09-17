@@ -729,20 +729,27 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {
-    let (code, category, phase, cleanup, recovery) = error
-        .downcast_ref::<riftri_core::WorktreeError>()
-        .map(worktree_failure_fields)
-        .unwrap_or((
+    let worktree_error = error.downcast_ref::<riftri_core::WorktreeError>();
+    let (code, category, phase, cleanup, recovery) =
+        worktree_error.map(worktree_failure_fields).unwrap_or((
             "command-failed",
             "operational",
             None,
             "unknown",
             recovery_for_operation(operation),
         ));
-    let next_command = match recovery {
-        "required" => Some("riftri repair"),
-        "inspect" => Some("riftri status"),
-        _ => None,
+    let next_command = match worktree_error {
+        Some(riftri_core::WorktreeError::RecoveryPending {
+            state_directory, ..
+        }) => Some(format!(
+            "riftri repair --state-dir {}",
+            state_directory.display()
+        )),
+        _ => match recovery {
+            "required" => Some("riftri repair".to_owned()),
+            "inspect" => Some("riftri status".to_owned()),
+            _ => None,
+        },
     };
 
     serde_json::json!({
@@ -799,6 +806,19 @@ fn worktree_failure_fields(
             "not-needed",
             "not-required",
         ),
+        // An interrupted lifecycle operation left a durable journal behind:
+        // nothing was changed by this command, but the caller must run the
+        // repair command echoed in `nextCommand` before retrying.
+        WorktreeError::RecoveryPending { .. } => (
+            "recovery-pending",
+            "operational",
+            None,
+            "not-needed",
+            "required",
+        ),
+        // Another live process holds the operation lock. No repair is needed;
+        // the caller should wait for the concurrent operation and retry.
+        WorktreeError::Busy { .. } => ("worktree-busy", "operational", None, "not-needed", "retry"),
         WorktreeError::Io { .. } => (
             "filesystem-io-failed",
             "operational",
@@ -2114,6 +2134,50 @@ mod tests {
     }
 
     #[test]
+    fn pending_recovery_receipts_require_repair_with_the_state_directory() {
+        let state_directory = std::path::PathBuf::from("/tmp/riftri-state");
+        let error = anyhow::Error::new(riftri_core::WorktreeError::RecoveryPending {
+            message: format!(
+                "a move of /tmp/view is already pending; run `riftri repair --state-dir {}`",
+                state_directory.display()
+            ),
+            state_directory: state_directory.clone(),
+        });
+        let receipt = failure_receipt("worktree-move", &error);
+
+        assert_eq!(receipt["code"], "recovery-pending");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "required");
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        assert_eq!(
+            next_command,
+            format!("riftri repair --state-dir {}", state_directory.display())
+        );
+        assert!(
+            receipt["message"]
+                .as_str()
+                .expect("message")
+                .contains(next_command),
+            "human guidance and nextCommand must agree"
+        );
+    }
+
+    #[test]
+    fn busy_receipts_ask_the_caller_to_retry_without_repair() {
+        let error = anyhow::Error::new(riftri_core::WorktreeError::Busy {
+            message: "worktree /tmp/view is busy with another Riftri operation; wait for it to finish and retry".to_owned(),
+        });
+        let receipt = failure_receipt("worktree-compact", &error);
+
+        assert_eq!(receipt["code"], "worktree-busy");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "retry");
+        assert!(receipt["nextCommand"].is_null());
+    }
+
+    #[test]
     fn policy_failures_exit_with_a_distinct_code() {
         use super::failure_exit_code;
 
@@ -2129,6 +2193,18 @@ mod tests {
 
         let operational = anyhow::anyhow!("disk on fire");
         assert_eq!(failure_exit_code(&operational), 1);
+
+        // Pending recovery and busy states are operational: the caller can
+        // proceed after repair or retry, unlike a policy refusal.
+        let pending = anyhow::Error::new(riftri_core::WorktreeError::RecoveryPending {
+            message: "a move is already pending".to_owned(),
+            state_directory: std::path::PathBuf::from("/tmp/riftri-state"),
+        });
+        assert_eq!(failure_exit_code(&pending), 1);
+        let busy = anyhow::Error::new(riftri_core::WorktreeError::Busy {
+            message: "worktree is busy".to_owned(),
+        });
+        assert_eq!(failure_exit_code(&busy), 1);
     }
 
     #[test]

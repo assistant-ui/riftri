@@ -14,6 +14,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `--json-errors` receipts for a lifecycle command blocked by a pending
+  operation now agree with the human-readable guidance: they report
+  `"code": "recovery-pending"`, `"category": "operational"` (exit code 1),
+  `"recovery": "required"`, and a `nextCommand` of
+  `riftri repair --state-dir <state-dir>` naming the state directory that
+  holds the pending journal. Previously these receipts claimed
+  `"recovery": "not-required"` with no next command while the message said to
+  run repair. Genuine policy refusals still report
+  `"recovery": "not-required"`. A worktree whose operation lock is held by a
+  live process is reported separately as `"code": "worktree-busy"` with
+  `"recovery": "retry"`, since waiting and retrying — not repair — is the
+  correct response there.
 - Managed removal, forced removal, and compaction reject worktrees with an
   incomplete move journal until repair completes the move.
 - State unregistration accepts relative parent components such as `../old-state`
