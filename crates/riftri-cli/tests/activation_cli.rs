@@ -358,7 +358,6 @@ fn doctor_explains_destination_readiness_and_repository_activation() {
     assert_eq!(readiness["copy_on_write"], readiness["backend"].is_string());
     if readiness["backend"].is_string() {
         assert_eq!(readiness["status"], "needs-activation");
-        assert_eq!(readiness["next_command"], "riftri enable");
     } else {
         assert_eq!(readiness["status"], "blocked");
         assert!(
@@ -429,17 +428,71 @@ fn doctor_marks_an_enabled_supported_destination_ready() {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["copy_on_write"], true);
         assert_eq!(readiness["blockers"], serde_json::json!([]));
-        assert!(
-            readiness["next_command"]
-                .as_str()
-                .is_some_and(|command| command.starts_with("riftri worktree add "))
-        );
     } else {
         assert_eq!(readiness["status"], "blocked");
         assert_eq!(readiness["copy_on_write"], false);
     }
     assert!(!fixture.repository.join(".git/riftri").exists());
     assert!(!destination.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn doctor_commands_keep_the_selected_repository_outside_git() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("suggested-worktree");
+    let binary = Path::new(env!("CARGO_BIN_EXE_riftri"));
+    let path = std::env::join_paths(
+        std::iter::once(binary.parent().expect("binary directory").to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ),
+    )
+    .expect("test PATH");
+
+    for status in ["needs-activation", "ready"] {
+        let doctor = Command::new(binary)
+            .arg("doctor")
+            .arg(&fixture.repository)
+            .arg("--destination")
+            .arg(&destination)
+            .arg("--json")
+            .current_dir(fixture.directory.path())
+            .output()
+            .expect("run doctor outside Git");
+        assert!(
+            doctor.status.success(),
+            "{}",
+            String::from_utf8_lossy(&doctor.stderr)
+        );
+        let report: serde_json::Value =
+            serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+        let readiness = &report["destination_readiness"];
+        assert_eq!(readiness["status"], status);
+        let command = readiness["next_command"].as_str().expect("next command");
+        let output = Command::new("sh")
+            .args(["-c", command])
+            .env("PATH", &path)
+            .current_dir(fixture.directory.path())
+            .output()
+            .expect("run suggested command outside Git");
+        assert!(
+            output.status.success(),
+            "{command}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    assert_eq!(
+        fs::read(destination.join("tracked.txt")).expect("read worktree file"),
+        b"tracked\n"
+    );
+    assert_eq!(
+        git(&destination, &["rev-parse", "HEAD"]).stdout,
+        git(&fixture.repository, &["rev-parse", "HEAD"]).stdout
+    );
+    let status = git(&destination, &["status", "--porcelain=v1"]);
+    assert!(status.status.success());
+    assert!(status.stdout.is_empty());
 }
 
 #[test]

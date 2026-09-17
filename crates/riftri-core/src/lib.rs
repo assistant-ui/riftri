@@ -605,12 +605,21 @@ fn destination_readiness(
         Err(error) if error.to_string().contains("helper") => OverlayFsHelperReadiness::Unavailable,
         Ok(_) | Err(_) => OverlayFsHelperReadiness::NotApplicable,
     };
+    let repository_root = repository
+        .value
+        .as_ref()
+        .and_then(|info| info.root.as_deref());
     let next_command = match status {
-        DestinationReadinessStatus::Ready => Some(format!(
-            "riftri worktree add {} --detach HEAD",
-            destination.display()
-        )),
-        DestinationReadinessStatus::NeedsActivation => Some("riftri enable".to_owned()),
+        DestinationReadinessStatus::Ready => repository_root.map(|root| {
+            format!(
+                "riftri worktree add {} --detach HEAD --repository {}",
+                destination.display(),
+                root.display()
+            )
+        }),
+        DestinationReadinessStatus::NeedsActivation => {
+            repository_root.map(|root| format!("riftri enable {}", root.display()))
+        }
         DestinationReadinessStatus::Blocked
             if overlayfs_helper == OverlayFsHelperReadiness::Unavailable =>
         {
