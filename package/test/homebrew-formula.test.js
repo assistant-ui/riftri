@@ -74,19 +74,80 @@ test("rendering rejects a tag-shaped version and malformed checksums", async () 
   assert.throws(() => parseChecksums("not-a-checksum  riftri.tar.gz\n"), /malformed/);
 });
 
-test("updating writes the formula to disk from a checksum manifest", async (t) => {
+test("updating writes every formula copy to disk from a checksum manifest", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-formula-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const checksumsPath = path.join(directory, "SHA256SUMS");
-  const formulaPath = path.join(directory, "riftri.rb");
+  const targets = [
+    path.join(directory, "riftri.rb"),
+    // A missing parent directory must be created, as for a fresh staged copy.
+    path.join(directory, "staged/Formula/riftri.rb"),
+  ];
   fs.writeFileSync(checksumsPath, checksumManifest("1.2.3"));
 
   const { updateHomebrewFormula } = await import("../scripts/update-homebrew-formula.mjs");
-  await updateHomebrewFormula({ version: "1.2.3", checksumsPath, formulaPath });
+  await updateHomebrewFormula({ version: "1.2.3", checksumsPath, targets });
 
-  const formula = fs.readFileSync(formulaPath, "utf8");
-  assert.ok(formula.includes('version "1.2.3"'));
-  assert.ok(formula.endsWith("end\n"));
+  const copies = targets.map((target) => fs.readFileSync(target, "utf8"));
+  assert.equal(copies[0], copies[1]);
+  assert.ok(copies[0].includes('version "1.2.3"'));
+  assert.ok(copies[0].endsWith("end\n"));
+});
+
+test("the staged tap formula is byte-identical to the canonical formula", () => {
+  const canonical = fs.readFileSync(path.join(root, "Formula/riftri.rb"), "utf8");
+  const staged = fs.readFileSync(path.join(root, "package/homebrew/Formula/riftri.rb"), "utf8");
+  assert.equal(
+    staged,
+    canonical,
+    "package/homebrew/Formula/riftri.rb must match Formula/riftri.rb; run node package/scripts/sync-homebrew-tap.mjs",
+  );
+});
+
+test("the generator's default targets cover the canonical and staged copies", async () => {
+  const { formulaPaths } = await import("../scripts/update-homebrew-formula.mjs");
+  assert.deepEqual(
+    formulaPaths.map((target) => path.relative(root, target).split(path.sep).join("/")),
+    ["Formula/riftri.rb", "package/homebrew/Formula/riftri.rb"],
+  );
+});
+
+test("tap sync normalizes versions and rejects non-release input", async () => {
+  const { normalizeVersion } = await import("../scripts/sync-homebrew-tap.mjs");
+  assert.equal(normalizeVersion("v1.2.3"), "1.2.3");
+  assert.equal(normalizeVersion("1.2.3"), "1.2.3");
+  assert.equal(normalizeVersion("v1.2.3-rc.1"), "1.2.3-rc.1");
+  for (const bad of ["v1.2", "main", "v1.2.3.4", ""]) {
+    assert.throws(() => normalizeVersion(bad), /expected a release version/);
+  }
+});
+
+test("tap sync detects drift in check mode and repairs it when writing", async (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-tap-sync-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const targets = [
+    path.join(directory, "Formula/riftri.rb"),
+    path.join(directory, "staged/Formula/riftri.rb"),
+  ];
+  const fetchImpl = async (url) => {
+    assert.match(url, /\/releases\/download\/v9\.9\.9\/SHA256SUMS$/);
+    return { ok: true, text: async () => checksumManifest("9.9.9") };
+  };
+
+  const { syncHomebrewTap } = await import("../scripts/sync-homebrew-tap.mjs");
+
+  // Both copies are missing, so a check must report both as drifted.
+  const checked = await syncHomebrewTap({ version: "9.9.9", check: true, targets, fetchImpl });
+  assert.deepEqual(checked.drifted, targets);
+  assert.ok(!fs.existsSync(targets[0]), "check mode must not write");
+
+  // Writing repairs both copies and a follow-up check is clean.
+  await syncHomebrewTap({ version: "9.9.9", targets, fetchImpl });
+  const copies = targets.map((target) => fs.readFileSync(target, "utf8"));
+  assert.equal(copies[0], copies[1]);
+  assert.ok(copies[0].includes('version "9.9.9"'));
+  const clean = await syncHomebrewTap({ version: "9.9.9", check: true, targets, fetchImpl });
+  assert.deepEqual(clean.drifted, []);
 });
 
 test("the checked-in formula matches the generator and the released version", async () => {
