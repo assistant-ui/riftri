@@ -110,6 +110,15 @@ already covered by the exact tree ID. If Riftri cannot account for an active
 external input, it must reject optimized creation rather than reuse an
 ambiguous base.
 
+Optimized creation suppresses Git's checkout, which also suppresses its
+`post-checkout` hook. Until hook execution has a recoverable transaction design,
+Riftri refuses creation before mutation when an executable default
+`post-checkout` hook is present. Custom `core.hooksPath` configurations are also
+refused: relative paths can refer to hooks in the destination tree rather than
+the invoking worktree. Doctor reports the same blocker. Use ordinary
+`git worktree add` when checkout hooks are required; Riftri never silently
+skips them or automatically falls back to a full checkout.
+
 The current native COW policy asks Git to resolve attributes from the exact
 requested tree through an isolated temporary index. Built-in `text`, `eol`, and
 `binary` checkout semantics are allowlisted; `diff` and `merge` records emitted

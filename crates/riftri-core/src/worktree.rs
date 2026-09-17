@@ -3206,6 +3206,53 @@ fn analyze_repository_compatibility(
     analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[])
 }
 
+fn checkout_hook_blocker(common_git_dir: &Path, custom_hooks_path: bool) -> Option<String> {
+    if custom_hooks_path {
+        // Relative paths are interpreted from the new worktree, not necessarily
+        // the invoking worktree. Do not declare them safe by inspecting here.
+        return Some(
+            "core.hooksPath is configured; Riftri cannot safely reproduce custom post-checkout hook behavior yet; use ordinary git worktree add"
+                .to_owned(),
+        );
+    }
+    // Git already resolved the common directory for this operation. Without
+    // hooksPath, linked worktrees share its hooks directory.
+    let hook = common_git_dir.join("hooks/post-checkout");
+    // Git for Windows can discover executable hooks with an .exe suffix.
+    #[cfg(windows)]
+    let candidates = [hook.clone(), hook.with_extension("exe")];
+    #[cfg(not(windows))]
+    let candidates = [hook];
+    for path in candidates {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Some(format!(
+                    "post-checkout hook {} could not be inspected safely: {error}; use ordinary git worktree add",
+                    path.display()
+                ));
+            }
+        };
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = true;
+        if executable {
+            return Some(format!(
+                "post-checkout hook {} is present; optimized creation cannot run checkout hooks safely yet; use ordinary git worktree add",
+                path.display()
+            ));
+        }
+        // A non-executable Unix hook is ignored by Git as well.
+        let _ = metadata;
+    }
+    None
+}
+
 fn analyze_resolved_repository_compatibility(
     git: &Git,
     repository: &Path,
@@ -3394,7 +3441,16 @@ fn analyze_resolved_repository_compatibility(
     if !lfs_paths.is_empty() {
         config_keys.extend(lfs_config_keys);
     }
+    config_keys.push("core.hookspath");
     let config_values = git.config_values(repository, &config_keys)?;
+    if let Some(explanation) =
+        checkout_hook_blocker(common_git_dir, config_values.contains_key("core.hookspath"))
+    {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+            explanation,
+        });
+    }
     for (key, accepted, kind) in checked_config {
         let value = config_values.get(key).cloned();
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
