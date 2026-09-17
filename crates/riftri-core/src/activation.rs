@@ -26,6 +26,7 @@ use crate::{
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
 pub const CACHE_DIR_ENV: &str = "RIFTRI_CACHE_DIR";
+const PROCESS_SHIM_DIR_ENV: &str = "RIFTRI_PROCESS_SHIM_DIR";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepositoryActivation {
@@ -393,6 +394,7 @@ fn execute_scoped_command_from(
         .args(arguments)
         .env("PATH", scoped_path)
         .env(riftri_git::REAL_GIT_ENV, real_git)
+        .env(PROCESS_SHIM_DIR_ENV, shim_directory.path())
         .env(SHIM_ACTIVE_ENV, "1");
     if let Some(working_directory) = working_directory {
         child.current_dir(working_directory);
@@ -570,11 +572,19 @@ fn prepare_powershell_deactivation_inner() -> Result<String, ActivationError> {
 
 #[cfg(any(unix, target_os = "windows"))]
 fn shell_activation_status_inner() -> Result<ShellActivationStatus, ActivationError> {
-    let shim_directory = shell_shim_directory()?;
+    let first_path = env::var_os("PATH").and_then(|path| env::split_paths(&path).next());
+    // A process scope owns an ephemeral shim, not the durable shell cache.
+    // Only select its marker while that exact directory remains first on PATH;
+    // a subsequently evaluated shell hook can legitimately supersede it.
+    let process_shim = env::var_os(PROCESS_SHIM_DIR_ENV)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && first_path.as_ref() == Some(path));
+    let shim_directory = match process_shim {
+        Some(path) => path,
+        None => shell_shim_directory()?,
+    };
     let marker_set = environment_truthy(SHIM_ACTIVE_ENV);
-    let shim_first_on_path = env::var_os("PATH")
-        .and_then(|path| env::split_paths(&path).next())
-        .is_some_and(|path| path == shim_directory);
+    let shim_first_on_path = first_path.is_some_and(|path| path == shim_directory);
     let real_git = env::var_os(riftri_git::REAL_GIT_ENV)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from);

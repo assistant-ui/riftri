@@ -31,6 +31,12 @@ executable. Non-worktree Git commands are delegated in enabled repositories too.
 
 ## Inspect and reverse it
 
+`riftri shell status [repository]` recognizes the temporary shim inherited from
+`riftri exec`, including nested process scopes, as well as durable shell hooks.
+Repository consent is still reported separately; an active process scope does
+not enable a repository. The temporary directory is passed only to the child
+environment and does not change the parent shell or its cache settings.
+
 `riftri shell status [repository]` reports whether the current process inherited
 a complete hook, whether the selected repository opted in, and whether those two
 conditions make optimized interception effective.
