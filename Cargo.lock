@@ -305,6 +305,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "clap_mangen",
+ "fs2",
  "libc",
  "riftri-core",
  "riftri-storage",
