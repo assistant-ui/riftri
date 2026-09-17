@@ -1,0 +1,83 @@
+name: Website deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never let two deploys race: the newer commit must win, and an in-flight
+# deploy of an older commit would otherwise publish stale content last.
+concurrency:
+  group: website-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy riftri.dev
+    runs-on: ubuntu-24.04
+
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Report missing deployment credentials
+        id: credentials
+        run: |
+          set -euo pipefail
+          # Deploying needs all three values. Skip cleanly when they are absent
+          # so the workflow is inert until a maintainer configures it, rather
+          # than failing every push to main with an authentication error.
+          if [ -n "${VERCEL_TOKEN}" ] && [ -n "${VERCEL_ORG_ID}" ] && [ -n "${VERCEL_PROJECT_ID}" ]; then
+            echo "configured=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+            echo "::warning::Skipping deploy: set the VERCEL_TOKEN, VERCEL_ORG_ID, and VERCEL_PROJECT_ID secrets to enable it."
+          fi
+
+      - name: Set up Node.js
+        if: steps.credentials.outputs.configured == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Set up pnpm
+        if: steps.credentials.outputs.configured == 'true'
+        run: corepack enable && corepack prepare pnpm@10.18.3 --activate
+
+      - name: Install website dependencies
+        if: steps.credentials.outputs.configured == 'true'
+        run: pnpm --dir website install --frozen-lockfile
+
+      - name: Check website types
+        if: steps.credentials.outputs.configured == 'true'
+        run: pnpm --dir website type-check
+
+      - name: Build website
+        if: steps.credentials.outputs.configured == 'true'
+        # Stages the installers, builds, and finalizes the Vercel Build Output
+        # API directory, including the build-info.json revision the deployment
+        # is verified against below.
+        run: pnpm --dir website build
+
+      - name: Deploy the prebuilt output to production
+        if: steps.credentials.outputs.configured == 'true'
+        working-directory: website
+        # The CLI is not a project dependency, so it is fetched here at a
+        # pinned version rather than pulled into every install of the website.
+        run: npx --yes vercel@59.20.0 deploy --prebuilt --prod --yes --token "${VERCEL_TOKEN}"
+
+      - name: Verify the public production deployment
+        if: steps.credentials.outputs.configured == 'true'
+        # Confirms riftri.dev now serves this exact commit, that the installers
+        # and Markdown guide match the repository, and that the homepage keeps
+        # its canonical and sharing metadata.
+        run: node package/scripts/verify-website.mjs https://riftri.dev
