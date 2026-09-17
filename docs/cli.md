@@ -103,20 +103,25 @@ without any shell-level activation.
 | --- | --- |
 | `--worktree <PATH>` | Start the command from this exact, registered Git worktree root |
 
-Termination follows the platform's conventions. On Unix, SIGTERM, SIGINT, or
-SIGHUP delivered to `riftri exec` is forwarded to the scoped command: without
-a foreground controlling terminal (a supervisor or script), the command runs
-in its own process group and the whole group is signaled, stopping the
-command's descendants without touching unrelated processes; with a foreground
-controlling terminal, the command stays in `riftri exec`'s process group so
-terminal job control is unchanged — the terminal keeps delivering Ctrl-C to
-the command directly, and SIGTERM and SIGHUP are forwarded to the command
-itself. `riftri exec` waits for the command, removes its temporary Git shim,
-and exits with the command's status (`128 + signal` when the command dies from
-a signal). SIGKILL cannot be intercepted and still orphans the command. On
-Windows, the console already delivers Ctrl-C and Ctrl-Break events to the
-command, and a hard `TerminateProcess` cannot be intercepted, so no forwarding
-layer exists.
+Termination follows the platform's conventions. On Unix, without a foreground
+controlling terminal (a supervisor or script), the command runs in its own
+process group, and SIGTERM, SIGINT, or SIGHUP delivered to `riftri exec` is
+forwarded to that whole group, stopping the command's descendants without
+touching unrelated processes. With a foreground controlling terminal, the
+command stays in `riftri exec`'s process group so terminal job control is
+unchanged: the terminal keeps delivering Ctrl-C (SIGINT) and Ctrl-\ (SIGQUIT)
+to the whole foreground process group, and `riftri exec` ignores both while it
+waits — like a shell waiting on a foreground job, the command alone decides
+whether the interrupt is fatal, so a command that catches Ctrl-C (a REPL, an
+agent session) keeps running under an intact wrapper. SIGTERM and SIGHUP
+delivered to interactive `riftri exec` are still forwarded to the command
+itself. In both modes `riftri exec` waits for the command, restores its prior
+signal dispositions, removes its temporary Git shim, and exits with the
+command's status (`128 + signal` when the command dies from a signal — for
+example 130 after a fatal SIGINT). SIGKILL cannot be intercepted and still
+orphans the command. On Windows, the console already delivers Ctrl-C and
+Ctrl-Break events to the command, and a hard `TerminateProcess` cannot be
+intercepted, so no forwarding layer exists.
 
 ### `riftri shell <SUBCOMMAND>`
 

@@ -65,6 +65,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Interactive `riftri exec` no longer dies from Ctrl-C while its scoped
+  command survives the interrupt. With a foreground controlling terminal,
+  `riftri exec` now ignores SIGINT and SIGQUIT while waiting — the terminal
+  still delivers both to the whole foreground process group, so the command
+  alone decides whether the interrupt is fatal — and keeps waiting so shim
+  cleanup and exit-status propagation still happen (including 130 when the
+  command does die from SIGINT). The command starts with its inherited
+  dispositions restored, prior dispositions are reinstated after the command
+  is reaped, and supervised process-group forwarding is unchanged.
 - Repair of an interrupted forced managed removal no longer deletes a worktree
   whose metadata changed after force intent was recorded. The forced-removal
   snapshot now covers each entry's full native permission bits (setuid,
