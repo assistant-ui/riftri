@@ -32,6 +32,17 @@ test("static preview honors route overrides, branded errors, HEAD, and containme
     assert.equal(await response.text(), body);
     assert.match(response.headers.get("content-type"), /text\/html/);
   }
+  for (const [name, type] of [["robots.txt", "text/plain"], ["sitemap.xml", "application/xml"]]) {
+    const content = await fs.readFile(path.join(__dirname, "../../website/public", name));
+    await fs.writeFile(path.join(root, name), content);
+    for (const method of ["GET", "HEAD"]) {
+      const response = await get(`/${name}`, { method });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-type"), type);
+      assert.equal(Number(response.headers.get("content-length")), content.length);
+      assert.deepEqual(Buffer.from(await response.arrayBuffer()), method === "HEAD" ? Buffer.alloc(0) : content);
+    }
+  }
   const markdown = await get("/index.md");
   assert.equal(markdown.headers.get("content-disposition"), "inline");
   assert.equal(await markdown.text(), "# Riftri");
