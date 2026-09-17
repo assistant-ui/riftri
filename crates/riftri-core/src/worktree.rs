@@ -5485,6 +5485,19 @@ fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
 #[cfg(unix)]
 fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
+    // Git does not reproduce these bits from its tree. Refuse both new
+    // compactions and recovery cleanup instead of silently dropping them.
+    // Leave the legacy digest format unchanged for ordinary permissions.
+    if !metadata.file_type().is_symlink() && metadata.permissions().mode() & 0o7000 != 0 {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} has special Unix permissions (setuid, setgid, or sticky); compaction preserved it",
+            path.display()
+        )));
+    }
 
     let mut name_buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
     rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(&mut name_buffer))
@@ -5509,8 +5522,6 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         digest.update((value_buffer.len() as u64).to_le_bytes());
         digest.update(value_buffer);
     }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         let mut entries = fs::read_dir(path)
             .map_err(|source| io("read worktree snapshot directory", path, source))?
@@ -7452,6 +7463,34 @@ mod tests {
 
         assert!(error.to_string().contains("failed SHA-256 verification"));
         assert_eq!(fs::read(source).expect("source preserved"), b"evil");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compaction_snapshots_preserve_special_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempdir().unwrap();
+        let child = fixture.path().join("file");
+        fs::write(&child, "private\n").unwrap();
+        for (path, mode) in [
+            (fixture.path(), 0o1755),
+            (child.as_path(), 0o2644),
+            (child.as_path(), 0o4644),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            let error = super::directory_snapshot(fixture.path())
+                .expect_err("special bits cannot disappear from a compaction snapshot");
+            assert!(
+                error.to_string().contains("special Unix permissions"),
+                "{error}"
+            );
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                mode
+            );
+            fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777)).unwrap();
+        }
+        super::directory_snapshot(fixture.path()).expect("ordinary permissions remain supported");
     }
 
     #[test]
