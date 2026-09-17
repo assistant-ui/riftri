@@ -23,6 +23,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   near the mobile layout breakpoint.
 - `riftri shell status` reports optimized interception as inactive when
   `RIFTRI_BYPASS` is active, without reporting that the shell hook is inactive.
+- Git worktree remove and move commands that use a unique path suffix no longer
+  bypass Riftri's lifecycle journals for managed worktrees.
 
 ## 0.2.3 - 2026-09-16
 
