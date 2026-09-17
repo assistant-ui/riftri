@@ -1300,7 +1300,10 @@ fn validate_collection_paths(
     ] {
         let metadata = fs::symlink_metadata(directory)
             .map_err(|source| io("inspect collection parent", directory, source))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() {
+            return Err(symlinked_base_parent_error(state_directory, directory));
+        }
+        if !metadata.is_dir() {
             return Err(WorktreeError::InvalidRequest(format!(
                 "collection journal {} has a non-directory or symlinked parent {}",
                 journal.journal_path.display(),
@@ -4378,6 +4381,21 @@ enum UnsafeBaseInventory {
     Reject,
 }
 
+fn symlinked_base_parent_error(state_directory: &Path, directory: &Path) -> WorktreeError {
+    WorktreeError::InvalidRequest(format!(
+        "cleanup stopped: immutable-base path {} is a symbolic link, not a real directory.\n\
+         Following it could access data outside Riftri's expected storage layout. \
+         Riftri did not follow this link or delete data through it.\n\
+         Next: run `riftri status --state-dir <STATE_DIR>` to inspect the affected state, \
+         replacing <STATE_DIR> with your state directory (quote paths in your shell).\n\
+         State directory: {}\n\
+         Do not delete or move the linked data manually. For new worktrees, use --state-dir \
+         with a real directory; this does not repair an existing redirected layout.",
+        directory.display(),
+        state_directory.display(),
+    ))
+}
+
 fn retained_base_paths(
     state_directory: &Path,
     unsafe_inventory: UnsafeBaseInventory,
@@ -4387,6 +4405,9 @@ fn retained_base_paths(
         match fs::symlink_metadata(directory) {
             Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
             Ok(_) if unsafe_inventory == UnsafeBaseInventory::Ignore => return Ok(Vec::new()),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(symlinked_base_parent_error(state_directory, directory));
+            }
             Ok(_) => {
                 return Err(WorktreeError::InvalidRequest(format!(
                     "immutable-base root {} is not a real directory",
@@ -7906,12 +7927,40 @@ mod tests {
                     .all(|issue| { issue.path == parent || !issue.path.starts_with(&parent) })
             );
             for apply in [false, true] {
-                assert!(garbage_collect_inner(&state, apply, None).is_err());
+                let error = garbage_collect_inner(&state, apply, None)
+                    .expect_err("reject symlinked base parent")
+                    .to_string();
+                assert!(error.contains("cleanup stopped"), "{error}");
+                assert!(error.contains("is a symbolic link"), "{error}");
+                assert!(error.contains(&parent.display().to_string()), "{error}");
+                assert!(
+                    error.contains("outside Riftri's expected storage layout"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("did not follow this link or delete data through it"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("riftri status --state-dir <STATE_DIR>"),
+                    "{error}"
+                );
+                assert!(error.contains(&state.display().to_string()), "{error}");
+                assert!(
+                    error.contains("Do not delete or move the linked data manually"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("does not repair an existing redirected layout"),
+                    "{error}"
+                );
             }
             if pending_collection {
                 let recovery = recover_incomplete_operations(&state).expect("attempt recovery");
                 assert_eq!(recovery.recovered_collections, 0);
                 assert_eq!(recovery.errors.len(), 1);
+                assert!(recovery.errors[0].contains("is a symbolic link"));
+                assert!(recovery.errors[0].contains("riftri status --state-dir <STATE_DIR>"));
             }
             let outside_base = outside
                 .join("v1/repository")
