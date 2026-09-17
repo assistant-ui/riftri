@@ -661,6 +661,101 @@ fn exec_delegates_normal_git_to_the_real_executable() {
     assert_eq!(scoped_failure.stderr, direct_failure.stderr);
 }
 
+/// Regression test: evaluating shell deactivation inside a `riftri exec`
+/// session used to leave the process-scoped shim first on `PATH` with its
+/// delegation environment stripped, so `git --version` answered as Riftri and
+/// ordinary commands like `git log` failed. Deactivation must remove the
+/// process-scoped shim entry too, restoring the real Git for the rest of the
+/// session.
+#[cfg(unix)]
+#[test]
+fn deactivation_inside_exec_restores_real_git_for_the_rest_of_the_session() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell shim cache");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "eval \"$(\"$RIFTRI_TEST_BIN\" shell deactivate sh)\"\n\
+             git --version\n\
+             git log -1 --format=%s\n\
+             printf 'scope=%s\\n' \"${RIFTRI_PROCESS_SHIM_DIR-unset}\"\n\
+             case :$PATH: in *riftri-git-shim-*) printf 'shim=retained\\n' ;; *) printf 'shim=removed\\n' ;; esac",
+        ])
+        .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+        .env("RIFTRI_CACHE_DIR", cache.path())
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("deactivate inside riftri exec");
+
+    assert!(
+        output.status.success(),
+        "deactivated exec session failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 session output");
+    assert!(
+        stdout.contains("git version"),
+        "git --version did not reach the real Git: {stdout}"
+    );
+    assert!(
+        !stdout.contains("riftri "),
+        "the Riftri CLI answered a Git command: {stdout}"
+    );
+    assert!(
+        stdout.contains("initial"),
+        "git log did not reach the real Git: {stdout}"
+    );
+    assert!(stdout.contains("scope=unset"), "{stdout}");
+    assert!(stdout.contains("shim=removed"), "{stdout}");
+}
+
+/// Fail-safe guard: even when the shim's environment is stripped without a
+/// proper deactivation — so the shim stays first on `PATH` — a `git`-named
+/// invocation must delegate to the real Git instead of answering as Riftri.
+#[cfg(unix)]
+#[test]
+fn exec_shim_delegates_to_real_git_when_its_environment_is_stripped() {
+    let fixture = RepositoryFixture::new();
+    for stripped in [
+        "RIFTRI_SHIM_ACTIVE RIFTRI_REAL_GIT",
+        "RIFTRI_SHIM_ACTIVE RIFTRI_REAL_GIT RIFTRI_PROCESS_SHIM_DIR",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args([
+                "exec",
+                "--",
+                "sh",
+                "-c",
+                &format!(
+                    "unset {stripped}\n\
+                     git --version\n\
+                     git log -1 --format=%s"
+                ),
+            ])
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("run stripped-environment shim");
+
+        assert!(
+            output.status.success(),
+            "stripped shim failed ({stripped}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 session output");
+        assert!(
+            stdout.contains("git version"),
+            "stripped shim answered as Riftri ({stripped}): {stdout}"
+        );
+        assert!(
+            stdout.contains("initial"),
+            "stripped shim broke git log ({stripped}): {stdout}"
+        );
+    }
+}
+
 #[test]
 fn exec_binds_any_command_to_an_exact_git_worktree() {
     let fixture = RepositoryFixture::new();

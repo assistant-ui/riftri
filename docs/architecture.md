@@ -52,8 +52,9 @@ repository-local consent is still required.
 `riftri shell status` reports the two independent activation layers and whether
 they combine into effective optimized interception for a selected repository.
 `riftri shell deactivate <sh|bash|zsh|powershell>` prints code that removes
-every cached shim-directory occurrence from `PATH` and unsets Riftri's shim environment in
-the current shell when explicitly evaluated. It does not change repository
+every Riftri shim-directory occurrence from `PATH` — the durable cached shim
+and any process-scoped `riftri exec` shim entries — and unsets Riftri's shim
+environment in the current shell when explicitly evaluated. It does not change repository
 configuration or edit a shell profile, so persistent global activation remains
 under the user's direct control.
 

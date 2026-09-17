@@ -125,7 +125,10 @@ Configure shell-scoped interception for normal Git commands.
 - **`riftri shell hook <SHELL>`** — print initialization code to evaluate in a
   shell. Shells: `sh`, `bash`, `zsh`, `powershell`.
 - **`riftri shell deactivate <SHELL>`** — print code to evaluate to deactivate
-  Riftri in the current shell. Same shell choices.
+  Riftri in the current shell. Same shell choices. The code removes both the
+  durable shell-hook shim and any process-scoped `riftri exec` shim entries
+  from `PATH`; evaluated inside a `riftri exec` session it ends Git
+  interception for the rest of that session.
 - **`riftri shell status [REPOSITORY]`** — show shell interception and
   repository opt-in status. `REPOSITORY` defaults to `.`.
 

@@ -53,11 +53,23 @@ PowerShell:
 Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
 ```
 
-This removes every Riftri shim-directory entry from `PATH` and unsets the two
-shim variables. It does not disable a repository. If the hook is in a profile,
-remove that profile line yourself before opening another shell. Remove the line
-before uninstalling a globally installed `riftri` package so new shells do not
-print a command-not-found error while evaluating the stale profile command.
+This removes every Riftri shim-directory entry from `PATH` — the durable
+shell-hook shim and any process-scoped `riftri exec` shim entries, including
+nested scopes — and unsets the shim variables (`RIFTRI_REAL_GIT`,
+`RIFTRI_SHIM_ACTIVE`, and `RIFTRI_PROCESS_SHIM_DIR`). Evaluated inside a
+`riftri exec` session, it therefore ends Git interception for the rest of that
+session; the parent `riftri exec` still removes its temporary shim directory
+when the command exits. It does not disable a repository. If the hook is in a
+profile, remove that profile line yourself before opening another shell.
+Remove the line before uninstalling a globally installed `riftri` package so
+new shells do not print a command-not-found error while evaluating the stale
+profile command.
+
+Independently of deactivation, every Riftri Git shim fails safe: each shim
+directory records the captured real Git path at creation, so a shim whose
+environment was stripped some other way — a tool that scrubbed the
+`RIFTRI_*` variables, for example — delegates `git` invocations to the real
+executable unchanged instead of answering as Riftri or intercepting anything.
 
 ## Compatibility matrix
 
