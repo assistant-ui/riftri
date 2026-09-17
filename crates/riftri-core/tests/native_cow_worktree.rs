@@ -126,6 +126,7 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first Riftri worktree");
     let second_result = add_worktree(AddWorktreeRequest {
@@ -134,6 +135,7 @@ fn creates_clean_isolated_linked_worktrees_from_one_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/second")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect("create second Riftri worktree");
 
@@ -261,6 +263,7 @@ fn creates_a_clean_linked_worktree_for_an_existing_branch() {
         revision: OsString::from("feature/existing"),
         mode: WorktreeMode::ExistingBranch(OsString::from("feature/existing")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect("create existing-branch Riftri worktree");
 
@@ -317,6 +320,7 @@ fn validates_unicode_aliases_before_durable_mutation() {
             revision: OsString::from(commit.trim()),
             mode: WorktreeMode::Detached,
             state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
         });
         if distinct {
             result.expect("filesystem represents both Unicode names");
@@ -381,6 +385,7 @@ fn validates_case_colliding_tree_paths_before_durable_mutation() {
         revision: OsString::from(commit.trim()),
         mode: WorktreeMode::Detached,
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     });
 
     if destination_is_case_sensitive(fixture.path()) {
@@ -451,6 +456,7 @@ fn refuses_reuse_of_a_base_with_an_injected_ignored_file() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::Detached,
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     };
     let first = add_worktree(request("first")).expect("first view");
     let original = fs::metadata(&first.base_path)
@@ -512,6 +518,7 @@ fn creates_a_clean_worktree_with_deterministic_in_tree_attributes() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/attributes")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect("create attributed Riftri worktree");
 
@@ -575,6 +582,7 @@ fn creates_a_clean_worktree_with_checkout_neutral_linguist_attributes() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/linguist")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect("linguist metadata must not block Riftri worktree creation");
 
@@ -619,6 +627,7 @@ fn rejects_effective_attributes_before_creating_state_or_git_metadata() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/rejected")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect_err("active filter must be rejected");
 
@@ -659,6 +668,7 @@ fn rejects_a_symlinked_state_layout_directory_without_writing_through_it() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/symlinked-state-layout")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect_err("symlinked state layout must be rejected");
 
@@ -709,6 +719,7 @@ fn rejects_a_symlinked_repository_base_bucket_without_writing_through_it() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/base-bucket-first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create initial managed worktree");
     let bucket = added.base_path.parent().expect("repository base bucket");
@@ -722,6 +733,7 @@ fn rejects_a_symlinked_repository_base_bucket_without_writing_through_it() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/base-bucket-second")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect_err("symlinked repository base bucket must be rejected");
 
@@ -775,6 +787,7 @@ fn rejects_a_symlinked_lifecycle_lock_before_mutation() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/symlinked-lock")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect_err("symlinked lifecycle lock must be rejected");
 
