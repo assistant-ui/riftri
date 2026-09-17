@@ -121,6 +121,20 @@ the repository's default local LFS store. Repository-local, global, and system
 attribute sources remain unsupported because they are mutable outside the tree
 identity.
 
+An explicit `riftri worktree add --sparse-dir` request selects a cone-mode
+sparse view. The canonical directory list — sorted, deduplicated, and with
+nested cones collapsed into their ancestors — is an additional checkout-profile
+input, so different sparse selections at one tree, or a sparse and a full
+request, always key different bases. Git's own `sparse-checkout set --cone`
+runs inside the isolated materialization directory to compute the patterns and
+skip-worktree bits, `checkout-index` writes only the active entries, and the
+new linked worktree receives real worktree-scoped sparse configuration before
+its clean state is verified. Anything outside that subset — patterns,
+nonexistent directories, repository-configured sparse checkout, sparse
+requests through Git interception, sparse plus Git LFS, or compaction of a
+sparse view — fails closed before durable state exists
+(see [sparse-checkout.md](sparse-checkout.md)).
+
 Git materializes the exact pointer tree inside Riftri's isolated administrative
 directory, where inherited filters are intentionally disabled. Riftri then
 opens each validated local LFS object without following links, checks its exact

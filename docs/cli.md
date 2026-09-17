@@ -167,6 +167,7 @@ worktree.
 | --- | --- |
 | `-b, --branch <BRANCH>` | Create and check out a new branch |
 | `--detach` | Create a detached worktree instead of a branch |
+| `--sparse-dir <DIR>` | Materialize only this directory (plus repository-root files) with Git cone-mode sparse checkout; repeatable, repository-relative with `/` separators. See [sparse-checkout.md](sparse-checkout.md) for the supported subset and refusals |
 
 ### `riftri worktree remove [OPTIONS] <PATH>`
 

@@ -5,6 +5,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- `riftri worktree add --sparse-dir <DIR>` (repeatable) creates cone-mode
+  sparse worktrees through Git's real sparse-checkout and skip-worktree
+  semantics. The canonical directory list becomes part of the versioned
+  checkout profile and immutable-base key, so different selections at the same
+  commit never share a base and full worktrees keep their existing bases.
+  Sparse patterns, nonexistent directories, repository-configured sparse
+  checkout, intercepted sparse adds, sparse plus Git LFS, and sparse
+  compaction are refused with precise diagnostics before any state is created.
+  See [docs/sparse-checkout.md](docs/sparse-checkout.md).
+
 ### Changed
 
 - `riftri state unregister <PATH>` replaces the displayed `state forget-missing`

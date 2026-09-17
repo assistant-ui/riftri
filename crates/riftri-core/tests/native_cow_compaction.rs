@@ -63,6 +63,7 @@ fn compaction_replaces_a_pristine_view_without_changing_git_identity() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/compact")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create managed worktree");
     let pointer = fs::read(worktree.join(".git")).expect("read Git pointer");
@@ -116,6 +117,7 @@ fn compaction_refuses_ignored_files_even_when_git_calls_the_view_clean() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/ignored")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create managed worktree");
     fs::write(repository.join(".git/info/exclude"), "build-output\n")
@@ -164,6 +166,7 @@ fn compaction_rekeys_the_active_view_after_a_clean_commit() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/new-tree")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create managed worktree");
     fs::write(worktree.join("tracked.txt"), "new committed tree\n").expect("change tree");
@@ -218,6 +221,7 @@ fn compaction_preserves_private_extended_attributes_by_refusing_replacement() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/xattr")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create managed worktree");
     #[cfg(target_os = "macos")]

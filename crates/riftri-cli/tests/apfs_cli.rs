@@ -520,3 +520,86 @@ fn lifecycle_commands_emit_stable_json_reports() {
     );
     assert!(collected["removed_logical_bytes"].is_u64());
 }
+
+#[test]
+fn sparse_dir_flag_creates_a_cone_view_and_refuses_unsupported_forms() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let destination = fixture.path().join("sparse-view");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::create_dir_all(repository.join("kept/nested")).expect("create kept directory");
+    fs::create_dir_all(repository.join("skipped")).expect("create skipped directory");
+    fs::write(repository.join("root.txt"), "root\n").expect("write root file");
+    fs::write(repository.join("kept/file.txt"), "kept\n").expect("write kept file");
+    fs::write(repository.join("kept/nested/deep.txt"), "deep\n").expect("write nested file");
+    fs::write(repository.join("skipped/file.txt"), "skipped\n").expect("write skipped file");
+    assert!(git(&repository, &["add", "-A"]).status.success());
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "initial"])
+            .status
+            .success()
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&destination)
+        .args(["-b", "feature/sparse-cli", "HEAD", "--sparse-dir", "kept"])
+        .args(["--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI with --sparse-dir");
+    assert!(
+        output.status.success(),
+        "riftri --sparse-dir failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(destination.join("root.txt").is_file());
+    assert!(destination.join("kept/nested/deep.txt").is_file());
+    assert!(!destination.join("skipped").exists());
+    assert!(
+        git(
+            &destination,
+            &["status", "--porcelain=v1", "--untracked-files=all"]
+        )
+        .stdout
+        .is_empty()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&git(&destination, &["sparse-checkout", "list"]).stdout),
+        "kept\n"
+    );
+
+    let refused_destination = fixture.path().join("refused-view");
+    let refused = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&refused_destination)
+        .args([
+            "-b",
+            "feature/sparse-refused",
+            "HEAD",
+            "--sparse-dir",
+            "kept/*",
+        ])
+        .args(["--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI with a sparse pattern");
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("literal directory paths"),
+        "unexpected diagnostic: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(!refused_destination.exists());
+}
