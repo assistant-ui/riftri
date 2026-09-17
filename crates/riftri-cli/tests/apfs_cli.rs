@@ -520,3 +520,116 @@ fn lifecycle_commands_emit_stable_json_reports() {
     );
     assert!(collected["removed_logical_bytes"].is_u64());
 }
+
+#[test]
+fn all_states_inventory_discovers_worktrees_across_registered_states() {
+    let fixture = tempdir().expect("fixture directory");
+    let shared_state = fixture.path().join("shared-state");
+    let mut repositories = Vec::new();
+    for (name, branch) in [("first", "feature/first"), ("second", "feature/second")] {
+        let repository = fixture.path().join(name);
+        fs::create_dir(&repository).expect("create repository");
+        for arguments in [
+            &["init", "--quiet"][..],
+            &["config", "user.name", "Riftri Tests"][..],
+            &["config", "user.email", "riftri@example.invalid"][..],
+            &["config", "core.autocrlf", "false"][..],
+        ] {
+            assert!(git(&repository, arguments).status.success());
+        }
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
+        assert!(
+            git(&repository, &["add", "--", "tracked.txt"])
+                .status
+                .success()
+        );
+        assert!(
+            git(&repository, &["commit", "--quiet", "-m", "initial"])
+                .status
+                .success()
+        );
+
+        let destination = fixture.path().join(format!("{name}-worktree"));
+        let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "add"])
+            .arg(&destination)
+            .args(["-b", branch, "HEAD", "--state-dir"])
+            .arg(&shared_state)
+            .current_dir(&repository)
+            .output()
+            .expect("run Riftri CLI");
+        assert!(
+            added.status.success(),
+            "riftri worktree add failed: {}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        repositories.push((repository, destination));
+    }
+    let (first_repository, first_worktree) = &repositories[0];
+    let (_, second_worktree) = &repositories[1];
+
+    // The documented default scope stays unchanged: it still reads only the
+    // default state location and therefore reports no managed worktrees.
+    let default_scope = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "list", "--json"])
+        .current_dir(first_repository)
+        .output()
+        .expect("list default scope");
+    assert!(default_scope.status.success());
+    let default_report: serde_json::Value =
+        serde_json::from_slice(&default_scope.stdout).expect("parse default inventory JSON");
+    assert_eq!(default_report["schema_version"], 1);
+    assert_eq!(default_report["worktrees"], serde_json::json!([]));
+
+    // The all-states scope discovers the registered shared state directory and
+    // filters out the other repository's worktree.
+    let all_states = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "list", "--all-states", "--json"])
+        .current_dir(first_repository)
+        .output()
+        .expect("list all registered states");
+    assert!(
+        all_states.status.success(),
+        "riftri worktree list --all-states failed: {}",
+        String::from_utf8_lossy(&all_states.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&all_states.stdout).expect("parse all-states inventory JSON");
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["scope"], "all-registered-states");
+    assert_eq!(report["diagnostic_issues"], serde_json::json!([]));
+
+    let canonical_state = shared_state
+        .canonicalize()
+        .expect("canonical shared state")
+        .to_string_lossy()
+        .into_owned();
+    let states = report["state_directories"]
+        .as_array()
+        .expect("state_directories array");
+    assert_eq!(states.len(), 1);
+    assert_eq!(states[0]["path"], canonical_state);
+    assert_eq!(states[0]["source"], "registered");
+
+    let worktrees = report["worktrees"].as_array().expect("worktree list");
+    assert_eq!(
+        worktrees.len(),
+        1,
+        "shared-state inventory must only list the queried repository's worktree"
+    );
+    assert_eq!(
+        worktrees[0]["path"],
+        first_worktree
+            .canonicalize()
+            .expect("canonical managed path")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(worktrees[0]["state_directory"], canonical_state);
+    assert_eq!(worktrees[0]["branch"], "refs/heads/feature/first");
+    assert!(
+        !String::from_utf8_lossy(&all_states.stdout)
+            .contains(&second_worktree.to_string_lossy().into_owned()),
+        "the other repository's worktree must be filtered out"
+    );
+}

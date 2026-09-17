@@ -172,6 +172,28 @@ All `riftri worktree` subcommands accept `--repository <REPOSITORY>`
 
 List active Riftri-managed worktrees and their storage use.
 
+By default the inventory reads one state directory: the explicit `--state-dir`,
+or `<common-git-dir>/riftri` when none is given. That default scope is
+unchanged and its JSON keeps `schema_version` 1.
+
+| Flag | Effect |
+| --- | --- |
+| `--all-states` | Inspect every state directory the repository registers, including the default location. Conflicts with `--state-dir` |
+
+With `--all-states`, discovery reads the default location plus every
+`riftri.stateDirectory` registration recorded by `riftri worktree add
+--state-dir`. Equivalent registrations are deduplicated, and worktrees owned by
+other repositories that share a state directory are filtered out. Missing,
+non-absolute, or symlinked registrations are reported as diagnostic entries
+instead of being traversed or silently dropped; `riftri state unregister`
+removes a stale missing registration. Discovery is strictly read-only.
+
+The `--all-states --json` report uses `schema_version` 2 with
+`"scope": "all-registered-states"`: it adds a `state_directories` array
+(each entry's `source` is `default` or `registered`), each worktree carries its
+owning `state_directory`, and each diagnostic entry carries the
+`state_directory` it was found in (`null` for registration-level issues).
+
 ### `riftri worktree add [OPTIONS] <PATH> [REVISION]`
 
 Create a real linked worktree at `PATH` using the platform's native

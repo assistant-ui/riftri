@@ -227,6 +227,11 @@ enum WorktreeCommand {
         #[arg(long)]
         state_dir: Option<PathBuf>,
 
+        /// Inspect every state directory the repository registers, including
+        /// the default location, and report unusable registrations.
+        #[arg(long, conflicts_with = "state_dir")]
+        all_states: bool,
+
         /// Emit stable machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -618,11 +623,17 @@ fn run(cli: Cli) -> Result<()> {
             WorktreeCommand::List {
                 repository,
                 state_dir,
+                all_states,
                 json,
             } => {
-                let state_directory = resolve_state_directory(&repository, state_dir)?;
-                let report = riftri_core::storage_accounting(&state_directory)?;
-                print_worktree_inventory(&state_directory, &report, json)?;
+                if all_states {
+                    let inventory = riftri_core::worktree_inventory_across_states(&repository)?;
+                    print_all_states_worktree_inventory(&inventory, json)?;
+                } else {
+                    let state_directory = resolve_state_directory(&repository, state_dir)?;
+                    let report = riftri_core::storage_accounting(&state_directory)?;
+                    print_worktree_inventory(&state_directory, &report, json)?;
+                }
             }
             WorktreeCommand::Add {
                 path,
@@ -729,20 +740,27 @@ fn run(cli: Cli) -> Result<()> {
 }
 
 fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {
-    let (code, category, phase, cleanup, recovery) = error
-        .downcast_ref::<riftri_core::WorktreeError>()
-        .map(worktree_failure_fields)
-        .unwrap_or((
+    let worktree_error = error.downcast_ref::<riftri_core::WorktreeError>();
+    let (code, category, phase, cleanup, recovery) =
+        worktree_error.map(worktree_failure_fields).unwrap_or((
             "command-failed",
             "operational",
             None,
             "unknown",
             recovery_for_operation(operation),
         ));
-    let next_command = match recovery {
-        "required" => Some("riftri repair"),
-        "inspect" => Some("riftri status"),
-        _ => None,
+    let next_command = match worktree_error {
+        Some(riftri_core::WorktreeError::RecoveryPending {
+            state_directory, ..
+        }) => Some(format!(
+            "riftri repair --state-dir {}",
+            state_directory.display()
+        )),
+        _ => match recovery {
+            "required" => Some("riftri repair".to_owned()),
+            "inspect" => Some("riftri status".to_owned()),
+            _ => None,
+        },
     };
 
     serde_json::json!({
@@ -799,6 +817,19 @@ fn worktree_failure_fields(
             "not-needed",
             "not-required",
         ),
+        // An interrupted lifecycle operation left a durable journal behind:
+        // nothing was changed by this command, but the caller must run the
+        // repair command echoed in `nextCommand` before retrying.
+        WorktreeError::RecoveryPending { .. } => (
+            "recovery-pending",
+            "operational",
+            None,
+            "not-needed",
+            "required",
+        ),
+        // Another live process holds the operation lock. No repair is needed;
+        // the caller should wait for the concurrent operation and retry.
+        WorktreeError::Busy { .. } => ("worktree-busy", "operational", None, "not-needed", "retry"),
         WorktreeError::Io { .. } => (
             "filesystem-io-failed",
             "operational",
@@ -1424,30 +1455,140 @@ fn print_worktree_inventory(
     println!("Managed worktrees: {}", report.views.len());
     for view in &report.views {
         println!("- {}", view.destination.display());
-        println!("  Repository: {}", view.repository.display());
-        println!("  Head: {}", view.head.as_str());
-        if let Some(branch) = &view.branch {
-            println!("  Branch: {}", display_git_bytes(branch));
-        } else if view.detached {
-            println!("  Branch: detached");
-        }
-        if let Some(reason) = &view.locked_reason {
-            println!("  Locked: {}", display_git_bytes(reason));
-        }
-        if let Some(reason) = &view.prunable_reason {
-            println!("  Prunable: {}", display_git_bytes(reason));
-        }
-        println!("  Backend: {}", view.backend.display_name());
-        println!("  Immutable base: {}", view.base_path.display());
-        println!("  Logical: {}", display_byte_count(view.logical_bytes));
-        println!(
-            "  Filesystem-accounted allocated: {}",
-            display_byte_count(view.allocated_bytes)
-        );
+        print_worktree_view_details(view, None);
     }
     if !report.diagnostic_issues.is_empty() {
         println!("Diagnostic issues: {}", report.diagnostic_issues.len());
         for issue in &report.diagnostic_issues {
+            println!("- {}: {}", issue.path.display(), issue.reason);
+        }
+    }
+    Ok(())
+}
+
+fn print_worktree_view_details(view: &riftri_core::ViewStorageAccounting, state: Option<&Path>) {
+    if let Some(state) = state {
+        println!("  State: {}", state.display());
+    }
+    println!("  Repository: {}", view.repository.display());
+    println!("  Head: {}", view.head.as_str());
+    if let Some(branch) = &view.branch {
+        println!("  Branch: {}", display_git_bytes(branch));
+    } else if view.detached {
+        println!("  Branch: detached");
+    }
+    if let Some(reason) = &view.locked_reason {
+        println!("  Locked: {}", display_git_bytes(reason));
+    }
+    if let Some(reason) = &view.prunable_reason {
+        println!("  Prunable: {}", display_git_bytes(reason));
+    }
+    println!("  Backend: {}", view.backend.display_name());
+    println!("  Immutable base: {}", view.base_path.display());
+    println!("  Logical: {}", display_byte_count(view.logical_bytes));
+    println!(
+        "  Filesystem-accounted allocated: {}",
+        display_byte_count(view.allocated_bytes)
+    );
+}
+
+fn print_all_states_worktree_inventory(
+    inventory: &riftri_core::AllStatesWorktreeInventory,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let state_directories = inventory
+            .states
+            .iter()
+            .map(|state| {
+                serde_json::json!({
+                    "path": state.state_directory.display().to_string(),
+                    "path_native_hex": native_path_hex(&state.state_directory),
+                    "source": state.source.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let worktrees = inventory
+            .states
+            .iter()
+            .flat_map(|state| {
+                state.views.iter().map(|view| {
+                    let mut value = worktree_view_json(view);
+                    value["state_directory"] =
+                        serde_json::Value::from(state.state_directory.display().to_string());
+                    value["state_directory_native_hex"] =
+                        serde_json::Value::from(native_path_hex(&state.state_directory));
+                    value
+                })
+            })
+            .collect::<Vec<_>>();
+        let diagnostic_issues = inventory
+            .registration_issues
+            .iter()
+            .map(|issue| {
+                let mut value = diagnostic_issue_json(issue);
+                value["state_directory"] = serde_json::Value::Null;
+                value
+            })
+            .chain(inventory.states.iter().flat_map(|state| {
+                state.diagnostic_issues.iter().map(|issue| {
+                    let mut value = diagnostic_issue_json(issue);
+                    value["state_directory"] =
+                        serde_json::Value::from(state.state_directory.display().to_string());
+                    value
+                })
+            }))
+            .collect::<Vec<_>>();
+        let output = serde_json::json!({
+            "schema_version": 2,
+            "scope": "all-registered-states",
+            "native_path_encoding": native_path_encoding(),
+            "state_directories": state_directories,
+            "worktrees": worktrees,
+            "diagnostic_issues": diagnostic_issues,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
+        );
+        return Ok(());
+    }
+
+    println!("Riftri managed worktrees (all registered states)");
+    println!("State directories: {}", inventory.states.len());
+    for state in &inventory.states {
+        println!(
+            "- {} ({})",
+            state.state_directory.display(),
+            state.source.as_str()
+        );
+    }
+    let total_views = inventory
+        .states
+        .iter()
+        .map(|state| state.views.len())
+        .sum::<usize>();
+    println!("Managed worktrees: {total_views}");
+    for state in &inventory.states {
+        for view in &state.views {
+            println!("- {}", view.destination.display());
+            print_worktree_view_details(view, Some(&state.state_directory));
+        }
+    }
+    let total_issues = inventory.registration_issues.len()
+        + inventory
+            .states
+            .iter()
+            .map(|state| state.diagnostic_issues.len())
+            .sum::<usize>();
+    if total_issues > 0 {
+        println!("Diagnostic issues: {total_issues}");
+        for issue in inventory.registration_issues.iter().chain(
+            inventory
+                .states
+                .iter()
+                .flat_map(|state| state.diagnostic_issues.iter()),
+        ) {
             println!("- {}: {}", issue.path.display(), issue.reason);
         }
     }
@@ -2114,6 +2255,50 @@ mod tests {
     }
 
     #[test]
+    fn pending_recovery_receipts_require_repair_with_the_state_directory() {
+        let state_directory = std::path::PathBuf::from("/tmp/riftri-state");
+        let error = anyhow::Error::new(riftri_core::WorktreeError::RecoveryPending {
+            message: format!(
+                "a move of /tmp/view is already pending; run `riftri repair --state-dir {}`",
+                state_directory.display()
+            ),
+            state_directory: state_directory.clone(),
+        });
+        let receipt = failure_receipt("worktree-move", &error);
+
+        assert_eq!(receipt["code"], "recovery-pending");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "required");
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        assert_eq!(
+            next_command,
+            format!("riftri repair --state-dir {}", state_directory.display())
+        );
+        assert!(
+            receipt["message"]
+                .as_str()
+                .expect("message")
+                .contains(next_command),
+            "human guidance and nextCommand must agree"
+        );
+    }
+
+    #[test]
+    fn busy_receipts_ask_the_caller_to_retry_without_repair() {
+        let error = anyhow::Error::new(riftri_core::WorktreeError::Busy {
+            message: "worktree /tmp/view is busy with another Riftri operation; wait for it to finish and retry".to_owned(),
+        });
+        let receipt = failure_receipt("worktree-compact", &error);
+
+        assert_eq!(receipt["code"], "worktree-busy");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "retry");
+        assert!(receipt["nextCommand"].is_null());
+    }
+
+    #[test]
     fn policy_failures_exit_with_a_distinct_code() {
         use super::failure_exit_code;
 
@@ -2129,6 +2314,18 @@ mod tests {
 
         let operational = anyhow::anyhow!("disk on fire");
         assert_eq!(failure_exit_code(&operational), 1);
+
+        // Pending recovery and busy states are operational: the caller can
+        // proceed after repair or retry, unlike a policy refusal.
+        let pending = anyhow::Error::new(riftri_core::WorktreeError::RecoveryPending {
+            message: "a move is already pending".to_owned(),
+            state_directory: std::path::PathBuf::from("/tmp/riftri-state"),
+        });
+        assert_eq!(failure_exit_code(&pending), 1);
+        let busy = anyhow::Error::new(riftri_core::WorktreeError::Busy {
+            message: "worktree is busy".to_owned(),
+        });
+        assert_eq!(failure_exit_code(&busy), 1);
     }
 
     #[test]
@@ -2276,6 +2473,7 @@ mod tests {
                 WorktreeCommand::List {
                     repository,
                     state_dir,
+                    all_states,
                     json,
                 },
         } = list.command
@@ -2284,7 +2482,34 @@ mod tests {
         };
         assert_eq!(repository, Path::new("../app"));
         assert_eq!(state_dir.as_deref(), Some(Path::new("../state")));
+        assert!(!all_states);
         assert!(json);
+
+        let all_states = Cli::try_parse_from(["riftri", "worktree", "list", "--all-states"])
+            .expect("parse all-states inventory");
+        let Command::Worktree {
+            command:
+                WorktreeCommand::List {
+                    all_states,
+                    state_dir,
+                    ..
+                },
+        } = all_states.command
+        else {
+            panic!("unexpected all-states list command");
+        };
+        assert!(all_states);
+        assert!(state_dir.is_none());
+
+        Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "list",
+            "--all-states",
+            "--state-dir",
+            "../state",
+        ])
+        .expect_err("--all-states conflicts with an explicit --state-dir");
 
         let remove = Cli::try_parse_from([
             "riftri",

@@ -332,6 +332,22 @@ pub enum WorktreeError {
     #[error("invalid worktree request: {0}")]
     InvalidRequest(String),
 
+    /// A durable journal records an interrupted lifecycle operation, so this
+    /// request is refused until `riftri repair` runs against
+    /// `state_directory`. Distinct from [`WorktreeError::Busy`], which means
+    /// another live process currently holds the operation lock.
+    #[error("{message}")]
+    RecoveryPending {
+        message: String,
+        state_directory: PathBuf,
+    },
+
+    /// Another live process holds the operation lock right now. Nothing needs
+    /// repair; the caller should wait for the concurrent operation to finish
+    /// and retry.
+    #[error("{message}")]
+    Busy { message: String },
+
     #[error("{operation} {path}: {source}")]
     Io {
         operation: &'static str,
@@ -545,6 +561,185 @@ fn repository_state_directories_with_git(
     directories.sort_unstable();
     directories.dedup();
     Ok(directories)
+}
+
+/// Origin of one discovered state directory in an all-states inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateDirectorySource {
+    /// The implicit `<common-git-dir>/riftri` location.
+    Default,
+    /// A `riftri.stateDirectory` registration in the repository-local config.
+    Registered,
+}
+
+impl StateDirectorySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Registered => "registered",
+        }
+    }
+}
+
+/// Read-only worktree inventory for one discovered state directory.
+#[derive(Debug, Clone)]
+pub struct StateWorktreeInventory {
+    /// Resolved real state-directory path.
+    pub state_directory: PathBuf,
+    pub source: StateDirectorySource,
+    /// Active managed worktrees owned by the queried repository.
+    pub views: Vec<ViewStorageAccounting>,
+    /// Diagnostic findings inside this state directory.
+    pub diagnostic_issues: Vec<StateDiagnosticIssue>,
+}
+
+/// Read-only worktree inventory across every state directory the repository
+/// registers, including its implicit default location.
+#[derive(Debug, Clone, Default)]
+pub struct AllStatesWorktreeInventory {
+    pub states: Vec<StateWorktreeInventory>,
+    /// Registrations that discovery reported instead of traversing: missing,
+    /// malformed, or unsafe state-directory registrations.
+    pub registration_issues: Vec<StateDiagnosticIssue>,
+}
+
+/// Inventory managed worktrees across the default state location and every
+/// registered state directory of `repository`, without mutating anything.
+///
+/// Registrations that are missing, not absolute, or not real directories are
+/// reported as diagnostic entries and never traversed. Worktrees belonging to
+/// other repositories that share a state directory are filtered out by
+/// repository identity.
+pub fn worktree_inventory_across_states(
+    repository: &Path,
+) -> Result<AllStatesWorktreeInventory, WorktreeError> {
+    let git = Git::default();
+    let repository_info = git.inspect_repository(repository)?;
+    let repository_root = repository_info.root.as_deref().ok_or_else(|| {
+        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    })?;
+    let query_identity = repository_info.identity.common_git_dir.clone();
+
+    let mut inventory = AllStatesWorktreeInventory::default();
+    let mut discovered: Vec<(PathBuf, StateDirectorySource)> = Vec::new();
+
+    let default = repository_info.identity.common_git_dir.join("riftri");
+    match resolve_real_state_directory_if_present(&default) {
+        Ok(Some(resolved)) => discovered.push((resolved, StateDirectorySource::Default)),
+        Ok(None) => {}
+        Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
+            path: default,
+            reason: format!(
+                "default Riftri state path is not a real directory; discovery did not traverse it: {error}"
+            ),
+        }),
+    }
+
+    for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
+        if !configured.is_absolute() {
+            inventory.registration_issues.push(StateDiagnosticIssue {
+                path: configured,
+                reason: "registered Riftri state directory is not absolute; discovery skipped it"
+                    .to_owned(),
+            });
+            continue;
+        }
+        match fs::symlink_metadata(&configured) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: "registered Riftri state directory is missing; \
+                             `riftri state unregister` can remove the stale registration"
+                        .to_owned(),
+                });
+                continue;
+            }
+            Err(source) => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: format!(
+                        "registered Riftri state directory could not be inspected: {source}"
+                    ),
+                });
+                continue;
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: "registered Riftri state path is not a real directory; \
+                             discovery did not traverse it"
+                        .to_owned(),
+                });
+                continue;
+            }
+            Ok(_) => {}
+        }
+        match resolve_real_state_directory(&configured) {
+            Ok(resolved) => {
+                if !discovered
+                    .iter()
+                    .any(|(existing, _)| paths_match(existing, &resolved))
+                {
+                    discovered.push((resolved, StateDirectorySource::Registered));
+                }
+            }
+            Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
+                path: configured,
+                reason: format!("registered Riftri state directory could not be resolved: {error}"),
+            }),
+        }
+    }
+
+    let mut identity_cache: BTreeMap<PathBuf, Option<PathBuf>> = BTreeMap::new();
+    for (state_directory, source) in discovered {
+        let report = match storage_accounting(&state_directory) {
+            Ok(report) => report,
+            Err(error) => {
+                inventory.states.push(StateWorktreeInventory {
+                    diagnostic_issues: vec![StateDiagnosticIssue {
+                        path: state_directory.clone(),
+                        reason: format!(
+                            "state directory could not be inventoried; discovery reported it instead of guessing: {error}"
+                        ),
+                    }],
+                    state_directory,
+                    source,
+                    views: Vec::new(),
+                });
+                continue;
+            }
+        };
+        let mut views = Vec::new();
+        let mut diagnostic_issues = report.diagnostic_issues;
+        for view in report.views {
+            let identity = identity_cache
+                .entry(view.repository.clone())
+                .or_insert_with(|| {
+                    git.inspect_repository(&view.repository)
+                        .ok()
+                        .map(|info| info.identity.common_git_dir)
+                });
+            match identity {
+                Some(identity) if paths_match(identity, &query_identity) => views.push(view),
+                Some(_) => {}
+                None => diagnostic_issues.push(StateDiagnosticIssue {
+                    path: view.destination,
+                    reason: format!(
+                        "managed worktree belongs to a repository that could not be inspected; \
+                         it was left out of the repository-filtered inventory: {}",
+                        view.repository.display()
+                    ),
+                }),
+            }
+        }
+        inventory.states.push(StateWorktreeInventory {
+            state_directory,
+            source,
+            views,
+            diagnostic_issues,
+        });
+    }
+    Ok(inventory)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -1742,22 +1937,32 @@ fn compact_worktree_inner(
                 )
         })
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a compaction of {} is already pending; run `riftri repair --state-dir {}`",
-            destination.display(),
-            state_directory.display()
-        )));
+        return Err(pending_lifecycle_error(
+            "compaction",
+            &destination,
+            &state_directory,
+        ));
     }
 
     let _operation_lock = try_lock_add_operation(&managed.journal_path)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "worktree {} is busy with another Riftri operation",
-            destination.display()
-        ))
+        WorktreeError::Busy {
+            message: format!(
+                "worktree {} is busy with another Riftri operation; wait for it to finish and retry",
+                destination.display()
+            ),
+        }
     })?;
     let resolved = git.resolve_revision(&destination, OsStr::new("HEAD"))?;
     verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)?;
-    let compatibility = validate_resolved_compatibility(&git, &destination, &resolved)?;
+    // `verify_compaction_source` proved above that `destination` is one of
+    // this repository's registered linked worktrees, so it shares the same
+    // common Git directory that `inspect_repository` resolved.
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &destination,
+        &repository.identity.common_git_dir,
+        &resolved,
+    )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
     #[cfg(target_os = "windows")]
@@ -1953,7 +2158,12 @@ fn add_worktree_inner(
             )));
         }
     }
-    let compatibility = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &repository_root,
+        &repository.identity.common_git_dir,
+        &resolved,
+    )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     let selected_backend = supported_worktree_backend(&destination)?;
     let destination_volume = &selected_backend.volume;
@@ -2206,6 +2416,10 @@ fn perform_add(
         AddWorktreePhase::IndexSynchronized,
         fail_after,
     )?;
+    // This clean check is also the index refresh: `git status` performs the
+    // full stat-and-content comparison that a separate `update-index
+    // --refresh` used to run, so any divergence between the cloned view and
+    // the exact tree still fails the add before activation.
     if !git.worktree_is_clean(destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "new worktree {} is not clean; it was not activated",
@@ -2623,9 +2837,11 @@ fn prepare_base(
 fn validate_resolved_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     resolved: &ResolvedRevision,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
-    let analysis = analyze_resolved_repository_compatibility(git, repository, resolved)?;
+    let analysis =
+        analyze_resolved_repository_compatibility(git, repository, common_git_dir, resolved)?;
     if let Some(blocker) = analysis.report.blockers.first() {
         return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
     }
@@ -2770,23 +2986,26 @@ fn ascii_lowercase_path(path: &Path) -> PathBuf {
 pub(crate) fn inspect_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<RepositoryCompatibilityReport, WorktreeError> {
-    Ok(analyze_repository_compatibility(git, repository, revision)?.report)
+    Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
 fn analyze_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let resolved = git.resolve_revision(repository, revision)?;
-    analyze_resolved_repository_compatibility(git, repository, &resolved)
+    analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved)
 }
 
 fn analyze_resolved_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     resolved: &ResolvedRevision,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let entries = git.list_tree(repository, &resolved.tree)?;
@@ -2810,7 +3029,14 @@ fn analyze_resolved_repository_compatibility(
     }
     let mut lfs_paths = Vec::new();
 
-    let info_attributes_path = git.info_attributes_path(repository)?;
+    // Callers pass the common Git directory that `inspect_repository` already
+    // resolved with `rev-parse --path-format=absolute --git-common-dir`, the
+    // exact command `Git::info_attributes_path` would re-run here; joining the
+    // fixed relative path avoids one Git invocation without changing which
+    // file is inspected. `--git-path` is still avoided because its absolute
+    // form can resolve a symlink at the final path and hide it from the
+    // symlink-refusing metadata checks below.
+    let info_attributes_path = common_git_dir.join("info/attributes");
     // Only an absent or empty regular file is supported. Inspect its metadata
     // without reading contents: FIFOs must not block, symlinks must not escape
     // this path, and a large unsupported file needs no memory allocation.
@@ -2853,8 +3079,13 @@ fn analyze_resolved_repository_compatibility(
             false
         }
     };
-    if info_attributes_safe {
-        let mut in_tree = git.in_tree_attributes_for_paths(repository, &resolved.tree, &paths)?;
+    if info_attributes_safe && !paths.is_empty() {
+        // Both attribute passes query the same exact tree, so populate one
+        // temporary index once instead of running `git read-tree` twice; the
+        // isolated and effective environments still apply per `check-attr`
+        // query, which never writes the shared index.
+        let tree_index = git.tree_attribute_index(repository, &resolved.tree)?;
+        let mut in_tree = git.in_tree_attributes_for_index(repository, &tree_index, &paths)?;
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
             Err(explanation) => {
@@ -2865,8 +3096,7 @@ fn analyze_resolved_repository_compatibility(
             }
         }
 
-        let mut effective =
-            git.effective_attributes_for_tree_paths(repository, &resolved.tree, &paths)?;
+        let mut effective = git.effective_attributes_for_index(repository, &tree_index, &paths)?;
         in_tree.sort_unstable();
         effective.sort_unstable();
         if effective != in_tree {
@@ -3752,33 +3982,53 @@ fn find_managed_add_journal(
         .as_ref()
         .is_some_and(|journal| pending.contains(journal.operation_id.as_str()))
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a removal of {} is already pending; run `riftri repair --state-dir {}`",
-            destination.display(),
-            state_directory.display()
-        )));
+        return Err(pending_lifecycle_error(
+            "removal",
+            destination,
+            state_directory,
+        ));
     }
     if managed
         .as_ref()
         .is_some_and(|journal| pending_moves.contains(journal.operation_id.as_str()))
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a move of {} is already pending; run `riftri repair --state-dir {}`",
-            destination.display(),
-            state_directory.display()
-        )));
+        return Err(pending_lifecycle_error(
+            "move",
+            destination,
+            state_directory,
+        ));
     }
     if managed
         .as_ref()
         .is_some_and(|journal| pending_compactions.contains(journal.operation_id.as_str()))
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a compaction of {} is already pending; run `riftri repair --state-dir {}`",
-            destination.display(),
-            state_directory.display()
-        )));
+        return Err(pending_lifecycle_error(
+            "compaction",
+            destination,
+            state_directory,
+        ));
     }
     Ok(managed)
+}
+
+/// A durable journal shows an interrupted lifecycle operation touching this
+/// worktree. Journals record durable phases, not liveness, so this cannot tell
+/// an interrupted operation from one still running in another process; repair
+/// is safe either way because it takes the same per-operation locks and skips
+/// live operations.
+fn pending_lifecycle_error(
+    operation: &str,
+    subject: &Path,
+    state_directory: &Path,
+) -> WorktreeError {
+    WorktreeError::RecoveryPending {
+        message: format!(
+            "a {operation} of {} is already pending; run `riftri repair --state-dir {}`",
+            subject.display(),
+            state_directory.display()
+        ),
+        state_directory: state_directory.to_path_buf(),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -5803,10 +6053,13 @@ fn verify_prune_safe(
                     && Some(journal.operation_id.as_str()) != current_prune
             })
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "another Riftri lifecycle operation is pending; run `riftri repair --state-dir {}` first",
-            state_directory.display()
-        )));
+        return Err(WorktreeError::RecoveryPending {
+            message: format!(
+                "another Riftri lifecycle operation is pending; run `riftri repair --state-dir {}` first",
+                state_directory.display()
+            ),
+            state_directory: state_directory.to_path_buf(),
+        });
     }
     let inventory = git.list_worktrees(repository)?;
     for journal in adds.iter().filter(|journal| {
@@ -7515,9 +7768,18 @@ mod tests {
         for (autocrlf, compatible) in [("false", true), ("true", false)] {
             git.set_local_config(repository, "core.autocrlf", std::ffi::OsStr::new(autocrlf))
                 .unwrap();
-            let analysis =
-                super::analyze_resolved_repository_compatibility(&git, repository, &resolved)
-                    .unwrap();
+            let common_git_dir = git
+                .inspect_repository(repository)
+                .unwrap()
+                .identity
+                .common_git_dir;
+            let analysis = super::analyze_resolved_repository_compatibility(
+                &git,
+                repository,
+                &common_git_dir,
+                &resolved,
+            )
+            .unwrap();
             // Reconstruct the previous, individual-read profile independently.
             let mut profile = Sha256::new();
             profile.update(b"riftri-checkout-profile-v3-lfs\0");
@@ -7799,9 +8061,16 @@ mod tests {
         fs::write(&empty, "").expect("empty file");
         symlink(&empty, &attributes).expect("symlink attributes");
         let inspect = || {
+            let git = Git::default();
+            let common_git_dir = git
+                .inspect_repository(fixture.path())
+                .expect("inspect fixture repository")
+                .identity
+                .common_git_dir;
             super::inspect_repository_compatibility(
-                &Git::default(),
+                &git,
                 fixture.path(),
+                &common_git_dir,
                 std::ffi::OsStr::new("HEAD"),
             )
             .expect("compatibility report")

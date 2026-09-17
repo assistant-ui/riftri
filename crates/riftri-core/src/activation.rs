@@ -1310,12 +1310,7 @@ fn parse_enabled_remove(
     let [path] = positional.as_slice() else {
         return Ok(None);
     };
-    let destination = PathBuf::from(path);
-    let destination = if destination.is_absolute() {
-        destination
-    } else {
-        repository.join(destination)
-    };
+    let destination = Git::default().resolve_worktree_path(repository, path)?;
     let Some(state_directory) = managed_worktree_state_directory(repository, &destination)? else {
         return Ok(None);
     };
@@ -1356,22 +1351,14 @@ fn parse_enabled_move(
         [separator, source, destination] if separator == "--" => (source, destination),
         _ => return Ok(None),
     };
-    let resolve = |path: &OsString| {
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            path
-        } else {
-            repository.join(path)
-        }
-    };
-    let source = resolve(source);
+    let source = Git::default().resolve_worktree_path(repository, source)?;
     let Some(state_directory) = managed_worktree_state_directory(repository, &source)? else {
         return Ok(None);
     };
     Ok(Some(MoveWorktreeRequest {
         repository: repository.to_path_buf(),
         source,
-        destination: resolve(destination),
+        destination: resolve_command_path(repository, destination),
         state_dir: Some(state_directory),
     }))
 }
@@ -1429,12 +1416,7 @@ fn guard_managed_path_lifecycle(
     let Some(path) = positional_paths(arguments).first().copied() else {
         return Ok(());
     };
-    let path = PathBuf::from(path);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        repository.join(path)
-    };
+    let path = Git::default().resolve_worktree_path(repository, path)?;
     if managed_worktree_state_directory(repository, &path)?.is_some() {
         return Err(unsupported(format!(
             "refusing `git worktree {operation}` options that would bypass the journal for managed Riftri worktree {}; use a supported Riftri lifecycle command instead",
