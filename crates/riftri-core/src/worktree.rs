@@ -5145,7 +5145,7 @@ fn resume_compaction(
                 journal.journal_path.display()
             )));
         }
-        git.reset_worktree_index(&journal.destination)?;
+        git.refresh_worktree_index(&journal.destination)?;
         if !git
             .list_worktrees(&journal.repository)?
             .into_iter()
@@ -7379,6 +7379,9 @@ mod tests {
             Some(CompactWorktreePhase::ReplacementActivated),
         )
         .expect_err("interrupt after activation");
+        fs::write(destination.join("tracked.txt"), "staged-only contents\n")
+            .expect("write staged version");
+        git(&destination, &["add", "--", "tracked.txt"]);
         fs::write(
             destination.join("tracked.txt"),
             "edit in the new active view\n",
@@ -7391,6 +7394,13 @@ mod tests {
             fs::read_to_string(destination.join("tracked.txt")).unwrap(),
             "edit in the new active view\n"
         );
+        let staged = Command::new("git")
+            .args(["show", ":tracked.txt"])
+            .current_dir(&destination)
+            .output()
+            .expect("read staged version");
+        assert!(staged.status.success());
+        assert_eq!(staged.stdout, b"staged-only contents\n");
         let accounting = storage_accounting(&state).expect("inspect completed compaction");
         assert_eq!(accounting.completed_compactions, 1);
         assert_eq!(accounting.pending_compactions, 0);

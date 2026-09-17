@@ -970,10 +970,9 @@ impl Git {
         Ok(())
     }
 
-    /// Reset the linked worktree index to HEAD without requiring the visible
-    /// files to remain clean while the command runs.
-    pub fn reset_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
-        self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+    /// Refresh index stat data without changing staged entries or worktree files.
+    pub fn refresh_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
+        self.run(Some(worktree), &["update-index", "-q", "--refresh"])?;
         Ok(())
     }
 
@@ -1973,8 +1972,8 @@ mod tests {
 
         fs::write(linked.join("tracked.txt"), "changed\n").expect("modify linked file");
         assert!(!git.worktree_is_clean(&linked).expect("check dirty"));
-        git.reset_worktree_index(&linked)
-            .expect("reset index while worktree is dirty");
+        git.refresh_worktree_index(&linked)
+            .expect("refresh index while worktree is dirty");
         assert!(!git.worktree_is_clean(&linked).expect("still dirty"));
         fs::write(linked.join("tracked.txt"), "tracked\n").expect("restore linked file");
         assert!(git.worktree_is_clean(&linked).expect("check restored"));
