@@ -250,17 +250,31 @@ directly from a checkout:
 brew install --formula ./Formula/riftri.rb
 ```
 
-The formula is generated, not hand-written. After a release, regenerate it
-from that tag's published checksums:
+A dedicated tap is the target state, staged in
+[`package/homebrew/`](../package/homebrew/README.md), which mirrors the layout
+of the planned `assistant-ui/homebrew-riftri` repository. Once a maintainer
+creates that repository, publishes the staged formula to it, and verifies a
+clean-machine installation, the checkout will no longer be needed:
 
 ```sh
-gh release download v0.2.3 --repo assistant-ui/riftri --pattern SHA256SUMS --dir /tmp/riftri
-node package/scripts/update-homebrew-formula.mjs 0.2.3 /tmp/riftri/SHA256SUMS
+# Pending maintainer setup — this tap does not exist yet. Use the checkout
+# command above until this notice is removed.
+brew tap assistant-ui/riftri
+brew install assistant-ui/riftri/riftri
 ```
 
-`package/test/homebrew-formula.test.js` fails if the checked-in formula stops
-matching what the generator produces, so a partial bump or a hand edit is
-caught in CI rather than at install time.
+The formula is generated, not hand-written. After a release, regenerate every
+checked-in copy from that tag's published checksums:
+
+```sh
+node package/scripts/sync-homebrew-tap.mjs v0.2.3
+```
+
+`package/test/homebrew-formula.test.js` fails if either checked-in formula
+copy stops matching what the generator produces or the copies diverge, so a
+partial bump or a hand edit is caught in CI rather than at install time. A
+scheduled workflow additionally compares the pinned checksums against the
+latest release's published `SHA256SUMS` every day.
 
 ## npm is a separate channel
 
@@ -269,6 +283,9 @@ but publication status is independent. The `riftri` launcher is not currently
 available because the initial npm publication is incomplete. Use a standalone
 installer or GitHub release asset until this notice is removed. A GitHub release
 does not by itself mean the corresponding npm launcher finished publishing.
+The remaining steps — resolving the registry's package-name rejection with npm
+support and explicitly re-enabling the paused publish job — require maintainer
+access and are documented in [RELEASING.md](../RELEASING.md).
 
 ## Updating and uninstalling
 
