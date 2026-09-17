@@ -1164,17 +1164,19 @@ fn run_git_shim() -> Result<i32> {
 
     match riftri_core::proxy_git_command(&current_directory, &arguments)? {
         riftri_core::GitProxyOutcome::Passthrough(status) => Ok(status),
-        riftri_core::GitProxyOutcome::OptimizedAdd(result) => {
-            eprintln!(
-                "Riftri created an optimized {} worktree at {} ({})",
-                result.backend.display_name(),
-                result.destination.display(),
-                if result.reused_base {
-                    "reused base"
-                } else {
-                    "new base"
-                }
-            );
+        riftri_core::GitProxyOutcome::OptimizedAdd { result, quiet } => {
+            if !quiet {
+                eprintln!(
+                    "Riftri created an optimized {} worktree at {} ({})",
+                    result.backend.display_name(),
+                    result.destination.display(),
+                    if result.reused_base {
+                        "reused base"
+                    } else {
+                        "new base"
+                    }
+                );
+            }
             Ok(0)
         }
         riftri_core::GitProxyOutcome::OptimizedRemove(result) => {

@@ -46,7 +46,10 @@ pub struct ShellActivationStatus {
 #[derive(Debug, Clone)]
 pub enum GitProxyPlan {
     Passthrough,
-    OptimizedAdd(AddWorktreeRequest),
+    OptimizedAdd {
+        request: AddWorktreeRequest,
+        quiet: bool,
+    },
     OptimizedRemove(RemoveWorktreeRequest),
     OptimizedForceRemove(RemoveWorktreeRequest),
     OptimizedMove(MoveWorktreeRequest),
@@ -56,7 +59,10 @@ pub enum GitProxyPlan {
 #[derive(Debug)]
 pub enum GitProxyOutcome {
     Passthrough(i32),
-    OptimizedAdd(AddWorktreeResult),
+    OptimizedAdd {
+        result: AddWorktreeResult,
+        quiet: bool,
+    },
     OptimizedRemove(RemoveWorktreeResult),
     OptimizedMove(MoveWorktreeResult),
     OptimizedPrune(PruneWorktreesResult),
@@ -153,7 +159,7 @@ pub fn plan_git_command(
                 )));
             }
             parse_enabled_add(&repository, &arguments[context.command_index + 2..])
-                .map(GitProxyPlan::OptimizedAdd)
+                .map(|(request, quiet)| GitProxyPlan::OptimizedAdd { request, quiet })
         }
         "remove" => plan_enabled_remove(
             &repository,
@@ -183,9 +189,10 @@ pub fn proxy_git_command(
         GitProxyPlan::Passthrough => Ok(GitProxyOutcome::Passthrough(exit_status_code(
             Git::default().passthrough(arguments)?,
         ))),
-        GitProxyPlan::OptimizedAdd(request) => {
-            Ok(GitProxyOutcome::OptimizedAdd(add_worktree(request)?))
-        }
+        GitProxyPlan::OptimizedAdd { request, quiet } => Ok(GitProxyOutcome::OptimizedAdd {
+            result: add_worktree(request)?,
+            quiet,
+        }),
         GitProxyPlan::OptimizedRemove(request) => {
             Ok(GitProxyOutcome::OptimizedRemove(remove_worktree(request)?))
         }
@@ -1047,10 +1054,11 @@ fn option_value(argument: &OsStr, prefix: &str) -> Option<OsString> {
 fn parse_enabled_add(
     repository: &Path,
     arguments: &[OsString],
-) -> Result<AddWorktreeRequest, ActivationError> {
+) -> Result<(AddWorktreeRequest, bool), ActivationError> {
     let mut mode = None;
     let mut positional = Vec::new();
     let mut options = true;
+    let mut quiet = false;
     let mut index = 0;
 
     while let Some(argument) = arguments.get(index) {
@@ -1064,9 +1072,10 @@ fn parse_enabled_add(
             index += 1;
         } else if options && argument == "--detach" {
             set_mode(&mut mode, WorktreeMode::Detached)?;
-        } else if options && (argument == "--quiet" || argument == "--checkout") {
-            // The optimized implementation is already quiet and always creates
-            // a checked-out, clean result before returning.
+        } else if options && argument == "--quiet" {
+            quiet = true;
+        } else if options && argument == "--checkout" {
+            // Optimized adds always create a checked-out, clean result.
         } else if options && argument.to_string_lossy().starts_with('-') {
             return Err(unsupported(format!(
                 "option {} is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation",
@@ -1105,13 +1114,16 @@ fn parse_enabled_add(
         repository.join(destination)
     };
 
-    Ok(AddWorktreeRequest {
-        repository: repository.to_path_buf(),
-        destination,
-        revision,
-        mode,
-        state_dir: None,
-    })
+    Ok((
+        AddWorktreeRequest {
+            repository: repository.to_path_buf(),
+            destination,
+            revision,
+            mode,
+            state_dir: None,
+        },
+        quiet,
+    ))
 }
 
 fn parse_enabled_remove(
@@ -1452,7 +1464,7 @@ mod tests {
             OsString::from("HEAD"),
         ];
 
-        let GitProxyPlan::OptimizedAdd(request) =
+        let GitProxyPlan::OptimizedAdd { request, .. } =
             plan_git_command(fixture.path(), &arguments).expect("plan Git command")
         else {
             panic!("enabled worktree add was not optimized");
@@ -1479,7 +1491,7 @@ mod tests {
             OsString::from("feature/existing"),
         ];
 
-        let GitProxyPlan::OptimizedAdd(request) =
+        let GitProxyPlan::OptimizedAdd { request, .. } =
             plan_git_command(fixture.path(), &arguments).expect("plan Git command")
         else {
             panic!("enabled existing-branch add was not optimized");
@@ -1544,7 +1556,7 @@ mod tests {
 
         assert!(matches!(
             plan_git_command(current, &arguments).expect("plan -C Git command"),
-            GitProxyPlan::OptimizedAdd(_)
+            GitProxyPlan::OptimizedAdd { .. }
         ));
     }
 

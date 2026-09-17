@@ -64,6 +64,7 @@ non-disruptive:
 | Windows PowerShell | The hook installs a real `git.exe` shim, is tested as current-session-only and reversible, and exercises optimized creation on a disposable ReFS volume. |
 | Disabled repository | Normal Git creates an ordinary linked worktree and no Riftri state. |
 | Enabled repository on APFS | Supported adds create clean, real Git worktrees through strict native clones. |
+| Quiet adds | Intercepted `git worktree add --quiet` commands print no success message. Errors remain visible. |
 | Child tools | Plain-shell, `claude`, and `codex`-named child harnesses inherit interception without Riftri-specific prompts. |
 | Shared storage | Three child-created views reuse one immutable base while keeping separate writable views. |
 | Delegation | Standard input, standard output, standard error, and exit status match direct Git for passthrough commands; a signalled child produces the conventional `128 + signal` shell status. |
