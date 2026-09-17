@@ -110,6 +110,15 @@ already covered by the exact tree ID. If Riftri cannot account for an active
 external input, it must reject optimized creation rather than reuse an
 ambiguous base.
 
+Optimized creation suppresses Git's checkout, which also suppresses its
+`post-checkout` hook. Until hook execution has a recoverable transaction design,
+Riftri refuses creation before mutation when an executable default
+`post-checkout` hook is present. Custom `core.hooksPath` configurations are also
+refused: relative paths can refer to hooks in the destination tree rather than
+the invoking worktree. Doctor reports the same blocker. Use ordinary
+`git worktree add` when checkout hooks are required; Riftri never silently
+skips them or automatically falls back to a full checkout.
+
 The current native COW policy asks Git to resolve attributes from the exact
 requested tree through an isolated temporary index. Built-in `text`, `eol`, and
 `binary` checkout semantics are allowlisted; `diff` and `merge` records emitted
@@ -120,6 +129,20 @@ configuration is standard, and the strict v1 pointer names an exact object in
 the repository's default local LFS store. Repository-local, global, and system
 attribute sources remain unsupported because they are mutable outside the tree
 identity.
+
+An explicit `riftri worktree add --sparse-dir` request selects a cone-mode
+sparse view. The canonical directory list — sorted, deduplicated, and with
+nested cones collapsed into their ancestors — is an additional checkout-profile
+input, so different sparse selections at one tree, or a sparse and a full
+request, always key different bases. Git's own `sparse-checkout set --cone`
+runs inside the isolated materialization directory to compute the patterns and
+skip-worktree bits, `checkout-index` writes only the active entries, and the
+new linked worktree receives real worktree-scoped sparse configuration before
+its clean state is verified. Anything outside that subset — patterns,
+nonexistent directories, repository-configured sparse checkout, sparse
+requests through Git interception, sparse plus Git LFS, or compaction of a
+sparse view — fails closed before durable state exists
+(see [sparse-checkout.md](sparse-checkout.md)).
 
 Git materializes the exact pointer tree inside Riftri's isolated administrative
 directory, where inherited filters are intentionally disabled. Riftri then
@@ -268,8 +291,14 @@ path without `--force`, so a concurrent dirtying write is also rejected.
 
 An explicit forced removal snapshots the complete native view, or the complete
 OverlayFS private layer, before recording durable intent. The journal records
-both the force choice and snapshot. Riftri re-hashes the view at the final
-delete boundary and during recovery; any later change stops the operation and
+both the force choice and snapshot. The snapshot includes Git HEAD, its symbolic branch, and structured
+staged index contents (including intent-to-add state). Index stat-cache refreshes
+do not change this consent. OverlayFS reads Git metadata through its private
+upper-layer pointer while the merged view is unmounted. Legacy content-only
+force snapshots cannot prove this Git state and are preserved for manual
+inspection rather than automatically completing a pending deletion.
+Riftri revalidates the combined snapshot at the final delete boundary and
+during recovery; any later change stops the operation and
 is preserved. Only a still-present native view whose snapshot matches reaches
 Git's force removal. Missing-path metadata cleanup continues through ordinary
 Git safety checks, so recreating the destination cannot turn old force consent
@@ -316,8 +345,12 @@ intent-recorded
 Before recording intent, Riftri requires an active managed Git registration,
 the expected HEAD, and an empty structured status including ignored paths. It
 snapshots names, kinds, bytes, modes, symlink targets, Unix extended
-attributes, and Windows file attributes across the complete view. Windows
-alternate data streams fail closed. Riftri then prepares or reuses the exact current-tree base,
+attributes, and Windows file attributes across the complete view. Unix
+setuid, setgid, and sticky bits are not represented by Git trees;
+compaction refuses entries carrying these special bits, including during
+recovery, rather than dropping them. Ordinary-mode snapshot compatibility is
+unchanged. Windows alternate data streams fail closed. Riftri then prepares or
+reuses the exact current-tree base,
 creates a fresh native COW replacement, and copies the real linked-worktree
 pointer into it. Immediately before the same-parent directory swap, Riftri
 revalidates registration, HEAD, strict cleanliness, and the snapshot. The old

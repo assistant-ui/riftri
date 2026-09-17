@@ -124,6 +124,7 @@ fn reports_cold_cached_and_private_write_costs() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("benchmark/cold")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create cold Riftri worktree");
     let cold_duration = cold_started.elapsed();
@@ -136,6 +137,7 @@ fn reports_cold_cached_and_private_write_costs() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("benchmark/cached")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create cached Riftri worktree");
     let cached_duration = cached_started.elapsed();
