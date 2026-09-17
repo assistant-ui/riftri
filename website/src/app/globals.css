@@ -499,14 +499,10 @@ code, pre { font-family: var(--font-mono); }
 
 .savings-map { margin: 3rem 0 0; }
 .savings-backend-label { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; }
-.savings-backend-toggle { max-width: 100%; min-height: 24px; margin-block: -2px; padding: 0; border: 0; border-bottom: 1px dotted var(--line-strong); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-.savings-backend-toggle:active { color: var(--accent); }
-.savings-backend-toggle:disabled { border-color: transparent; cursor: default; }
-.savings-backend-cycle { display: inline-grid; overflow: hidden; vertical-align: middle; }
+.savings-backend-cycle { display: inline-grid; max-width: 100%; overflow: hidden; border-bottom: 1px dotted var(--line-strong); vertical-align: middle; }
 .savings-backend-item { grid-area: 1 / 1; animation: savings-backend-cycle 12s var(--ease-out) infinite both; }
 .savings-backend-item:nth-child(2) { animation-delay: -8s; }
 .savings-backend-item:nth-child(3) { animation-delay: -4s; }
-.savings-backend-toggle.is-paused .savings-backend-item { animation-play-state: paused; }
 
 @keyframes savings-backend-cycle {
   0%, 30% { opacity: 1; transform: translateY(0); }
@@ -661,7 +657,6 @@ code, pre { font-family: var(--font-mono); }
   .button-secondary:hover { color: var(--ink); }
   .site-footer a:hover { color: var(--accent); }
   .savings-notes a:hover, .savings-details summary:hover { color: var(--accent); }
-  .savings-backend-toggle:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
 }
 
 @media (max-width: 1040px) {
