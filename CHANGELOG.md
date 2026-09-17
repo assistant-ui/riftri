@@ -14,6 +14,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Terminating the native `riftri exec` with SIGTERM, SIGINT, or SIGHUP now
+  forwards the signal to the scoped command instead of orphaning it.
+  Supervised invocations run the command in its own process group and signal
+  that whole group, so the command's descendants stop with it without touching
+  unrelated processes; interactive foreground invocations keep terminal job
+  control unchanged and forward SIGTERM and SIGHUP to the command itself.
+  Riftri then removes its temporary Git shim and exits with the command's
+  status. The npm launcher's own signal forwarding is tracked separately
+  (#180).
 - Managed removal, forced removal, and compaction reject worktrees with an
   incomplete move journal until repair completes the move.
 - State unregistration accepts relative parent components such as `../old-state`
