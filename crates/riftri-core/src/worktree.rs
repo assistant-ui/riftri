@@ -127,6 +127,13 @@ pub struct AddWorktreeRequest {
     /// Defaults to `<common-git-dir>/riftri`. A custom directory must be on the
     /// same filesystem volume as the destination.
     pub state_dir: Option<PathBuf>,
+    /// Cone-mode sparse-checkout directories, relative to the repository root
+    /// with `/` separators. Empty materializes the full tree. Directories are
+    /// canonicalized (sorted, deduplicated, nested cones collapsed into their
+    /// ancestors) and become part of the versioned checkout profile, so
+    /// different selections at the same commit never share a base. Requests
+    /// outside the supported cone subset are refused before any state exists.
+    pub sparse_directories: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1946,6 +1953,12 @@ fn compact_worktree_inner(
                 .to_owned(),
         ));
     }
+    if !managed.sparse_directories.is_empty() {
+        return Err(WorktreeError::Unsupported(
+            "compacting a sparse worktree is not supported yet; remove and recreate the worktree to reset its storage"
+                .to_owned(),
+        ));
+    }
     if CompactJournalStore::open(&state_directory)
         .load_all()?
         .iter()
@@ -1982,6 +1995,7 @@ fn compact_worktree_inner(
         &destination,
         &repository.identity.common_git_dir,
         &resolved,
+        &[],
     )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
@@ -2057,6 +2071,7 @@ fn compact_worktree_inner(
         &temporary_index,
         &compatibility.checkout_config,
         &compatibility.lfs_objects,
+        &[],
     )?;
     NativeCowCloner::clone_tree(&base_path, &replacement)?;
     NativeCowCloner::make_tree_owner_writable(&replacement)?;
@@ -2178,13 +2193,27 @@ fn add_worktree_inner(
             )));
         }
     }
+    let sparse_directories = canonicalize_sparse_directories(&request.sparse_directories)?;
     let compatibility = validate_resolved_compatibility(
         &git,
         &repository_root,
         &repository.identity.common_git_dir,
         &resolved,
+        &sparse_directories,
     )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
+    if !sparse_directories.is_empty() {
+        validate_sparse_directories_in_tree(
+            &sparse_directories,
+            &compatibility.checkout_paths,
+            &resolved.tree,
+        )?;
+        if !compatibility.lfs_objects.is_empty() {
+            return Err(WorktreeError::Unsupported(
+                "sparse worktrees for trees with Git LFS-managed paths are not supported yet; request the full tree instead".to_owned(),
+            ));
+        }
+    }
     let selected_backend = supported_worktree_backend(&destination)?;
     let destination_volume = &selected_backend.volume;
 
@@ -2240,6 +2269,7 @@ fn add_worktree_inner(
         temporary_index: &temporary_index,
         branch,
         branch_created,
+        sparse_directories: &sparse_directories,
     };
     let backend = selected_backend.kind;
     let mut journal = if backend == BackendKind::OverlayFs {
@@ -2291,6 +2321,7 @@ fn add_worktree_inner(
             &resolved.tree,
             &compatibility.checkout_config,
             &compatibility.lfs_objects,
+            &sparse_directories,
             &repository.identity.common_git_dir,
             fail_after,
         )
@@ -2366,6 +2397,7 @@ fn perform_add(
     tree: &ObjectId,
     checkout_config: &[(String, Vec<u8>)],
     lfs_objects: &[GitLfsObject],
+    sparse_directories: &[String],
     common_git_dir: &Path,
     fail_after: Option<AddWorktreePhase>,
 ) -> Result<bool, WorktreeError> {
@@ -2403,6 +2435,7 @@ fn perform_add(
         temporary_index,
         checkout_config,
         lfs_objects,
+        sparse_directories,
     )?;
     advance(store, journal, AddWorktreePhase::BaseReady, fail_after)?;
 
@@ -2440,7 +2473,11 @@ fn perform_add(
         )?;
     }
 
-    git.synchronize_worktree_index(destination)?;
+    if sparse_directories.is_empty() {
+        git.synchronize_worktree_index(destination)?;
+    } else {
+        git.synchronize_sparse_worktree_index(destination, sparse_directories)?;
+    }
     advance(
         store,
         journal,
@@ -2813,6 +2850,7 @@ fn prepare_base(
     temporary_index: &Path,
     checkout_config: &[(String, Vec<u8>)],
     lfs_objects: &[GitLfsObject],
+    sparse_directories: &[String],
 ) -> Result<bool, WorktreeError> {
     let base_parent = base_path.expect_parent()?;
     let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
@@ -2846,13 +2884,24 @@ fn prepare_base(
             source,
         )
     })?;
-    git.materialize_tree_with_config(
-        repository,
-        tree,
-        base_staging,
-        temporary_index,
-        checkout_config,
-    )?;
+    if sparse_directories.is_empty() {
+        git.materialize_tree_with_config(
+            repository,
+            tree,
+            base_staging,
+            temporary_index,
+            checkout_config,
+        )?;
+    } else {
+        git.materialize_sparse_tree_with_config(
+            repository,
+            tree,
+            base_staging,
+            temporary_index,
+            checkout_config,
+            sparse_directories,
+        )?;
+    }
     materialize_git_lfs_objects(base_staging, lfs_objects)?;
     remove_file_if_present(temporary_index)?;
     fs::rename(base_staging, base_path)
@@ -2886,13 +2935,121 @@ fn validate_resolved_compatibility(
     repository: &Path,
     common_git_dir: &Path,
     resolved: &ResolvedRevision,
+    sparse_directories: &[String],
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
-    let analysis =
-        analyze_resolved_repository_compatibility(git, repository, common_git_dir, resolved)?;
+    let analysis = analyze_resolved_repository_compatibility(
+        git,
+        repository,
+        common_git_dir,
+        resolved,
+        sparse_directories,
+    )?;
     if let Some(blocker) = analysis.report.blockers.first() {
         return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
     }
     Ok(analysis)
+}
+
+/// Canonicalize a requested cone-mode sparse directory list into the exact
+/// form that keys the immutable base: sorted, deduplicated, trailing-slash
+/// free, with nested cones collapsed into their listed ancestors so base
+/// identity always equals materialized content. Anything outside the
+/// supported literal-directory subset is refused before any state exists.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn canonicalize_sparse_directories(requested: &[String]) -> Result<Vec<String>, WorktreeError> {
+    let mut normalized = Vec::new();
+    for raw in requested {
+        let directory = raw.strip_suffix('/').unwrap_or(raw);
+        if directory.is_empty() {
+            return Err(WorktreeError::InvalidRequest(
+                "sparse directory names cannot be empty; cone mode selects repository-relative directories such as `crates/riftri-core`"
+                    .to_owned(),
+            ));
+        }
+        if raw.starts_with('/') {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {raw} is absolute; cone mode selects directories relative to the repository root"
+            )));
+        }
+        if let Some(unsupported) = directory
+            .chars()
+            .find(|c| matches!(c, '*' | '?' | '[' | ']' | '\\') || c.is_control())
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {raw} contains {unsupported:?}; only literal directory paths with `/` separators are supported, not sparse patterns"
+            )));
+        }
+        if directory.starts_with('!') {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {raw} looks like a negated sparse pattern; only literal cone-mode directory lists are supported"
+            )));
+        }
+        for component in directory.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "sparse directory {raw} must use non-empty path components without `.` or `..`"
+                )));
+            }
+            if component.eq_ignore_ascii_case(".git") {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "sparse directory {raw} names a Git administrative path"
+                )));
+            }
+        }
+        normalized.push(directory.to_owned());
+    }
+    normalized.sort_unstable();
+    normalized.dedup();
+    let mut canonical: Vec<String> = Vec::new();
+    for directory in normalized {
+        let covered = canonical.iter().any(|kept| {
+            directory
+                .strip_prefix(kept.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if !covered {
+            canonical.push(directory);
+        }
+    }
+    Ok(canonical)
+}
+
+/// Require every requested cone directory to exist as a directory in the
+/// exact requested tree, so a misspelled selection cannot silently
+/// materialize a nearly empty worktree.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn validate_sparse_directories_in_tree(
+    sparse_directories: &[String],
+    checkout_paths: &[PathBuf],
+    tree: &ObjectId,
+) -> Result<(), WorktreeError> {
+    for directory in sparse_directories {
+        let prefix = Path::new(directory);
+        let mut is_file = false;
+        let mut is_directory = false;
+        for path in checkout_paths {
+            if path.as_path() == prefix {
+                is_file = true;
+            } else if path.starts_with(prefix) {
+                is_directory = true;
+                break;
+            }
+        }
+        if is_directory {
+            continue;
+        }
+        if is_file {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {directory} is a file in tree {}; cone mode selects directories",
+                tree.as_str()
+            )));
+        }
+        return Err(WorktreeError::InvalidRequest(format!(
+            "sparse directory {directory} does not exist in tree {}",
+            tree.as_str()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -3046,7 +3203,7 @@ fn analyze_repository_compatibility(
     revision: &OsStr,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let resolved = git.resolve_revision(repository, revision)?;
-    analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved)
+    analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[])
 }
 
 fn analyze_resolved_repository_compatibility(
@@ -3054,6 +3211,7 @@ fn analyze_resolved_repository_compatibility(
     repository: &Path,
     common_git_dir: &Path,
     resolved: &ResolvedRevision,
+    sparse_directories: &[String],
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
@@ -3160,6 +3318,20 @@ fn analyze_resolved_repository_compatibility(
         profile.update(b"riftri-checkout-profile-v3-lfs\0");
         let git_version = git.detect()?.version;
         hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
+        // The canonical cone directory list is part of the checkout profile,
+        // so two sparse selections at the same tree, or a sparse and a full
+        // request, can never resolve to the same immutable-base key. Full
+        // requests add no input and keep their existing base identities.
+        if !sparse_directories.is_empty() {
+            hash_profile_input(&mut profile, b"riftri.sparse.mode", Some(b"cone"));
+            for directory in sparse_directories {
+                hash_profile_input(
+                    &mut profile,
+                    b"riftri.sparse.directory",
+                    Some(directory.as_bytes()),
+                );
+            }
+        }
         profile
     };
 
@@ -6758,7 +6930,16 @@ fn remove_registered_worktree_for_rollback(
     } else if git.worktree_is_clean(&journal.destination)? {
         remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
-        git.synchronize_worktree_index(&journal.destination)?;
+        if journal.sparse_directories.is_empty() {
+            git.synchronize_worktree_index(&journal.destination)?;
+        } else {
+            // A sparse view compares against its sparse base; rebuilding a
+            // full index here would misreport out-of-cone entries as deleted.
+            git.synchronize_sparse_worktree_index(
+                &journal.destination,
+                &journal.sparse_directories,
+            )?;
+        }
         if !git.worktree_is_clean(&journal.destination)? {
             return Err(changed_rollback_worktree(journal));
         }
@@ -7629,6 +7810,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from("feature/compact-recovery")),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -7731,6 +7913,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/compact-live-edit")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -7852,6 +8035,7 @@ mod tests {
                 repository,
                 &common_git_dir,
                 &resolved,
+                &[],
             )
             .unwrap();
             // Reconstruct the previous, individual-read profile independently.
@@ -8443,6 +8627,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from(&branch)),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(phase),
                 false,
@@ -8535,6 +8720,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/overlay-gap")),
                 state_dir: Some(required_path("RIFTRI_OVERLAYFS_CORE_STATE")),
+                sparse_directories: Vec::new(),
             },
             None,
             false,
@@ -8573,6 +8759,7 @@ mod tests {
                         "feature/overlay-remove-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -8627,6 +8814,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::Detached,
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -8755,6 +8943,7 @@ mod tests {
                 temporary_index: &state.join("tmp/index-operation"),
                 branch: None,
                 branch_created: false,
+                sparse_directories: &[],
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             BackendKind::ApfsClone,
@@ -8846,6 +9035,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/live-view")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -8914,6 +9104,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/interrupted")),
                 state_dir: Some(state),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::GitPointerRestored),
             true,
@@ -8963,6 +9154,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/recover")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::GitPointerRestored),
             false,
@@ -9026,6 +9218,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from(&branch_name)),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(phase),
                 false,
@@ -9058,6 +9251,83 @@ mod tests {
     }
 
     #[test]
+    fn sparse_add_recovery_is_idempotent_after_every_transition() {
+        let phases = [
+            AddWorktreePhase::IntentRecorded,
+            AddWorktreePhase::GitMetadataCreated,
+            AddWorktreePhase::BaseReady,
+            AddWorktreePhase::ViewCreated,
+            AddWorktreePhase::GitPointerRestored,
+            AddWorktreePhase::IndexSynchronized,
+            AddWorktreePhase::CleanVerified,
+        ];
+
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            let branch_name = format!("feature/sparse-recover-{index}");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::create_dir_all(repository.join("a")).expect("create cone directory");
+            fs::create_dir_all(repository.join("b")).expect("create out-of-cone directory");
+            fs::write(repository.join("root.txt"), "root\n").expect("write root file");
+            fs::write(repository.join("a/file.txt"), "a\n").expect("write cone file");
+            fs::write(repository.join("b/file.txt"), "b\n").expect("write out-of-cone file");
+            git(&repository, &["add", "-A"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            let request = AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from(&branch_name)),
+                state_dir: Some(state.clone()),
+                sparse_directories: vec!["a".to_owned()],
+            };
+
+            let error = add_worktree_inner(request.clone(), Some(phase), false)
+                .expect_err("simulate process termination");
+            assert!(
+                error.to_string().contains("injected failure"),
+                "unexpected failure after {phase:?}: {error}"
+            );
+
+            let recovered = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("recover after {phase:?}: {error}"));
+            assert_eq!(recovered.recovered, 1, "phase {phase:?}");
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert!(!destination.exists(), "phase {phase:?}");
+
+            let repeated = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("repeat recovery after {phase:?}: {error}"));
+            assert_eq!(repeated.recovered, 0, "phase {phase:?}");
+            assert!(repeated.errors.is_empty(), "phase {phase:?}");
+
+            // The same sparse request succeeds after the rollback and yields a
+            // clean, correctly shaped cone view.
+            add_worktree_inner(request, None, true)
+                .unwrap_or_else(|error| panic!("retry after {phase:?}: {error}"));
+            assert!(destination.join("a/file.txt").is_file(), "phase {phase:?}");
+            assert!(destination.join("root.txt").is_file(), "phase {phase:?}");
+            assert!(!destination.join("b").exists(), "phase {phase:?}");
+            let status = Command::new("git")
+                .args(["status", "--porcelain=v1", "--untracked-files=all"])
+                .current_dir(&destination)
+                .output()
+                .expect("inspect recreated sparse worktree");
+            assert!(status.status.success(), "phase {phase:?}");
+            assert!(status.stdout.is_empty(), "phase {phase:?}");
+        }
+    }
+
+    #[test]
     fn recovery_preserves_a_changed_interrupted_view() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
@@ -9082,6 +9352,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/preserve")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::GitPointerRestored),
             false,
@@ -9130,6 +9401,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from("feature/raced-rollback")),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(phase),
                 false,
@@ -9198,6 +9470,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::Detached,
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(AddWorktreePhase::GitMetadataCreated),
                 false,
@@ -9263,6 +9536,7 @@ mod tests {
                         WorktreeMode::NewBranch(OsString::from("feature/interrupted"))
                     },
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(AddWorktreePhase::IndexSynchronized),
                 false,
@@ -9329,6 +9603,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/committed")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::IndexSynchronized),
             false,
@@ -9374,6 +9649,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/remove-recover")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9444,6 +9720,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::Detached,
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9514,6 +9791,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::Detached,
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9584,6 +9862,7 @@ mod tests {
                         "feature/remove-phase-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -9657,6 +9936,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/remove-preserve")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9719,6 +9999,7 @@ mod tests {
                         "feature/gc-phase-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -9794,6 +10075,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/gc-incomplete")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::BaseReady),
             false,
@@ -9841,6 +10123,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/gc-marker")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9940,6 +10223,7 @@ mod tests {
                         "feature/move-phase-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -10020,6 +10304,7 @@ mod tests {
                         "feature/prune-managed-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,

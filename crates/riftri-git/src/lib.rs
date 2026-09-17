@@ -893,6 +893,48 @@ impl Git {
         temporary_index: &Path,
         configuration: &[(String, Vec<u8>)],
     ) -> Result<(), GitError> {
+        self.materialize_tree_inner(
+            repository,
+            tree,
+            destination,
+            temporary_index,
+            configuration,
+            &[],
+        )
+    }
+
+    /// Materialize a cone-mode sparse view of the exact tree. Git's own
+    /// `sparse-checkout set --cone` computes the sparse patterns and
+    /// skip-worktree bits inside the isolated administrative directory, and
+    /// `checkout-index` then writes only the entries Git left active.
+    pub fn materialize_sparse_tree_with_config(
+        &self,
+        repository: &Path,
+        tree: &ObjectId,
+        destination: &Path,
+        temporary_index: &Path,
+        configuration: &[(String, Vec<u8>)],
+        sparse_directories: &[String],
+    ) -> Result<(), GitError> {
+        self.materialize_tree_inner(
+            repository,
+            tree,
+            destination,
+            temporary_index,
+            configuration,
+            sparse_directories,
+        )
+    }
+
+    fn materialize_tree_inner(
+        &self,
+        repository: &Path,
+        tree: &ObjectId,
+        destination: &Path,
+        temporary_index: &Path,
+        configuration: &[(String, Vec<u8>)],
+        sparse_directories: &[String],
+    ) -> Result<(), GitError> {
         let objects = self.run_path(
             Some(repository),
             &[
@@ -1005,6 +1047,19 @@ impl Git {
         let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
         run(&read_tree)?;
 
+        if !sparse_directories.is_empty() {
+            // Real Git computes the cone patterns and applies skip-worktree
+            // bits to the isolated index; checkout-index below honors them.
+            let mut sparse = vec![
+                OsString::from("sparse-checkout"),
+                OsString::from("set"),
+                OsString::from("--cone"),
+                OsString::from("--"),
+            ];
+            sparse.extend(sparse_directories.iter().map(OsString::from));
+            run(&sparse)?;
+        }
+
         let mut prefix = git_path_argument(destination);
         prefix.push(std::path::MAIN_SEPARATOR.to_string());
         let checkout = [
@@ -1063,6 +1118,26 @@ impl Git {
     /// Git process and one full worktree traversal.
     pub fn synchronize_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
         self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+        Ok(())
+    }
+
+    /// Enable per-worktree cone sparse checkout for the listed directories and
+    /// populate the linked worktree index from HEAD. `sparse-checkout set`
+    /// stores the sparse configuration in the worktree-scoped Git
+    /// configuration, exactly as running the command by hand would, and
+    /// `sparse-checkout reapply` restores the skip-worktree bits after the
+    /// index is rebuilt.
+    pub fn synchronize_sparse_worktree_index(
+        &self,
+        worktree: &Path,
+        sparse_directories: &[String],
+    ) -> Result<(), GitError> {
+        let mut arguments = vec!["sparse-checkout", "set", "--cone", "--"];
+        arguments.extend(sparse_directories.iter().map(String::as_str));
+        self.run(Some(worktree), &arguments)?;
+        self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+        self.run(Some(worktree), &["sparse-checkout", "reapply"])?;
+        self.run(Some(worktree), &["update-index", "--refresh"])?;
         Ok(())
     }
 

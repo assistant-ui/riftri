@@ -258,6 +258,14 @@ enum WorktreeCommand {
         #[arg(required_unless_present_any = ["branch", "detach"])]
         revision: Option<OsString>,
 
+        /// Materialize only this directory (plus all repository-root files)
+        /// using Git cone-mode sparse checkout. Repeatable; directories are
+        /// repository-relative with `/` separators. Each distinct selection
+        /// keys its own immutable base. Unsupported sparse forms are refused
+        /// before any state is created.
+        #[arg(long = "sparse-dir", value_name = "DIR")]
+        sparse_dir: Vec<String>,
+
         /// Repository in which Git should create linked-worktree metadata.
         #[arg(long, default_value = ".")]
         repository: PathBuf,
@@ -652,6 +660,7 @@ fn run(cli: Cli) -> Result<()> {
                 branch,
                 detach,
                 revision,
+                sparse_dir,
                 repository,
                 state_dir,
                 json,
@@ -677,6 +686,7 @@ fn run(cli: Cli) -> Result<()> {
                     revision,
                     mode,
                     state_dir,
+                    sparse_directories: sparse_dir,
                 })?;
                 print_add_result(&result, json)?;
             }

@@ -1,0 +1,69 @@
+# Sparse-checkout worktrees
+
+Riftri supports a deliberately narrow, deterministic slice of Git
+sparse checkout: **cone mode with an explicit directory list**, requested
+per worktree on the explicit interface:
+
+```console
+$ riftri worktree add ../app-core -b feature/core main \
+    --sparse-dir crates/riftri-core --sparse-dir docs
+```
+
+The resulting directory is a real linked Git worktree whose working tree
+contains every repository-root file, every file directly inside a listed
+directory's ancestors, and everything below the listed directories — exactly
+the shape `git sparse-checkout set --cone` produces. Git remains the source of
+truth: the immutable base is materialized by Git's own sparse-checkout and
+`checkout-index` machinery in an isolated administrative directory, and the new
+worktree carries real worktree-scoped sparse configuration
+(`core.sparseCheckout` plus the cone directory list), real skip-worktree index
+bits, and a verified clean `git status` before Riftri reports success.
+Enabling that worktree-scoped configuration turns on Git's standard
+`extensions.worktreeConfig` setting for the repository, exactly as running
+`git sparse-checkout set` in any linked worktree would; the main worktree and
+other worktrees keep their ordinary full-checkout behavior.
+
+## Configuration source
+
+The sparse selection comes only from repeated `--sparse-dir <DIR>` flags on
+`riftri worktree add`. Each directory is repository-relative with `/`
+separators. The list is canonicalized — sorted, deduplicated, trailing slashes
+removed, and nested selections collapsed into their listed ancestors — and the
+canonical list becomes part of the versioned checkout profile that keys the
+immutable base. Two different selections at the same commit therefore always
+build or reuse different bases, a sparse and a full request never share a
+base, and repeating an equivalent selection reuses its cached base. Full
+(non-sparse) requests are unaffected and keep their existing base identities.
+
+## Refusal behavior
+
+Anything outside this subset fails closed with a precise diagnostic before
+Riftri creates lifecycle state, a branch, or Git worktree metadata — a sparse
+request is never silently materialized as a full tree, and an unsupported one
+never partially materializes:
+
+- Sparse patterns are not accepted: wildcards (`*`, `?`, `[`, `]`), negations
+  (`!dir`), backslashes, control characters, absolute paths, and `.`/`..`
+  components are all refused. Only literal directory lists are supported.
+- Each listed directory must exist as a directory in the exact requested tree,
+  so a misspelled selection cannot silently produce a nearly empty worktree.
+- Repository-configured sparse checkout (`core.sparseCheckout=true` in the
+  repository's own configuration) remains an unsupported checkout profile for
+  any optimized add, sparse or full.
+- Intercepted `git worktree add` commands (process-scoped or shell-hook
+  activation) cannot request a sparse view yet; sparse-looking options are
+  refused with a pointer to the explicit interface, and `RIFTRI_BYPASS=1`
+  remains the ordinary-Git escape hatch.
+- Trees with Git LFS-managed paths cannot be combined with a sparse selection
+  yet.
+- Compacting a sparse worktree is refused; remove and recreate the worktree to
+  reset its storage.
+
+## Lifecycle
+
+Sparse views use the same journaled add transaction, private-write isolation,
+clean-removal lifecycle, and crash recovery as full views. An interrupted
+sparse add rolls back completely and can simply be retried. Non-cone patterns,
+file-level sparse selection, sparse requests through Git interception, and
+changing an existing worktree's sparse profile in place remain future work
+tracked in the roadmap.

@@ -1242,6 +1242,14 @@ fn parse_enabled_add(
         } else if options && (argument == "--quiet" || argument == "--checkout") {
             // The optimized implementation is already quiet and always creates
             // a checked-out, clean result before returning.
+        } else if options
+            && (argument == "--sparse"
+                || argument == "--sparse-dir"
+                || argument.to_string_lossy().starts_with("--sparse-dir="))
+        {
+            return Err(unsupported(format!(
+                "sparse worktrees are only available through the explicit `riftri worktree add --sparse-dir` interface; intercepted Git adds cannot request a sparse view yet. Set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+            )));
         } else if options && argument.to_string_lossy().starts_with('-') {
             return Err(unsupported(format!(
                 "option {} is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation",
@@ -1286,6 +1294,7 @@ fn parse_enabled_add(
         revision,
         mode,
         state_dir: None,
+        sparse_directories: Vec::new(),
     })
 }
 
@@ -1682,6 +1691,38 @@ mod tests {
                 .to_string()
                 .contains("requires an existing local branch")
         );
+    }
+
+    #[test]
+    fn enabled_add_refuses_a_sparse_request_with_a_precise_diagnostic() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for sparse_argument in [
+            "--sparse",
+            "--sparse-dir",
+            "--sparse-dir=crates/riftri-core",
+        ] {
+            let arguments = [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from(sparse_argument),
+                OsString::from("-b"),
+                OsString::from("feature/sparse"),
+                OsString::from("../sparse-view"),
+            ];
+
+            let error = plan_git_command(fixture.path(), &arguments)
+                .expect_err("intercepted sparse add must fail before any state exists");
+            let message = error.to_string();
+            assert!(
+                message.contains("riftri worktree add --sparse-dir"),
+                "{sparse_argument}: {message}"
+            );
+            assert!(
+                message.contains("cannot request a sparse view"),
+                "{sparse_argument}: {message}"
+            );
+        }
     }
 
     #[test]
