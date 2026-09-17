@@ -1045,7 +1045,9 @@ fn print_shell_status(repository: &Path) -> Result<()> {
             );
             println!(
                 "Effective optimized interception: {}",
-                if shell.active && activation.enabled {
+                if shell.bypass {
+                    "inactive (RIFTRI_BYPASS)"
+                } else if shell.active && activation.enabled {
                     "active"
                 } else {
                     "inactive"

@@ -37,6 +37,7 @@ pub struct RepositoryActivation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ShellActivationStatus {
     pub active: bool,
+    pub bypass: bool,
     pub marker_set: bool,
     pub shim_first_on_path: bool,
     pub shim_directory: PathBuf,
@@ -586,6 +587,7 @@ fn shell_activation_status_inner() -> Result<ShellActivationStatus, ActivationEr
         && real_git.as_deref().is_some_and(is_executable_file);
     Ok(ShellActivationStatus {
         active,
+        bypass: environment_truthy(BYPASS_ENV),
         marker_set,
         shim_first_on_path,
         shim_directory,
