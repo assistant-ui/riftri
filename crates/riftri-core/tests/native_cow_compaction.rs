@@ -155,6 +155,39 @@ fn compaction_refuses_ignored_files_even_when_git_calls_the_view_clean() {
     assert_eq!(storage_accounting(&state).unwrap().pending_compactions, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn compaction_refuses_special_permissions_before_recording_intent() {
+    use std::os::unix::fs::PermissionsExt;
+    let (fixture, repository) = fixture();
+    let state = fixture.path().join("state");
+    let worktree = fixture.path().join("worktree");
+    add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::Detached,
+        state_dir: Some(state.clone()),
+    })
+    .unwrap();
+    fs::set_permissions(&worktree, fs::Permissions::from_mode(0o1755)).unwrap();
+    let pointer = fs::read(worktree.join(".git")).unwrap();
+    assert!(git(&worktree, &["status", "--porcelain"]).is_empty());
+    let error = compact_worktree(CompactWorktreeRequest {
+        repository,
+        destination: worktree.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("preserve sticky directory");
+    assert!(error.to_string().contains("special Unix permissions"));
+    assert_eq!(
+        fs::metadata(&worktree).unwrap().permissions().mode() & 0o7777,
+        0o1755
+    );
+    assert_eq!(fs::read(worktree.join(".git")).unwrap(), pointer);
+    assert_eq!(fs::read_dir(state.join("compactions")).unwrap().count(), 0);
+}
+
 #[test]
 fn compaction_rekeys_the_active_view_after_a_clean_commit() {
     let (fixture, repository) = fixture();

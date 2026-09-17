@@ -336,8 +336,12 @@ intent-recorded
 Before recording intent, Riftri requires an active managed Git registration,
 the expected HEAD, and an empty structured status including ignored paths. It
 snapshots names, kinds, bytes, modes, symlink targets, Unix extended
-attributes, and Windows file attributes across the complete view. Windows
-alternate data streams fail closed. Riftri then prepares or reuses the exact current-tree base,
+attributes, and Windows file attributes across the complete view. Unix
+setuid, setgid, and sticky bits are not represented by Git trees;
+compaction refuses entries carrying these special bits, including during
+recovery, rather than dropping them. Ordinary-mode snapshot compatibility is
+unchanged. Windows alternate data streams fail closed. Riftri then prepares or
+reuses the exact current-tree base,
 creates a fresh native COW replacement, and copies the real linked-worktree
 pointer into it. Immediately before the same-parent directory swap, Riftri
 revalidates registration, HEAD, strict cleanliness, and the snapshot. The old
