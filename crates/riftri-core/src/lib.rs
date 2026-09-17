@@ -610,16 +610,15 @@ fn destination_readiness(
         .as_ref()
         .and_then(|info| info.root.as_deref());
     let next_command = match status {
-        DestinationReadinessStatus::Ready => repository_root.map(|root| {
-            format!(
+        DestinationReadinessStatus::Ready => repository_root.and_then(|root| {
+            Some(format!(
                 "riftri worktree add {} --detach HEAD --repository {}",
-                destination.display(),
-                root.display()
-            )
+                quote_command_path(destination)?,
+                quote_command_path(root)?
+            ))
         }),
-        DestinationReadinessStatus::NeedsActivation => {
-            repository_root.map(|root| format!("riftri enable {}", root.display()))
-        }
+        DestinationReadinessStatus::NeedsActivation => repository_root
+            .and_then(|root| Some(format!("riftri enable {}", quote_command_path(root)?))),
         DestinationReadinessStatus::Blocked
             if overlayfs_helper == OverlayFsHelperReadiness::Unavailable =>
         {
@@ -637,6 +636,16 @@ fn destination_readiness(
         blockers,
         next_command,
     }
+}
+
+fn quote_command_path(path: &Path) -> Option<String> {
+    let path = path.to_str()?;
+    let escaped = if cfg!(windows) {
+        path.replace('\'', "''")
+    } else {
+        path.replace('\'', "'\"'\"'")
+    };
+    Some(format!("'{escaped}'"))
 }
 
 fn compatibility_remedy(kind: RepositoryCompatibilityBlockerKind) -> &'static str {

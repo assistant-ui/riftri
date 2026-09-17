@@ -439,8 +439,11 @@ fn doctor_marks_an_enabled_supported_destination_ready() {
 #[cfg(target_os = "macos")]
 #[test]
 fn doctor_commands_keep_the_selected_repository_outside_git() {
-    let fixture = RepositoryFixture::new();
-    let destination = fixture.directory.path().join("suggested-worktree");
+    let mut fixture = RepositoryFixture::new();
+    let repository = fixture.directory.path().join("repo ' $(false); & space");
+    fs::rename(&fixture.repository, &repository).expect("rename repository");
+    fixture.repository = repository;
+    let destination = fixture.directory.path().join("view ' $(false); & space");
     let binary = Path::new(env!("CARGO_BIN_EXE_riftri"));
     let path = std::env::join_paths(
         std::iter::once(binary.parent().expect("binary directory").to_path_buf()).chain(

@@ -22,7 +22,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
 - Doctor's suggested add and activation commands keep the inspected repository
-  when doctor runs from a different directory.
+  when doctor runs from a different directory. Repository and destination paths
+  use shell quotes to preserve spaces and shell metacharacters.
 
 ## 0.2.3 - 2026-09-16
 
