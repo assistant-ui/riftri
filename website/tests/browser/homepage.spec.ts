@@ -105,31 +105,9 @@ test("Markdown link navigates in the same tab without a download", async ({ page
   expect(context.pages()).toHaveLength(count);
 });
 
-test("both example diagrams can pause and resume", async ({ page }) => {
-  await page.emulateMedia({ reducedMotion: "no-preference" });
-  await page.goto("/");
-  for (const name of ["worktree example", "storage backend"]) {
-    const figure = page.locator(name === "worktree example" ? ".storage-map" : ".materialization-map");
-    const button = figure.getByRole("button");
-    await expect(button).toHaveAccessibleName(`Pause ${name} animation`);
-    await expect(button).toBeEnabled();
-    await button.click();
-    await expect(button).toHaveAccessibleName(`Resume ${name} animation`);
-    await expect(button).toHaveText("Resume");
-    await expect(button).toHaveAttribute("aria-pressed", "true");
-    await expect(figure).toHaveAttribute("data-paused", "true");
-    const states = await figure.locator(".track-counter, .backend-cycle-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationPlayState));
-    expect(states.every((state) => state === "paused")).toBe(true);
-    await button.click();
-    await expect(button).toHaveAccessibleName(`Pause ${name} animation`);
-    await expect(button).toHaveText("Pause");
-    await expect(button).toHaveAttribute("aria-pressed", "false");
-  }
-});
-
 test("reduced motion stops loops while preserving readable diagram content", async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByRole("button", { name: /motion disabled by preference/ })).toHaveCount(2);
+  await expect(page.locator(".storage-map, .materialization-map").getByRole("button")).toHaveCount(0);
   const names = await page.locator(".track-counter, .backend-cycle-item, .savings-backend-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName));
   expect(names.every((name) => name === "none")).toBe(true);
   await expect(page.getByText("APFS · Linux · ReFS", { exact: true })).toBeVisible();
