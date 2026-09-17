@@ -563,6 +563,185 @@ fn repository_state_directories_with_git(
     Ok(directories)
 }
 
+/// Origin of one discovered state directory in an all-states inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateDirectorySource {
+    /// The implicit `<common-git-dir>/riftri` location.
+    Default,
+    /// A `riftri.stateDirectory` registration in the repository-local config.
+    Registered,
+}
+
+impl StateDirectorySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Registered => "registered",
+        }
+    }
+}
+
+/// Read-only worktree inventory for one discovered state directory.
+#[derive(Debug, Clone)]
+pub struct StateWorktreeInventory {
+    /// Resolved real state-directory path.
+    pub state_directory: PathBuf,
+    pub source: StateDirectorySource,
+    /// Active managed worktrees owned by the queried repository.
+    pub views: Vec<ViewStorageAccounting>,
+    /// Diagnostic findings inside this state directory.
+    pub diagnostic_issues: Vec<StateDiagnosticIssue>,
+}
+
+/// Read-only worktree inventory across every state directory the repository
+/// registers, including its implicit default location.
+#[derive(Debug, Clone, Default)]
+pub struct AllStatesWorktreeInventory {
+    pub states: Vec<StateWorktreeInventory>,
+    /// Registrations that discovery reported instead of traversing: missing,
+    /// malformed, or unsafe state-directory registrations.
+    pub registration_issues: Vec<StateDiagnosticIssue>,
+}
+
+/// Inventory managed worktrees across the default state location and every
+/// registered state directory of `repository`, without mutating anything.
+///
+/// Registrations that are missing, not absolute, or not real directories are
+/// reported as diagnostic entries and never traversed. Worktrees belonging to
+/// other repositories that share a state directory are filtered out by
+/// repository identity.
+pub fn worktree_inventory_across_states(
+    repository: &Path,
+) -> Result<AllStatesWorktreeInventory, WorktreeError> {
+    let git = Git::default();
+    let repository_info = git.inspect_repository(repository)?;
+    let repository_root = repository_info.root.as_deref().ok_or_else(|| {
+        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    })?;
+    let query_identity = repository_info.identity.common_git_dir.clone();
+
+    let mut inventory = AllStatesWorktreeInventory::default();
+    let mut discovered: Vec<(PathBuf, StateDirectorySource)> = Vec::new();
+
+    let default = repository_info.identity.common_git_dir.join("riftri");
+    match resolve_real_state_directory_if_present(&default) {
+        Ok(Some(resolved)) => discovered.push((resolved, StateDirectorySource::Default)),
+        Ok(None) => {}
+        Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
+            path: default,
+            reason: format!(
+                "default Riftri state path is not a real directory; discovery did not traverse it: {error}"
+            ),
+        }),
+    }
+
+    for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
+        if !configured.is_absolute() {
+            inventory.registration_issues.push(StateDiagnosticIssue {
+                path: configured,
+                reason: "registered Riftri state directory is not absolute; discovery skipped it"
+                    .to_owned(),
+            });
+            continue;
+        }
+        match fs::symlink_metadata(&configured) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: "registered Riftri state directory is missing; \
+                             `riftri state unregister` can remove the stale registration"
+                        .to_owned(),
+                });
+                continue;
+            }
+            Err(source) => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: format!(
+                        "registered Riftri state directory could not be inspected: {source}"
+                    ),
+                });
+                continue;
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: "registered Riftri state path is not a real directory; \
+                             discovery did not traverse it"
+                        .to_owned(),
+                });
+                continue;
+            }
+            Ok(_) => {}
+        }
+        match resolve_real_state_directory(&configured) {
+            Ok(resolved) => {
+                if !discovered
+                    .iter()
+                    .any(|(existing, _)| paths_match(existing, &resolved))
+                {
+                    discovered.push((resolved, StateDirectorySource::Registered));
+                }
+            }
+            Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
+                path: configured,
+                reason: format!("registered Riftri state directory could not be resolved: {error}"),
+            }),
+        }
+    }
+
+    let mut identity_cache: BTreeMap<PathBuf, Option<PathBuf>> = BTreeMap::new();
+    for (state_directory, source) in discovered {
+        let report = match storage_accounting(&state_directory) {
+            Ok(report) => report,
+            Err(error) => {
+                inventory.states.push(StateWorktreeInventory {
+                    diagnostic_issues: vec![StateDiagnosticIssue {
+                        path: state_directory.clone(),
+                        reason: format!(
+                            "state directory could not be inventoried; discovery reported it instead of guessing: {error}"
+                        ),
+                    }],
+                    state_directory,
+                    source,
+                    views: Vec::new(),
+                });
+                continue;
+            }
+        };
+        let mut views = Vec::new();
+        let mut diagnostic_issues = report.diagnostic_issues;
+        for view in report.views {
+            let identity = identity_cache
+                .entry(view.repository.clone())
+                .or_insert_with(|| {
+                    git.inspect_repository(&view.repository)
+                        .ok()
+                        .map(|info| info.identity.common_git_dir)
+                });
+            match identity {
+                Some(identity) if paths_match(identity, &query_identity) => views.push(view),
+                Some(_) => {}
+                None => diagnostic_issues.push(StateDiagnosticIssue {
+                    path: view.destination,
+                    reason: format!(
+                        "managed worktree belongs to a repository that could not be inspected; \
+                         it was left out of the repository-filtered inventory: {}",
+                        view.repository.display()
+                    ),
+                }),
+            }
+        }
+        inventory.states.push(StateWorktreeInventory {
+            state_directory,
+            source,
+            views,
+            diagnostic_issues,
+        });
+    }
+    Ok(inventory)
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn register_state_directory(
     git: &Git,
