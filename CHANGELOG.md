@@ -18,6 +18,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- `riftri worktree add` spawns three fewer Git processes per creation (21 to
+  18 cached, 27 to 24 cold on macOS): the two attribute-compatibility passes
+  share one `read-tree` temporary index, the compatibility analysis reuses the
+  already-resolved common Git directory instead of re-running `rev-parse`, and
+  the separate `update-index --refresh` is gone because the fail-closed clean
+  check performs the same full refresh. Corruption detection, index contents,
+  and the clean-creation guarantee are unchanged, and a new integration test
+  guards the per-add Git invocation budget.
 - `riftri state unregister <PATH>` replaces the displayed `state forget-missing`
   command. The old name remains a hidden compatibility alias, and existing paths
   still cannot be unregistered. Help, completions, and generated man pages use
