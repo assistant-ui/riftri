@@ -16,6 +16,10 @@ Two conventions apply everywhere:
   (`doctor`, `backends`, `status`, `repair`, `gc`, and all `worktree`
   subcommands). It emits stable machine-readable JSON on success.
 
+A third convention, [progress reporting](#progress-reporting), applies to the
+long-running lifecycle commands and is suppressed with the global
+`--no-progress` flag.
+
 Commands that operate on a repository accept it as an optional positional
 argument or a `--repository` flag, defaulting to the current directory (`.`).
 Commands that touch Riftri state accept `--state-dir <PATH>` to override the
@@ -35,6 +39,41 @@ the `--json-errors` receipt, so a wrapper can branch on the exit status
 without parsing JSON. A policy refusal means nothing was changed; consult
 [decisions.md](decisions.md) for the forms Riftri refuses and `RIFTRI_BYPASS=1`
 to run one such command through ordinary Git instead.
+
+## Progress reporting
+
+Long-running lifecycle commands — `worktree add`, `repair`, and `gc` — print
+one plain line on stderr each time the operation durably reaches a journal
+phase, starts waiting on a coordination lock another process holds, or
+resumes after acquiring it:
+
+```text
+riftri: worktree-add: intent-recorded
+riftri: worktree-add: materializing new immutable base
+riftri: worktree-add: base-ready
+riftri: waiting: read-lock immutable base (held by another process)
+riftri: resumed: read-lock immutable base
+riftri: worktree-add: active
+```
+
+Every line reflects a state the operation genuinely reached — there are no
+percentages, timers, or animations, and no terminal control sequences even
+when stderr is a terminal — so redirected logs stay clean and output is
+bounded by the number of real transitions. The phase names match the durable
+journal phases that also appear in `--json-errors` receipts.
+
+Two suppression rules keep machine-readable streams intact:
+
+- The global `--no-progress` flag disables progress lines for quiet scripted
+  use.
+- `--json-errors` implies `--no-progress`, because a caller expecting one
+  JSON failure receipt on stderr must never receive interleaved progress
+  text. There is no separate structured progress stream; parse the receipt's
+  `phase` field instead.
+
+`--json` is unaffected: its single report goes to stdout while progress uses
+stderr, so `riftri worktree add … --json 2>log` still yields exactly one
+valid JSON document on stdout.
 
 ## Destructive commands
 

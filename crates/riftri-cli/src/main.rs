@@ -39,6 +39,10 @@ struct Cli {
     #[arg(long, global = true)]
     json_errors: bool,
 
+    /// Do not print lifecycle phase-progress lines on stderr.
+    #[arg(long, global = true)]
+    no_progress: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -409,6 +413,13 @@ fn main() -> Result<()> {
     let json_errors = cli.json_errors;
     let operation = cli.command.operation_name();
 
+    // Progress lines share stderr with the `--json-errors` receipt, so that
+    // flag suppresses them automatically: callers expecting one machine-
+    // readable failure receipt must never receive interleaved progress text.
+    if !cli.no_progress && !json_errors {
+        riftri_core::progress::set_progress_observer(Box::new(report_progress));
+    }
+
     match run(cli) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -737,6 +748,46 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Print one plain progress line per lifecycle state transition on stderr.
+///
+/// Lines are emitted only when an operation durably reaches a phase, starts
+/// waiting on a contended lock, or resumes after one — never on timers or
+/// per-file work — so output stays bounded and never uses control sequences,
+/// whether or not stderr is a terminal. `--no-progress` disables these lines
+/// and `--json-errors` implies that, keeping stderr reserved for its single
+/// JSON failure receipt.
+fn report_progress(event: &riftri_core::progress::ProgressEvent) {
+    use riftri_core::progress::ProgressEvent;
+
+    let line = match event {
+        ProgressEvent::LockContended { operation } => {
+            format!("waiting: {operation} (held by another process)")
+        }
+        ProgressEvent::LockAcquired { operation } => format!("resumed: {operation}"),
+        ProgressEvent::AddPhase { phase } => {
+            format!("worktree-add: {}", add_phase_name(*phase))
+        }
+        ProgressEvent::BaseReused => "worktree-add: immutable base cached; reusing it".to_owned(),
+        ProgressEvent::BaseMaterializing => {
+            "worktree-add: materializing new immutable base".to_owned()
+        }
+        ProgressEvent::RepairScanned { operations } => {
+            format!("repair: scanned {operations} journaled operation(s)")
+        }
+        ProgressEvent::RepairRecovering { kind, operation_id } => {
+            format!("repair: recovering {kind} operation {operation_id}")
+        }
+        ProgressEvent::GcPlanned { candidates } => {
+            format!("garbage-collection: {candidates} candidate base(s)")
+        }
+        ProgressEvent::GcPhase { phase } => {
+            format!("garbage-collection: {}", collection_phase_name(*phase))
+        }
+        _ => return,
+    };
+    eprintln!("riftri: {line}");
 }
 
 fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {

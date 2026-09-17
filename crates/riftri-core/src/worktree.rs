@@ -58,6 +58,7 @@ use crate::journal::{
     DecodedJournal, DecodedMoveJournal, DecodedPruneJournal, DecodedRemovalJournal, JournalError,
     JournalStore, MoveJournalStore, PruneJournalStore, RemovalJournalRecord, RemovalJournalStore,
 };
+use crate::progress::{self, ProgressEvent};
 use crate::{
     AddWorktreePhase, CompactJournalTransitionError, CompactWorktreePhase, GarbageCollectionPhase,
     JournalTransitionError, MoveJournalTransitionError, MoveWorktreePhase,
@@ -785,8 +786,20 @@ fn acquire_coordination_lock(
     lock_operation: &'static str,
 ) -> Result<File, WorktreeError> {
     let lock = open_coordination_lock(lock_path, open_operation)?;
-    lock.lock_exclusive()
-        .map_err(|source| io(lock_operation, lock_path, source))?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            progress::emit(ProgressEvent::LockContended {
+                operation: lock_operation,
+            });
+            lock.lock_exclusive()
+                .map_err(|source| io(lock_operation, lock_path, source))?;
+            progress::emit(ProgressEvent::LockAcquired {
+                operation: lock_operation,
+            });
+        }
+        Err(source) => return Err(io(lock_operation, lock_path, source)),
+    }
     validate_coordination_lock(&lock, lock_path)?;
     Ok(lock)
 }
@@ -1230,6 +1243,9 @@ fn garbage_collect_inner(
         0
     };
     let candidates = garbage_collection_candidates(&state_directory)?;
+    progress::emit(ProgressEvent::GcPlanned {
+        candidates: candidates.len(),
+    });
     let mut report = GarbageCollectionReport {
         applied: apply,
         candidates: candidates.clone(),
@@ -1258,6 +1274,9 @@ fn garbage_collect_inner(
         let decoded = journal.clone().decode(journal_path.clone())?;
         validate_new_collection_candidate(&state_directory, &decoded)?;
         let journal_path = store.persist(&journal)?;
+        progress::emit(ProgressEvent::GcPhase {
+            phase: journal.phase,
+        });
         fail_collection_if_requested(journal.phase, fail_after)?;
         let decoded = journal.clone().decode(journal_path)?;
         if resume_collection(&state_directory, &store, &mut journal, &decoded, fail_after)? {
@@ -1627,6 +1646,7 @@ fn advance_collection(
 ) -> Result<(), WorktreeError> {
     journal.transition(phase)?;
     store.persist(journal)?;
+    progress::emit(ProgressEvent::GcPhase { phase });
     fail_collection_if_requested(phase, fail_after)
 }
 
@@ -2251,6 +2271,9 @@ fn add_worktree_inner(
         )
     };
     let journal_path = store.persist(&journal)?;
+    progress::emit(ProgressEvent::AddPhase {
+        phase: journal.phase,
+    });
 
     let operation = fail_add_if_requested(journal.phase, fail_after).and_then(|()| {
         perform_add(
@@ -2299,11 +2322,19 @@ fn add_worktree_inner(
                             .map_err(WorktreeError::from)
                     });
             let rollback = rollback_journal
+                .map(|()| {
+                    progress::emit(ProgressEvent::AddPhase {
+                        phase: AddWorktreePhase::RollbackPending,
+                    });
+                })
                 .and_then(|()| decoded.map_err(WorktreeError::from))
                 .and_then(|decoded| rollback_decoded(&git, &decoded))
                 .and_then(|()| {
                     journal.transition(AddWorktreePhase::RolledBack)?;
                     store.persist(&journal)?;
+                    progress::emit(ProgressEvent::AddPhase {
+                        phase: AddWorktreePhase::RolledBack,
+                    });
                     Ok(())
                 });
 
@@ -2521,6 +2552,7 @@ fn advance(
 ) -> Result<(), WorktreeError> {
     journal.transition(phase)?;
     store.persist(journal)?;
+    progress::emit(ProgressEvent::AddPhase { phase });
     fail_add_if_requested(phase, fail_after)
 }
 
@@ -2622,9 +2654,21 @@ impl Drop for BaseReadLock {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn acquire_base_read_lock(lock_path: &Path) -> Result<BaseReadLock, WorktreeError> {
+    const LOCK_OPERATION: &str = "read-lock immutable base";
     let lock = open_coordination_lock(lock_path, "open immutable-base lock")?;
-    FileExt::lock_shared(&lock)
-        .map_err(|source| io("read-lock immutable base", lock_path, source))?;
+    match FileExt::try_lock_shared(&lock) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            progress::emit(ProgressEvent::LockContended {
+                operation: LOCK_OPERATION,
+            });
+            FileExt::lock_shared(&lock).map_err(|source| io(LOCK_OPERATION, lock_path, source))?;
+            progress::emit(ProgressEvent::LockAcquired {
+                operation: LOCK_OPERATION,
+            });
+        }
+        Err(source) => return Err(io(LOCK_OPERATION, lock_path, source)),
+    }
     let lock = BaseReadLock(lock);
     validate_coordination_lock(&lock.0, lock_path)?;
     Ok(lock)
@@ -2775,6 +2819,7 @@ fn prepare_base(
     let complete_path = base_parent.join(format!("{}.complete", tree.as_str()));
     let read_lock = acquire_base_read_lock(&lock_path)?;
     if verify_existing_base(base_path, &complete_path)? {
+        progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
     }
     // Never upgrade a held shared lock: concurrent cold callers could deadlock.
@@ -2787,8 +2832,10 @@ fn prepare_base(
         "lock immutable base",
     )?;
     if verify_existing_base(base_path, &complete_path)? {
+        progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
     }
+    progress::emit(ProgressEvent::BaseMaterializing);
     remove_tree_if_present(base_path)?;
     remove_file_if_present(&complete_path)?;
 
@@ -4826,6 +4873,9 @@ pub fn recover_incomplete_operations(
             .saturating_add(collection_journals.len()),
         ..RecoveryReport::default()
     };
+    progress::emit(ProgressEvent::RepairScanned {
+        operations: report.scanned,
+    });
     let git = Git::default();
 
     for (operation_id, error) in invalid_removal_journals {
@@ -4882,6 +4932,10 @@ pub fn recover_incomplete_operations(
             }
             AddWorktreePhase::RolledBack => {}
             _ => {
+                progress::emit(ProgressEvent::RepairRecovering {
+                    kind: "add",
+                    operation_id: journal.operation_id.clone(),
+                });
                 if let Err(error) = validate_recovery_paths(&state_directory, &journal)
                     .and_then(|()| adopt_overlayfs_mount_identity(&store, journal.clone()))
                     .and_then(|journal| {
@@ -4907,6 +4961,10 @@ pub fn recover_incomplete_operations(
             report.completed_removals += 1;
             continue;
         }
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "removal",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_removal(&git, &removal_store, journal.clone()) {
             report.errors.push(format!(
                 "removal operation {}: {error}",
@@ -4925,6 +4983,10 @@ pub fn recover_incomplete_operations(
             report.completed_moves += 1;
             continue;
         }
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "move",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_move(&git, &move_store, journal.clone(), None) {
             report
                 .errors
@@ -4971,6 +5033,10 @@ pub fn recover_incomplete_operations(
                 continue;
             }
         };
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "compaction",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_compaction(&git, &compact_store, journal.clone(), None) {
             report.errors.push(format!(
                 "compaction operation {}: {error}",
@@ -4995,6 +5061,10 @@ pub fn recover_incomplete_operations(
             report.completed_prunes += 1;
             continue;
         }
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "prune",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_prune(&git, &prune_store, journal.clone(), None) {
             report
                 .errors
@@ -5011,6 +5081,10 @@ pub fn recover_incomplete_operations(
             GarbageCollectionPhase::Complete => report.completed_collections += 1,
             GarbageCollectionPhase::Cancelled => {}
             _ => {
+                progress::emit(ProgressEvent::RepairRecovering {
+                    kind: "garbage-collection",
+                    operation_id: journal.operation_id.clone(),
+                });
                 match resume_decoded_collection(&state_directory, &collection_store, &journal, None)
                 {
                     Ok(true) => {
