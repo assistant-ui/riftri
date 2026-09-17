@@ -1293,10 +1293,17 @@ fn validate_collection_paths(
             journal.journal_path.display()
         )));
     }
-    for directory in [&base_root, repository_directory] {
+    for directory in [
+        &state_directory.join("bases"),
+        &base_root,
+        repository_directory,
+    ] {
         let metadata = fs::symlink_metadata(directory)
             .map_err(|source| io("inspect collection parent", directory, source))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() {
+            return Err(symlinked_base_parent_error(state_directory, directory));
+        }
+        if !metadata.is_dir() {
             return Err(WorktreeError::InvalidRequest(format!(
                 "collection journal {} has a non-directory or symlinked parent {}",
                 journal.journal_path.display(),
@@ -4126,15 +4133,16 @@ fn diagnose_base_directories(
     coordination_locks: &mut usize,
 ) -> Result<(), WorktreeError> {
     let bases = state_directory.join("bases");
-    if is_real_directory_if_present(&bases)? {
-        for path in child_paths(&bases, "read immutable-base layout")? {
-            if path != bases.join("v1") {
-                add_state_issue(
-                    issues,
-                    path,
-                    "not part of the supported immutable-base layout version",
-                );
-            }
+    if !is_real_directory_if_present(&bases)? {
+        return Ok(());
+    }
+    for path in child_paths(&bases, "read immutable-base layout")? {
+        if path != bases.join("v1") {
+            add_state_issue(
+                issues,
+                path,
+                "not part of the supported immutable-base layout version",
+            );
         }
     }
 
@@ -4375,22 +4383,42 @@ enum UnsafeBaseInventory {
     Reject,
 }
 
+fn symlinked_base_parent_error(state_directory: &Path, directory: &Path) -> WorktreeError {
+    WorktreeError::InvalidRequest(format!(
+        "cleanup stopped: immutable-base path {} is a symbolic link, not a real directory.\n\
+         Following it could access data outside Riftri's expected storage layout. \
+         Riftri did not follow this link or delete data through it.\n\
+         Next: run `riftri status --state-dir <STATE_DIR>` to inspect the affected state, \
+         replacing <STATE_DIR> with your state directory (quote paths in your shell).\n\
+         State directory: {}\n\
+         Do not delete or move the linked data manually. For new worktrees, use --state-dir \
+         with a real directory; this does not repair an existing redirected layout.",
+        directory.display(),
+        state_directory.display(),
+    ))
+}
+
 fn retained_base_paths(
     state_directory: &Path,
     unsafe_inventory: UnsafeBaseInventory,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
     let root = state_directory.join("bases/v1");
-    match fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) if unsafe_inventory == UnsafeBaseInventory::Ignore => return Ok(Vec::new()),
-        Ok(_) => {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "immutable-base root {} is not a real directory",
-                root.display()
-            )));
+    for directory in [&state_directory.join("bases"), &root] {
+        match fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) if unsafe_inventory == UnsafeBaseInventory::Ignore => return Ok(Vec::new()),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(symlinked_base_parent_error(state_directory, directory));
+            }
+            Ok(_) => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "immutable-base root {} is not a real directory",
+                    directory.display()
+                )));
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(io("inspect immutable-base root", directory, source)),
         }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(io("inspect immutable-base root", &root, source)),
     }
     let mut bases = Vec::new();
     for repository_entry in
@@ -7866,6 +7894,101 @@ mod tests {
             fs::read_to_string(outside_base.join("private.txt")).expect("read outside file"),
             "outside\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_and_gc_preserve_bases_behind_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        for pending_collection in [false, true] {
+            let fixture = tempdir().expect("fixture");
+            let state = fixture.path().join("state");
+            let base = state
+                .join("bases/v1/repository")
+                .join("0123456789abcdef0123456789abcdef01234567");
+            fs::create_dir_all(&base).expect("create base");
+            fs::write(base.join("private.txt"), "outside\n").expect("write base file");
+            fs::write(base.with_extension("complete"), "").expect("write base marker");
+            let state = state.canonicalize().expect("resolve state");
+            if pending_collection {
+                assert!(matches!(
+                    garbage_collect_inner(
+                        &state,
+                        true,
+                        Some(GarbageCollectionPhase::IntentRecorded)
+                    ),
+                    Err(super::WorktreeError::InjectedCollectionFailure(
+                        GarbageCollectionPhase::IntentRecorded
+                    ))
+                ));
+            }
+            let parent = state.join("bases");
+            let outside = fixture.path().join("outside");
+            fs::rename(&parent, &outside).expect("move bases outside state");
+            fs::write(outside.join("v1/unexplained"), "private\n").expect("write outside entry");
+            symlink(&outside, &parent).expect("symlink base parent");
+
+            let status = storage_accounting(&state).expect("diagnose symlinked parent");
+            assert!(status.bases.is_empty());
+            assert!(
+                status
+                    .diagnostic_issues
+                    .iter()
+                    .any(|issue| issue.path == parent)
+            );
+            assert!(
+                status
+                    .diagnostic_issues
+                    .iter()
+                    .all(|issue| { issue.path == parent || !issue.path.starts_with(&parent) })
+            );
+            for apply in [false, true] {
+                let error = garbage_collect_inner(&state, apply, None)
+                    .expect_err("reject symlinked base parent")
+                    .to_string();
+                assert!(error.contains("cleanup stopped"), "{error}");
+                assert!(error.contains("is a symbolic link"), "{error}");
+                assert!(error.contains(&parent.display().to_string()), "{error}");
+                assert!(
+                    error.contains("outside Riftri's expected storage layout"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("did not follow this link or delete data through it"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("riftri status --state-dir <STATE_DIR>"),
+                    "{error}"
+                );
+                assert!(error.contains(&state.display().to_string()), "{error}");
+                assert!(
+                    error.contains("Do not delete or move the linked data manually"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("does not repair an existing redirected layout"),
+                    "{error}"
+                );
+            }
+            if pending_collection {
+                let recovery = recover_incomplete_operations(&state).expect("attempt recovery");
+                assert_eq!(recovery.recovered_collections, 0);
+                assert_eq!(recovery.errors.len(), 1);
+                assert!(recovery.errors[0].contains("is a symbolic link"));
+                assert!(recovery.errors[0].contains("riftri status --state-dir <STATE_DIR>"));
+            }
+            let outside_base = outside
+                .join("v1/repository")
+                .join("0123456789abcdef0123456789abcdef01234567");
+            assert_eq!(
+                fs::read_to_string(outside_base.join("private.txt")).expect("read outside file"),
+                "outside\n"
+            );
+            assert!(outside_base.with_extension("complete").is_file());
+            assert!(parent.is_symlink());
+        }
     }
 
     #[cfg(unix)]
