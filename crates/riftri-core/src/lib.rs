@@ -12,6 +12,7 @@ mod activation;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod base_integrity;
 mod journal;
+pub mod progress;
 #[cfg(test)]
 mod test_hooks;
 #[cfg(all(
@@ -38,14 +39,15 @@ pub use activation::{
 };
 pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{
-    AddWorktreeRequest, AddWorktreeResult, BaseStorageAccounting, CompactWorktreeRequest,
-    CompactWorktreeResult, GarbageCollectionCandidate, GarbageCollectionReport,
-    MoveWorktreeRequest, MoveWorktreeResult, PruneWorktreesRequest, PruneWorktreesResult,
-    RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue,
-    StorageAccountingReport, ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree,
-    compact_worktree, force_remove_worktree, forget_missing_state_directory, garbage_collect,
-    is_managed_worktree, move_worktree, prune_worktrees, recover_incomplete_operations,
-    remove_worktree, storage_accounting,
+    AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
+    CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,
+    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PruneWorktreesRequest,
+    PruneWorktreesResult, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
+    StateDiagnosticIssue, StateDirectorySource, StateWorktreeInventory, StorageAccountingReport,
+    ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree, compact_worktree,
+    force_remove_worktree, forget_missing_state_directory, garbage_collect, is_managed_worktree,
+    move_worktree, prune_worktrees, recover_incomplete_operations, remove_worktree,
+    storage_accounting, worktree_inventory_across_states,
 };
 
 /// A diagnostic check and its optional failure explanation.
@@ -478,7 +480,12 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
         }
         Some(repository) => match repository.root.as_deref() {
             Some(root) if repository.head_commit.is_some() => {
-                match worktree::inspect_repository_compatibility(&git, root, OsStr::new("HEAD")) {
+                match worktree::inspect_repository_compatibility(
+                    &git,
+                    root,
+                    &repository.identity.common_git_dir,
+                    OsStr::new("HEAD"),
+                ) {
                     Ok(report) => Diagnostic::success(report),
                     Err(error) => Diagnostic::failure(error.to_string()),
                 }
