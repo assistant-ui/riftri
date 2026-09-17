@@ -5,6 +5,19 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- `riftri worktree add`, `riftri repair`, and `riftri gc` report lifecycle
+  progress on stderr: one plain line per durable journal phase, plus explicit
+  lines when an operation waits on a contended coordination lock and when it
+  resumes. Lines reflect only states an operation genuinely reached — no
+  percentages, timers, or terminal control sequences. The new global
+  `--no-progress` flag suppresses them, `--json-errors` implies that
+  suppression so its stderr stays exactly one JSON receipt, and `--json`
+  stdout remains a single valid report. `riftri-core` gains an optional
+  `progress::set_progress_observer` hook that emits these phase events
+  without changing lifecycle behaviour.
+
 ### Changed
 
 - `riftri state unregister <PATH>` replaces the displayed `state forget-missing`

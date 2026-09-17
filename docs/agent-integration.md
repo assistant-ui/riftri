@@ -105,6 +105,13 @@ policy refusals from operational failures, the durable `phase` reached, a
 `nextCommand`. A harness should treat a non-zero exit with a
 `"category": "policy"` receipt as a configuration to report, not retry.
 
+`--json-errors` also suppresses the human-readable lifecycle progress lines
+that `worktree add`, `repair`, and `gc` otherwise print on stderr, so stderr
+stays reserved for that single receipt. Harnesses that parse stdout with
+`--json` but leave stderr for logs can keep progress enabled — `--json`
+output is never interleaved with it — or pass `--no-progress` explicitly;
+the [CLI reference](cli.md#progress-reporting) documents the line format.
+
 `RIFTRI_BYPASS=1` routes one intercepted Git command directly to real Git when
 an agent intentionally needs an unmanaged worktree form Riftri refuses.
 
