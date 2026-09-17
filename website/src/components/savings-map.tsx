@@ -18,7 +18,6 @@ export function SavingsMap() {
       <figcaption className="frame-title">[ ASSISTANT-UI / DISK ALLOCATION ]</figcaption>
       <div className="savings-meta">
         <span>{data.worktrees} WORKTREES / {data.filesPerView.toLocaleString("en-US")} FILES EACH</span>
-        <span>macOS ARM64 · APFS · v{data.version}</span>
       </div>
 
       <div className="savings-comparison">

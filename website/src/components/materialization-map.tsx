@@ -88,7 +88,6 @@ export function MaterializationMap() {
         <span>GIT OWNS THE WORKTREE</span>
         <span><i aria-hidden="true" /> RIFTRI EXITS AFTER CREATION</span>
       </div>
-      <div className="diagram-note">APFS · Linux · ReFS</div>
     </figure>
   );
 }
