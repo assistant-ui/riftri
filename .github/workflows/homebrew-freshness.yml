@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - "Formula/riftri.rb"
+      - "package/homebrew/Formula/riftri.rb"
       - ".github/workflows/homebrew-freshness.yml"
   schedule:
     # Daily, because the formula goes stale the moment a release publishes and
@@ -33,6 +34,18 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Confirm the staged tap copy matches the canonical formula
+        run: |
+          set -euo pipefail
+          # The staged copy under package/homebrew mirrors the future
+          # assistant-ui/homebrew-riftri tap; both are generated together by
+          # package/scripts/sync-homebrew-tap.mjs and must never diverge.
+          if ! diff -u Formula/riftri.rb package/homebrew/Formula/riftri.rb; then
+            echo "::error file=package/homebrew/Formula/riftri.rb::The staged tap formula differs from Formula/riftri.rb." \
+              "Regenerate both: node package/scripts/sync-homebrew-tap.mjs"
+            exit 1
+          fi
+
       - name: Compare the formula version against the latest release
         run: |
           set -euo pipefail
@@ -47,8 +60,7 @@ jobs:
           echo "latest release: ${latest_version} (${latest_tag})"
           if [ "${formula_version}" != "${latest_version}" ]; then
             echo "::error file=Formula/riftri.rb::The Homebrew formula pins ${formula_version} but the latest release is ${latest_version}." \
-              "Regenerate it: gh release download ${latest_tag} --repo ${GITHUB_REPOSITORY} --pattern SHA256SUMS --dir /tmp/riftri" \
-              "&& node package/scripts/update-homebrew-formula.mjs ${latest_version} /tmp/riftri/SHA256SUMS"
+              "Regenerate every copy: node package/scripts/sync-homebrew-tap.mjs ${latest_tag}"
             exit 1
           fi
           echo "LATEST_TAG=${latest_tag}" >> "${GITHUB_ENV}"
@@ -82,7 +94,7 @@ jobs:
             elif [ "${published}" != "${pinned}" ]; then
               failed=1
               echo "::error file=Formula/riftri.rb::${archive} pins ${pinned} but the release publishes ${published}." \
-                "Regenerate the formula with package/scripts/update-homebrew-formula.mjs."
+                "Regenerate every copy: node package/scripts/sync-homebrew-tap.mjs"
             else
               echo "${archive}: matches the published checksum."
             fi

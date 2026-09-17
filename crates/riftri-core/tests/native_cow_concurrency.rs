@@ -51,6 +51,7 @@ fn concurrent_add(
             revision: OsString::from("HEAD"),
             mode: WorktreeMode::NewBranch(OsString::from(branch)),
             state_dir: Some(state),
+            sparse_directories: Vec::new(),
         })
         .expect("create concurrent Riftri worktree")
     })

@@ -142,7 +142,7 @@ $ sudo riftri overlayfs install-helper
 ```
 
 **Riftri fails closed.** When a checkout cannot be reproduced exactly — custom
-filters, sparse checkout, submodules, external attributes, or non-canonical
+filters, sparse checkout, submodules, external attributes, checkout hooks, or non-canonical
 [Git LFS](docs/git-lfs.md) setups — it stops before changing anything rather
 than silently falling back to a full copy. See
 [how Riftri stays safe](docs/safety.md).

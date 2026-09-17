@@ -106,6 +106,7 @@ fn creates_isolates_and_removes_real_overlayfs_worktrees() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/overlay-first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first OverlayFS worktree");
     let second_result = add_worktree(AddWorktreeRequest {
@@ -114,6 +115,7 @@ fn creates_isolates_and_removes_real_overlayfs_worktrees() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/overlay-second")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create second OverlayFS worktree");
 
@@ -300,6 +302,7 @@ fn repair_remounts_an_active_view_after_a_simulated_reboot() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/reboot-recovery")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create OverlayFS worktree");
     assert_eq!(added.backend, BackendKind::OverlayFs);
