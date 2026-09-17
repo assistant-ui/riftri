@@ -282,8 +282,14 @@ path without `--force`, so a concurrent dirtying write is also rejected.
 
 An explicit forced removal snapshots the complete native view, or the complete
 OverlayFS private layer, before recording durable intent. The journal records
-both the force choice and snapshot. Riftri re-hashes the view at the final
-delete boundary and during recovery; any later change stops the operation and
+both the force choice and snapshot. The snapshot includes Git HEAD, its symbolic branch, and structured
+staged index contents (including intent-to-add state). Index stat-cache refreshes
+do not change this consent. OverlayFS reads Git metadata through its private
+upper-layer pointer while the merged view is unmounted. Legacy content-only
+force snapshots cannot prove this Git state and are preserved for manual
+inspection rather than automatically completing a pending deletion.
+Riftri revalidates the combined snapshot at the final delete boundary and
+during recovery; any later change stops the operation and
 is preserved. Only a still-present native view whose snapshot matches reaches
 Git's force removal. Missing-path metadata cleanup continues through ordinary
 Git safety checks, so recreating the destination cannot turn old force consent
