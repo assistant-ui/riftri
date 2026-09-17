@@ -97,6 +97,10 @@ Reports carry `schema_version`, display paths beside `*_native_hex` fields
 with the exact native encoding named in `native_path_encoding`, and raw Git
 ref bytes beside lossy display strings, so non-UTF-8 paths and refs remain
 representable.
+The `doctor` report includes these path pairs for the destination, Git command,
+repository root, common Git directory, and storage probe paths.
+On Unix, `native_path_encoding` is `unix-bytes-hex`. On Windows, it is
+`windows-utf16le-hex`.
 
 Failures become machine-readable with the global `--json-errors` flag: one
 JSON receipt on stderr with a stable `code`, a `category` distinguishing

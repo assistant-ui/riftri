@@ -386,6 +386,62 @@ fn doctor_explains_destination_readiness_and_repository_activation() {
     assert!(!destination.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_json_preserves_non_utf8_destination_paths() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = RepositoryFixture::new();
+    let destination = OsStr::from_bytes(b"destination-\xff");
+    let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--destination"])
+        .arg(destination)
+        .arg("--json")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run doctor with a native path");
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    assert_eq!(report["native_path_encoding"], "unix-bytes-hex");
+    assert_eq!(
+        report["destination_readiness"]["destination"],
+        "destination-\u{fffd}"
+    );
+    assert_eq!(
+        report["destination_readiness"]["destination_native_hex"],
+        "64657374696e6174696f6e2dff"
+    );
+    for capability in report["storage_capabilities"].as_array().unwrap() {
+        if let Some(volume) = capability.get("volume") {
+            assert_eq!(volume["requested_path"], "destination-\u{fffd}");
+            assert_eq!(
+                volume["requested_path_native_hex"],
+                "64657374696e6174696f6e2dff"
+            );
+            let probe_hex = volume["probe_path_native_hex"].as_str().unwrap();
+            let probe_bytes: Vec<u8> = (0..probe_hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&probe_hex[index..index + 2], 16).unwrap())
+                .collect();
+            assert_eq!(
+                probe_bytes,
+                fs::canonicalize(&fixture.repository)
+                    .unwrap()
+                    .as_os_str()
+                    .as_bytes()
+            );
+        }
+    }
+    assert!(!fixture.repository.join(destination).exists());
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
 #[test]
 fn doctor_human_output_leads_with_a_decisive_destination_summary() {
     let fixture = RepositoryFixture::new();
