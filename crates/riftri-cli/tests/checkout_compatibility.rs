@@ -151,6 +151,13 @@ fn git(path: &Path, arguments: &[&str]) -> Output {
     Command::new("git")
         .args(arguments)
         .current_dir(path)
+        // The fixture configures its own filters. An inherited Git LFS clean
+        // filter can otherwise install hooks while staging pointer blobs.
+        .env(
+            "GIT_CONFIG_GLOBAL",
+            if cfg!(windows) { "NUL" } else { "/dev/null" },
+        )
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("run Git fixture command")
 }
@@ -246,22 +253,38 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
         .parent()
         .expect("repository parent")
         .join("lfs-state");
-    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
-        .args([
-            "worktree",
-            "add",
-            destination.to_str().expect("UTF-8 destination"),
-            "--detach",
-            "HEAD",
-            "--state-dir",
-            state.to_str().expect("UTF-8 state"),
-        ])
-        .current_dir(&fixture.repository)
-        .env("PATH", &child_path)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run Riftri LFS add");
+    let mut add = Command::new(env!("CARGO_BIN_EXE_riftri"));
+    add.args([
+        "worktree",
+        "add",
+        destination.to_str().expect("UTF-8 destination"),
+        "--detach",
+        "HEAD",
+        "--state-dir",
+        state.to_str().expect("UTF-8 state"),
+    ])
+    .current_dir(&fixture.repository)
+    .env("PATH", &child_path)
+    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+    .env("GIT_CONFIG_NOSYSTEM", "1");
+    // Verified LFS objects must not bypass the checkout-hook policy. Install
+    // a disposable fixture hook, prove preflight refuses it, then exercise the
+    // supported hook-free profile without weakening the production guard.
+    let hook = fixture.repository.join(".git/hooks/post-checkout");
+    assert!(
+        !hook.exists(),
+        "host configuration installed a fixture hook"
+    );
+    fs::write(&hook, "#!/bin/sh\ngit lfs post-checkout \"$@\"\n").expect("write fixture LFS hook");
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+        .expect("make fixture LFS hook executable");
+    let refused = add.output().expect("try LFS add with a checkout hook");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("post-checkout"));
+    assert!(!destination.exists());
+    assert!(!state.exists());
+    fs::remove_file(hook).expect("remove only the disposable fixture hook");
+    let output = add.output().expect("run Riftri LFS add");
     assert!(
         output.status.success(),
         "Riftri LFS add failed: {}",

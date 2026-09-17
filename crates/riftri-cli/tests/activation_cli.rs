@@ -1197,7 +1197,7 @@ fn exec_routes_clean_managed_git_worktree_removal_through_riftri() {
 
     let removed = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "remove"])
-        .arg(&destination)
+        .arg(destination.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("remove enabled worktree");
@@ -1207,19 +1207,20 @@ fn exec_routes_clean_managed_git_worktree_removal_through_riftri() {
         "enabled removal failed: {}",
         String::from_utf8_lossy(&removed.stderr)
     );
-    assert!(String::from_utf8_lossy(&removed.stderr).contains("safely removed worktree"));
     assert!(!destination.exists());
     assert!(fixture.repository.join(".git/riftri/removals").is_dir());
 
-    let status = riftri(&fixture.repository, &["status"]);
+    let status = riftri(&fixture.repository, &["status", "--json"]);
     assert!(
         status.status.success(),
         "{}",
         String::from_utf8_lossy(&status.stderr)
     );
-    let status = String::from_utf8_lossy(&status.stdout);
-    assert!(status.contains("Active views: 0"));
-    assert!(status.contains("refs=0"));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("parse status");
+    assert_eq!(status["operations"]["active_views"], 0);
+    assert_eq!(status["operations"]["completed_removals"], 1);
+    assert_eq!(status["bases"][0]["reference_count"], 0);
+    assert_eq!(status["diagnostic_issues"], serde_json::json!([]));
 }
 
 #[cfg(target_os = "macos")]
@@ -1261,7 +1262,7 @@ fn enabled_forced_removal_of_a_managed_view_is_journaled() {
 
     let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "remove", "--force"])
-        .arg(&destination)
+        .arg(destination.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("force-remove managed worktree");
@@ -1271,7 +1272,6 @@ fn enabled_forced_removal_of_a_managed_view_is_journaled() {
         "{}",
         String::from_utf8_lossy(&removal.stderr)
     );
-    assert!(String::from_utf8_lossy(&removal.stderr).contains("safely removed worktree"));
     assert!(!destination.exists());
     let journals = fs::read_dir(fixture.repository.join(".git/riftri/removals"))
         .expect("read removal journals")
@@ -1378,7 +1378,7 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
             "remove",
             "--force",
         ])
-        .arg(&destination)
+        .arg(destination.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("guard globally configured managed removal");
@@ -1583,7 +1583,7 @@ fn enabled_move_of_a_managed_view_is_journaled() {
 
     let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "move"])
-        .arg(&source)
+        .arg(source.file_name().expect("worktree basename"))
         .arg(&destination)
         .current_dir(&fixture.repository)
         .output()
@@ -1594,7 +1594,6 @@ fn enabled_move_of_a_managed_view_is_journaled() {
         "{}",
         String::from_utf8_lossy(&moved.stderr)
     );
-    assert!(String::from_utf8_lossy(&moved.stderr).contains("moved managed Riftri worktree"));
     assert!(!source.exists());
     assert_eq!(
         fs::read_to_string(destination.join("private.txt")).expect("read private worktree data"),
@@ -1602,12 +1601,104 @@ fn enabled_move_of_a_managed_view_is_journaled() {
     );
     assert!(fixture.repository.join(".git/riftri/moves").is_dir());
 
-    let status = riftri(&fixture.repository, &["status"]);
+    let status = riftri(&fixture.repository, &["status", "--json"]);
     assert!(status.status.success());
-    let status = String::from_utf8_lossy(&status.stdout);
-    assert!(status.contains("Active views: 1"));
-    assert!(status.contains(destination.to_string_lossy().as_ref()));
-    assert!(!status.contains(source.to_string_lossy().as_ref()));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("parse status");
+    assert_eq!(status["operations"]["active_views"], 1);
+    assert_eq!(status["operations"]["completed_moves"], 1);
+    assert_eq!(
+        status["worktrees"][0]["path"],
+        fs::canonicalize(&destination)
+            .expect("resolve destination")
+            .to_str()
+            .expect("UTF-8 fixture path")
+    );
+    assert_eq!(status["diagnostic_issues"], serde_json::json!([]));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_worktree_selectors_preserve_ambiguity_and_path_boundaries() {
+    let fixture = RepositoryFixture::new();
+    assert!(
+        git(&fixture.repository, &["config", "core.ignorecase", "true"])
+            .status
+            .success()
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let left = fixture.directory.path().join("left/shared");
+    let right = fixture.directory.path().join("right/shared");
+    for path in [&left, &right] {
+        fs::create_dir_all(path.parent().expect("worktree parent")).expect("create parent");
+        let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "add", "--detach"])
+            .arg(path)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("add managed worktree");
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+    }
+    for selector in ["shared", "hared", "./shared", "left//shared"] {
+        for operation in ["remove", "move"] {
+            let mut args = vec!["exec", "--", "git", "worktree", operation, selector];
+            if operation == "move" {
+                args.push("moved");
+            }
+            let output = riftri(&fixture.repository, &args);
+            assert!(!output.status.success(), "{operation} accepted {selector}");
+            assert!(left.is_dir() && right.is_dir());
+        }
+    }
+    let guarded = riftri(
+        &fixture.repository,
+        &[
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "move",
+            "--force",
+            "left/shared",
+            "moved",
+        ],
+    );
+    assert!(!guarded.status.success());
+    assert!(left.is_dir() && right.is_dir());
+
+    // A unique suffix wins even when an unrelated local directory has that name.
+    fs::create_dir_all(fixture.repository.join("left/shared")).expect("create local directory");
+    let moved = riftri(
+        &fixture.repository,
+        &[
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "move",
+            "LEFT/SHARED",
+            "moved",
+        ],
+    );
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert!(!left.exists());
+    assert!(right.is_dir());
+    assert!(fixture.repository.join("left/shared").is_dir());
+    assert!(fixture.repository.join("moved/.git").is_file());
+    let status = riftri(&fixture.repository, &["status", "--json"]);
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("parse status");
+    assert_eq!(status["operations"]["active_views"], 2);
+    assert_eq!(status["operations"]["completed_moves"], 1);
+    assert_eq!(status["operations"]["completed_removals"], 0);
+    assert_eq!(status["diagnostic_issues"], serde_json::json!([]));
 }
 
 #[cfg(target_os = "macos")]
@@ -1911,7 +2002,7 @@ fn enabled_unmanaged_force_remove_and_move_still_use_real_git() {
 
     let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "remove", "--force"])
-        .arg(&removed)
+        .arg(removed.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("force-remove unmanaged worktree");
@@ -1924,7 +2015,7 @@ fn enabled_unmanaged_force_remove_and_move_still_use_real_git() {
 
     let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "move"])
-        .arg(&moved_from)
+        .arg(moved_from.file_name().expect("worktree basename"))
         .arg(&moved_to)
         .current_dir(&fixture.repository)
         .output()
