@@ -5,6 +5,17 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- A staged Homebrew tap directory at `package/homebrew/` mirrors the planned
+  `assistant-ui/homebrew-riftri` tap repository, with
+  `package/scripts/sync-homebrew-tap.mjs` regenerating every checked-in
+  formula copy directly from a release's published `SHA256SUMS`. Tests and the
+  scheduled freshness workflow fail when the copies diverge, drift from the
+  generator, or fall behind the latest release. The tap install command is
+  documented as pending maintainer setup; installing from a checkout remains
+  the supported Homebrew path.
+
 ### Changed
 
 - `riftri state unregister <PATH>` replaces the displayed `state forget-missing`
