@@ -58,6 +58,20 @@ through GitHub direct downloads without attempting npm publication. After npm
 confirms the rejection is resolved, a maintainer can explicitly set the
 repository variable `NPM_PUBLISH_ENABLED=true` before resuming that channel.
 
+Resuming the channel is two concrete maintainer actions:
+
+```console
+$ gh variable set NPM_PUBLISH_ENABLED --repo assistant-ui/riftri --body true
+```
+
+Then either re-run the tag's release workflow run within the build artifacts'
+two-day retention window (`gh run list --workflow release.yml` to find it,
+`gh run rerun <run-id>` to re-run all jobs so the publish gate re-evaluates
+the variable; the `github-release` job fails safely against the existing
+release and must be judged separately), or simply let the next tagged release
+publish npm normally. Do not create a new tag for an already-released version
+just to reach npm.
+
 ## Package layout
 
 The root `package.json` is the source manifest for the public `riftri` package.
@@ -115,6 +129,31 @@ publisher on each npm package:
 The workflow grants only its publish job `id-token: write`. Once a trusted
 publishing release succeeds, delete `NPM_TOKEN`. The publishing script is
 restartable: package versions already present in npm are detected and skipped.
+
+## Homebrew tap
+
+The Homebrew channel currently installs from a repository checkout
+(`brew install --formula ./Formula/riftri.rb`). The dedicated tap is staged in
+`package/homebrew/`, which mirrors the layout of the planned
+`assistant-ui/homebrew-riftri` repository; `package/homebrew/README.md`
+documents the owner-controlled bootstrap (create the public tap repository,
+copy the staged contents, verify a clean-machine `brew tap` install) and the
+per-release sync.
+
+After every release, regenerate both checked-in formula copies from the tag's
+published checksums and commit the result through a normal pull request:
+
+```console
+$ node package/scripts/sync-homebrew-tap.mjs
+$ node package/scripts/sync-homebrew-tap.mjs --check
+```
+
+Once the tap repository exists, copy the regenerated
+`package/homebrew/Formula/riftri.rb` there as part of the same release
+verification. `package/test/homebrew-formula.test.js` keeps the two in-repo
+copies identical and generator-faithful, and the scheduled Homebrew freshness
+workflow fails when either the version or a pinned checksum stops matching the
+latest published release.
 
 ## Cutting a release
 
