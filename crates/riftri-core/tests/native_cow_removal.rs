@@ -60,6 +60,7 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/removal")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create Riftri worktree");
 
@@ -151,6 +152,7 @@ fn pending_move_blocks_lifecycle_changes_until_repair() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::Detached,
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create managed worktree");
 
@@ -246,6 +248,7 @@ fn base_reuse_rejects_symlinked_completion_markers() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/marker-first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first worktree");
     remove_worktree(RemoveWorktreeRequest {
@@ -264,6 +267,7 @@ fn base_reuse_rejects_symlinked_completion_markers() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/marker-second")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect_err("symlinked completion marker must prevent base reuse");
 
@@ -298,6 +302,7 @@ fn base_reuse_rejects_symlinked_completion_markers() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/marker-third")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect_err("broken completion-marker symlink must prevent base reuse");
 
@@ -340,6 +345,7 @@ fn removal_preserves_untracked_files_when_status_configuration_hides_them() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/untracked-removal")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create Riftri worktree");
     git(&repository, &["config", "status.showUntrackedFiles", "no"]);
@@ -388,6 +394,7 @@ fn accounting_keeps_a_reference_for_a_missing_unreleased_view() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/missing-accounting")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create Riftri worktree");
     fs::remove_dir_all(&worktree).expect("simulate missing managed view");
@@ -434,6 +441,7 @@ fn accounting_tracks_two_views_that_reuse_one_retained_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/first-accounted")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first worktree");
     let second_add = add_worktree(AddWorktreeRequest {
@@ -442,6 +450,7 @@ fn accounting_tracks_two_views_that_reuse_one_retained_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/second-accounted")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create second worktree");
     assert!(!first_add.reused_base);
@@ -491,6 +500,7 @@ fn garbage_collection_requires_apply_and_never_collects_an_in_use_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/gc-first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first worktree");
     add_worktree(AddWorktreeRequest {
@@ -499,6 +509,7 @@ fn garbage_collection_requires_apply_and_never_collects_an_in_use_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/gc-second")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create second worktree");
 
@@ -566,6 +577,7 @@ fn garbage_collection_requires_apply_and_never_collects_an_in_use_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/gc-rebuilt")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect("rebuild collected base");
     assert!(!rebuilt.reused_base);

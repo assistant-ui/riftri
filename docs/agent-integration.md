@@ -97,6 +97,10 @@ Reports carry `schema_version`, display paths beside `*_native_hex` fields
 with the exact native encoding named in `native_path_encoding`, and raw Git
 ref bytes beside lossy display strings, so non-UTF-8 paths and refs remain
 representable.
+The `backends` report includes these path pairs for the requested destination
+and, per probed capability, the volume's requested and probe paths.
+On Unix, `native_path_encoding` is `unix-bytes-hex`. On Windows, it is
+`windows-utf16le-hex`.
 
 Failures become machine-readable with the global `--json-errors` flag: one
 JSON receipt on stderr with a stable `code`, a `category` distinguishing
@@ -104,6 +108,13 @@ policy refusals from operational failures, the durable `phase` reached, a
 `cleanup` disposition, and recovery guidance including the exact
 `nextCommand`. A harness should treat a non-zero exit with a
 `"category": "policy"` receipt as a configuration to report, not retry.
+
+`--json-errors` also suppresses the human-readable lifecycle progress lines
+that `worktree add`, `repair`, and `gc` otherwise print on stderr, so stderr
+stays reserved for that single receipt. Harnesses that parse stdout with
+`--json` but leave stderr for logs can keep progress enabled — `--json`
+output is never interleaved with it — or pass `--no-progress` explicitly;
+the [CLI reference](cli.md#progress-reporting) documents the line format.
 
 `RIFTRI_BYPASS=1` routes one intercepted Git command directly to real Git when
 an agent intentionally needs an unmanaged worktree form Riftri refuses.
