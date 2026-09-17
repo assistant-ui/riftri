@@ -101,8 +101,16 @@ but only after recording an exact recovery snapshot of the discarded changes.
 
 ### A state registration points at a directory that no longer exists
 
-`riftri state forget-missing <path>` forgets one explicitly selected
-registration whose directory is missing.
+`riftri state unregister <path>` removes the selected registration only if its
+directory is missing. For example, from the repository directory:
+
+```sh
+riftri state unregister ../old-state
+```
+
+This removes the stale registration, not files. Existing paths (including
+dangling symlinks) remain protected. `forget-missing` is still accepted as a
+hidden compatibility alias for existing scripts.
 
 ## Disk usage
 

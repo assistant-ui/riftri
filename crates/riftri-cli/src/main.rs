@@ -336,9 +336,10 @@ enum WorktreeCommand {
 
 #[derive(Debug, Subcommand)]
 enum StateCommand {
-    /// Forget an explicitly selected registration whose directory is missing.
-    ForgetMissing {
-        /// Missing state directory to forget.
+    /// Remove a registration for a missing state directory. No files are deleted.
+    #[command(alias = "forget-missing")]
+    Unregister {
+        /// Missing state directory whose registration should be removed.
         path: PathBuf,
 
         /// Repository containing the local registration.
@@ -607,10 +608,10 @@ fn run(cli: Cli) -> Result<()> {
             print_garbage_collection_report(&state_directory, &report, json)?;
         }
         Command::State { command } => match command {
-            StateCommand::ForgetMissing { path, repository } => {
-                let forgotten = riftri_core::forget_missing_state_directory(&repository, &path)?;
-                println!("Forgot missing Riftri state registration");
-                println!("State: {}", forgotten.display());
+            StateCommand::Unregister { path, repository } => {
+                let unregistered = riftri_core::forget_missing_state_directory(&repository, &path)?;
+                println!("Unregistered missing Riftri state directory");
+                println!("State: {}", unregistered.display());
             }
         },
         Command::Worktree { command } => match command {
@@ -2075,12 +2076,23 @@ mod tests {
         let directory = tempfile::tempdir().expect("create temporary directory");
         clap_mangen::generate_to(Cli::command(), directory.path()).expect("generate man pages");
 
-        for page in ["riftri.1", "riftri-completions.1", "riftri-worktree-add.1"] {
+        for page in [
+            "riftri.1",
+            "riftri-completions.1",
+            "riftri-worktree-add.1",
+            "riftri-state-unregister.1",
+        ] {
             assert!(
                 directory.path().join(page).is_file(),
                 "missing man page {page}"
             );
         }
+        assert!(
+            !directory
+                .path()
+                .join("riftri-state-forget-missing.1")
+                .exists()
+        );
     }
 
     #[test]
