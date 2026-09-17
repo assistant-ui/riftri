@@ -75,6 +75,7 @@ fn creates_reuses_and_removes_clean_isolated_git_worktrees() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/windows-first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first ReFS worktree");
     let second_result = add_worktree(AddWorktreeRequest {
@@ -83,6 +84,7 @@ fn creates_reuses_and_removes_clean_isolated_git_worktrees() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/windows-second")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create second ReFS worktree");
 

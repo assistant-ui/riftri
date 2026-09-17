@@ -56,6 +56,7 @@ fn request(repository: &Path, root: &Path, name: &str) -> AddWorktreeRequest {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::Detached,
         state_dir: Some(root.join("state")),
+        sparse_directories: Vec::new(),
     }
 }
 

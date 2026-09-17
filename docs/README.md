@@ -23,6 +23,8 @@ add it to that overview's documentation index — CI enforces the link.
   testing.
 - [git-lfs.md](git-lfs.md) — the exact accepted Git LFS profile and its
   fail-closed boundaries.
+- [sparse-checkout.md](sparse-checkout.md) — the supported cone-mode sparse
+  worktree subset, its base-key rules, and refusal behavior.
 - [troubleshooting.md](troubleshooting.md) — symptom-first answers: refused
   operations, activation gaps, recovery, disk usage, and installation.
 - [build-caches.md](build-caches.md) — which dependency stores are safe to
