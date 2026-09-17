@@ -557,7 +557,8 @@ fn run(cli: Cli) -> Result<()> {
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&backends).context("serialize backend report")?
+                    serde_json::to_string_pretty(&backends_json(&path, &backends))
+                        .context("serialize backend report")?
                 );
             } else {
                 println!("Storage capabilities for {}:", path.display());
@@ -1774,6 +1775,44 @@ fn print_allocation_note() {
         "Allocation note: filesystem-accounted allocation may count shared COW blocks more than once; it is not exclusive physical disk use"
     );
     println!("Physical-sharing proof: use the platform volume-delta benchmark on a quiet volume");
+}
+
+fn backends_json(
+    requested_path: &Path,
+    capabilities: &[riftri_storage::BackendCapability],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "native_path_encoding": native_path_encoding(),
+        "requested_path": requested_path.display().to_string(),
+        "requested_path_native_hex": native_path_hex(requested_path),
+        "storage_capabilities": capabilities
+            .iter()
+            .map(backend_capability_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Shared native-path-aware JSON shape for one storage capability, so the
+/// `backends` and `doctor` reports describe capabilities identically.
+fn backend_capability_json(capability: &riftri_storage::BackendCapability) -> serde_json::Value {
+    let mut output = serde_json::json!({
+        "kind": capability.kind,
+        "status": capability.status,
+        "explanation": capability.explanation,
+        "requires_explicit_fallback": capability.requires_explicit_fallback,
+    });
+    if let Some(volume) = &capability.volume {
+        output["volume"] = serde_json::json!({
+            "requested_path": volume.requested_path.display().to_string(),
+            "requested_path_native_hex": native_path_hex(&volume.requested_path),
+            "probe_path": volume.probe_path.display().to_string(),
+            "probe_path_native_hex": native_path_hex(&volume.probe_path),
+            "identity": volume.identity,
+            "read_only": volume.read_only,
+        });
+    }
+    output
 }
 
 fn print_doctor(report: &riftri_core::DoctorReport) {

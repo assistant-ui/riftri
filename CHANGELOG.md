@@ -21,6 +21,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- `riftri backends --json` emits a versioned report that preserves non-UTF-8
+  requested and probe paths through display strings and exact native
+  hexadecimal fields instead of rejecting serialization. The report is now an
+  object with `schema_version` 1 wrapping the previous capability array as
+  `storage_capabilities`.
 
 ## 0.2.3 - 2026-09-16
 
