@@ -102,10 +102,11 @@ fn enable_and_disable_change_only_repository_local_config() {
 }
 
 #[test]
-fn explicitly_forgets_only_a_missing_registered_state_directory() {
+fn state_unregister_accepts_missing_relative_parent_paths() {
     let fixture = RepositoryFixture::new();
-    let missing = fixture.directory.path().join("removed-custom-state");
-    let existing = fixture.directory.path().join("existing-custom-state");
+    let directory = fs::canonicalize(fixture.directory.path()).expect("resolve fixture directory");
+    let missing = directory.join("removed-custom-state");
+    let existing = directory.join("existing-custom-state");
     fs::create_dir(&existing).expect("create existing state directory");
     for state in [&missing, &existing] {
         assert!(
@@ -125,7 +126,7 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
     }
 
     let refused = Command::new(env!("CARGO_BIN_EXE_riftri"))
-        .args(["state", "forget-missing"])
+        .args(["state", "unregister"])
         .arg(&existing)
         .arg("--repository")
         .arg(&fixture.repository)
@@ -134,19 +135,29 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("still exists"));
 
-    let forgotten = Command::new(env!("CARGO_BIN_EXE_riftri"))
-        .args(["state", "forget-missing"])
-        .arg(&missing)
+    let unregistered = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["state", "unregister", "../removed-custom-state"])
         .arg("--repository")
         .arg(&fixture.repository)
+        .current_dir(&fixture.repository)
         .output()
-        .expect("forget missing state registration");
+        .expect("unregister missing state directory");
     assert!(
-        forgotten.status.success(),
+        unregistered.status.success(),
         "{}",
-        String::from_utf8_lossy(&forgotten.stderr)
+        String::from_utf8_lossy(&unregistered.stderr)
     );
-    assert!(String::from_utf8_lossy(&forgotten.stdout).contains("Forgot missing Riftri state"));
+    assert!(
+        String::from_utf8_lossy(&unregistered.stdout).contains("Unregistered missing Riftri state")
+    );
+    assert!(!missing.exists());
+
+    let unknown = riftri(
+        &fixture.repository,
+        &["state", "unregister", "../never-registered"],
+    );
+    assert_eq!(unknown.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("not registered"));
 
     let registered = git(
         &fixture.repository,
@@ -163,6 +174,143 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
         String::from_utf8_lossy(&registered.stdout).trim(),
         existing.to_string_lossy()
     );
+}
+
+#[test]
+fn state_unregister_help_hides_the_legacy_alias() {
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["state", "--help"])
+        .output()
+        .expect("state help");
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("unregister"), "{help}");
+    assert!(!help.contains("forget-missing"), "{help}");
+
+    for command in ["unregister", "forget-missing"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["state", command, "--help"])
+            .output()
+            .expect("unregister help");
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("missing state directory"), "{help}");
+        assert!(help.contains("No files are deleted"), "{help}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn state_unregister_keeps_existing_files_and_symlinks_registered() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = RepositoryFixture::new();
+    let root = fs::canonicalize(fixture.directory.path()).expect("resolve fixture");
+    let file = root.join("state-file");
+    let dangling = root.join("dangling-state");
+    let link = root.join("linked-state");
+    fs::write(&file, "keep me\n").expect("existing file");
+    symlink(root.join("absent"), &dangling).expect("dangling symlink");
+    symlink(&file, &link).expect("existing symlink target");
+    for path in [&file, &dangling, &link] {
+        assert!(
+            Command::new("git")
+                .args(["config", "--local", "--add", "riftri.stateDirectory"])
+                .arg(path)
+                .current_dir(&fixture.repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let before = git(
+        &fixture.repository,
+        &[
+            "config",
+            "--local",
+            "--null",
+            "--get-all",
+            "riftri.stateDirectory",
+        ],
+    )
+    .stdout;
+    for command in ["unregister", "forget-missing"] {
+        for path in [&file, &dangling, &link] {
+            let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .args(["state", command])
+                .arg(path)
+                .current_dir(&fixture.repository)
+                .output()
+                .expect("reject existing entry");
+            assert_eq!(output.status.code(), Some(3));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("still exists"));
+        }
+    }
+    let after = git(
+        &fixture.repository,
+        &[
+            "config",
+            "--local",
+            "--null",
+            "--get-all",
+            "riftri.stateDirectory",
+        ],
+    )
+    .stdout;
+    assert_eq!(after, before);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "keep me\n");
+    assert_eq!(fs::read_link(&dangling).unwrap(), root.join("absent"));
+    assert_eq!(fs::read_link(&link).unwrap(), file);
+}
+
+#[cfg(unix)]
+#[test]
+fn state_unregister_and_legacy_alias_resolve_native_paths_through_parent_symlinks() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+
+    for command in ["forget-missing", "unregister"] {
+        let fixture = RepositoryFixture::new();
+        let root = fs::canonicalize(fixture.directory.path()).expect("resolve fixture");
+        let parent = root.join("real parent");
+        let alias = root.join("parent alias");
+        fs::create_dir(&parent).expect("state parent");
+        symlink(&parent, &alias).expect("parent alias");
+        let name = OsString::from_vec(b"missing-state-\xff".to_vec());
+        let registered = parent.join(&name);
+        assert!(
+            Command::new("git")
+                .args(["config", "--local", "--add", "riftri.stateDirectory"])
+                .arg(&registered)
+                .current_dir(&fixture.repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["state", command])
+            .arg(Path::new("../parent alias").join(&name))
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("unregister native path");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!registered.exists());
+        assert_eq!(fs::read_link(&alias).unwrap(), parent);
+        assert_eq!(
+            git(
+                &fixture.repository,
+                &["config", "--local", "--get-all", "riftri.stateDirectory"]
+            )
+            .status
+            .code(),
+            Some(1)
+        );
+    }
 }
 
 #[test]

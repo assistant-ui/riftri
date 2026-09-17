@@ -137,11 +137,16 @@ Plan or apply collection of immutable bases with no journaled references.
 | `--state-dir <STATE_DIR>` | Explicit Riftri state directory |
 | `--json` | Emit stable machine-readable JSON |
 
-### `riftri state forget-missing [OPTIONS] <PATH>`
+### `riftri state unregister [OPTIONS] <PATH>`
 
-Forget an explicitly selected registration whose directory is missing.
+Remove a registration for a missing state directory. No files are deleted.
 `PATH` is the missing state directory; `--repository` names the repository
 containing the local registration (default `.`).
+
+Relative paths such as `../old-state` are resolved from the current directory
+and matched to the registered location. Existing paths, including dangling
+symlinks, cannot be unregistered. The former name `forget-missing` remains
+accepted as a hidden compatibility alias.
 
 ## Worktrees
 

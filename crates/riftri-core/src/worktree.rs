@@ -427,7 +427,7 @@ pub fn forget_missing_state_directory(
     match fs::symlink_metadata(&state_directory) {
         Ok(_) => {
             return Err(WorktreeError::InvalidRequest(format!(
-                "registered Riftri state path still exists; refusing to forget it: {}",
+                "registered Riftri state path still exists; refusing to unregister it: {}",
                 state_directory.display()
             )));
         }
@@ -441,11 +441,16 @@ pub fn forget_missing_state_directory(
         }
     }
 
+    let candidates = managed_destination_candidates(&state_directory)?;
     let _lock = acquire_state_directory_locator_lock(&repository.identity.common_git_dir)?;
     let registered = git
         .local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?
         .into_iter()
-        .find(|registered| paths_match(registered, &state_directory))
+        .find(|registered| {
+            candidates
+                .iter()
+                .any(|candidate| paths_match(registered, candidate))
+        })
         .ok_or_else(|| {
             WorktreeError::InvalidRequest(format!(
                 "Riftri state path is not registered in this repository: {}",

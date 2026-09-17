@@ -5,10 +5,20 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- `riftri state unregister <PATH>` replaces the displayed `state forget-missing`
+  command. The old name remains a hidden compatibility alias, and existing paths
+  still cannot be unregistered. Help, completions, and generated man pages use
+  the new name.
+
 ### Fixed
 
 - Managed removal, forced removal, and compaction reject worktrees with an
   incomplete move journal until repair completes the move.
+- State unregistration accepts relative parent components such as `../old-state`
+  and resolves existing parent aliases when matching a missing registered path,
+  without deleting files or unregistering existing paths.
 
 ## 0.2.3 - 2026-09-16
 
