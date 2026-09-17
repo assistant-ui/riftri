@@ -5964,21 +5964,8 @@ fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
 }
 
 #[cfg(unix)]
-fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+fn hash_entry_xattrs(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
-    // Git does not reproduce these bits from its tree. Refuse both new
-    // compactions and recovery cleanup instead of silently dropping them.
-    // Leave the legacy digest format unchanged for ordinary permissions.
-    if !metadata.file_type().is_symlink() && metadata.permissions().mode() & 0o7000 != 0 {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "{} has special Unix permissions (setuid, setgid, or sticky); compaction preserved it",
-            path.display()
-        )));
-    }
 
     let mut name_buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
     rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(&mut name_buffer))
@@ -6003,6 +5990,26 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         digest.update((value_buffer.len() as u64).to_le_bytes());
         digest.update(value_buffer);
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
+    // Git does not reproduce these bits from its tree. Refuse both new
+    // compactions and recovery cleanup instead of silently dropping them.
+    // Leave the legacy digest format unchanged for ordinary permissions.
+    if !metadata.file_type().is_symlink() && metadata.permissions().mode() & 0o7000 != 0 {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} has special Unix permissions (setuid, setgid, or sticky); compaction preserved it",
+            path.display()
+        )));
+    }
+
+    hash_entry_xattrs(path, digest)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         let mut entries = fs::read_dir(path)
             .map_err(|source| io("read worktree snapshot directory", path, source))?
@@ -6011,6 +6018,55 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         entries.sort_unstable_by_key(|entry| entry.file_name());
         for entry in entries {
             hash_extended_attributes(&entry.path(), digest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hash metadata Git does not reproduce from its tree: the full native mode
+/// (including setuid, setgid, and sticky bits) and, on Unix, every extended
+/// attribute name and value. The base-integrity content hash deliberately
+/// ignores these, so the forced-removal snapshot composes them separately;
+/// metadata-only edits after force intent must stop deletion.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect forced removal snapshot metadata", path, source))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        digest.update(metadata.mode().to_le_bytes());
+        hash_entry_xattrs(path, digest)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        digest.update(metadata.file_attributes().to_le_bytes());
+    }
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|source| io("read forced removal snapshot directory", path, source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| io("read forced removal snapshot entry", path, source))?;
+        entries.sort_unstable_by_key(|entry| entry.file_name());
+        digest.update((entries.len() as u64).to_le_bytes());
+        for entry in entries {
+            let name = entry.file_name();
+            #[cfg(unix)]
+            {
+                let bytes = name.as_bytes();
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let units = name.encode_wide().collect::<Vec<_>>();
+                digest.update((units.len() as u64).to_le_bytes());
+                for unit in units {
+                    digest.update(unit.to_le_bytes());
+                }
+            }
+            hash_forced_removal_metadata(&entry.path(), digest)?;
         }
     }
     Ok(())
@@ -6587,11 +6643,20 @@ fn snapshot_managed_worktree_for_force(managed: &DecodedJournal) -> Result<Strin
     };
     let git_state = Git::default().worktree_removal_state(&git_root)?;
     let mut digest = Sha256::new();
-    // Old content-only snapshots deliberately cannot authorize deletion after
-    // this upgrade: they cannot prove that the staged index or HEAD is unchanged.
-    digest.update(b"riftri-forced-removal-snapshot-v2\0");
+    // Older snapshot formats deliberately cannot authorize deletion after this
+    // upgrade: v1 could not prove that the staged index or HEAD was unchanged,
+    // and v2 could not prove that special permission bits or extended
+    // attributes were unchanged. A pending older snapshot never matches, so
+    // recovery preserves the worktree instead of trusting it.
+    digest.update(b"riftri-forced-removal-snapshot-v3\0");
     digest.update((content.len() as u64).to_le_bytes());
     digest.update(content);
+    if managed.backend != BackendKind::OverlayFs {
+        // The OverlayFS private-layer snapshot above already covers native
+        // modes and metadata-driven ctime changes; other backends need an
+        // explicit metadata pass over the worktree itself.
+        hash_forced_removal_metadata(&managed.destination, &mut digest)?;
+    }
     digest.update(git_state);
     Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
@@ -9890,7 +9955,7 @@ mod tests {
 
     #[test]
     fn forced_removal_recovery_preserves_later_index_and_head_changes() {
-        for change in ["index", "head", "legacy-snapshot"] {
+        for change in ["index", "head", "legacy-v1-snapshot", "legacy-v2-snapshot"] {
             let fixture = tempdir().expect("fixture");
             let repository = fixture.path().join("repository");
             let destination = fixture.path().join("worktree");
@@ -9936,8 +10001,22 @@ mod tests {
             } else {
                 use sha2::{Digest, Sha256};
                 let mut digest = Sha256::new();
-                digest.update(b"riftri-forced-removal-snapshot-v1\0");
-                digest.update(crate::base_integrity::marker(&destination).unwrap());
+                let content = crate::base_integrity::marker(&destination).unwrap();
+                if change == "legacy-v1-snapshot" {
+                    digest.update(b"riftri-forced-removal-snapshot-v1\0");
+                    digest.update(&content);
+                } else {
+                    // The exact digest a v2 binary recorded: the content
+                    // marker and Git state, with no metadata pass.
+                    digest.update(b"riftri-forced-removal-snapshot-v2\0");
+                    digest.update((content.len() as u64).to_le_bytes());
+                    digest.update(&content);
+                    digest.update(
+                        super::Git::default()
+                            .worktree_removal_state(&destination)
+                            .unwrap(),
+                    );
+                }
                 let store = RemovalJournalStore::open(&state);
                 let journal = store.load_all().unwrap().remove(0);
                 let mut record = store.reload(&journal).unwrap();
@@ -9949,6 +10028,106 @@ mod tests {
                 assert_eq!(report.recovered_removals, 0, "{change}: {report:?}");
                 assert_eq!(report.errors.len(), 1, "{change}: {report:?}");
                 assert!(destination.exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forced_removal_recovery_preserves_later_metadata_only_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        #[cfg(target_os = "macos")]
+        const ATTRIBUTE: &str = "com.riftri.forced-removal-test";
+        #[cfg(not(target_os = "macos"))]
+        const ATTRIBUTE: &str = "user.riftri.forced-removal-test";
+
+        for change in ["xattr", "special-bit"] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            fs::create_dir(destination.join("scratch")).expect("create scratch directory");
+
+            force_remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(RemoveWorktreePhase::IntentRecorded),
+            )
+            .expect_err("simulate interruption after durable force intent");
+            assert!(destination.exists());
+
+            // Metadata-only changes: neither edits file contents nor Git
+            // state, so only the snapshot's metadata pass can see them.
+            if change == "xattr" {
+                rustix::fs::setxattr(
+                    destination.join("tracked.txt"),
+                    ATTRIBUTE,
+                    b"added after intent",
+                    rustix::fs::XattrFlags::empty(),
+                )
+                .expect("set xattr after intent");
+            } else {
+                fs::set_permissions(
+                    destination.join("scratch"),
+                    fs::Permissions::from_mode(0o1755),
+                )
+                .expect("set sticky bit after intent");
+            }
+
+            for _ in 0..2 {
+                let recovery = recover_incomplete_operations(&state).expect("repair report");
+                assert_eq!(recovery.recovered_removals, 0, "{change}: {recovery:?}");
+                assert_eq!(recovery.errors.len(), 1, "{change}: {recovery:?}");
+                assert!(
+                    recovery.errors[0].contains("changed after forced removal intent"),
+                    "{change}: {recovery:?}"
+                );
+                assert!(destination.exists(), "{change}");
+            }
+
+            if change == "xattr" {
+                let mut value: Vec<u8> = Vec::with_capacity(64);
+                rustix::fs::lgetxattr(
+                    destination.join("tracked.txt"),
+                    ATTRIBUTE,
+                    rustix::buffer::spare_capacity(&mut value),
+                )
+                .expect("read preserved xattr");
+                assert_eq!(value, b"added after intent");
+            } else {
+                let mode = fs::symlink_metadata(destination.join("scratch"))
+                    .expect("inspect preserved directory")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o7777, 0o1755, "{mode:o}");
             }
         }
     }
@@ -9985,6 +10164,30 @@ mod tests {
         .expect("create worktree");
         fs::write(destination.join("untracked.txt"), "explicitly discarded\n")
             .expect("dirty worktree");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Metadata present before force intent must not cause a false
+            // refusal: the snapshot records and re-verifies it unchanged.
+            #[cfg(target_os = "macos")]
+            let attribute = "com.riftri.forced-removal-test";
+            #[cfg(not(target_os = "macos"))]
+            let attribute = "user.riftri.forced-removal-test";
+            fs::create_dir(destination.join("scratch")).expect("create scratch directory");
+            fs::set_permissions(
+                destination.join("scratch"),
+                fs::Permissions::from_mode(0o1755),
+            )
+            .expect("set pre-intent sticky bit");
+            rustix::fs::setxattr(
+                destination.join("untracked.txt"),
+                attribute,
+                b"recorded before intent",
+                rustix::fs::XattrFlags::empty(),
+            )
+            .expect("set pre-intent xattr");
+        }
 
         let error = force_remove_worktree_inner(
             RemoveWorktreeRequest {
