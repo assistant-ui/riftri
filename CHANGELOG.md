@@ -21,6 +21,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- Doctor's suggested worktree command quotes the destination as one shell argument,
+  including paths with spaces or apostrophes.
 
 ## 0.2.3 - 2026-09-16
 

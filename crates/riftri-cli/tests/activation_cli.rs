@@ -410,7 +410,10 @@ fn doctor_human_output_leads_with_a_decisive_destination_summary() {
 #[test]
 fn doctor_marks_an_enabled_supported_destination_ready() {
     let fixture = RepositoryFixture::new();
-    let destination = fixture.directory.path().join("ready-worktree");
+    let destination = fixture
+        .directory
+        .path()
+        .join("ready worktree ' $HOME ; [x]");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
 
     let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
@@ -429,17 +432,38 @@ fn doctor_marks_an_enabled_supported_destination_ready() {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["copy_on_write"], true);
         assert_eq!(readiness["blockers"], serde_json::json!([]));
-        assert!(
-            readiness["next_command"]
-                .as_str()
-                .is_some_and(|command| command.starts_with("riftri worktree add "))
-        );
     } else {
         assert_eq!(readiness["status"], "blocked");
         assert_eq!(readiness["copy_on_write"], false);
     }
     assert!(!fixture.repository.join(".git/riftri").exists());
     assert!(!destination.exists());
+
+    #[cfg(unix)]
+    if readiness["backend"].is_string() {
+        let command = readiness["next_command"].as_str().expect("next command");
+        let added = Command::new("sh")
+            .args([
+                "-c",
+                &format!("riftri() {{ \"$RIFTRI_TEST_BINARY\" \"$@\"; }}\n{command}"),
+            ])
+            .env("RIFTRI_TEST_BINARY", env!("CARGO_BIN_EXE_riftri"))
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("run suggested command");
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).expect("read exact destination"),
+            b"tracked\n"
+        );
+        let status = git(&destination, &["status", "--porcelain"]);
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+    }
 }
 
 #[test]
