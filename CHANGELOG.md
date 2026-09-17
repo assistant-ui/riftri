@@ -74,6 +74,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   command does die from SIGINT). The command starts with its inherited
   dispositions restored, prior dispositions are reinstated after the command
   is reaped, and supervised process-group forwarding is unchanged.
+- Repair of an interrupted forced managed removal no longer deletes a worktree
+  whose metadata changed after force intent was recorded. The forced-removal
+  snapshot now covers each entry's full native permission bits (setuid,
+  setgid, and sticky included) and, on Unix, its extended attribute names and
+  values, so a metadata-only change preserves the worktree and reports why.
+  Pending snapshots recorded by older versions can never match the upgraded
+  digest and therefore also fail closed instead of authorizing deletion.
+  Immutable-base content hashing is unchanged, so existing cached bases stay
+  valid.
 - Terminating the native `riftri exec` with SIGTERM, SIGINT, or SIGHUP now
   forwards the signal to the scoped command instead of orphaning it.
   Supervised invocations run the command in its own process group and signal
