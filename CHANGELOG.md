@@ -46,6 +46,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- The standalone `Website deployment check` workflow is removed. It duplicated
+  the post-deploy verification that the `Website deploy` workflow already runs
+  against https://riftri.dev, and its `deployment_status` trigger produced a
+  redundant failing check on unrelated pull requests.
 - `riftri worktree add` spawns three fewer Git processes per creation (21 to
   18 cached, 27 to 24 cold on macOS): the two attribute-compatibility passes
   share one `read-tree` temporary index, the compatibility analysis reuses the
