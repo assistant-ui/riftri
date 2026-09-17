@@ -35,6 +35,15 @@ silently substitutes a full checkout; if no backend qualifies, use plain
 [windows-refs.md](windows-refs.md), and
 [filesystem-compatibility.md](filesystem-compatibility.md).
 
+### Creation fails because of a checkout hook
+
+Git normally runs `post-checkout` after creating a worktree. Riftri cannot yet
+run that hook safely within its recoverable creation transaction, so it refuses
+an executable default hook or any custom `core.hooksPath` configuration before
+creating a branch, worktree, or state directory. This includes custom hook paths
+that currently contain no hook. Use ordinary `git worktree add` for these
+repositories. Do not disable a required hook just to enable optimization.
+
 ### Creation fails on a repository with sparse checkout, submodules, or custom filters
 
 These checkout configurations are not yet supported and fail closed with an
