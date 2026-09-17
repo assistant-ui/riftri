@@ -110,7 +110,7 @@ test("reduced motion stops loops while preserving readable diagram content", asy
   await expect(page.locator(".storage-map, .materialization-map").getByRole("button")).toHaveCount(0);
   const names = await page.locator(".track-counter, .backend-cycle-item, .savings-backend-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName));
   expect(names.every((name) => name === "none")).toBe(true);
-  await expect(page.getByText("APFS · Linux · ReFS", { exact: true })).toBeVisible();
+  await expect(page.locator(".materialization-map")).toContainText("FROM TREE TO WORKSPACE");
 });
 
 test("Windows onboarding separates review from running the installer", async ({ page }, testInfo) => {

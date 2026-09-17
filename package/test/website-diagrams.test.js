@@ -10,12 +10,10 @@ test("scripted worktree diagram is clearly labeled as an example", () => {
   assert.ok(map.includes("WORKTREE EXAMPLE"));
 });
 
-test("looping diagrams keep their scope note and stop under reduced motion", () => {
+test("looping diagrams stop under reduced motion without a pause control", () => {
   // The diagrams are decorative loops with no pause control, so the only
   // motion boundary that has to exist is the reduced-motion one, and it is
   // pure CSS rather than a client component.
-  assert.ok(read("components/storage-map.tsx").includes("Illustration · not live data"));
-  assert.ok(read("components/materialization-map.tsx").includes("APFS · Linux · ReFS"));
   const css = read("app/globals.css");
   const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
   assert.ok(reduced.includes(".track-counter"));

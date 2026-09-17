@@ -55,7 +55,6 @@ export function StorageMap() {
         <span><i>·</i> shared block</span>
         <span><i>█</i> private edit</span>
       </div>
-      <div className="diagram-note">Illustration · not live data</div>
     </figure>
   );
 }
