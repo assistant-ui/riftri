@@ -5,8 +5,59 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- `riftri worktree add --sparse-dir <DIR>` (repeatable) creates cone-mode
+  sparse worktrees through Git's real sparse-checkout and skip-worktree
+  semantics. The canonical directory list becomes part of the versioned
+  checkout profile and immutable-base key, so different selections at the same
+  commit never share a base and full worktrees keep their existing bases.
+  Sparse patterns, nonexistent directories, repository-configured sparse
+  checkout, intercepted sparse adds, sparse plus Git LFS, and sparse
+  compaction are refused with precise diagnostics before any state is created.
+  See [docs/sparse-checkout.md](docs/sparse-checkout.md).
+- `riftri worktree add`, `riftri repair`, and `riftri gc` report lifecycle
+  progress on stderr: one plain line per durable journal phase, plus explicit
+  lines when an operation waits on a contended coordination lock and when it
+  resumes. Lines reflect only states an operation genuinely reached — no
+  percentages, timers, or terminal control sequences. The new global
+  `--no-progress` flag suppresses them, `--json-errors` implies that
+  suppression so its stderr stays exactly one JSON receipt, and `--json`
+  stdout remains a single valid report. `riftri-core` gains an optional
+  `progress::set_progress_observer` hook that emits these phase events
+  without changing lifecycle behaviour.
+- `riftri worktree list --all-states` inventories managed worktrees across the
+  default state location and every state directory the repository registers,
+  so worktrees created with a custom `--state-dir` are discoverable without
+  repeating the path. The default single-state scope is unchanged. The new
+  scope's JSON report uses `schema_version` 2, names each worktree's owning
+  state directory, deduplicates equivalent registrations, filters shared state
+  directories to the queried repository, and reports missing, non-absolute, or
+  symlinked registrations as diagnostic entries without traversing them.
+  Discovery stays strictly read-only.
+- A staged Homebrew tap directory at `package/homebrew/` mirrors the planned
+  `assistant-ui/homebrew-riftri` tap repository, with
+  `package/scripts/sync-homebrew-tap.mjs` regenerating every checked-in
+  formula copy directly from a release's published `SHA256SUMS`. Tests and the
+  scheduled freshness workflow fail when the copies diverge, drift from the
+  generator, or fall behind the latest release. The tap install command is
+  documented as pending maintainer setup; installing from a checkout remains
+  the supported Homebrew path.
+
 ### Changed
 
+- The standalone `Website deployment check` workflow is removed. It duplicated
+  the post-deploy verification that the `Website deploy` workflow already runs
+  against https://riftri.dev, and its `deployment_status` trigger produced a
+  redundant failing check on unrelated pull requests.
+- `riftri worktree add` spawns three fewer Git processes per creation (21 to
+  18 cached, 27 to 24 cold on macOS): the two attribute-compatibility passes
+  share one `read-tree` temporary index, the compatibility analysis reuses the
+  already-resolved common Git directory instead of re-running `rev-parse`, and
+  the separate `update-index --refresh` is gone because the fail-closed clean
+  check performs the same full refresh. Corruption detection, index contents,
+  and the clean-creation guarantee are unchanged, and a new integration test
+  guards the per-add Git invocation budget.
 - `riftri state unregister <PATH>` replaces the displayed `state forget-missing`
   command. The old name remains a hidden compatibility alias, and existing paths
   still cannot be unregistered. Help, completions, and generated man pages use
@@ -14,6 +65,45 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Interactive `riftri exec` no longer dies from Ctrl-C while its scoped
+  command survives the interrupt. With a foreground controlling terminal,
+  `riftri exec` now ignores SIGINT and SIGQUIT while waiting — the terminal
+  still delivers both to the whole foreground process group, so the command
+  alone decides whether the interrupt is fatal — and keeps waiting so shim
+  cleanup and exit-status propagation still happen (including 130 when the
+  command does die from SIGINT). The command starts with its inherited
+  dispositions restored, prior dispositions are reinstated after the command
+  is reaped, and supervised process-group forwarding is unchanged.
+- Repair of an interrupted forced managed removal no longer deletes a worktree
+  whose metadata changed after force intent was recorded. The forced-removal
+  snapshot now covers each entry's full native permission bits (setuid,
+  setgid, and sticky included) and, on Unix, its extended attribute names and
+  values, so a metadata-only change preserves the worktree and reports why.
+  Pending snapshots recorded by older versions can never match the upgraded
+  digest and therefore also fail closed instead of authorizing deletion.
+  Immutable-base content hashing is unchanged, so existing cached bases stay
+  valid.
+- Terminating the native `riftri exec` with SIGTERM, SIGINT, or SIGHUP now
+  forwards the signal to the scoped command instead of orphaning it.
+  Supervised invocations run the command in its own process group and signal
+  that whole group, so the command's descendants stop with it without touching
+  unrelated processes; interactive foreground invocations keep terminal job
+  control unchanged and forward SIGTERM and SIGHUP to the command itself.
+  Riftri then removes its temporary Git shim and exits with the command's
+  status. The npm launcher's own signal forwarding is tracked separately
+  (#180).
+- `--json-errors` receipts for a lifecycle command blocked by a pending
+  operation now agree with the human-readable guidance: they report
+  `"code": "recovery-pending"`, `"category": "operational"` (exit code 1),
+  `"recovery": "required"`, and a `nextCommand` of
+  `riftri repair --state-dir <state-dir>` naming the state directory that
+  holds the pending journal. Previously these receipts claimed
+  `"recovery": "not-required"` with no next command while the message said to
+  run repair. Genuine policy refusals still report
+  `"recovery": "not-required"`. A worktree whose operation lock is held by a
+  live process is reported separately as `"code": "worktree-busy"` with
+  `"recovery": "retry"`, since waiting and retrying — not repair — is the
+  correct response there.
 - Managed removal, forced removal, and compaction reject worktrees with an
   incomplete move journal until repair completes the move.
 - State unregistration accepts relative parent components such as `../old-state`
@@ -23,6 +113,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   near the mobile layout breakpoint.
 - Doctor's suggested worktree command quotes the destination as one shell argument,
   including paths with spaces or apostrophes.
+- `riftri backends --json` emits a versioned report that preserves non-UTF-8
+  requested and probe paths through display strings and exact native
+  hexadecimal fields instead of rejecting serialization. The report is now an
+  object with `schema_version` 1 wrapping the previous capability array as
+  `storage_capabilities`.
+- Git worktree remove and move commands that use a unique path suffix no longer
+  bypass Riftri's lifecycle journals for managed worktrees.
 
 ## 0.2.3 - 2026-09-16
 

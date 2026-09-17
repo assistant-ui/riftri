@@ -1,8 +1,20 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
+
+/**
+ * Every checked-in copy of the generated formula. The first is the canonical
+ * checkout-install formula; the second is the staged copy that mirrors the
+ * intended `assistant-ui/homebrew-riftri` tap repository layout (see
+ * package/homebrew/README.md). They must stay byte-identical, which
+ * package/test/homebrew-formula.test.js enforces.
+ */
+export const formulaPaths = [
+  path.join(root, "Formula/riftri.rb"),
+  path.join(root, "package/homebrew/Formula/riftri.rb"),
+];
 
 /** Release archives Homebrew installs from, in formula order. */
 const bottles = [
@@ -91,15 +103,18 @@ end
 export async function updateHomebrewFormula({
   version,
   checksumsPath,
-  formulaPath = path.join(root, "Formula/riftri.rb"),
+  targets = formulaPaths,
 } = {}) {
   const contents = await readFile(checksumsPath, "utf8");
   const formula = renderHomebrewFormula({
     version,
     checksums: parseChecksums(contents),
   });
-  await writeFile(formulaPath, formula);
-  return formulaPath;
+  for (const target of targets) {
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, formula);
+  }
+  return targets;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
@@ -110,5 +125,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     );
   }
   const written = await updateHomebrewFormula({ version, checksumsPath });
-  process.stdout.write(`${written}\n`);
+  process.stdout.write(`${written.join("\n")}\n`);
 }

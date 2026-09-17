@@ -207,7 +207,11 @@ Outcome: cover real-world repositories and long-lived worktrees.
   the repository's default local LFS store are complete; custom filters,
   pointer extensions, custom LFS storage, and implicit network fetching remain
   fail-closed)
-- Sparse-checkout profiles.
+- Sparse-checkout profiles. (explicit cone-mode directory lists via
+  `riftri worktree add --sparse-dir` are complete, keyed into the checkout
+  profile and immutable-base identity; interception-path sparse requests,
+  non-cone forms, sparse plus Git LFS, sparse compaction, and representative
+  monorepo measurements remain fail-closed or open)
 - Submodule policy and support.
 - Symlinks, executable modes, xattrs, and case-sensitivity testing. (native
   Unix metadata-isolation matrix complete; the preflight replays ASCII
