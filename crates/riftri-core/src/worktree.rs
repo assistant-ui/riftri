@@ -1646,20 +1646,6 @@ fn move_worktree_inner(
             source.display()
         )));
     }
-    if MoveJournalStore::open(&state_directory)
-        .load_all()?
-        .iter()
-        .any(|journal| {
-            journal.source_add_operation_id == managed.operation_id
-                && journal.phase != MoveWorktreePhase::Complete
-        })
-    {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a move of {} is already pending; run `riftri repair --state-dir {}`",
-            source.display(),
-            state_directory.display()
-        )));
-    }
 
     let store = MoveJournalStore::create(&state_directory)?;
     let operation_id = allocate_move_operation_id(&store)?;
@@ -3718,6 +3704,12 @@ fn find_managed_add_journal(
         .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    let pending_moves = MoveJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id)
+        .collect::<HashSet<_>>();
     let pending_compactions = CompactJournalStore::open(state_directory)
         .load_all()?
         .into_iter()
@@ -3750,6 +3742,16 @@ fn find_managed_add_journal(
     {
         return Err(WorktreeError::InvalidRequest(format!(
             "a removal of {} is already pending; run `riftri repair --state-dir {}`",
+            destination.display(),
+            state_directory.display()
+        )));
+    }
+    if managed
+        .as_ref()
+        .is_some_and(|journal| pending_moves.contains(journal.operation_id.as_str()))
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "a move of {} is already pending; run `riftri repair --state-dir {}`",
             destination.display(),
             state_directory.display()
         )));
