@@ -16,9 +16,25 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   directories to the queried repository, and reports missing, non-absolute, or
   symlinked registrations as diagnostic entries without traversing them.
   Discovery stays strictly read-only.
+- A staged Homebrew tap directory at `package/homebrew/` mirrors the planned
+  `assistant-ui/homebrew-riftri` tap repository, with
+  `package/scripts/sync-homebrew-tap.mjs` regenerating every checked-in
+  formula copy directly from a release's published `SHA256SUMS`. Tests and the
+  scheduled freshness workflow fail when the copies diverge, drift from the
+  generator, or fall behind the latest release. The tap install command is
+  documented as pending maintainer setup; installing from a checkout remains
+  the supported Homebrew path.
 
 ### Changed
 
+- `riftri worktree add` spawns three fewer Git processes per creation (21 to
+  18 cached, 27 to 24 cold on macOS): the two attribute-compatibility passes
+  share one `read-tree` temporary index, the compatibility analysis reuses the
+  already-resolved common Git directory instead of re-running `rev-parse`, and
+  the separate `update-index --refresh` is gone because the fail-closed clean
+  check performs the same full refresh. Corruption detection, index contents,
+  and the clean-creation guarantee are unchanged, and a new integration test
+  guards the per-add Git invocation budget.
 - `riftri state unregister <PATH>` replaces the displayed `state forget-missing`
   command. The old name remains a hidden compatibility alias, and existing paths
   still cannot be unregistered. Help, completions, and generated man pages use
@@ -26,6 +42,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `--json-errors` receipts for a lifecycle command blocked by a pending
+  operation now agree with the human-readable guidance: they report
+  `"code": "recovery-pending"`, `"category": "operational"` (exit code 1),
+  `"recovery": "required"`, and a `nextCommand` of
+  `riftri repair --state-dir <state-dir>` naming the state directory that
+  holds the pending journal. Previously these receipts claimed
+  `"recovery": "not-required"` with no next command while the message said to
+  run repair. Genuine policy refusals still report
+  `"recovery": "not-required"`. A worktree whose operation lock is held by a
+  live process is reported separately as `"code": "worktree-busy"` with
+  `"recovery": "retry"`, since waiting and retrying — not repair — is the
+  correct response there.
 - Managed removal, forced removal, and compaction reject worktrees with an
   incomplete move journal until repair completes the move.
 - State unregistration accepts relative parent components such as `../old-state`
@@ -33,6 +61,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- Git worktree remove and move commands that use a unique path suffix no longer
+  bypass Riftri's lifecycle journals for managed worktrees.
 
 ## 0.2.3 - 2026-09-16
 

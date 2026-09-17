@@ -102,6 +102,17 @@ pub struct GitAttribute {
     pub value: Vec<u8>,
 }
 
+/// A private temporary index holding one exact tree for attribute queries.
+///
+/// The index is populated by a single `git read-tree` and removed with this
+/// value; every query against it is read-only, so one index can serve both
+/// the isolated and the effective attribute passes.
+pub struct TreeAttributeIndex {
+    /// Owns the temporary directory backing `index` for this value's lifetime.
+    _temporary: tempfile::TempDir,
+    index: PathBuf,
+}
+
 /// Branch behavior for a new linked worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeHead<'a> {
@@ -285,6 +296,49 @@ impl Git {
     pub fn list_worktrees(&self, path: &Path) -> Result<Vec<WorktreeInfo>, GitError> {
         let output = self.run(Some(path), &["worktree", "list", "--porcelain", "-z"])?;
         parse_worktree_porcelain(&output.stdout)
+    }
+
+    /// Resolve Git's unique path suffix before falling back to a filesystem path.
+    pub fn resolve_worktree_path(
+        &self,
+        repository: &Path,
+        selector: &OsStr,
+    ) -> Result<PathBuf, GitError> {
+        let path = repository.join(selector);
+        let suffix = selector.as_encoded_bytes();
+        if suffix.is_empty() {
+            return Ok(path);
+        }
+        let config = self.run(
+            Some(repository),
+            &[
+                "config",
+                "--bool",
+                "--default=false",
+                "--get",
+                "core.ignorecase",
+            ],
+        )?;
+        let ignore_case = cfg!(windows) || trim_line_endings(&config.stdout) == b"true";
+        let is_separator = |byte: u8| byte == b'/' || (cfg!(windows) && byte == b'\\');
+        let worktrees = self.list_worktrees(repository)?;
+        let mut matches = worktrees.into_iter().filter(|worktree| {
+            let bytes = worktree.path.as_os_str().as_encoded_bytes();
+            let Some(start) = bytes.len().checked_sub(suffix.len()) else {
+                return false;
+            };
+            (start == 0 || is_separator(bytes[start - 1]))
+                && bytes[start..].iter().zip(suffix).all(|(left, right)| {
+                    left == right
+                        || (ignore_case && left.eq_ignore_ascii_case(right))
+                        || (cfg!(windows) && is_separator(*left) && is_separator(*right))
+                })
+        });
+        match (matches.next(), matches.next()) {
+            (Some(worktree), None) => Ok(worktree.path),
+            // Git tries the literal path when the suffix is absent or ambiguous.
+            _ => Ok(path),
+        }
     }
 
     /// Resolve an explicit Git directory to one live non-bare worktree root.
@@ -658,6 +712,32 @@ impl Git {
         self.attributes_for_paths_with_environment(path, paths, &[], &[])
     }
 
+    /// Load an exact tree into a private temporary index once so multiple
+    /// attribute queries can share it instead of re-running `git read-tree`.
+    ///
+    /// `read-tree` runs with only `GIT_INDEX_FILE` set, exactly as each
+    /// attribute query previously ran it for its own private index; attribute
+    /// isolation is applied per query by `check-attr`, which only reads the
+    /// index, so sharing one index cannot leak state between queries.
+    pub fn tree_attribute_index(
+        &self,
+        path: &Path,
+        tree: &ObjectId,
+    ) -> Result<TreeAttributeIndex, GitError> {
+        let temporary = tempfile::Builder::new()
+            .prefix("riftri-attributes-")
+            .tempdir()
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let index = temporary.path().join("index");
+        let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.as_os_str())];
+        let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
+        self.run_os_with_env(Some(path), &read_tree, &index_environment)?;
+        Ok(TreeAttributeIndex {
+            _temporary: temporary,
+            index,
+        })
+    }
+
     /// Return attributes for an exact tree using Git's normal external
     /// attribute precedence.
     pub fn effective_attributes_for_tree_paths(
@@ -666,7 +746,11 @@ impl Git {
         tree: &ObjectId,
         paths: &[PathBuf],
     ) -> Result<Vec<GitAttribute>, GitError> {
-        self.attributes_for_tree_paths(path, tree, paths, false)
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = self.tree_attribute_index(path, tree)?;
+        self.effective_attributes_for_index(path, &index, paths)
     }
 
     /// Return attributes from an exact tree while disabling global and system
@@ -678,47 +762,50 @@ impl Git {
         tree: &ObjectId,
         paths: &[PathBuf],
     ) -> Result<Vec<GitAttribute>, GitError> {
-        self.attributes_for_tree_paths(path, tree, paths, true)
-    }
-
-    fn attributes_for_tree_paths(
-        &self,
-        path: &Path,
-        tree: &ObjectId,
-        paths: &[PathBuf],
-        isolate_external: bool,
-    ) -> Result<Vec<GitAttribute>, GitError> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
-        let temporary = tempfile::Builder::new()
-            .prefix("riftri-attributes-")
-            .tempdir()
-            .map_err(|source| GitError::TemporaryState { source })?;
-        let temporary_index = temporary.path().join("index");
-        let index_environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
-        let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
-        self.run_os_with_env(Some(path), &read_tree, &index_environment)?;
+        let index = self.tree_attribute_index(path, tree)?;
+        self.in_tree_attributes_for_index(path, &index, paths)
+    }
 
-        if isolate_external {
-            #[cfg(unix)]
-            let null_device = OsStr::new("/dev/null");
-            #[cfg(not(unix))]
-            let null_device = OsStr::new("NUL");
-            let mut attributes_override = OsString::from("core.attributesFile=");
-            attributes_override.push(null_device);
-            let arguments = [OsString::from("-c"), attributes_override];
-            let environment = [
-                (OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str()),
-                (OsStr::new("GIT_ATTR_NOSYSTEM"), OsStr::new("1")),
-                (OsStr::new("GIT_CONFIG_NOSYSTEM"), OsStr::new("1")),
-                (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
-                (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
-            ];
-            self.attributes_for_paths_with_environment(path, paths, &arguments, &environment)
-        } else {
-            self.attributes_for_paths_with_environment(path, paths, &[], &index_environment)
-        }
+    /// Return attributes for an already indexed tree using Git's normal
+    /// external attribute precedence.
+    pub fn effective_attributes_for_index(
+        &self,
+        path: &Path,
+        index: &TreeAttributeIndex,
+        paths: &[PathBuf],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str())];
+        self.attributes_for_paths_with_environment(path, paths, &[], &index_environment)
+    }
+
+    /// Return attributes from an already indexed tree while disabling global
+    /// and system attribute files. Callers must separately reject
+    /// `.git/info/attributes`, which Git intentionally gives highest
+    /// precedence and cannot disable.
+    pub fn in_tree_attributes_for_index(
+        &self,
+        path: &Path,
+        index: &TreeAttributeIndex,
+        paths: &[PathBuf],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        #[cfg(unix)]
+        let null_device = OsStr::new("/dev/null");
+        #[cfg(not(unix))]
+        let null_device = OsStr::new("NUL");
+        let mut attributes_override = OsString::from("core.attributesFile=");
+        attributes_override.push(null_device);
+        let arguments = [OsString::from("-c"), attributes_override];
+        let environment = [
+            (OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str()),
+            (OsStr::new("GIT_ATTR_NOSYSTEM"), OsStr::new("1")),
+            (OsStr::new("GIT_CONFIG_NOSYSTEM"), OsStr::new("1")),
+            (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
+            (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
+        ];
+        self.attributes_for_paths_with_environment(path, paths, &arguments, &environment)
     }
 
     fn attributes_for_paths_with_environment(
@@ -964,9 +1051,18 @@ impl Git {
     }
 
     /// Populate the linked worktree index from HEAD without writing files.
+    ///
+    /// SAFETY ARGUMENT: this intentionally issues no separate
+    /// `update-index --refresh`. The staged index contents are fully
+    /// determined by `reset --mixed HEAD`; a refresh only rewrites cached
+    /// stat data and reports paths whose contents differ. Every caller pairs
+    /// this call with `worktree_is_clean`, whose `git status` performs the
+    /// same full stat-and-content comparison against the freshly written
+    /// index and fails closed on any divergence, so corruption detection and
+    /// the clean-creation guarantee are unchanged while each add saves one
+    /// Git process and one full worktree traversal.
     pub fn synchronize_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
         self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
-        self.run(Some(worktree), &["update-index", "--refresh"])?;
         Ok(())
     }
 
@@ -1966,8 +2062,15 @@ mod tests {
         );
 
         fs::write(linked.join("tracked.txt"), "tracked\n").expect("materialize linked file");
+        let attempts_before = git.process_attempts();
         git.synchronize_worktree_index(&linked)
             .expect("synchronize index");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "index synchronization must stay a single Git invocation; the \
+             paired clean check performs the refresh"
+        );
         assert!(git.worktree_is_clean(&linked).expect("check clean"));
 
         fs::write(linked.join("tracked.txt"), "changed\n").expect("modify linked file");
@@ -2539,6 +2642,63 @@ mod tests {
                 .any(|attribute| { attribute.name == b"filter" && attribute.value == b"external" })
         );
         assert!(in_tree.is_empty());
+    }
+
+    #[test]
+    fn shared_tree_index_preserves_isolation_and_runs_read_tree_once() {
+        let fixture = RepositoryFixture::committed();
+        let external = fixture.path().join("external-attributes");
+        fs::write(&external, "*.txt filter=external\n").expect("write external attributes");
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "core.attributesFile",
+                external.to_str().expect("UTF-8 temporary path"),
+            ],
+        );
+        let git_handle = Git::default();
+        let tree = git_handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve tree")
+            .tree;
+        let paths = [Path::new("tracked.txt").to_path_buf()];
+
+        let attempts_before = git_handle.process_attempts();
+        let index = git_handle
+            .tree_attribute_index(fixture.path(), &tree)
+            .expect("load shared tree index");
+        let in_tree = git_handle
+            .in_tree_attributes_for_index(fixture.path(), &index, &paths)
+            .expect("read isolated attributes");
+        let effective = git_handle
+            .effective_attributes_for_index(fixture.path(), &index, &paths)
+            .expect("read effective attributes");
+        assert_eq!(
+            git_handle.process_attempts() - attempts_before,
+            3,
+            "both attribute passes must share one read-tree invocation"
+        );
+
+        assert!(
+            effective
+                .iter()
+                .any(|attribute| { attribute.name == b"filter" && attribute.value == b"external" })
+        );
+        assert!(in_tree.is_empty());
+
+        assert_eq!(
+            in_tree,
+            git_handle
+                .in_tree_attributes_for_paths(fixture.path(), &tree, &paths)
+                .expect("read isolated attributes through the wrapper")
+        );
+        assert_eq!(
+            effective,
+            git_handle
+                .effective_attributes_for_tree_paths(fixture.path(), &tree, &paths)
+                .expect("read effective attributes through the wrapper")
+        );
     }
 
     #[cfg(unix)]
