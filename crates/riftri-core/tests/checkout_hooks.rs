@@ -82,6 +82,7 @@ fn checkout_hooks_are_not_silently_skipped_by_optimized_creation() {
             revision: OsString::from("HEAD"),
             mode: WorktreeMode::NewBranch(OsString::from("hook-test")),
             state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
         })
         .expect_err("must not silently omit checkout setup");
         assert!(error.to_string().contains("post-checkout"), "{error}");

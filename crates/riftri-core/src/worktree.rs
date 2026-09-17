@@ -9912,6 +9912,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::Detached,
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             })
             .unwrap();
             force_remove_worktree_inner(
