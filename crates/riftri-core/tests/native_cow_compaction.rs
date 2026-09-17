@@ -168,6 +168,7 @@ fn compaction_refuses_special_permissions_before_recording_intent() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::Detached,
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .unwrap();
     fs::set_permissions(&worktree, fs::Permissions::from_mode(0o1755)).unwrap();
