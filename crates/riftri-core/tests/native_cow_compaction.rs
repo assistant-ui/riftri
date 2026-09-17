@@ -14,8 +14,8 @@ use std::process::Command;
 #[cfg(unix)]
 use riftri_core::recover_incomplete_operations;
 use riftri_core::{
-    AddWorktreeRequest, CompactWorktreeRequest, WorktreeMode, add_worktree, compact_worktree,
-    storage_accounting,
+    AddWorktreeRequest, CompactWorktreeRequest, MoveWorktreeRequest, WorktreeMode, add_worktree,
+    compact_worktree, move_worktree, storage_accounting,
 };
 
 mod support;
@@ -166,12 +166,18 @@ fn compaction_rekeys_the_active_view_after_a_clean_commit() {
         state_dir: Some(state.clone()),
     })
     .expect("create managed worktree");
+    compact_worktree(CompactWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect("compact initial tree");
     fs::write(worktree.join("tracked.txt"), "new committed tree\n").expect("change tree");
     git(&worktree, &["add", "--", "tracked.txt"]);
     git(&worktree, &["commit", "--quiet", "-m", "advance tree"]);
 
     let compacted = compact_worktree(CompactWorktreeRequest {
-        repository,
+        repository: repository.clone(),
         destination: worktree.clone(),
         state_dir: Some(state.clone()),
     })
@@ -186,6 +192,8 @@ fn compaction_rekeys_the_active_view_after_a_clean_commit() {
     );
     assert!(git(&worktree, &["status", "--porcelain"]).is_empty());
     let accounting = storage_accounting(&state).expect("inspect rekeyed state");
+    assert_eq!(accounting.completed_compactions, 2);
+    assert!(accounting.diagnostic_issues.is_empty());
     let view = accounting.views.first().expect("active view");
     assert_eq!(view.base_path, compacted.base_path);
     assert_eq!(
@@ -204,6 +212,17 @@ fn compaction_rekeys_the_active_view_after_a_clean_commit() {
             .map(|base| base.reference_count),
         Some(0)
     );
+
+    move_worktree(MoveWorktreeRequest {
+        repository,
+        source: worktree,
+        destination: fixture.path().join("moved"),
+        state_dir: Some(state.clone()),
+    })
+    .expect("move compacted worktree");
+    let accounting = storage_accounting(&state).expect("inspect moved state");
+    assert_eq!(accounting.completed_compactions, 2);
+    assert!(accounting.diagnostic_issues.is_empty());
 }
 
 #[cfg(unix)]
