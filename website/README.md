@@ -83,7 +83,32 @@ The preview honors the finalized static-file overrides and error-phase 404
 route, including its status, HTML body, and HEAD behavior. It is a preview of
 this site's static output, not a general Vercel routing emulator.
 
-To publish the tested site from this directory:
+## Automatic deployment
+
+Every push to `main` runs the `Website deploy` workflow, which installs, type
+checks, builds, publishes the prebuilt output to production, and then verifies
+the public site. It is the normal way the site ships; the manual command below
+remains for local recovery.
+
+The workflow needs three repository secrets and skips itself with a warning
+until all three exist, so it is inert rather than failing every push:
+
+| Secret | Where it comes from |
+| --- | --- |
+| `VERCEL_TOKEN` | Vercel account settings → Tokens, scoped to `assistant-ui` |
+| `VERCEL_ORG_ID` | `vercel link` writes it to `website/.vercel/project.json` as `orgId` |
+| `VERCEL_PROJECT_ID` | the same file, as `projectId` |
+
+`website/.vercel/` is gitignored, so read those two values locally once and copy
+them into the repository secrets. Deploys are serialized by a concurrency group
+so an older commit cannot finish after a newer one and republish stale content.
+
+If the Vercel Git integration is connected to this repository instead, Vercel
+builds each push itself and the separate `Website deployment check` workflow
+verifies the result on its `deployment_status` event. Use one path or the other;
+running both deploys the same commit twice.
+
+To publish the tested site manually from this directory:
 
 ```console
 $ vercel link --yes --project riftri --scope assistant-ui
