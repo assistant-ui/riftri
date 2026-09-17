@@ -104,9 +104,8 @@ them into the repository secrets. Deploys are serialized by a concurrency group
 so an older commit cannot finish after a newer one and republish stale content.
 
 If the Vercel Git integration is connected to this repository instead, Vercel
-builds each push itself and the separate `Website deployment check` workflow
-verifies the result on its `deployment_status` event. Use one path or the other;
-running both deploys the same commit twice.
+builds each push itself. Use one path or the other; running both deploys the
+same commit twice.
 
 To publish the tested site manually from this directory:
 
@@ -122,8 +121,6 @@ runs the existing Chromium suite, publishes the exact tested output, and runs
 revision. Verification compares it with the checkout and checks the homepage,
 inline Markdown, byte-identical installers and public assets, and branded 404.
 A failed verification exits nonzero; it does not silently roll back or redeploy.
-The Website deployment check workflow also verifies successful production
-deployment events and can be run manually against the intended deployed ref.
 
 The Farm.js build already generates Vercel Build Output API artifacts under
 `.vercel/output`. Keep the downloaded project settings and environment files
