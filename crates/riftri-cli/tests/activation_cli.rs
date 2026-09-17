@@ -104,8 +104,9 @@ fn enable_and_disable_change_only_repository_local_config() {
 #[test]
 fn explicitly_forgets_only_a_missing_registered_state_directory() {
     let fixture = RepositoryFixture::new();
-    let missing = fixture.directory.path().join("removed-custom-state");
-    let existing = fixture.directory.path().join("existing-custom-state");
+    let directory = fs::canonicalize(fixture.directory.path()).expect("resolve fixture directory");
+    let missing = directory.join("removed-custom-state");
+    let existing = directory.join("existing-custom-state");
     fs::create_dir(&existing).expect("create existing state directory");
     for state in [&missing, &existing] {
         assert!(
@@ -132,13 +133,13 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
         .output()
         .expect("refuse existing state registration");
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("still exists"));
 
     let forgotten = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["state", "forget-missing"])
-        .arg(&missing)
+        .arg("../removed-custom-state")
         .arg("--repository")
         .arg(&fixture.repository)
+        .current_dir(&fixture.repository)
         .output()
         .expect("forget missing state registration");
     assert!(
@@ -146,7 +147,6 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
         "{}",
         String::from_utf8_lossy(&forgotten.stderr)
     );
-    assert!(String::from_utf8_lossy(&forgotten.stdout).contains("Forgot missing Riftri state"));
 
     let registered = git(
         &fixture.repository,

@@ -5,6 +5,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- `riftri state forget-missing` accepts relative parent components such as
+  `../missing-state` for a registered missing path and still rejects existing paths.
+
 ## 0.2.3 - 2026-09-16
 
 This release changes documentation, tests, and tooling only. The CLI itself is
