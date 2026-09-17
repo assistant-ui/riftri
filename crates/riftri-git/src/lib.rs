@@ -287,6 +287,49 @@ impl Git {
         parse_worktree_porcelain(&output.stdout)
     }
 
+    /// Resolve Git's unique path suffix before falling back to a filesystem path.
+    pub fn resolve_worktree_path(
+        &self,
+        repository: &Path,
+        selector: &OsStr,
+    ) -> Result<PathBuf, GitError> {
+        let path = repository.join(selector);
+        let suffix = selector.as_encoded_bytes();
+        if suffix.is_empty() {
+            return Ok(path);
+        }
+        let config = self.run(
+            Some(repository),
+            &[
+                "config",
+                "--bool",
+                "--default=false",
+                "--get",
+                "core.ignorecase",
+            ],
+        )?;
+        let ignore_case = cfg!(windows) || trim_line_endings(&config.stdout) == b"true";
+        let is_separator = |byte: u8| byte == b'/' || (cfg!(windows) && byte == b'\\');
+        let worktrees = self.list_worktrees(repository)?;
+        let mut matches = worktrees.into_iter().filter(|worktree| {
+            let bytes = worktree.path.as_os_str().as_encoded_bytes();
+            let Some(start) = bytes.len().checked_sub(suffix.len()) else {
+                return false;
+            };
+            (start == 0 || is_separator(bytes[start - 1]))
+                && bytes[start..].iter().zip(suffix).all(|(left, right)| {
+                    left == right
+                        || (ignore_case && left.eq_ignore_ascii_case(right))
+                        || (cfg!(windows) && is_separator(*left) && is_separator(*right))
+                })
+        });
+        match (matches.next(), matches.next()) {
+            (Some(worktree), None) => Ok(worktree.path),
+            // Git tries the literal path when the suffix is absent or ambiguous.
+            _ => Ok(path),
+        }
+    }
+
     /// Resolve an explicit Git directory to one live non-bare worktree root.
     ///
     /// A linked worktree's Git directory does not sit below that worktree, so
