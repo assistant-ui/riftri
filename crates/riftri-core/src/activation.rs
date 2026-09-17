@@ -999,6 +999,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             optimization_compatible = false;
             index += 2;
         } else if argument.to_string_lossy().starts_with("--namespace=")
+            || argument.as_encoded_bytes().starts_with(b"--exec-path=")
             || argument == "--no-replace-objects"
             || argument == "--no-lazy-fetch"
             || argument == "--no-optional-locks"

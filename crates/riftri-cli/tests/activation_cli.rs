@@ -1339,6 +1339,53 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn exec_path_cannot_bypass_managed_lifecycle_guards() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("exec-path-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let exec_path = git(&fixture.repository, &["--exec-path"]);
+    assert!(exec_path.status.success());
+    let option = format!(
+        "--exec-path={}",
+        String::from_utf8(exec_path.stdout)
+            .expect("Git exec path")
+            .trim()
+    );
+    for arguments in [
+        vec!["remove", destination.to_str().unwrap()],
+        vec!["move", destination.to_str().unwrap(), "../moved-view"],
+        vec!["prune"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", &option, "worktree"])
+            .args(&arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("guard lifecycle with exec path");
+        assert!(
+            !output.status.success(),
+            "{arguments:?} bypassed the managed lifecycle guard"
+        );
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).expect("preserved worktree"),
+            b"tracked\n"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn enabled_pathspec_options_cannot_bypass_managed_removal_guard() {
     for (index, option) in [
         "--literal-pathspecs",
