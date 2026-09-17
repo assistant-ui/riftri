@@ -92,6 +92,10 @@ test filesystem traffic.
 
 ## Boundaries and edge cases
 
+- Managed `git worktree remove` and `git worktree move` commands accept a unique
+  path suffix, such as a basename. Riftri resolves the selector through Git's
+  inventory before it selects the lifecycle journal or rejects unsupported options.
+  If a suffix matches multiple worktrees, Git's literal-path rules still apply.
 - Shell aliases and functions named `git` take precedence over `PATH`; Riftri
   cannot intercept them. Use `command git` or remove the alias/function when
   optimized lifecycle handling is required.
