@@ -1050,6 +1050,44 @@ impl Git {
         Ok(())
     }
 
+    /// Stable, read-only Git state for forced-removal consent. Keep structured
+    /// index entries rather than stat-cache bytes, which ordinary status may refresh.
+    pub fn worktree_removal_state(&self, worktree: &Path) -> Result<Vec<u8>, GitError> {
+        let mut state = Vec::new();
+        for arguments in [
+            &["rev-parse", "--verify", "HEAD"][..],
+            &["ls-files", "--stage", "-v", "--full-name", "-z"],
+            &[
+                "diff",
+                "--cached",
+                "--raw",
+                "-z",
+                "--no-abbrev",
+                "--no-color",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                // Omitting intent-to-add entries distinguishes them from
+                // fully staged empty blobs (ls-files shows the same object ID).
+                "--ita-invisible-in-index",
+                "HEAD",
+                "--",
+            ],
+        ] {
+            let output = self.run(Some(worktree), arguments)?;
+            state.extend_from_slice(&(output.stdout.len() as u64).to_le_bytes());
+            state.extend_from_slice(&output.stdout);
+        }
+        let arguments = ["symbolic-ref", "--quiet", "HEAD"];
+        let symbolic = self.output(Some(worktree), &arguments)?;
+        if !symbolic.status.success() && symbolic.status.code() != Some(1) {
+            return Err(command_failed(&arguments.map(OsString::from), &symbolic));
+        }
+        state.extend_from_slice(&(symbolic.stdout.len() as u64).to_le_bytes());
+        state.extend_from_slice(&symbolic.stdout);
+        Ok(state)
+    }
+
     /// Populate the linked worktree index from HEAD without writing files.
     ///
     /// SAFETY ARGUMENT: this intentionally issues no separate
@@ -1755,6 +1793,48 @@ mod tests {
         assert_eq!(
             git.read_blob(fixture.path(), &object).unwrap(),
             b"tracked\n"
+        );
+    }
+
+    #[test]
+    fn removal_state_works_through_a_private_overlay_pointer() {
+        let fixture = RepositoryFixture::committed();
+        let views = tempdir().unwrap();
+        let linked = views.path().join("linked");
+        let upper = views.path().join("upper");
+        let output = Command::new("git")
+            .current_dir(fixture.path())
+            .args(["worktree", "add", "--detach"])
+            .arg(&linked)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        fs::create_dir(&upper).unwrap();
+        fs::copy(linked.join(".git"), upper.join(".git")).unwrap();
+        let git = Git::default();
+        assert_eq!(
+            git.worktree_removal_state(&linked).unwrap(),
+            git.worktree_removal_state(&upper).unwrap()
+        );
+    }
+
+    #[test]
+    fn removal_state_distinguishes_intent_to_add_from_staged_empty_content() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(fixture.path().join("empty.txt"), []).unwrap();
+        let git = Git::default();
+        git.run(
+            Some(fixture.path()),
+            &["add", "--intent-to-add", "empty.txt"],
+        )
+        .unwrap();
+        let intent = git.worktree_removal_state(fixture.path()).unwrap();
+        git.run(Some(fixture.path()), &["add", "empty.txt"])
+            .unwrap();
+        let staged = git.worktree_removal_state(fixture.path()).unwrap();
+        assert_ne!(
+            intent, staged,
+            "staging must invalidate force consent even when bytes match"
         );
     }
 
