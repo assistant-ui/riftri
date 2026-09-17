@@ -530,7 +530,7 @@ mod scoped_child_signals {
                 // async-signal-safe.
                 unsafe {
                     let mut action: libc::sigaction = std::mem::zeroed();
-                    action.sa_sigaction = forward_signal as usize;
+                    action.sa_sigaction = forward_signal as *const () as usize;
                     action.sa_flags = libc::SA_RESTART;
                     libc::sigemptyset(&mut action.sa_mask);
                     let mut previous: libc::sigaction = std::mem::zeroed();
