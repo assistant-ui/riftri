@@ -391,7 +391,7 @@ code, pre { font-family: var(--font-mono); }
 
 .materialization-track li > .backend-cycle {
   position: relative;
-  display: block;
+  display: grid;
   min-height: 2.6rem;
   overflow: hidden;
   color: var(--ink);
@@ -411,8 +411,8 @@ code, pre { font-family: var(--font-mono); }
 
 .backend-cycle-item {
   --cycle-delay: 0s;
-  position: absolute;
-  inset: 0;
+  position: relative;
+  grid-area: 1 / 1;
   display: grid;
   gap: 0.42rem;
   padding-bottom: 0.35rem;
@@ -718,7 +718,7 @@ code, pre { font-family: var(--font-mono); }
   html { scroll-behavior: auto; }
   .track-counter { clip-path: none; animation: none !important; }
   .backend-cycle-item { animation: none !important; }
-  .backend-cycle-item:first-child { position: relative; opacity: 1; transform: none; }
+  .backend-cycle-item:first-child { opacity: 1; transform: none; }
   .backend-cycle-item:not(:first-child) { display: none; }
   .savings-backend-item { animation: none !important; transform: none; }
   .savings-backend-item:first-child { opacity: 1; }

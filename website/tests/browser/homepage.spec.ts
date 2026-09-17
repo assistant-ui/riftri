@@ -105,6 +105,32 @@ test("Markdown link navigates in the same tab without a download", async ({ page
   expect(context.pages()).toHaveLength(count);
 });
 
+test("wrapped backend status stays inside the animated diagram", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "exercise the narrow four-column layout once");
+  await page.setViewportSize({ width: 761, height: 1000 });
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/");
+  await page.evaluate(() => document.fonts.ready);
+  const item = page.locator(".backend-cycle-item").nth(1);
+  // Freeze the natural Linux frame only in the test; the diagram has no pause control.
+  await expect.poll(() => item.evaluate((element) => {
+    if (getComputedStyle(element).opacity !== "1") return false;
+    for (const animation of element.getAnimations()) animation.pause();
+    return true;
+  }), { timeout: 12_000 }).toBe(true);
+  await expect(item).toHaveCSS("opacity", "1");
+  const overflow = await item.locator("small").evaluate((label) => {
+    const clip = label.closest(".backend-cycle");
+    if (!clip) throw new Error("Missing backend cycle");
+    const range = document.createRange();
+    range.selectNodeContents(label);
+    const text = range.getBoundingClientRect();
+    const bounds = clip.getBoundingClientRect();
+    return Math.max(bounds.top - text.top, text.bottom - bounds.bottom);
+  });
+  expect(overflow).toBeLessThanOrEqual(1);
+});
+
 test("reduced motion stops loops while preserving readable diagram content", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".storage-map, .materialization-map").getByRole("button")).toHaveCount(0);

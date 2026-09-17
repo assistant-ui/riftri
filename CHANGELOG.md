@@ -19,6 +19,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - State unregistration accepts relative parent components such as `../old-state`
   and resolves existing parent aliases when matching a missing registered path,
   without deleting files or unregistering existing paths.
+- The website storage diagram shows the full backend status when text wraps
+  near the mobile layout breakpoint.
 
 ## 0.2.3 - 2026-09-16
 
