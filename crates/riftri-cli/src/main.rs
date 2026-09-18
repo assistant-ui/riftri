@@ -21,10 +21,10 @@ Environment:
   RIFTRI_CACHE_DIR=PATH  Directory holding the shell-activation Git shim
                          (defaults to the platform cache directory).
 
-RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE are set by riftri itself inside
-activated scopes; RIFTRI_REQUIRE_* variables only make the test suites fail
-instead of falling back. See docs/agent-integration.md for the automation
-contract.";
+Riftri sets RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE inside activated scopes.
+Shell hooks also set RIFTRI_SHELL_SHIM_DIR to the absolute shim directory.
+RIFTRI_REQUIRE_* variables only make the test suites fail instead of falling
+back. See docs/agent-integration.md for the automation contract.";
 
 #[derive(Debug, Parser)]
 #[command(

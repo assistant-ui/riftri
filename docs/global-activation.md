@@ -53,7 +53,9 @@ PowerShell:
 Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
 ```
 
-This removes every Riftri shim-directory entry from `PATH` and unsets the two
+The hook records its absolute shim directory in `RIFTRI_SHELL_SHIM_DIR`.
+Status and deactivation use that path even after the current directory changes.
+Deactivation removes every entry for that directory from `PATH` and unsets the
 shim variables. It does not disable a repository. If the hook is in a profile,
 remove that profile line yourself before opening another shell. Remove the line
 before uninstalling a globally installed `riftri` package so new shells do not

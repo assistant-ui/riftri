@@ -26,6 +26,7 @@ use crate::{
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
 pub const CACHE_DIR_ENV: &str = "RIFTRI_CACHE_DIR";
+const SHELL_SHIM_DIR_ENV: &str = "RIFTRI_SHELL_SHIM_DIR";
 const PROCESS_SHIM_DIR_ENV: &str = "RIFTRI_PROCESS_SHIM_DIR";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -746,9 +747,10 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     let shim_directory = posix_quote_path(&shim_directory)?;
     let real_git = posix_quote_path(&real_git)?;
     Ok(format!(
-        "export {real_git_env}={real_git}\nexport {shim_active_env}='1'\ncase \"${{PATH-}}\" in\n  {shim_directory}|{shim_directory}:*) ;;\n  *) export PATH={shim_directory}${{PATH:+\":$PATH\"}} ;;\nesac\n",
+        "export {real_git_env}={real_git}\nexport {shim_active_env}='1'\nexport {shell_shim_dir_env}={shim_directory}\ncase \"${{PATH-}}\" in\n  {shim_directory}|{shim_directory}:*) ;;\n  *) export PATH={shim_directory}${{PATH:+\":$PATH\"}} ;;\nesac\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
+        shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
     ))
 }
 
@@ -763,9 +765,10 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = posix_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "_riftri_shim={shim_directory}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  if [ \"$_riftri_entry\" != \"$_riftri_shim\" ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env}\nunset _riftri_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more\n",
+        "_riftri_shim={shim_directory}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  if [ \"$_riftri_entry\" != \"$_riftri_shim\" ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env} {shell_shim_dir_env}\nunset _riftri_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
+        shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
     ))
 }
 
@@ -789,9 +792,10 @@ fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
     let shim_directory = powershell_quote_path(&shim_directory)?;
     let real_git = powershell_quote_path(&real_git)?;
     Ok(format!(
-        "$env:{real_git_env} = {real_git}\n$env:{shim_active_env} = '1'\n$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = (@($_riftriShim) + $_riftriPath) -join ';'\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
+        "$env:{real_git_env} = {real_git}\n$env:{shim_active_env} = '1'\n$env:{shell_shim_dir_env} = {shim_directory}\n$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = (@($_riftriShim) + $_riftriPath) -join ';'\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
+        shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
     ))
 }
 
@@ -806,9 +810,10 @@ fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_powershell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = powershell_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
+        "$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shell_shim_dir_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
+        shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
     ))
 }
 
@@ -869,6 +874,15 @@ fn shim_executable_paths(directory: &Path) -> Vec<PathBuf> {
 
 #[cfg(any(unix, target_os = "windows"))]
 fn shell_shim_directory() -> Result<PathBuf, ActivationError> {
+    if let Some(path) = env::var_os(SHELL_SHIM_DIR_ENV).filter(|path| !path.is_empty()) {
+        let directory = PathBuf::from(path);
+        if !directory.is_absolute() {
+            return Err(shell_error(format!(
+                "{SHELL_SHIM_DIR_ENV} must be absolute"
+            )));
+        }
+        return Ok(directory);
+    }
     let cache_root = env::var_os(CACHE_DIR_ENV)
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
