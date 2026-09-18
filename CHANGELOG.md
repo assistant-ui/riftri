@@ -111,6 +111,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- The static website preview serves `robots.txt` as plain text and `sitemap.xml`
+  as XML instead of `application/octet-stream`.
 - `riftri shell status` reports optimized interception as inactive when
   `RIFTRI_BYPASS` is active, without reporting that the shell hook is inactive.
 - `riftri status` reports a file or symlink at `overlays/v1` as an unsafe
