@@ -19,6 +19,27 @@ For the test-only APFS directory-clone candidate, see
 It records behavioral parity, a directory-metadata difference, allocation, and
 five local timing samples. The candidate is deliberately not used in production.
 
+The [paired creation harness](benchmarks/checkout-config-batching.mjs) can also
+compare a proposed optimization with a baseline on an exact exported Git tree:
+
+```sh
+RIFTRI_BENCH_SINGLE_ROUNDS=4 RIFTRI_BENCH_BATCH_ROUNDS=2 \
+RIFTRI_BENCH_WORKERS=10 node docs/benchmarks/checkout-config-batching.mjs \
+  /path/to/baseline/riftri /path/to/candidate/riftri \
+  /path/to/source EXACT_COMMIT /path/to/new-output-directory
+```
+
+Use matching build profiles and a quiet volume with ample free space. The
+harness records cold samples, alternating cached serial samples, and ten-way
+cached batches through both explicit and process-scoped interfaces. It records
+Git Trace2 process counts, observed CLI phase timestamps, and batch volume
+deltas separately. Phase timestamps are observed at stderr receipt, not an
+internal profiler; the shim does not emit the explicit CLI's phase stream.
+The fixture must have the source's exact tree ID, and every successful view is
+checked against the tracked-content manifest and removed through Riftri. Each
+concurrent batch also checks private-write isolation. A failed or disk-full run
+is incomplete evidence; do not use its partial samples for a speedup claim.
+
 Riftri includes one ignored integration benchmark for comparing worktree
 creation and physical allocation on a real supported destination filesystem.
 It exercises the same public core transaction used by the CLI; no synthetic
