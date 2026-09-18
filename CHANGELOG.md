@@ -7,6 +7,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- `enable`, `disable`, `doctor`, `status`, `repair`, `gc`, and `shell status`
+  now accept `--repository <PATH>`, matching the worktree and state commands.
+  Existing positional repository arguments still work; passing both forms is
+  rejected as ambiguous before running the command.
+
 - `riftri worktree add --sparse-dir <DIR>` (repeatable) creates cone-mode
   sparse worktrees through Git's real sparse-checkout and skip-worktree
   semantics. The canonical directory list becomes part of the versioned
