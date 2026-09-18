@@ -38,8 +38,10 @@ not enable a repository. The temporary directory is passed only to the child
 environment and does not change the parent shell or its cache settings.
 
 `riftri shell status [repository]` reports whether the current process inherited
-a complete hook, whether the selected repository opted in, and whether those two
-conditions make optimized interception effective.
+a complete hook and whether the selected repository opted in. Effective optimized
+interception also requires that `RIFTRI_BYPASS` is not `1`, `true`, or `yes`
+(case-insensitive). When bypass is active, status identifies `RIFTRI_BYPASS` as
+the reason without reporting that the hook is inactive.
 
 Remove Riftri from the current shell with:
 
@@ -53,7 +55,9 @@ PowerShell:
 Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
 ```
 
-This removes every Riftri shim-directory entry from `PATH` and unsets the two
+The hook records its absolute shim directory in `RIFTRI_SHELL_SHIM_DIR`.
+Status and deactivation use that path even after the current directory changes.
+Deactivation removes every entry for that directory from `PATH` and unsets the
 shim variables. It does not disable a repository. If the hook is in a profile,
 remove that profile line yourself before opening another shell. Remove the line
 before uninstalling a globally installed `riftri` package so new shells do not
@@ -70,6 +74,7 @@ non-disruptive:
 | Windows PowerShell | The hook installs a real `git.exe` shim, is tested as current-session-only and reversible, and exercises optimized creation on a disposable ReFS volume. |
 | Disabled repository | Normal Git creates an ordinary linked worktree and no Riftri state. |
 | Enabled repository on APFS | Supported adds create clean, real Git worktrees through strict native clones. |
+| Quiet adds | Intercepted `git worktree add --quiet` commands print no success message. Errors remain visible. |
 | Child tools | Plain-shell, `claude`, and `codex`-named child harnesses inherit interception without Riftri-specific prompts. |
 | Shared storage | Three child-created views reuse one immutable base while keeping separate writable views. |
 | Delegation | Standard input, standard output, standard error, and exit status match direct Git for passthrough commands; a signalled child produces the conventional `128 + signal` shell status. |

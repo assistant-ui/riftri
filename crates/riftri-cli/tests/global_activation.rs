@@ -87,6 +87,59 @@ mod unix {
     }
 
     #[test]
+    fn relative_cache_hook_survives_directory_changes_and_deactivates() {
+        let fixture = RepositoryFixture::new();
+        for shell_name in ["sh", "bash", "zsh"] {
+            let Some(shell) = executable(shell_name) else {
+                assert_ne!(shell_name, "sh", "sh is required");
+                continue;
+            };
+            let output = Command::new(shell)
+                .args([
+                    "-ec",
+                    r#"original_path=$PATH
+original_git=$(command -v git)
+original_version=$(git --version)
+eval "$("$RIFTRI_TEST_BIN" shell hook sh)"
+shim=$(command -v git)
+cd "$RIFTRI_TEST_REPOSITORY"
+"$RIFTRI_TEST_BIN" shell status
+eval "$("$RIFTRI_TEST_BIN" shell hook sh)"
+[ "$(command -v git)" = "$shim" ]
+PATH=$PATH:${shim%/*}; export PATH
+eval "$("$RIFTRI_TEST_BIN" shell deactivate sh)"
+[ "$PATH" = "$original_path" ]
+[ "$(command -v git)" = "$original_git" ]
+[ "$(git --version)" = "$original_version" ]
+[ "${RIFTRI_SHIM_ACTIVE-unset}" = unset ]
+[ "${RIFTRI_REAL_GIT-unset}" = unset ]
+[ "${RIFTRI_SHELL_SHIM_DIR-unset}" = unset ]
+"#,
+                ])
+                .current_dir(fixture.directory.path())
+                .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+                .env("RIFTRI_TEST_REPOSITORY", &fixture.repository)
+                .env(
+                    "RIFTRI_CACHE_DIR",
+                    format!("cache-{shell_name} with ' quote"),
+                )
+                .output()
+                .expect("run shell lifecycle after a directory change");
+            assert!(
+                output.status.success(),
+                "{shell_name}: {:?}\n{}\n{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("Shell interception: active"),
+                "{shell_name}"
+            );
+        }
+    }
+
+    #[test]
     fn global_hook_compatibility_matrix_keeps_disabled_repositories_on_real_git() {
         let fixture = RepositoryFixture::new();
         let mut tested = Vec::new();
@@ -213,6 +266,62 @@ mod unix {
         assert!(status.contains("Active views: 3"));
         assert!(status.contains("Retained bases: 1"));
         assert!(status.contains("refs=3"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn optimized_add_honors_quiet_without_hiding_errors() {
+        let fixture = RepositoryFixture::new();
+        let cache = fixture.directory.path().join("quiet-cache");
+        assert!(
+            Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .arg("enable")
+                .current_dir(&fixture.repository)
+                .output()
+                .expect("enable fixture repository")
+                .status
+                .success()
+        );
+
+        for (arguments, destination, quiet) in [
+            (
+                vec!["--quiet", "--detach", "../quiet-view"],
+                "../quiet-view",
+                true,
+            ),
+            (vec!["--detach", "../normal-view"], "../normal-view", false),
+            (vec!["--detach", "--", "--quiet"], "--quiet", false),
+        ] {
+            let run = || {
+                Command::new(env!("CARGO_BIN_EXE_riftri"))
+                    .args(["exec", "--", "git", "worktree", "add"])
+                    .args(&arguments)
+                    .current_dir(&fixture.repository)
+                    .env("RIFTRI_CACHE_DIR", &cache)
+                    .output()
+                    .expect("run intercepted add")
+            };
+            let output = run();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stdout.is_empty());
+            assert_eq!(output.stderr.is_empty(), quiet);
+            let destination = fixture.repository.join(destination);
+            assert_eq!(
+                fs::read(destination.join("tracked.txt")).expect("read worktree file"),
+                b"tracked\n"
+            );
+            let status = git(&destination, &["status", "--porcelain=v1"]);
+            assert!(status.status.success());
+            assert!(status.stdout.is_empty());
+
+            let error = run();
+            assert!(!error.status.success());
+            assert!(!error.stderr.is_empty());
+        }
     }
 
     #[test]
