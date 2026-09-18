@@ -1147,6 +1147,109 @@ impl Git {
         Ok(state)
     }
 
+    /// Inspect staged state without confusing a not-yet-created index with
+    /// staged deletion of the whole tree. Both intent-to-add representations
+    /// are compared so an empty tracked blob cannot hide an intent-only entry.
+    pub fn worktree_index_has_changes(&self, worktree: &Path) -> Result<bool, GitError> {
+        let index = self.worktree_index_path(worktree)?;
+        match std::fs::symlink_metadata(&index) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(GitError::TemporaryState { source }),
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Err(GitError::InvalidOutput {
+                    context: "worktree index",
+                    detail: "index is not a regular file".to_owned(),
+                });
+            }
+            Ok(_) => {}
+        }
+        for intent in ["--ita-visible-in-index", "--ita-invisible-in-index"] {
+            let args = [
+                "diff",
+                "--cached",
+                "--quiet",
+                "--no-ext-diff",
+                "--no-textconv",
+                intent,
+                "HEAD",
+                "--",
+            ];
+            let output = self.output(Some(worktree), &args)?;
+            match output.status.code() {
+                Some(0) => {}
+                Some(1) => return Ok(true),
+                _ => return Err(command_failed(&args.map(OsString::from), &output)),
+            }
+        }
+        Ok(false)
+    }
+
+    fn worktree_index_path(&self, worktree: &Path) -> Result<PathBuf, GitError> {
+        self.run_path(
+            Some(worktree),
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            "worktree index path",
+        )
+    }
+
+    /// Build a missing index with real Git in a temporary file, then install
+    /// it without replacing any index a user or another Git process created.
+    /// Recovery must never reset an already populated worktree index.
+    pub fn initialize_missing_worktree_index(
+        &self,
+        worktree: &Path,
+        sparse_directories: &[String],
+    ) -> Result<bool, GitError> {
+        let index = self.worktree_index_path(worktree)?;
+        match std::fs::symlink_metadata(&index) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(GitError::TemporaryState { source }),
+        }
+        let parent = index.parent().ok_or_else(|| GitError::InvalidOutput {
+            context: "worktree index path",
+            detail: "index has no parent directory".to_owned(),
+        })?;
+        let temporary = tempfile::Builder::new()
+            .prefix("riftri-recovery-index-")
+            .tempdir_in(parent)
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let temporary_index = temporary.path().join("index");
+        let environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
+        let run = |args: &[&str]| {
+            self.run_os_with_env(
+                Some(worktree),
+                &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                &environment,
+            )
+        };
+        if !sparse_directories.is_empty() {
+            let mut args = vec!["sparse-checkout", "set", "--cone", "--"];
+            args.extend(sparse_directories.iter().map(String::as_str));
+            run(&args)?;
+        }
+        run(&["reset", "--mixed", "--quiet", "HEAD"])?;
+        if !sparse_directories.is_empty() {
+            run(&["sparse-checkout", "reapply"])?;
+        }
+        // Windows FlushFileBuffers requires a handle opened for writing.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary_index)
+            .and_then(|file| file.sync_all())
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let temporary_index = tempfile::TempPath::try_from_path(temporary_index)
+            .map_err(|source| GitError::TemporaryState { source })?;
+        match temporary_index.persist_noclobber(&index) {
+            Ok(()) => Ok(true),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(GitError::TemporaryState {
+                source: error.error,
+            }),
+        }
+    }
+
     /// Populate the linked worktree index from HEAD without writing files.
     ///
     /// SAFETY ARGUMENT: this intentionally issues no separate
@@ -1853,6 +1956,52 @@ mod tests {
         fn path(&self) -> &Path {
             self.directory.path()
         }
+    }
+
+    #[test]
+    fn recovery_initializes_only_a_missing_worktree_index() {
+        let fixture = RepositoryFixture::committed();
+        let parent = tempdir().unwrap();
+        let worktree = parent.path().join("view");
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let git_handle = Git::default();
+        assert!(!git_handle.worktree_index_has_changes(&worktree).unwrap());
+        assert!(
+            git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        let index = git_handle.worktree_index_path(&worktree).unwrap();
+        let before = fs::read(&index).unwrap();
+        assert!(
+            !git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        assert_eq!(fs::read(&index).unwrap(), before);
+        assert!(!git_handle.worktree_index_has_changes(&worktree).unwrap());
+        git(
+            &worktree,
+            &["update-index", "--force-remove", "tracked.txt"],
+        );
+        let staged = fs::read(&index).unwrap();
+        assert!(git_handle.worktree_index_has_changes(&worktree).unwrap());
+        assert!(
+            !git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        assert_eq!(fs::read(&index).unwrap(), staged);
     }
 
     #[test]

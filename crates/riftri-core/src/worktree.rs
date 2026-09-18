@@ -7133,20 +7133,18 @@ fn remove_registered_worktree_for_rollback(
     git: &Git,
     journal: &DecodedJournal,
 ) -> Result<(), WorktreeError> {
+    if journal.destination.exists() && git.worktree_index_has_changes(&journal.destination)? {
+        return Err(changed_rollback_worktree(journal));
+    }
     if !journal.destination.exists() || contains_only_git_pointer(&journal.destination)? {
         remove_pointer_only_worktree(git, &journal.repository, journal)?;
     } else if git.worktree_is_clean(&journal.destination)? {
         remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
-        if journal.sparse_directories.is_empty() {
-            git.synchronize_worktree_index(&journal.destination)?;
-        } else {
-            // A sparse view compares against its sparse base; rebuilding a
-            // full index here would misreport out-of-cone entries as deleted.
-            git.synchronize_sparse_worktree_index(
-                &journal.destination,
-                &journal.sparse_directories,
-            )?;
+        if !git
+            .initialize_missing_worktree_index(&journal.destination, &journal.sparse_directories)?
+        {
+            return Err(changed_rollback_worktree(journal));
         }
         if !git.worktree_is_clean(&journal.destination)? {
             return Err(changed_rollback_worktree(journal));
@@ -7463,6 +7461,15 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
         &journal.base_path,
         &journal.destination,
     )?;
+    // The private pointer also works when the merged view is unmounted.
+    let index_root = if layout.upper().join(".git").exists() {
+        layout.upper()
+    } else {
+        &journal.destination
+    };
+    if index_root.join(".git").exists() && git.worktree_index_has_changes(index_root)? {
+        return Err(changed_rollback_worktree(journal));
+    }
     let identity = if let Some(identity) = overlayfs.mount_identity.clone() {
         match OverlayFsMounter::mount_state(&layout, &identity)? {
             OverlayFsMountState::Active | OverlayFsMountState::Absent => Some(identity),
@@ -9495,6 +9502,131 @@ mod tests {
             .status()
             .expect("check branch");
         assert!(!branch.success());
+    }
+
+    #[test]
+    fn interrupted_add_recovery_preserves_staged_index_changes() {
+        for sparse in [false, true] {
+            for phase in [
+                AddWorktreePhase::GitPointerRestored,
+                AddWorktreePhase::IndexSynchronized,
+            ] {
+                for change in ["content", "deletion", "intent-to-add", "conflict"] {
+                    let fixture = tempdir().unwrap();
+                    let repository = fixture.path().join("repository");
+                    let destination = fixture.path().join("view");
+                    let state = fixture.path().join("state");
+                    fs::create_dir_all(repository.join("selected")).unwrap();
+                    git(&repository, &["init", "--quiet"]);
+                    git(&repository, &["config", "user.name", "Riftri Tests"]);
+                    git(
+                        &repository,
+                        &["config", "user.email", "riftri@example.invalid"],
+                    );
+                    git(&repository, &["config", "core.autocrlf", "false"]);
+                    fs::write(repository.join("selected/file"), "original\n").unwrap();
+                    fs::write(repository.join("empty"), "").unwrap();
+                    git(&repository, &["add", "."]);
+                    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+                    let sparse_directories = if sparse {
+                        vec!["selected".to_owned()]
+                    } else {
+                        vec![]
+                    };
+                    add_worktree_inner(
+                        AddWorktreeRequest {
+                            repository: repository.clone(),
+                            destination: destination.clone(),
+                            revision: OsString::from("HEAD"),
+                            mode: WorktreeMode::Detached,
+                            state_dir: Some(state.clone()),
+                            sparse_directories: sparse_directories.clone(),
+                        },
+                        Some(phase),
+                        false,
+                    )
+                    .expect_err("interrupt creation");
+                    // Also cover the crash gap: Git wrote the index, but the
+                    // creator did not yet persist IndexSynchronized.
+                    let git_handle = riftri_git::Git::default();
+                    if phase == AddWorktreePhase::GitPointerRestored {
+                        if sparse {
+                            git_handle
+                                .synchronize_sparse_worktree_index(
+                                    &destination,
+                                    &sparse_directories,
+                                )
+                                .unwrap();
+                        } else {
+                            git_handle.synchronize_worktree_index(&destination).unwrap();
+                        }
+                    }
+                    match change {
+                        "content" => {
+                            fs::write(
+                                destination.join("selected/file"),
+                                "private staged content\n",
+                            )
+                            .unwrap();
+                            git(&destination, &["add", "selected/file"]);
+                            fs::write(destination.join("selected/file"), "original\n").unwrap();
+                        }
+                        "deletion" => git(&destination, &["rm", "--cached", "selected/file"]),
+                        "intent-to-add" => {
+                            git(&destination, &["rm", "--cached", "empty"]);
+                            git(&destination, &["add", "--intent-to-add", "empty"]);
+                        }
+                        "conflict" => {
+                            use std::io::Write;
+                            use std::process::Stdio;
+                            let oid = Command::new("git")
+                                .args(["rev-parse", "HEAD:selected/file"])
+                                .current_dir(&destination)
+                                .output()
+                                .unwrap();
+                            let oid = String::from_utf8(oid.stdout).unwrap();
+                            git(
+                                &destination,
+                                &["update-index", "--force-remove", "selected/file"],
+                            );
+                            let mut child = Command::new("git")
+                                .args(["update-index", "--index-info"])
+                                .current_dir(&destination)
+                                .stdin(Stdio::piped())
+                                .spawn()
+                                .unwrap();
+                            write!(
+                                child.stdin.take().unwrap(),
+                                "100644 {} 1\tselected/file\n100644 {} 2\tselected/file\n",
+                                oid.trim(),
+                                oid.trim()
+                            )
+                            .unwrap();
+                            assert!(child.wait().unwrap().success());
+                        }
+                        _ => unreachable!(),
+                    }
+                    let before = git_handle.worktree_removal_state(&destination).unwrap();
+                    for _ in 0..2 {
+                        let report = recover_incomplete_operations(&state).unwrap();
+                        assert_eq!(
+                            report.recovered, 0,
+                            "{change}, sparse={sparse}, {phase:?}: {report:?}"
+                        );
+                        assert_eq!(report.errors.len(), 1, "{report:?}");
+                        assert!(destination.exists());
+                        assert_eq!(
+                            git_handle.worktree_removal_state(&destination).unwrap(),
+                            before
+                        );
+                        assert_eq!(
+                            fs::read(destination.join("selected/file")).unwrap(),
+                            b"original\n"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
