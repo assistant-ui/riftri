@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.3.0] - 2026-09-18
+
 ### Added
 
 - `enable`, `disable`, `doctor`, `status`, `repair`, `gc`, and `shell status`

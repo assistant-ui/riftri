@@ -1,6 +1,6 @@
 {
   "name": "riftri-linux-arm64-musl",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Riftri native binary for Linux ARM64 (musl)",
   "license": "MIT",
   "os": [
