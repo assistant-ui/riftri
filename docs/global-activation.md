@@ -38,8 +38,10 @@ not enable a repository. The temporary directory is passed only to the child
 environment and does not change the parent shell or its cache settings.
 
 `riftri shell status [repository]` reports whether the current process inherited
-a complete hook, whether the selected repository opted in, and whether those two
-conditions make optimized interception effective.
+a complete hook and whether the selected repository opted in. Effective optimized
+interception also requires that `RIFTRI_BYPASS` is not `1`, `true`, or `yes`
+(case-insensitive). When bypass is active, status identifies `RIFTRI_BYPASS` as
+the reason without reporting that the hook is inactive.
 
 Remove Riftri from the current shell with:
 

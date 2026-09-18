@@ -1010,6 +1010,50 @@ fn shell_status_explains_global_scope_and_deactivation_restores_git() {
 
 #[cfg(unix)]
 #[test]
+fn shell_status_reports_bypass_without_deactivating_the_hook() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell hook cache");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for (bypass, effective) in [
+        ("1", "inactive"),
+        ("TrUe", "inactive"),
+        ("YES", "inactive"),
+        ("0", "active"),
+        ("false", "active"),
+        ("", "active"),
+    ] {
+        let output = Command::new("sh")
+            .args([
+                "-ec",
+                "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
+                 \"$RIFTRI_TEST_BIN\" shell status",
+            ])
+            .current_dir(&fixture.repository)
+            .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+            .env("RIFTRI_CACHE_DIR", cache.path())
+            .env("RIFTRI_BYPASS", bypass)
+            .output()
+            .expect("inspect hooked shell with bypass");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+        assert!(stdout.contains("Shell interception: active"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("Effective optimized interception: {effective}")),
+            "RIFTRI_BYPASS={bypass}: {stdout}"
+        );
+        if effective == "inactive" {
+            assert!(stdout.contains("RIFTRI_BYPASS"), "{stdout}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
     let fixture = RepositoryFixture::new();
     let cache = tempdir().expect("shell hook cache");
