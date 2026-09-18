@@ -3,9 +3,16 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 
 mod setup;
+mod ui;
+
+// One presentation boundary; machine commands bypass it before any rendering.
+macro_rules! outputln {
+    () => { ui::print_line(format_args!("")) };
+    ($($arg:tt)*) => { ui::print_line(format_args!($($arg)*)) };
+}
 
 const CLI_EXAMPLES: &str = "\
 Examples:
@@ -23,6 +30,8 @@ Environment:
   RIFTRI_BYPASS=1        Route one intercepted Git command to ordinary Git.
   RIFTRI_CACHE_DIR=PATH  Directory holding the shell-activation Git shim
                          (defaults to the platform cache directory).
+  NO_COLOR=1            Disable terminal colors.
+  RIFTRI_NO_ANIMATION=1 Disable animated progress.
 
 Riftri sets RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE inside activated scopes.
 Shell hooks also set RIFTRI_SHELL_SHIM_DIR to the absolute shim directory.
@@ -34,6 +43,7 @@ back. See docs/agent-integration.md for the automation contract.";
     name = "riftri",
     version,
     about = "Lightweight Git workspaces for parallel development",
+    styles = ui::help_styles(),
     after_help = CLI_EXAMPLES,
     after_long_help = format!("{CLI_EXAMPLES}\n\n{CLI_ENVIRONMENT}")
 )]
@@ -45,6 +55,14 @@ struct Cli {
     /// Do not print lifecycle phase-progress lines on stderr.
     #[arg(long, global = true)]
     no_progress: bool,
+
+    /// Use plain, line-oriented output and setup prompts (no terminal UI).
+    #[arg(long, global = true)]
+    plain: bool,
+
+    /// Disable animated progress while keeping the terminal interface.
+    #[arg(long, global = true)]
+    no_animation: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -246,6 +264,27 @@ enum Command {
 }
 
 impl Command {
+    fn machine_output(&self) -> bool {
+        match self {
+            Self::Doctor { json, .. }
+            | Self::Backends { json, .. }
+            | Self::Status { json, .. }
+            | Self::Repair { json, .. }
+            | Self::Gc { json, .. } => *json,
+            Self::Worktree { command } => match command {
+                WorktreeCommand::List { json, .. }
+                | WorktreeCommand::Add { json, .. }
+                | WorktreeCommand::Remove { json, .. }
+                | WorktreeCommand::Move { json, .. }
+                | WorktreeCommand::Compact { json, .. }
+                | WorktreeCommand::Prune { json, .. } => *json,
+            },
+            Self::Exec { .. } | Self::Completions { .. } => true,
+            Self::Shell { command } => !matches!(command, ShellCommand::Status { .. }),
+            _ => false,
+        }
+    }
+
     fn operation_name(&self) -> &'static str {
         match self {
             Self::Setup { .. } => "setup",
@@ -480,9 +519,24 @@ fn main() -> Result<()> {
         std::process::exit(run_git_shim()?);
     }
 
-    let cli = Cli::parse();
+    // Clap handles --help before normal parsing returns. Honor --plain there too.
+    let plain_help = env::args_os()
+        .take_while(|arg| arg != "--")
+        .any(|arg| arg == "--plain");
+    let matches = Cli::command()
+        .color(if plain_help {
+            clap::ColorChoice::Never
+        } else {
+            clap::ColorChoice::Auto
+        })
+        .get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
     let json_errors = cli.json_errors;
     let operation = cli.command.operation_name();
+    let _presentation = ui::initialize(
+        cli.plain || json_errors || cli.command.machine_output(),
+        cli.no_animation || cli.no_progress,
+    );
 
     // Progress lines share stderr with the `--json-errors` receipt, so that
     // flag suppresses them automatically: callers expecting one machine-
@@ -494,13 +548,14 @@ fn main() -> Result<()> {
     match run(cli) {
         Ok(()) => Ok(()),
         Err(error) => {
+            ui::pause_progress();
             if json_errors {
                 eprintln!(
                     "{}",
                     serde_json::to_string(&failure_receipt(operation, &error))?
                 );
             } else {
-                eprintln!("Error: {error:?}");
+                ui::print_error(&format!("Error: {error:?}"));
             }
             std::process::exit(failure_exit_code(&error));
         }
@@ -510,6 +565,9 @@ fn main() -> Result<()> {
 /// Exit codes: 0 success, 1 operational failure, 2 command-line usage error
 /// (clap), 3 policy refusal. Mirrors the receipt `category` field.
 fn failure_exit_code(error: &anyhow::Error) -> i32 {
+    if let Some(interrupted) = error.downcast_ref::<ui::Interrupted>() {
+        return interrupted.0;
+    }
     match error
         .downcast_ref::<riftri_core::WorktreeError>()
         .map(worktree_failure_fields)
@@ -527,6 +585,13 @@ fn confirm_destructive_action(warning: &str, yes: bool) -> Result<()> {
 
     if yes || !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Ok(());
+    }
+    if ui::interactive() {
+        let answer = ui::prompt(warning, "Continue?", ui::PromptKind::Confirm)?;
+        if answer.as_deref() == Some("y") {
+            return Ok(());
+        }
+        anyhow::bail!("aborted without confirmation; pass --yes to skip the prompt");
     }
     let mut stderr = std::io::stderr().lock();
     write!(stderr, "{warning} Continue? [y/N] ").context("write confirmation prompt")?;
@@ -558,27 +623,27 @@ fn run(cli: Cli) -> Result<()> {
         Command::Enable { path, repository } => {
             let path = repository.unwrap_or(path);
             let activation = riftri_core::enable_repository(&path)?;
-            println!("Enabled Riftri for {}", activation.repository.display());
-            println!("Git config: riftri.enabled=true");
+            outputln!("Enabled Riftri for {}", activation.repository.display());
+            outputln!("Git config: riftri.enabled=true");
             if env::var_os(riftri_core::SHIM_ACTIVE_ENV).is_some() {
-                println!("Normal Git interception is active in this shell");
+                outputln!("Normal Git interception is active in this shell");
             } else {
                 #[cfg(unix)]
-                println!(
+                outputln!(
                     "Activate this shell with: eval \"$(riftri shell hook {})\"",
                     detected_posix_shell()
                 );
                 #[cfg(target_os = "windows")]
-                println!(
+                outputln!(
                     "Activate this PowerShell session with: Invoke-Expression (& riftri shell hook powershell | Out-String)"
                 );
-                println!("Or activate one process with: riftri exec -- <command>");
+                outputln!("Or activate one process with: riftri exec -- <command>");
             }
         }
         Command::Disable { path, repository } => {
             let path = repository.unwrap_or(path);
             let activation = riftri_core::disable_repository(&path)?;
-            println!("Disabled Riftri for {}", activation.repository.display());
+            outputln!("Disabled Riftri for {}", activation.repository.display());
         }
         Command::Exec { worktree, command } => {
             let status = match worktree {
@@ -592,11 +657,11 @@ fn run(cli: Cli) -> Result<()> {
         Command::Overlayfs { command } => match command {
             OverlayFsCommand::InstallHelper { replace } => {
                 let destination = riftri_core::install_overlayfs_helper(replace)?;
-                println!(
+                outputln!(
                     "Installed Riftri OverlayFS helper at {}",
                     destination.display()
                 );
-                println!(
+                outputln!(
                     "The helper is available system-wide; `riftri enable` still opts in one repository at a time."
                 );
             }
@@ -636,7 +701,7 @@ fn run(cli: Cli) -> Result<()> {
             std::fs::create_dir_all(&directory)
                 .with_context(|| format!("create man page directory {}", directory.display()))?;
             clap_mangen::generate_to(Cli::command(), &directory).context("write man pages")?;
-            println!("Man pages written to {}", directory.display());
+            outputln!("Man pages written to {}", directory.display());
         }
         Command::Doctor {
             path,
@@ -668,16 +733,16 @@ fn run(cli: Cli) -> Result<()> {
                         .context("serialize backend report")?
                 );
             } else {
-                println!("Storage capabilities for {}:", path.display());
+                outputln!("Storage capabilities for {}:", path.display());
                 for backend in backends {
-                    println!(
+                    outputln!(
                         "- {} ({}): {}",
                         backend.kind.display_name(),
                         backend.status.display_name(),
                         backend.explanation
                     );
                 }
-                println!("\nCapability support does not mean a backend is active yet.");
+                outputln!("\nCapability support does not mean a backend is active yet.");
             }
         }
         Command::Status {
@@ -724,8 +789,8 @@ fn run(cli: Cli) -> Result<()> {
         Command::State { command } => match command {
             StateCommand::Unregister { path, repository } => {
                 let unregistered = riftri_core::forget_missing_state_directory(&repository, &path)?;
-                println!("Unregistered missing Riftri state directory");
-                println!("State: {}", unregistered.display());
+                outputln!("Unregistered missing Riftri state directory");
+                outputln!("State: {}", unregistered.display());
             }
         },
         Command::Worktree { command } => match command {
@@ -850,14 +915,8 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-/// Print one plain progress line per lifecycle state transition on stderr.
-///
-/// Lines are emitted only when an operation durably reaches a phase, starts
-/// waiting on a contended lock, or resumes after one — never on timers or
-/// per-file work — so output stays bounded and never uses control sequences,
-/// whether or not stderr is a terminal. `--no-progress` disables these lines
-/// and `--json-errors` implies that, keeping stderr reserved for its single
-/// JSON failure receipt.
+/// Actual lifecycle events drive terminal progress. Pipes and plain mode retain
+/// bounded phase lines; no UI state is an authority for operation completion.
 fn report_progress(event: &riftri_core::progress::ProgressEvent) {
     use riftri_core::progress::ProgressEvent;
 
@@ -887,7 +946,7 @@ fn report_progress(event: &riftri_core::progress::ProgressEvent) {
         }
         _ => return,
     };
-    eprintln!("riftri: {line}");
+    ui::progress(line);
 }
 
 fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {
@@ -1148,7 +1207,7 @@ fn run_overlayfs_helper() -> Result<()> {
                 Path::new(merged),
                 requester_uid,
             )?;
-            println!("{}", serde_json::to_string(&identity)?);
+            outputln!("{}", serde_json::to_string(&identity)?);
         }
         ("unmount", [layout_root, lower, merged, identity]) => {
             let identity = identity
@@ -1164,7 +1223,7 @@ fn run_overlayfs_helper() -> Result<()> {
                 requester_uid,
                 requester_gid,
             )?;
-            println!("{unmounted}");
+            outputln!("{unmounted}");
         }
         ("reset-work", [layout_root, lower, merged]) => {
             riftri_storage::OverlayFsMounter::helper_reset_work(
@@ -1192,7 +1251,7 @@ fn resolve_state_directory(repository: &Path, state_directory: Option<PathBuf>) 
 
 fn print_shell_status(repository: &Path) -> Result<()> {
     let shell = riftri_core::shell_activation_status()?;
-    println!(
+    outputln!(
         "Shell interception: {}",
         if shell.active {
             "active"
@@ -1202,11 +1261,11 @@ fn print_shell_status(repository: &Path) -> Result<()> {
             "inactive"
         }
     );
-    println!("Shim directory: {}", shell.shim_directory.display());
+    outputln!("Shim directory: {}", shell.shim_directory.display());
     if let Some(real_git) = &shell.real_git {
-        println!("Real Git: {}", real_git.display());
+        outputln!("Real Git: {}", real_git.display());
     }
-    println!(
+    outputln!(
         "Global shell scope: {}",
         if shell.active {
             "this shell and its children; every new shell too only if you added the hook to your profile"
@@ -1216,8 +1275,8 @@ fn print_shell_status(repository: &Path) -> Result<()> {
     );
     match riftri_core::repository_activation(repository) {
         Ok(activation) => {
-            println!("Repository: {}", activation.repository.display());
-            println!(
+            outputln!("Repository: {}", activation.repository.display());
+            outputln!(
                 "Repository optimization: {}",
                 if activation.enabled {
                     "enabled"
@@ -1225,7 +1284,7 @@ fn print_shell_status(repository: &Path) -> Result<()> {
                     "disabled"
                 }
             );
-            println!(
+            outputln!(
                 "Effective optimized interception: {}",
                 if shell.bypass {
                     "inactive (RIFTRI_BYPASS)"
@@ -1237,9 +1296,9 @@ fn print_shell_status(repository: &Path) -> Result<()> {
             );
         }
         Err(_) => {
-            println!("Repository: none at {}", repository.display());
-            println!("Repository optimization: not applicable");
-            println!("Effective optimized interception: inactive");
+            outputln!("Repository: none at {}", repository.display());
+            outputln!("Repository optimization: not applicable");
+            outputln!("Effective optimized interception: inactive");
         }
     }
     Ok(())
@@ -1286,34 +1345,34 @@ fn print_recovery_report(
         return Ok(());
     }
 
-    println!("Riftri repair");
-    println!("State: {}", state_directory.display());
-    println!("Scanned operations: {}", report.scanned);
-    println!("Busy add operations skipped: {}", report.busy_adds);
-    println!("Active worktrees: {}", report.active);
-    println!("Recovered mounts: {}", report.recovered_mounts);
-    println!("Recovered add operations: {}", report.recovered);
-    println!("Completed removals: {}", report.completed_removals);
-    println!("Recovered removals: {}", report.recovered_removals);
-    println!("Completed moves: {}", report.completed_moves);
-    println!("Recovered moves: {}", report.recovered_moves);
-    println!("Completed compactions: {}", report.completed_compactions);
-    println!("Recovered compactions: {}", report.recovered_compactions);
-    println!("Completed prunes: {}", report.completed_prunes);
-    println!("Recovered prunes: {}", report.recovered_prunes);
-    println!("Completed collections: {}", report.completed_collections);
-    println!("Recovered collections: {}", report.recovered_collections);
+    outputln!("Riftri repair");
+    outputln!("State: {}", state_directory.display());
+    outputln!("Scanned operations: {}", report.scanned);
+    outputln!("Busy add operations skipped: {}", report.busy_adds);
+    outputln!("Active worktrees: {}", report.active);
+    outputln!("Recovered mounts: {}", report.recovered_mounts);
+    outputln!("Recovered add operations: {}", report.recovered);
+    outputln!("Completed removals: {}", report.completed_removals);
+    outputln!("Recovered removals: {}", report.recovered_removals);
+    outputln!("Completed moves: {}", report.completed_moves);
+    outputln!("Recovered moves: {}", report.recovered_moves);
+    outputln!("Completed compactions: {}", report.completed_compactions);
+    outputln!("Recovered compactions: {}", report.recovered_compactions);
+    outputln!("Completed prunes: {}", report.completed_prunes);
+    outputln!("Recovered prunes: {}", report.recovered_prunes);
+    outputln!("Completed collections: {}", report.completed_collections);
+    outputln!("Recovered collections: {}", report.recovered_collections);
     if !report.errors.is_empty() {
-        println!("Operations needing attention:");
+        outputln!("Operations needing attention:");
         for error in &report.errors {
-            println!("- {error}");
+            outputln!("- {error}");
         }
         anyhow::bail!(
             "{} operation(s) need manual attention; no changed worktree was deleted",
             report.errors.len()
         );
     }
-    println!("No journaled operation needs manual attention");
+    outputln!("No journaled operation needs manual attention");
     Ok(())
 }
 
@@ -1407,15 +1466,15 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
         return Ok(());
     }
 
-    println!(
+    outputln!(
         "Created {}-backed Git worktree",
         result.backend.display_name()
     );
-    println!("Destination: {}", result.destination.display());
-    println!("Commit: {}", result.commit.as_str());
-    println!("Tree: {}", result.tree.as_str());
-    println!("Immutable base: {}", result.base_path.display());
-    println!(
+    outputln!("Destination: {}", result.destination.display());
+    outputln!("Commit: {}", result.commit.as_str());
+    outputln!("Tree: {}", result.tree.as_str());
+    outputln!("Immutable base: {}", result.base_path.display());
+    outputln!(
         "Base: {}",
         if result.reused_base {
             "reused"
@@ -1423,7 +1482,7 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
             "created"
         }
     );
-    println!("Journal: {}", result.journal_path.display());
+    outputln!("Journal: {}", result.journal_path.display());
     Ok(())
 }
 
@@ -1452,13 +1511,13 @@ fn print_remove_result(
     }
 
     if forced {
-        println!("Force-removed Riftri-backed Git worktree after snapshot verification");
+        outputln!("Force-removed Riftri-backed Git worktree after snapshot verification");
     } else {
-        println!("Removed Riftri-backed Git worktree");
+        outputln!("Removed Riftri-backed Git worktree");
     }
-    println!("Destination: {}", result.destination.display());
-    println!("Retained immutable base: {}", result.base_path.display());
-    println!("Journal: {}", result.journal_path.display());
+    outputln!("Destination: {}", result.destination.display());
+    outputln!("Retained immutable base: {}", result.base_path.display());
+    outputln!("Journal: {}", result.journal_path.display());
     Ok(())
 }
 
@@ -1483,11 +1542,11 @@ fn print_move_result(result: &riftri_core::MoveWorktreeResult, json: bool) -> Re
         return Ok(());
     }
 
-    println!("Moved Riftri-backed Git worktree");
-    println!("Source: {}", result.source.display());
-    println!("Destination: {}", result.destination.display());
-    println!("Retained immutable base: {}", result.base_path.display());
-    println!("Journal: {}", result.journal_path.display());
+    outputln!("Moved Riftri-backed Git worktree");
+    outputln!("Source: {}", result.source.display());
+    outputln!("Destination: {}", result.destination.display());
+    outputln!("Retained immutable base: {}", result.base_path.display());
+    outputln!("Journal: {}", result.journal_path.display());
     Ok(())
 }
 
@@ -1515,12 +1574,12 @@ fn print_compact_result(result: &riftri_core::CompactWorktreeResult, json: bool)
         return Ok(());
     }
 
-    println!("Compacted Riftri-backed Git worktree");
-    println!("Destination: {}", result.destination.display());
-    println!("Commit: {}", result.commit.as_str());
-    println!("Immutable base: {}", result.base_path.display());
-    println!("Reused immutable base: {}", result.reused_base);
-    println!("Journal: {}", result.journal_path.display());
+    outputln!("Compacted Riftri-backed Git worktree");
+    outputln!("Destination: {}", result.destination.display());
+    outputln!("Commit: {}", result.commit.as_str());
+    outputln!("Immutable base: {}", result.base_path.display());
+    outputln!("Reused immutable base: {}", result.reused_base);
+    outputln!("Journal: {}", result.journal_path.display());
     Ok(())
 }
 
@@ -1539,8 +1598,8 @@ fn print_prune_result(result: &riftri_core::PruneWorktreesResult, json: bool) ->
         return Ok(());
     }
 
-    println!("Pruned stale Git worktree metadata");
-    println!("Journal: {}", result.journal_path.display());
+    outputln!("Pruned stale Git worktree metadata");
+    outputln!("Journal: {}", result.journal_path.display());
     Ok(())
 }
 
@@ -1605,17 +1664,17 @@ fn print_worktree_inventory(
         return Ok(());
     }
 
-    println!("Riftri managed worktrees");
-    println!("State: {}", state_directory.display());
-    println!("Managed worktrees: {}", report.views.len());
+    outputln!("Riftri managed worktrees");
+    outputln!("State: {}", state_directory.display());
+    outputln!("Managed worktrees: {}", report.views.len());
     for view in &report.views {
-        println!("- {}", view.destination.display());
+        outputln!("- {}", view.destination.display());
         print_worktree_view_details(view, None);
     }
     if !report.diagnostic_issues.is_empty() {
-        println!("Diagnostic issues: {}", report.diagnostic_issues.len());
+        outputln!("Diagnostic issues: {}", report.diagnostic_issues.len());
         for issue in &report.diagnostic_issues {
-            println!("- {}: {}", issue.path.display(), issue.reason);
+            outputln!("- {}: {}", issue.path.display(), issue.reason);
         }
     }
     Ok(())
@@ -1623,25 +1682,25 @@ fn print_worktree_inventory(
 
 fn print_worktree_view_details(view: &riftri_core::ViewStorageAccounting, state: Option<&Path>) {
     if let Some(state) = state {
-        println!("  State: {}", state.display());
+        outputln!("  State: {}", state.display());
     }
-    println!("  Repository: {}", view.repository.display());
-    println!("  Head: {}", view.head.as_str());
+    outputln!("  Repository: {}", view.repository.display());
+    outputln!("  Head: {}", view.head.as_str());
     if let Some(branch) = &view.branch {
-        println!("  Branch: {}", display_git_bytes(branch));
+        outputln!("  Branch: {}", display_git_bytes(branch));
     } else if view.detached {
-        println!("  Branch: detached");
+        outputln!("  Branch: detached");
     }
     if let Some(reason) = &view.locked_reason {
-        println!("  Locked: {}", display_git_bytes(reason));
+        outputln!("  Locked: {}", display_git_bytes(reason));
     }
     if let Some(reason) = &view.prunable_reason {
-        println!("  Prunable: {}", display_git_bytes(reason));
+        outputln!("  Prunable: {}", display_git_bytes(reason));
     }
-    println!("  Backend: {}", view.backend.display_name());
-    println!("  Immutable base: {}", view.base_path.display());
-    println!("  Logical: {}", display_byte_count(view.logical_bytes));
-    println!(
+    outputln!("  Backend: {}", view.backend.display_name());
+    outputln!("  Immutable base: {}", view.base_path.display());
+    outputln!("  Logical: {}", display_byte_count(view.logical_bytes));
+    outputln!(
         "  Filesystem-accounted allocated: {}",
         display_byte_count(view.allocated_bytes)
     );
@@ -1709,10 +1768,10 @@ fn print_all_states_worktree_inventory(
         return Ok(());
     }
 
-    println!("Riftri managed worktrees (all registered states)");
-    println!("State directories: {}", inventory.states.len());
+    outputln!("Riftri managed worktrees (all registered states)");
+    outputln!("State directories: {}", inventory.states.len());
     for state in &inventory.states {
-        println!(
+        outputln!(
             "- {} ({})",
             state.state_directory.display(),
             state.source.as_str()
@@ -1723,10 +1782,10 @@ fn print_all_states_worktree_inventory(
         .iter()
         .map(|state| state.views.len())
         .sum::<usize>();
-    println!("Managed worktrees: {total_views}");
+    outputln!("Managed worktrees: {total_views}");
     for state in &inventory.states {
         for view in &state.views {
-            println!("- {}", view.destination.display());
+            outputln!("- {}", view.destination.display());
             print_worktree_view_details(view, Some(&state.state_directory));
         }
     }
@@ -1737,14 +1796,14 @@ fn print_all_states_worktree_inventory(
             .map(|state| state.diagnostic_issues.len())
             .sum::<usize>();
     if total_issues > 0 {
-        println!("Diagnostic issues: {total_issues}");
+        outputln!("Diagnostic issues: {total_issues}");
         for issue in inventory.registration_issues.iter().chain(
             inventory
                 .states
                 .iter()
                 .flat_map(|state| state.diagnostic_issues.iter()),
         ) {
-            println!("- {}: {}", issue.path.display(), issue.reason);
+            outputln!("- {}: {}", issue.path.display(), issue.reason);
         }
     }
     Ok(())
@@ -1883,52 +1942,52 @@ fn print_storage_accounting(
         return Ok(());
     }
 
-    println!("Riftri storage status");
-    println!("State: {}", state_directory.display());
-    println!("Active views: {}", report.active_views);
-    println!("Pending adds: {}", report.pending_adds);
+    outputln!("Riftri storage status");
+    outputln!("State: {}", state_directory.display());
+    outputln!("Active views: {}", report.active_views);
+    outputln!("Pending adds: {}", report.pending_adds);
     if report.pending_adds > 0 {
-        println!("Attention: run `riftri repair` to roll back pending adds");
+        outputln!("Attention: run `riftri repair` to roll back pending adds");
     }
-    println!("Completed removals: {}", report.completed_removals);
-    println!("Pending removals: {}", report.pending_removals);
+    outputln!("Completed removals: {}", report.completed_removals);
+    outputln!("Pending removals: {}", report.pending_removals);
     if report.pending_removals > 0 {
-        println!("Attention: run `riftri repair` to resume pending removals");
+        outputln!("Attention: run `riftri repair` to resume pending removals");
     }
-    println!("Completed moves: {}", report.completed_moves);
-    println!("Pending moves: {}", report.pending_moves);
+    outputln!("Completed moves: {}", report.completed_moves);
+    outputln!("Pending moves: {}", report.pending_moves);
     if report.pending_moves > 0 {
-        println!("Attention: run `riftri repair` to resume pending moves");
+        outputln!("Attention: run `riftri repair` to resume pending moves");
     }
-    println!("Completed compactions: {}", report.completed_compactions);
-    println!("Cancelled compactions: {}", report.cancelled_compactions);
-    println!("Pending compactions: {}", report.pending_compactions);
+    outputln!("Completed compactions: {}", report.completed_compactions);
+    outputln!("Cancelled compactions: {}", report.cancelled_compactions);
+    outputln!("Pending compactions: {}", report.pending_compactions);
     if report.pending_compactions > 0 {
-        println!("Attention: run `riftri repair` to resume pending compactions");
+        outputln!("Attention: run `riftri repair` to resume pending compactions");
     }
-    println!("Completed prunes: {}", report.completed_prunes);
-    println!("Pending prunes: {}", report.pending_prunes);
+    outputln!("Completed prunes: {}", report.completed_prunes);
+    outputln!("Pending prunes: {}", report.pending_prunes);
     if report.pending_prunes > 0 {
-        println!("Attention: run `riftri repair` to resume pending prunes");
+        outputln!("Attention: run `riftri repair` to resume pending prunes");
     }
-    println!("Completed collections: {}", report.completed_collections);
-    println!("Cancelled collections: {}", report.cancelled_collections);
-    println!("Pending collections: {}", report.pending_collections);
+    outputln!("Completed collections: {}", report.completed_collections);
+    outputln!("Cancelled collections: {}", report.cancelled_collections);
+    outputln!("Pending collections: {}", report.pending_collections);
     if report.pending_collections > 0 {
-        println!("Attention: run `riftri repair` to resume pending collections");
+        outputln!("Attention: run `riftri repair` to resume pending collections");
     }
-    println!(
+    outputln!(
         "Coordination locks: {} (safe persistent metadata)",
         report.coordination_locks
     );
-    println!("Retained bases: {}", report.bases.len());
+    outputln!("Retained bases: {}", report.bases.len());
     for base in &report.bases {
         let state = if base.reference_count == 0 {
             "retained cache; no active views"
         } else {
             "in use"
         };
-        println!(
+        outputln!(
             "- {}: refs={}, logical={}, filesystem-accounted allocated={}, state={}",
             base.path.display(),
             base.reference_count,
@@ -1937,9 +1996,9 @@ fn print_storage_accounting(
             state
         );
     }
-    println!("Active view storage:");
+    outputln!("Active view storage:");
     for view in &report.views {
-        println!(
+        outputln!(
             "- {}: backend={}, logical={}, filesystem-accounted allocated={}, base={}",
             view.destination.display(),
             view.backend.display_name(),
@@ -1948,18 +2007,20 @@ fn print_storage_accounting(
             view.base_path.display()
         );
     }
-    println!("State issues: {}", report.diagnostic_issues.len());
+    outputln!("State issues: {}", report.diagnostic_issues.len());
     for issue in &report.diagnostic_issues {
-        println!("- {}: {}", issue.path.display(), issue.reason);
+        outputln!("- {}: {}", issue.path.display(), issue.reason);
     }
     if !report.diagnostic_issues.is_empty() {
-        println!("Attention: Riftri preserves unexplained state; inspect it before manual cleanup");
+        outputln!(
+            "Attention: Riftri preserves unexplained state; inspect it before manual cleanup"
+        );
     }
-    println!(
+    outputln!(
         "Total logical: {}",
         display_byte_count(report.total_logical_bytes)
     );
-    println!(
+    outputln!(
         "Total filesystem-accounted allocated: {}",
         display_byte_count(report.total_allocated_bytes)
     );
@@ -2025,9 +2086,9 @@ fn print_garbage_collection_report(
         return Ok(());
     }
 
-    println!("Riftri garbage collection");
-    println!("State: {}", state_directory.display());
-    println!(
+    outputln!("Riftri garbage collection");
+    outputln!("State: {}", state_directory.display());
+    outputln!(
         "Mode: {}",
         if report.applied {
             "applied"
@@ -2035,41 +2096,41 @@ fn print_garbage_collection_report(
             "plan only"
         }
     );
-    println!("Eligible bases: {}", report.candidates.len());
+    outputln!("Eligible bases: {}", report.candidates.len());
     for candidate in &report.candidates {
-        println!(
+        outputln!(
             "- {}: logical={}, filesystem-accounted allocated={}",
             candidate.base_path.display(),
             display_byte_count(candidate.logical_bytes),
             display_byte_count(candidate.allocated_bytes)
         );
     }
-    println!("Collected bases: {}", report.collected.len());
-    println!("Resumed prior collections: {}", report.resumed_collections);
-    println!(
+    outputln!("Collected bases: {}", report.collected.len());
+    outputln!("Resumed prior collections: {}", report.resumed_collections);
+    outputln!(
         "Skipped because now in use: {}",
         report.skipped_in_use.len()
     );
-    println!(
+    outputln!(
         "Removed logical: {}",
         display_byte_count(report.removed_logical_bytes)
     );
-    println!(
+    outputln!(
         "Removed filesystem-accounted allocated: {}",
         display_byte_count(report.removed_allocated_bytes)
     );
     print_allocation_note();
     if !report.applied && !report.candidates.is_empty() {
-        println!("Nothing was deleted; rerun with `riftri gc --apply` to collect this plan");
+        outputln!("Nothing was deleted; rerun with `riftri gc --apply` to collect this plan");
     }
     Ok(())
 }
 
 fn print_allocation_note() {
-    println!(
+    outputln!(
         "Allocation note: filesystem-accounted allocation may count shared COW blocks more than once; it is not exclusive physical disk use"
     );
-    println!("Physical-sharing proof: use the platform volume-delta benchmark on a quiet volume");
+    outputln!("Physical-sharing proof: use the platform volume-delta benchmark on a quiet volume");
 }
 
 fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
@@ -2178,8 +2239,8 @@ fn backend_capability_json(capability: &riftri_storage::BackendCapability) -> se
 }
 
 fn print_doctor(report: &riftri_core::DoctorReport) {
-    println!("Riftri doctor");
-    println!(
+    outputln!("Riftri doctor");
+    outputln!(
         "Destination readiness: {}",
         match report.destination_readiness.status {
             riftri_core::DestinationReadinessStatus::Ready => "ready",
@@ -2187,18 +2248,18 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
             riftri_core::DestinationReadinessStatus::Blocked => "blocked",
         }
     );
-    println!(
+    outputln!(
         "Destination: {}",
         report.destination_readiness.destination.display()
     );
-    println!(
+    outputln!(
         "Selected backend: {}",
         report
             .destination_readiness
             .backend
             .map_or("none", |backend| backend.display_name())
     );
-    println!(
+    outputln!(
         "Copy-on-write: {}",
         if report.destination_readiness.copy_on_write {
             "verified"
@@ -2206,7 +2267,7 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
             "unavailable"
         }
     );
-    println!(
+    outputln!(
         "OverlayFS helper: {}",
         match report.destination_readiness.overlayfs_helper {
             riftri_core::OverlayFsHelperReadiness::NotApplicable => "not applicable",
@@ -2216,30 +2277,31 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
         }
     );
     if report.destination_readiness.blockers.is_empty() {
-        println!("Readiness blockers: none");
+        outputln!("Readiness blockers: none");
     } else {
-        println!("Readiness blockers:");
+        outputln!("Readiness blockers:");
         for blocker in &report.destination_readiness.blockers {
-            println!("- {}: {}", blocker.kind, blocker.explanation);
-            println!("  Fix: {}", blocker.remedy);
+            outputln!("- {}: {}", blocker.kind, blocker.explanation);
+            outputln!("  Fix: {}", blocker.remedy);
         }
     }
     if let Some(command) = &report.destination_readiness.next_command {
-        println!("Next command: {command}");
+        outputln!("Next command: {command}");
     }
-    println!();
-    println!("Project stage: {}", report.project_stage);
-    println!(
+    outputln!();
+    outputln!("Project stage: {}", report.project_stage);
+    outputln!(
         "Platform: {} / {}",
-        report.operating_system, report.architecture
+        report.operating_system,
+        report.architecture
     );
-    println!(
+    outputln!(
         "Repository enabled: {}",
         report
             .repository_enabled
             .map_or("unknown", |enabled| if enabled { "yes" } else { "no" })
     );
-    println!(
+    outputln!(
         "Process-scoped Git interception: {}",
         if report.git_shim_active {
             "active"
@@ -2249,8 +2311,8 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
     );
 
     match &report.git.value {
-        Some(git) => println!("Git: {} ({})", git.version, git.command.display()),
-        None => println!(
+        Some(git) => outputln!("Git: {} ({})", git.version, git.command.display()),
+        None => outputln!(
             "Git: unavailable ({})",
             report.git.error.as_deref().unwrap_or("unknown error")
         ),
@@ -2259,14 +2321,14 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
     match &report.repository.value {
         Some(repository) => {
             match &repository.root {
-                Some(root) => println!("Repository: {}", root.display()),
-                None => println!("Repository: bare"),
+                Some(root) => outputln!("Repository: {}", root.display()),
+                None => outputln!("Repository: bare"),
             }
-            println!(
+            outputln!(
                 "Common Git directory: {}",
                 repository.identity.common_git_dir.display()
             );
-            println!(
+            outputln!(
                 "HEAD: {}",
                 repository
                     .head_commit
@@ -2274,11 +2336,11 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
                     .map_or("unborn", |object_id| object_id.as_str())
             );
             match repository.clean {
-                Some(clean) => println!("Working tree clean: {clean}"),
-                None => println!("Working tree clean: not applicable (bare repository)"),
+                Some(clean) => outputln!("Working tree clean: {clean}"),
+                None => outputln!("Working tree clean: not applicable (bare repository)"),
             }
         }
-        None => println!(
+        None => outputln!(
             "Repository: unavailable ({})",
             report
                 .repository
@@ -2290,7 +2352,7 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
 
     match &report.repository_compatibility.value {
         Some(compatibility) => {
-            println!(
+            outputln!(
                 "Repository checkout compatibility (HEAD): {}",
                 if compatibility.compatible {
                     "supported"
@@ -2299,10 +2361,10 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
                 }
             );
             for blocker in &compatibility.blockers {
-                println!("- {}: {}", blocker.kind.as_str(), blocker.explanation);
+                outputln!("- {}: {}", blocker.kind.as_str(), blocker.explanation);
             }
         }
-        None => println!(
+        None => outputln!(
             "Repository checkout compatibility (HEAD): unavailable ({})",
             report
                 .repository_compatibility
@@ -2312,9 +2374,9 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
         ),
     }
 
-    println!("Destination storage capabilities:");
+    outputln!("Destination storage capabilities:");
     for backend in &report.storage_capabilities {
-        println!(
+        outputln!(
             "- {} ({}): {}",
             backend.kind.display_name(),
             backend.status.display_name(),
@@ -2594,6 +2656,38 @@ mod tests {
         // the plain path must return without blocking on input.
         super::confirm_destructive_action("would delete things.", true).expect("--yes path");
         super::confirm_destructive_action("would delete things.", false).expect("non-tty path");
+    }
+
+    #[test]
+    fn machine_commands_never_opt_into_terminal_presentation() {
+        for arguments in [
+            vec!["riftri", "doctor", "--json"],
+            vec!["riftri", "backends", "--json"],
+            vec!["riftri", "status", "--json"],
+            vec!["riftri", "repair", "--json"],
+            vec!["riftri", "gc", "--json"],
+            vec!["riftri", "worktree", "list", "--json"],
+            vec!["riftri", "worktree", "add", "view", "--detach", "--json"],
+            vec!["riftri", "worktree", "remove", "view", "--json"],
+            vec!["riftri", "worktree", "move", "old", "new", "--json"],
+            vec!["riftri", "worktree", "compact", "view", "--json"],
+            vec!["riftri", "worktree", "prune", "--json"],
+            vec!["riftri", "shell", "hook", "zsh"],
+            vec!["riftri", "shell", "deactivate", "powershell"],
+            vec!["riftri", "completions", "bash"],
+            vec!["riftri", "exec", "--", "agent"],
+        ] {
+            let cli = Cli::try_parse_from(&arguments).unwrap();
+            assert!(cli.command.machine_output(), "{arguments:?}");
+        }
+        for command in ["setup", "doctor", "status"] {
+            assert!(
+                !Cli::try_parse_from(["riftri", command])
+                    .unwrap()
+                    .command
+                    .machine_output()
+            );
+        }
     }
 
     #[test]
