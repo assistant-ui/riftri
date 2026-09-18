@@ -1,5 +1,6 @@
 import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
+import { Faq } from "../components/faq";
 import { MaterializationMap } from "../components/materialization-map";
 import { SavingsMap } from "../components/savings-map";
 import { SectionLink } from "../components/section-link";
@@ -270,6 +271,17 @@ export default function HomePage() {
           <Overview />
           <Savings />
           <GetStarted />
+          <section className="content-section faq-section" id="faq" aria-labelledby="faq-title">
+            <div className="section-heading">
+              <GraphLabel index="04">FAQ</GraphLabel>
+              <h2 id="faq-title">Common questions</h2>
+              <p>Where Riftri fits, what it saves, and what stays in your control.</p>
+              <a className="button button-secondary" href={`${githubUrl}/issues`}>
+                Ask a question <ArrowUpRightIcon />
+              </a>
+            </div>
+            <Faq />
+          </section>
         </main>
         <Footer />
       </div>

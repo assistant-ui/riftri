@@ -102,10 +102,11 @@ fn enable_and_disable_change_only_repository_local_config() {
 }
 
 #[test]
-fn explicitly_forgets_only_a_missing_registered_state_directory() {
+fn state_unregister_accepts_missing_relative_parent_paths() {
     let fixture = RepositoryFixture::new();
-    let missing = fixture.directory.path().join("removed-custom-state");
-    let existing = fixture.directory.path().join("existing-custom-state");
+    let directory = fs::canonicalize(fixture.directory.path()).expect("resolve fixture directory");
+    let missing = directory.join("removed-custom-state");
+    let existing = directory.join("existing-custom-state");
     fs::create_dir(&existing).expect("create existing state directory");
     for state in [&missing, &existing] {
         assert!(
@@ -125,7 +126,7 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
     }
 
     let refused = Command::new(env!("CARGO_BIN_EXE_riftri"))
-        .args(["state", "forget-missing"])
+        .args(["state", "unregister"])
         .arg(&existing)
         .arg("--repository")
         .arg(&fixture.repository)
@@ -134,19 +135,29 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("still exists"));
 
-    let forgotten = Command::new(env!("CARGO_BIN_EXE_riftri"))
-        .args(["state", "forget-missing"])
-        .arg(&missing)
+    let unregistered = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["state", "unregister", "../removed-custom-state"])
         .arg("--repository")
         .arg(&fixture.repository)
+        .current_dir(&fixture.repository)
         .output()
-        .expect("forget missing state registration");
+        .expect("unregister missing state directory");
     assert!(
-        forgotten.status.success(),
+        unregistered.status.success(),
         "{}",
-        String::from_utf8_lossy(&forgotten.stderr)
+        String::from_utf8_lossy(&unregistered.stderr)
     );
-    assert!(String::from_utf8_lossy(&forgotten.stdout).contains("Forgot missing Riftri state"));
+    assert!(
+        String::from_utf8_lossy(&unregistered.stdout).contains("Unregistered missing Riftri state")
+    );
+    assert!(!missing.exists());
+
+    let unknown = riftri(
+        &fixture.repository,
+        &["state", "unregister", "../never-registered"],
+    );
+    assert_eq!(unknown.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("not registered"));
 
     let registered = git(
         &fixture.repository,
@@ -163,6 +174,143 @@ fn explicitly_forgets_only_a_missing_registered_state_directory() {
         String::from_utf8_lossy(&registered.stdout).trim(),
         existing.to_string_lossy()
     );
+}
+
+#[test]
+fn state_unregister_help_hides_the_legacy_alias() {
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["state", "--help"])
+        .output()
+        .expect("state help");
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("unregister"), "{help}");
+    assert!(!help.contains("forget-missing"), "{help}");
+
+    for command in ["unregister", "forget-missing"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["state", command, "--help"])
+            .output()
+            .expect("unregister help");
+        assert!(output.status.success());
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(help.contains("missing state directory"), "{help}");
+        assert!(help.contains("No files are deleted"), "{help}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn state_unregister_keeps_existing_files_and_symlinks_registered() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = RepositoryFixture::new();
+    let root = fs::canonicalize(fixture.directory.path()).expect("resolve fixture");
+    let file = root.join("state-file");
+    let dangling = root.join("dangling-state");
+    let link = root.join("linked-state");
+    fs::write(&file, "keep me\n").expect("existing file");
+    symlink(root.join("absent"), &dangling).expect("dangling symlink");
+    symlink(&file, &link).expect("existing symlink target");
+    for path in [&file, &dangling, &link] {
+        assert!(
+            Command::new("git")
+                .args(["config", "--local", "--add", "riftri.stateDirectory"])
+                .arg(path)
+                .current_dir(&fixture.repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let before = git(
+        &fixture.repository,
+        &[
+            "config",
+            "--local",
+            "--null",
+            "--get-all",
+            "riftri.stateDirectory",
+        ],
+    )
+    .stdout;
+    for command in ["unregister", "forget-missing"] {
+        for path in [&file, &dangling, &link] {
+            let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .args(["state", command])
+                .arg(path)
+                .current_dir(&fixture.repository)
+                .output()
+                .expect("reject existing entry");
+            assert_eq!(output.status.code(), Some(3));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("still exists"));
+        }
+    }
+    let after = git(
+        &fixture.repository,
+        &[
+            "config",
+            "--local",
+            "--null",
+            "--get-all",
+            "riftri.stateDirectory",
+        ],
+    )
+    .stdout;
+    assert_eq!(after, before);
+    assert_eq!(fs::read_to_string(&file).unwrap(), "keep me\n");
+    assert_eq!(fs::read_link(&dangling).unwrap(), root.join("absent"));
+    assert_eq!(fs::read_link(&link).unwrap(), file);
+}
+
+#[cfg(unix)]
+#[test]
+fn state_unregister_and_legacy_alias_resolve_native_paths_through_parent_symlinks() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::fs::symlink;
+
+    for command in ["forget-missing", "unregister"] {
+        let fixture = RepositoryFixture::new();
+        let root = fs::canonicalize(fixture.directory.path()).expect("resolve fixture");
+        let parent = root.join("real parent");
+        let alias = root.join("parent alias");
+        fs::create_dir(&parent).expect("state parent");
+        symlink(&parent, &alias).expect("parent alias");
+        let name = OsString::from_vec(b"missing-state-\xff".to_vec());
+        let registered = parent.join(&name);
+        assert!(
+            Command::new("git")
+                .args(["config", "--local", "--add", "riftri.stateDirectory"])
+                .arg(&registered)
+                .current_dir(&fixture.repository)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["state", command])
+            .arg(Path::new("../parent alias").join(&name))
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("unregister native path");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!registered.exists());
+        assert_eq!(fs::read_link(&alias).unwrap(), parent);
+        assert_eq!(
+            git(
+                &fixture.repository,
+                &["config", "--local", "--get-all", "riftri.stateDirectory"]
+            )
+            .status
+            .code(),
+            Some(1)
+        );
+    }
 }
 
 #[test]
@@ -238,6 +386,62 @@ fn doctor_explains_destination_readiness_and_repository_activation() {
     assert!(!destination.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_json_preserves_non_utf8_destination_paths() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = RepositoryFixture::new();
+    let destination = OsStr::from_bytes(b"destination-\xff");
+    let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--destination"])
+        .arg(destination)
+        .arg("--json")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run doctor with a native path");
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    assert_eq!(report["native_path_encoding"], "unix-bytes-hex");
+    assert_eq!(
+        report["destination_readiness"]["destination"],
+        "destination-\u{fffd}"
+    );
+    assert_eq!(
+        report["destination_readiness"]["destination_native_hex"],
+        "64657374696e6174696f6e2dff"
+    );
+    for capability in report["storage_capabilities"].as_array().unwrap() {
+        if let Some(volume) = capability.get("volume") {
+            assert_eq!(volume["requested_path"], "destination-\u{fffd}");
+            assert_eq!(
+                volume["requested_path_native_hex"],
+                "64657374696e6174696f6e2dff"
+            );
+            let probe_hex = volume["probe_path_native_hex"].as_str().unwrap();
+            let probe_bytes: Vec<u8> = (0..probe_hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&probe_hex[index..index + 2], 16).unwrap())
+                .collect();
+            assert_eq!(
+                probe_bytes,
+                fs::canonicalize(&fixture.repository)
+                    .unwrap()
+                    .as_os_str()
+                    .as_bytes()
+            );
+        }
+    }
+    assert!(!fixture.repository.join(destination).exists());
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
 #[test]
 fn doctor_human_output_leads_with_a_decisive_destination_summary() {
     let fixture = RepositoryFixture::new();
@@ -262,7 +466,10 @@ fn doctor_human_output_leads_with_a_decisive_destination_summary() {
 #[test]
 fn doctor_marks_an_enabled_supported_destination_ready() {
     let fixture = RepositoryFixture::new();
-    let destination = fixture.directory.path().join("ready-worktree");
+    let destination = fixture
+        .directory
+        .path()
+        .join("ready worktree ' $HOME ; [x]");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
 
     let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
@@ -281,17 +488,38 @@ fn doctor_marks_an_enabled_supported_destination_ready() {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["copy_on_write"], true);
         assert_eq!(readiness["blockers"], serde_json::json!([]));
-        assert!(
-            readiness["next_command"]
-                .as_str()
-                .is_some_and(|command| command.starts_with("riftri worktree add "))
-        );
     } else {
         assert_eq!(readiness["status"], "blocked");
         assert_eq!(readiness["copy_on_write"], false);
     }
     assert!(!fixture.repository.join(".git/riftri").exists());
     assert!(!destination.exists());
+
+    #[cfg(unix)]
+    if readiness["backend"].is_string() {
+        let command = readiness["next_command"].as_str().expect("next command");
+        let added = Command::new("sh")
+            .args([
+                "-c",
+                &format!("riftri() {{ \"$RIFTRI_TEST_BINARY\" \"$@\"; }}\n{command}"),
+            ])
+            .env("RIFTRI_TEST_BINARY", env!("CARGO_BIN_EXE_riftri"))
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("run suggested command");
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).expect("read exact destination"),
+            b"tracked\n"
+        );
+        let status = git(&destination, &["status", "--porcelain"]);
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+    }
 }
 
 #[test]
@@ -782,6 +1010,50 @@ fn shell_status_explains_global_scope_and_deactivation_restores_git() {
 
 #[cfg(unix)]
 #[test]
+fn shell_status_reports_bypass_without_deactivating_the_hook() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell hook cache");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for (bypass, effective) in [
+        ("1", "inactive"),
+        ("TrUe", "inactive"),
+        ("YES", "inactive"),
+        ("0", "active"),
+        ("false", "active"),
+        ("", "active"),
+    ] {
+        let output = Command::new("sh")
+            .args([
+                "-ec",
+                "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
+                 \"$RIFTRI_TEST_BIN\" shell status",
+            ])
+            .current_dir(&fixture.repository)
+            .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+            .env("RIFTRI_CACHE_DIR", cache.path())
+            .env("RIFTRI_BYPASS", bypass)
+            .output()
+            .expect("inspect hooked shell with bypass");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+        assert!(stdout.contains("Shell interception: active"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("Effective optimized interception: {effective}")),
+            "RIFTRI_BYPASS={bypass}: {stdout}"
+        );
+        if effective == "inactive" {
+            assert!(stdout.contains("RIFTRI_BYPASS"), "{stdout}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
     let fixture = RepositoryFixture::new();
     let cache = tempdir().expect("shell hook cache");
@@ -816,7 +1088,7 @@ fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
 #[test]
 fn powershell_hook_is_session_scoped_idempotent_and_reversible() {
     let fixture = RepositoryFixture::new();
-    let cache = fixture.directory.path().join("cache with ' quote");
+    let cache = Path::new("cache with ' quote");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
     let script = r#"
 $hook = (& $env:RIFTRI_TEST_BIN shell hook powershell) -join [Environment]::NewLine
@@ -824,12 +1096,14 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Invoke-Expression $hook
 Invoke-Expression $hook
 $shimDirectory = Join-Path $env:RIFTRI_CACHE_DIR 'shims\v1'
+$shimDirectory = (Resolve-Path $shimDirectory).Path
 $shim = Join-Path $shimDirectory 'git.exe'
 $matches = @($env:PATH -split ';' | Where-Object { $_ -eq $shimDirectory }).Count
 if ($matches -ne 1) { exit 41 }
 Write-Output "shim=$((Get-Command git -CommandType Application).Source)"
 & powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'git --version; exit $LASTEXITCODE'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Set-Location $env:RIFTRI_TEST_REPOSITORY
 & $env:RIFTRI_TEST_BIN shell status $env:RIFTRI_TEST_REPOSITORY
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $deactivate = (& $env:RIFTRI_TEST_BIN shell deactivate powershell) -join [Environment]::NewLine
@@ -837,6 +1111,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Invoke-Expression $deactivate
 if (Test-Path Env:RIFTRI_SHIM_ACTIVE) { exit 42 }
 if (Test-Path Env:RIFTRI_REAL_GIT) { exit 43 }
+if (Test-Path Env:RIFTRI_SHELL_SHIM_DIR) { exit 45 }
 if ((Get-Command git -CommandType Application).Source -eq $shim) { exit 44 }
 Write-Output 'deactivated=true'
 "#;
@@ -848,9 +1123,10 @@ Write-Output 'deactivated=true'
             "-Command",
             script,
         ])
+        .current_dir(fixture.directory.path())
         .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
         .env("RIFTRI_TEST_REPOSITORY", &fixture.repository)
-        .env("RIFTRI_CACHE_DIR", &cache)
+        .env("RIFTRI_CACHE_DIR", cache)
         .output()
         .expect("activate, inspect, and deactivate PowerShell hook");
 
@@ -993,7 +1269,7 @@ fn exec_routes_clean_managed_git_worktree_removal_through_riftri() {
 
     let removed = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "remove"])
-        .arg(&destination)
+        .arg(destination.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("remove enabled worktree");
@@ -1003,19 +1279,20 @@ fn exec_routes_clean_managed_git_worktree_removal_through_riftri() {
         "enabled removal failed: {}",
         String::from_utf8_lossy(&removed.stderr)
     );
-    assert!(String::from_utf8_lossy(&removed.stderr).contains("safely removed worktree"));
     assert!(!destination.exists());
     assert!(fixture.repository.join(".git/riftri/removals").is_dir());
 
-    let status = riftri(&fixture.repository, &["status"]);
+    let status = riftri(&fixture.repository, &["status", "--json"]);
     assert!(
         status.status.success(),
         "{}",
         String::from_utf8_lossy(&status.stderr)
     );
-    let status = String::from_utf8_lossy(&status.stdout);
-    assert!(status.contains("Active views: 0"));
-    assert!(status.contains("refs=0"));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("parse status");
+    assert_eq!(status["operations"]["active_views"], 0);
+    assert_eq!(status["operations"]["completed_removals"], 1);
+    assert_eq!(status["bases"][0]["reference_count"], 0);
+    assert_eq!(status["diagnostic_issues"], serde_json::json!([]));
 }
 
 #[cfg(target_os = "macos")]
@@ -1057,7 +1334,7 @@ fn enabled_forced_removal_of_a_managed_view_is_journaled() {
 
     let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "remove", "--force"])
-        .arg(&destination)
+        .arg(destination.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("force-remove managed worktree");
@@ -1067,7 +1344,6 @@ fn enabled_forced_removal_of_a_managed_view_is_journaled() {
         "{}",
         String::from_utf8_lossy(&removal.stderr)
     );
-    assert!(String::from_utf8_lossy(&removal.stderr).contains("safely removed worktree"));
     assert!(!destination.exists());
     let journals = fs::read_dir(fixture.repository.join(".git/riftri/removals"))
         .expect("read removal journals")
@@ -1174,7 +1450,7 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
             "remove",
             "--force",
         ])
-        .arg(&destination)
+        .arg(destination.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("guard globally configured managed removal");
@@ -1187,6 +1463,83 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
             .stdout
             .is_empty()
     );
+
+    let other = RepositoryFixture::new();
+    assert!(riftri(&other.repository, &["enable"]).status.success());
+    for options in [
+        &["--git-dir=.git"][..],
+        &["--git-dir", ".git"][..],
+        &["--work-tree=."][..],
+        &["--work-tree", "."][..],
+    ] {
+        let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(options)
+            .arg("-C")
+            .arg(fixture.directory.path())
+            .args(["-C", "repository", "worktree", "remove"])
+            .arg(&destination)
+            .current_dir(&other.repository)
+            .output()
+            .expect("guard removal after directory changes");
+
+        assert!(
+            !removal.status.success(),
+            "{options:?} bypassed the managed removal guard"
+        );
+        assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+        assert!(destination.is_dir());
+        let status = git(&destination, &["status", "--porcelain=v1"]);
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn exec_path_cannot_bypass_managed_lifecycle_guards() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("exec-path-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let exec_path = git(&fixture.repository, &["--exec-path"]);
+    assert!(exec_path.status.success());
+    let option = format!(
+        "--exec-path={}",
+        String::from_utf8(exec_path.stdout)
+            .expect("Git exec path")
+            .trim()
+    );
+    for arguments in [
+        vec!["remove", destination.to_str().unwrap()],
+        vec!["move", destination.to_str().unwrap(), "../moved-view"],
+        vec!["prune"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", &option, "worktree"])
+            .args(&arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("guard lifecycle with exec path");
+        assert!(
+            !output.status.success(),
+            "{arguments:?} bypassed the managed lifecycle guard"
+        );
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).expect("preserved worktree"),
+            b"tracked\n"
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1332,7 +1685,7 @@ fn enabled_move_of_a_managed_view_is_journaled() {
 
     let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "move"])
-        .arg(&source)
+        .arg(source.file_name().expect("worktree basename"))
         .arg(&destination)
         .current_dir(&fixture.repository)
         .output()
@@ -1343,7 +1696,6 @@ fn enabled_move_of_a_managed_view_is_journaled() {
         "{}",
         String::from_utf8_lossy(&moved.stderr)
     );
-    assert!(String::from_utf8_lossy(&moved.stderr).contains("moved managed Riftri worktree"));
     assert!(!source.exists());
     assert_eq!(
         fs::read_to_string(destination.join("private.txt")).expect("read private worktree data"),
@@ -1351,12 +1703,104 @@ fn enabled_move_of_a_managed_view_is_journaled() {
     );
     assert!(fixture.repository.join(".git/riftri/moves").is_dir());
 
-    let status = riftri(&fixture.repository, &["status"]);
+    let status = riftri(&fixture.repository, &["status", "--json"]);
     assert!(status.status.success());
-    let status = String::from_utf8_lossy(&status.stdout);
-    assert!(status.contains("Active views: 1"));
-    assert!(status.contains(destination.to_string_lossy().as_ref()));
-    assert!(!status.contains(source.to_string_lossy().as_ref()));
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("parse status");
+    assert_eq!(status["operations"]["active_views"], 1);
+    assert_eq!(status["operations"]["completed_moves"], 1);
+    assert_eq!(
+        status["worktrees"][0]["path"],
+        fs::canonicalize(&destination)
+            .expect("resolve destination")
+            .to_str()
+            .expect("UTF-8 fixture path")
+    );
+    assert_eq!(status["diagnostic_issues"], serde_json::json!([]));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_worktree_selectors_preserve_ambiguity_and_path_boundaries() {
+    let fixture = RepositoryFixture::new();
+    assert!(
+        git(&fixture.repository, &["config", "core.ignorecase", "true"])
+            .status
+            .success()
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let left = fixture.directory.path().join("left/shared");
+    let right = fixture.directory.path().join("right/shared");
+    for path in [&left, &right] {
+        fs::create_dir_all(path.parent().expect("worktree parent")).expect("create parent");
+        let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "add", "--detach"])
+            .arg(path)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("add managed worktree");
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+    }
+    for selector in ["shared", "hared", "./shared", "left//shared"] {
+        for operation in ["remove", "move"] {
+            let mut args = vec!["exec", "--", "git", "worktree", operation, selector];
+            if operation == "move" {
+                args.push("moved");
+            }
+            let output = riftri(&fixture.repository, &args);
+            assert!(!output.status.success(), "{operation} accepted {selector}");
+            assert!(left.is_dir() && right.is_dir());
+        }
+    }
+    let guarded = riftri(
+        &fixture.repository,
+        &[
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "move",
+            "--force",
+            "left/shared",
+            "moved",
+        ],
+    );
+    assert!(!guarded.status.success());
+    assert!(left.is_dir() && right.is_dir());
+
+    // A unique suffix wins even when an unrelated local directory has that name.
+    fs::create_dir_all(fixture.repository.join("left/shared")).expect("create local directory");
+    let moved = riftri(
+        &fixture.repository,
+        &[
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "move",
+            "LEFT/SHARED",
+            "moved",
+        ],
+    );
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    assert!(!left.exists());
+    assert!(right.is_dir());
+    assert!(fixture.repository.join("left/shared").is_dir());
+    assert!(fixture.repository.join("moved/.git").is_file());
+    let status = riftri(&fixture.repository, &["status", "--json"]);
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("parse status");
+    assert_eq!(status["operations"]["active_views"], 2);
+    assert_eq!(status["operations"]["completed_moves"], 1);
+    assert_eq!(status["operations"]["completed_removals"], 0);
+    assert_eq!(status["diagnostic_issues"], serde_json::json!([]));
 }
 
 #[cfg(target_os = "macos")]
@@ -1660,7 +2104,7 @@ fn enabled_unmanaged_force_remove_and_move_still_use_real_git() {
 
     let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "remove", "--force"])
-        .arg(&removed)
+        .arg(removed.file_name().expect("worktree basename"))
         .current_dir(&fixture.repository)
         .output()
         .expect("force-remove unmanaged worktree");
@@ -1673,7 +2117,7 @@ fn enabled_unmanaged_force_remove_and_move_still_use_real_git() {
 
     let moved = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["exec", "--", "git", "worktree", "move"])
-        .arg(&moved_from)
+        .arg(moved_from.file_name().expect("worktree basename"))
         .arg(&moved_to)
         .current_dir(&fixture.repository)
         .output()

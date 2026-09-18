@@ -2,9 +2,14 @@
 
 The Riftri product site is a single-page Farm.js application. The page at `/`
 has a hero with the copyable installer command, a storage-model overview, a
-worktree disk-usage comparison, and a three-step get-started section; deeper
+worktree disk-usage comparison, a three-step get-started section, and a compact
+FAQ about manual COW copies, Git behavior, storage, activation, and recovery; deeper
 concepts, safety, lifecycle, and compatibility material stays in the
 repository documentation and the Markdown overview described below.
+
+The FAQ at `/#faq` uses native `details` disclosures so answers remain usable
+without JavaScript. The first answer is open initially; readers can open several
+answers to compare them. Keep its capability claims aligned with the roadmap.
 
 `public/index.md` is the plain-Markdown overview served at `https://riftri.dev/index.md`.
 It covers setup, internals, supported backends, lifecycle, and benchmark context,
@@ -83,7 +88,31 @@ The preview honors the finalized static-file overrides and error-phase 404
 route, including its status, HTML body, and HEAD behavior. It is a preview of
 this site's static output, not a general Vercel routing emulator.
 
-To publish the tested site from this directory:
+## Automatic deployment
+
+Every push to `main` runs the `Website deploy` workflow, which installs, type
+checks, builds, publishes the prebuilt output to production, and then verifies
+the public site. It is the normal way the site ships; the manual command below
+remains for local recovery.
+
+The workflow needs three repository secrets and skips itself with a warning
+until all three exist, so it is inert rather than failing every push:
+
+| Secret | Where it comes from |
+| --- | --- |
+| `VERCEL_TOKEN` | Vercel account settings → Tokens, scoped to `assistant-ui` |
+| `VERCEL_ORG_ID` | `vercel link` writes it to `website/.vercel/project.json` as `orgId` |
+| `VERCEL_PROJECT_ID` | the same file, as `projectId` |
+
+`website/.vercel/` is gitignored, so read those two values locally once and copy
+them into the repository secrets. Deploys are serialized by a concurrency group
+so an older commit cannot finish after a newer one and republish stale content.
+
+If the Vercel Git integration is connected to this repository instead, Vercel
+builds each push itself. Use one path or the other; running both deploys the
+same commit twice.
+
+To publish the tested site manually from this directory:
 
 ```console
 $ vercel link --yes --project riftri --scope assistant-ui
@@ -97,8 +126,6 @@ runs the existing Chromium suite, publishes the exact tested output, and runs
 revision. Verification compares it with the checkout and checks the homepage,
 inline Markdown, byte-identical installers and public assets, and branded 404.
 A failed verification exits nonzero; it does not silently roll back or redeploy.
-The Website deployment check workflow also verifies successful production
-deployment events and can be run manually against the intended deployed ref.
 
 The Farm.js build already generates Vercel Build Output API artifacts under
 `.vercel/output`. Keep the downloaded project settings and environment files

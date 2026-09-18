@@ -10,14 +10,12 @@ test("scripted worktree diagram is clearly labeled as an example", () => {
   assert.ok(map.includes("WORKTREE EXAMPLE"));
 });
 
-test("both looping diagrams have a named user-controlled motion boundary", () => {
-  for (const file of ["storage-map.tsx", "materialization-map.tsx"]) {
-    assert.ok(read(`components/${file}`).includes("<MotionFigure"));
-  }
-  const boundary = read("components/motion-figure.tsx");
-  assert.ok(boundary.includes("aria-pressed={paused}"));
-  assert.ok(boundary.includes("disabled={reducedMotion}"));
-  assert.ok(boundary.includes("data-paused={paused}"));
+test("looping diagrams stop under reduced motion without a pause control", () => {
+  // The diagrams are decorative loops with no pause control, so the only
+  // motion boundary that has to exist is the reduced-motion one, and it is
+  // pure CSS rather than a client component.
   const css = read("app/globals.css");
-  assert.ok(css.includes('.motion-figure[data-paused="true"]'));
+  const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+  assert.ok(reduced.includes(".track-counter"));
+  assert.ok(reduced.includes(".backend-cycle-item"));
 });

@@ -35,6 +35,15 @@ silently substitutes a full checkout; if no backend qualifies, use plain
 [windows-refs.md](windows-refs.md), and
 [filesystem-compatibility.md](filesystem-compatibility.md).
 
+### Creation fails because of a checkout hook
+
+Git normally runs `post-checkout` after creating a worktree. Riftri cannot yet
+run that hook safely within its recoverable creation transaction, so it refuses
+an executable default hook or any custom `core.hooksPath` configuration before
+creating a branch, worktree, or state directory. This includes custom hook paths
+that currently contain no hook. Use ordinary `git worktree add` for these
+repositories. Do not disable a required hook just to enable optimization.
+
 ### Creation fails on a repository with sparse checkout, submodules, or custom filters
 
 These checkout configurations are not yet supported and fail closed with an
@@ -114,10 +123,37 @@ but only after recording an exact recovery snapshot of the discarded changes.
 
 ### A state registration points at a directory that no longer exists
 
-`riftri state forget-missing <path>` forgets one explicitly selected
-registration whose directory is missing.
+`riftri state unregister <path>` removes the selected registration only if its
+directory is missing. For example, from the repository directory:
+
+```sh
+riftri state unregister ../old-state
+```
+
+This removes the stale registration, not files. Existing paths (including
+dangling symlinks) remain protected. `forget-missing` is still accepted as a
+hidden compatibility alias for existing scripts.
 
 ## Disk usage
+
+### Cleanup stops because an immutable-base directory is a symbolic link
+
+A symbolic link redirects a path to another location. If an internal directory
+such as `bases` or `bases/v1` is replaced by one, Riftri cannot safely assume
+the linked data belongs to its storage layout. Collection refuses to follow
+the link; recovery also preserves a pending collection with an unsafe parent.
+The refusal names the affected path and state directory.
+
+Inspect that state with `riftri status --state-dir <STATE_DIR>`, replacing the
+placeholder with the reported state directory and quoting the path for your
+shell. Status reports the unsafe path without listing bases through it. Do not
+delete or move the linked data manually to make the error disappear; preserve
+the layout and diagnostic output when asking for help.
+
+For **new worktrees**, `--state-dir` lets you choose a real storage directory on
+the destination volume. It does not migrate existing state or repair a layout
+that was already redirected. Cleanup of an affected path remains blocked until
+its storage layout can be safely verified.
 
 ### How do I see what Riftri is storing?
 

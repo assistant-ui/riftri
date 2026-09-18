@@ -21,10 +21,10 @@ Environment:
   RIFTRI_CACHE_DIR=PATH  Directory holding the shell-activation Git shim
                          (defaults to the platform cache directory).
 
-RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE are set by riftri itself inside
-activated scopes; RIFTRI_REQUIRE_* variables only make the test suites fail
-instead of falling back. See docs/agent-integration.md for the automation
-contract.";
+Riftri sets RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE inside activated scopes.
+Shell hooks also set RIFTRI_SHELL_SHIM_DIR to the absolute shim directory.
+RIFTRI_REQUIRE_* variables only make the test suites fail instead of falling
+back. See docs/agent-integration.md for the automation contract.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -38,6 +38,10 @@ struct Cli {
     /// Emit command failures as one machine-readable JSON receipt on stderr.
     #[arg(long, global = true)]
     json_errors: bool,
+
+    /// Do not print lifecycle phase-progress lines on stderr.
+    #[arg(long, global = true)]
+    no_progress: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -227,6 +231,11 @@ enum WorktreeCommand {
         #[arg(long)]
         state_dir: Option<PathBuf>,
 
+        /// Inspect every state directory the repository registers, including
+        /// the default location, and report unusable registrations.
+        #[arg(long, conflicts_with = "state_dir")]
+        all_states: bool,
+
         /// Emit stable machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -248,6 +257,14 @@ enum WorktreeCommand {
         /// Commit-ish to use for the new worktree.
         #[arg(required_unless_present_any = ["branch", "detach"])]
         revision: Option<OsString>,
+
+        /// Materialize only this directory (plus all repository-root files)
+        /// using Git cone-mode sparse checkout. Repeatable; directories are
+        /// repository-relative with `/` separators. Each distinct selection
+        /// keys its own immutable base. Unsupported sparse forms are refused
+        /// before any state is created.
+        #[arg(long = "sparse-dir", value_name = "DIR")]
+        sparse_dir: Vec<String>,
 
         /// Repository in which Git should create linked-worktree metadata.
         #[arg(long, default_value = ".")]
@@ -336,9 +353,10 @@ enum WorktreeCommand {
 
 #[derive(Debug, Subcommand)]
 enum StateCommand {
-    /// Forget an explicitly selected registration whose directory is missing.
-    ForgetMissing {
-        /// Missing state directory to forget.
+    /// Remove a registration for a missing state directory. No files are deleted.
+    #[command(alias = "forget-missing")]
+    Unregister {
+        /// Missing state directory whose registration should be removed.
         path: PathBuf,
 
         /// Repository containing the local registration.
@@ -402,6 +420,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let json_errors = cli.json_errors;
     let operation = cli.command.operation_name();
+
+    // Progress lines share stderr with the `--json-errors` receipt, so that
+    // flag suppresses them automatically: callers expecting one machine-
+    // readable failure receipt must never receive interleaved progress text.
+    if !cli.no_progress && !json_errors {
+        riftri_core::progress::set_progress_observer(Box::new(report_progress));
+    }
 
     match run(cli) {
         Ok(()) => Ok(()),
@@ -544,7 +569,8 @@ fn run(cli: Cli) -> Result<()> {
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&report).context("serialize doctor report")?
+                    serde_json::to_string_pretty(&doctor_json(&report))
+                        .context("serialize doctor report")?
                 );
             } else {
                 print_doctor(&report);
@@ -556,7 +582,8 @@ fn run(cli: Cli) -> Result<()> {
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&backends).context("serialize backend report")?
+                    serde_json::to_string_pretty(&backends_json(&path, &backends))
+                        .context("serialize backend report")?
                 );
             } else {
                 println!("Storage capabilities for {}:", path.display());
@@ -607,27 +634,34 @@ fn run(cli: Cli) -> Result<()> {
             print_garbage_collection_report(&state_directory, &report, json)?;
         }
         Command::State { command } => match command {
-            StateCommand::ForgetMissing { path, repository } => {
-                let forgotten = riftri_core::forget_missing_state_directory(&repository, &path)?;
-                println!("Forgot missing Riftri state registration");
-                println!("State: {}", forgotten.display());
+            StateCommand::Unregister { path, repository } => {
+                let unregistered = riftri_core::forget_missing_state_directory(&repository, &path)?;
+                println!("Unregistered missing Riftri state directory");
+                println!("State: {}", unregistered.display());
             }
         },
         Command::Worktree { command } => match command {
             WorktreeCommand::List {
                 repository,
                 state_dir,
+                all_states,
                 json,
             } => {
-                let state_directory = resolve_state_directory(&repository, state_dir)?;
-                let report = riftri_core::storage_accounting(&state_directory)?;
-                print_worktree_inventory(&state_directory, &report, json)?;
+                if all_states {
+                    let inventory = riftri_core::worktree_inventory_across_states(&repository)?;
+                    print_all_states_worktree_inventory(&inventory, json)?;
+                } else {
+                    let state_directory = resolve_state_directory(&repository, state_dir)?;
+                    let report = riftri_core::storage_accounting(&state_directory)?;
+                    print_worktree_inventory(&state_directory, &report, json)?;
+                }
             }
             WorktreeCommand::Add {
                 path,
                 branch,
                 detach,
                 revision,
+                sparse_dir,
                 repository,
                 state_dir,
                 json,
@@ -653,6 +687,7 @@ fn run(cli: Cli) -> Result<()> {
                     revision,
                     mode,
                     state_dir,
+                    sparse_directories: sparse_dir,
                 })?;
                 print_add_result(&result, json)?;
             }
@@ -727,21 +762,68 @@ fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
+/// Print one plain progress line per lifecycle state transition on stderr.
+///
+/// Lines are emitted only when an operation durably reaches a phase, starts
+/// waiting on a contended lock, or resumes after one — never on timers or
+/// per-file work — so output stays bounded and never uses control sequences,
+/// whether or not stderr is a terminal. `--no-progress` disables these lines
+/// and `--json-errors` implies that, keeping stderr reserved for its single
+/// JSON failure receipt.
+fn report_progress(event: &riftri_core::progress::ProgressEvent) {
+    use riftri_core::progress::ProgressEvent;
+
+    let line = match event {
+        ProgressEvent::LockContended { operation } => {
+            format!("waiting: {operation} (held by another process)")
+        }
+        ProgressEvent::LockAcquired { operation } => format!("resumed: {operation}"),
+        ProgressEvent::AddPhase { phase } => {
+            format!("worktree-add: {}", add_phase_name(*phase))
+        }
+        ProgressEvent::BaseReused => "worktree-add: immutable base cached; reusing it".to_owned(),
+        ProgressEvent::BaseMaterializing => {
+            "worktree-add: materializing new immutable base".to_owned()
+        }
+        ProgressEvent::RepairScanned { operations } => {
+            format!("repair: scanned {operations} journaled operation(s)")
+        }
+        ProgressEvent::RepairRecovering { kind, operation_id } => {
+            format!("repair: recovering {kind} operation {operation_id}")
+        }
+        ProgressEvent::GcPlanned { candidates } => {
+            format!("garbage-collection: {candidates} candidate base(s)")
+        }
+        ProgressEvent::GcPhase { phase } => {
+            format!("garbage-collection: {}", collection_phase_name(*phase))
+        }
+        _ => return,
+    };
+    eprintln!("riftri: {line}");
+}
+
 fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {
-    let (code, category, phase, cleanup, recovery) = error
-        .downcast_ref::<riftri_core::WorktreeError>()
-        .map(worktree_failure_fields)
-        .unwrap_or((
+    let worktree_error = error.downcast_ref::<riftri_core::WorktreeError>();
+    let (code, category, phase, cleanup, recovery) =
+        worktree_error.map(worktree_failure_fields).unwrap_or((
             "command-failed",
             "operational",
             None,
             "unknown",
             recovery_for_operation(operation),
         ));
-    let next_command = match recovery {
-        "required" => Some("riftri repair"),
-        "inspect" => Some("riftri status"),
-        _ => None,
+    let next_command = match worktree_error {
+        Some(riftri_core::WorktreeError::RecoveryPending {
+            state_directory, ..
+        }) => Some(format!(
+            "riftri repair --state-dir {}",
+            state_directory.display()
+        )),
+        _ => match recovery {
+            "required" => Some("riftri repair".to_owned()),
+            "inspect" => Some("riftri status".to_owned()),
+            _ => None,
+        },
     };
 
     serde_json::json!({
@@ -798,6 +880,19 @@ fn worktree_failure_fields(
             "not-needed",
             "not-required",
         ),
+        // An interrupted lifecycle operation left a durable journal behind:
+        // nothing was changed by this command, but the caller must run the
+        // repair command echoed in `nextCommand` before retrying.
+        WorktreeError::RecoveryPending { .. } => (
+            "recovery-pending",
+            "operational",
+            None,
+            "not-needed",
+            "required",
+        ),
+        // Another live process holds the operation lock. No repair is needed;
+        // the caller should wait for the concurrent operation and retry.
+        WorktreeError::Busy { .. } => ("worktree-busy", "operational", None, "not-needed", "retry"),
         WorktreeError::Io { .. } => (
             "filesystem-io-failed",
             "operational",
@@ -1044,7 +1139,9 @@ fn print_shell_status(repository: &Path) -> Result<()> {
             );
             println!(
                 "Effective optimized interception: {}",
-                if shell.active && activation.enabled {
+                if shell.bypass {
+                    "inactive (RIFTRI_BYPASS)"
+                } else if shell.active && activation.enabled {
                     "active"
                 } else {
                     "inactive"
@@ -1163,17 +1260,19 @@ fn run_git_shim() -> Result<i32> {
 
     match riftri_core::proxy_git_command(&current_directory, &arguments)? {
         riftri_core::GitProxyOutcome::Passthrough(status) => Ok(status),
-        riftri_core::GitProxyOutcome::OptimizedAdd(result) => {
-            eprintln!(
-                "Riftri created an optimized {} worktree at {} ({})",
-                result.backend.display_name(),
-                result.destination.display(),
-                if result.reused_base {
-                    "reused base"
-                } else {
-                    "new base"
-                }
-            );
+        riftri_core::GitProxyOutcome::OptimizedAdd { result, quiet } => {
+            if !quiet {
+                eprintln!(
+                    "Riftri created an optimized {} worktree at {} ({})",
+                    result.backend.display_name(),
+                    result.destination.display(),
+                    if result.reused_base {
+                        "reused base"
+                    } else {
+                        "new base"
+                    }
+                );
+            }
             Ok(0)
         }
         riftri_core::GitProxyOutcome::OptimizedRemove(result) => {
@@ -1423,30 +1522,140 @@ fn print_worktree_inventory(
     println!("Managed worktrees: {}", report.views.len());
     for view in &report.views {
         println!("- {}", view.destination.display());
-        println!("  Repository: {}", view.repository.display());
-        println!("  Head: {}", view.head.as_str());
-        if let Some(branch) = &view.branch {
-            println!("  Branch: {}", display_git_bytes(branch));
-        } else if view.detached {
-            println!("  Branch: detached");
-        }
-        if let Some(reason) = &view.locked_reason {
-            println!("  Locked: {}", display_git_bytes(reason));
-        }
-        if let Some(reason) = &view.prunable_reason {
-            println!("  Prunable: {}", display_git_bytes(reason));
-        }
-        println!("  Backend: {}", view.backend.display_name());
-        println!("  Immutable base: {}", view.base_path.display());
-        println!("  Logical: {}", display_byte_count(view.logical_bytes));
-        println!(
-            "  Filesystem-accounted allocated: {}",
-            display_byte_count(view.allocated_bytes)
-        );
+        print_worktree_view_details(view, None);
     }
     if !report.diagnostic_issues.is_empty() {
         println!("Diagnostic issues: {}", report.diagnostic_issues.len());
         for issue in &report.diagnostic_issues {
+            println!("- {}: {}", issue.path.display(), issue.reason);
+        }
+    }
+    Ok(())
+}
+
+fn print_worktree_view_details(view: &riftri_core::ViewStorageAccounting, state: Option<&Path>) {
+    if let Some(state) = state {
+        println!("  State: {}", state.display());
+    }
+    println!("  Repository: {}", view.repository.display());
+    println!("  Head: {}", view.head.as_str());
+    if let Some(branch) = &view.branch {
+        println!("  Branch: {}", display_git_bytes(branch));
+    } else if view.detached {
+        println!("  Branch: detached");
+    }
+    if let Some(reason) = &view.locked_reason {
+        println!("  Locked: {}", display_git_bytes(reason));
+    }
+    if let Some(reason) = &view.prunable_reason {
+        println!("  Prunable: {}", display_git_bytes(reason));
+    }
+    println!("  Backend: {}", view.backend.display_name());
+    println!("  Immutable base: {}", view.base_path.display());
+    println!("  Logical: {}", display_byte_count(view.logical_bytes));
+    println!(
+        "  Filesystem-accounted allocated: {}",
+        display_byte_count(view.allocated_bytes)
+    );
+}
+
+fn print_all_states_worktree_inventory(
+    inventory: &riftri_core::AllStatesWorktreeInventory,
+    json: bool,
+) -> Result<()> {
+    if json {
+        let state_directories = inventory
+            .states
+            .iter()
+            .map(|state| {
+                serde_json::json!({
+                    "path": state.state_directory.display().to_string(),
+                    "path_native_hex": native_path_hex(&state.state_directory),
+                    "source": state.source.as_str(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let worktrees = inventory
+            .states
+            .iter()
+            .flat_map(|state| {
+                state.views.iter().map(|view| {
+                    let mut value = worktree_view_json(view);
+                    value["state_directory"] =
+                        serde_json::Value::from(state.state_directory.display().to_string());
+                    value["state_directory_native_hex"] =
+                        serde_json::Value::from(native_path_hex(&state.state_directory));
+                    value
+                })
+            })
+            .collect::<Vec<_>>();
+        let diagnostic_issues = inventory
+            .registration_issues
+            .iter()
+            .map(|issue| {
+                let mut value = diagnostic_issue_json(issue);
+                value["state_directory"] = serde_json::Value::Null;
+                value
+            })
+            .chain(inventory.states.iter().flat_map(|state| {
+                state.diagnostic_issues.iter().map(|issue| {
+                    let mut value = diagnostic_issue_json(issue);
+                    value["state_directory"] =
+                        serde_json::Value::from(state.state_directory.display().to_string());
+                    value
+                })
+            }))
+            .collect::<Vec<_>>();
+        let output = serde_json::json!({
+            "schema_version": 2,
+            "scope": "all-registered-states",
+            "native_path_encoding": native_path_encoding(),
+            "state_directories": state_directories,
+            "worktrees": worktrees,
+            "diagnostic_issues": diagnostic_issues,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
+        );
+        return Ok(());
+    }
+
+    println!("Riftri managed worktrees (all registered states)");
+    println!("State directories: {}", inventory.states.len());
+    for state in &inventory.states {
+        println!(
+            "- {} ({})",
+            state.state_directory.display(),
+            state.source.as_str()
+        );
+    }
+    let total_views = inventory
+        .states
+        .iter()
+        .map(|state| state.views.len())
+        .sum::<usize>();
+    println!("Managed worktrees: {total_views}");
+    for state in &inventory.states {
+        for view in &state.views {
+            println!("- {}", view.destination.display());
+            print_worktree_view_details(view, Some(&state.state_directory));
+        }
+    }
+    let total_issues = inventory.registration_issues.len()
+        + inventory
+            .states
+            .iter()
+            .map(|state| state.diagnostic_issues.len())
+            .sum::<usize>();
+    if total_issues > 0 {
+        println!("Diagnostic issues: {total_issues}");
+        for issue in inventory.registration_issues.iter().chain(
+            inventory
+                .states
+                .iter()
+                .flat_map(|state| state.diagnostic_issues.iter()),
+        ) {
             println!("- {}: {}", issue.path.display(), issue.reason);
         }
     }
@@ -1775,6 +1984,111 @@ fn print_allocation_note() {
     println!("Physical-sharing proof: use the platform volume-delta benchmark on a quiet volume");
 }
 
+fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
+    let git = match &report.git.value {
+        Some(git) => serde_json::json!({
+            "available": report.git.available,
+            "value": {
+                "command": git.command.display().to_string(),
+                "command_native_hex": native_path_hex(&git.command),
+                "version": git.version,
+            },
+        }),
+        None => serde_json::json!(report.git),
+    };
+    let repository = match &report.repository.value {
+        Some(repository) => serde_json::json!({
+            "available": report.repository.available,
+            "value": {
+                "root": repository.root.as_deref().map(|path| path.display().to_string()),
+                "root_native_hex": repository.root.as_deref().map(native_path_hex),
+                "identity": {
+                    "common_git_dir": repository.identity.common_git_dir.display().to_string(),
+                    "common_git_dir_native_hex": native_path_hex(&repository.identity.common_git_dir),
+                },
+                "is_bare": repository.is_bare,
+                "head_commit": repository.head_commit,
+                "head_tree": repository.head_tree,
+                "clean": repository.clean,
+            },
+        }),
+        None => serde_json::json!(report.repository),
+    };
+    let readiness = &report.destination_readiness;
+    let mut destination_readiness = serde_json::json!({
+        "destination": readiness.destination.display().to_string(),
+        "destination_native_hex": native_path_hex(&readiness.destination),
+        "status": readiness.status,
+        "copy_on_write": readiness.copy_on_write,
+        "overlayfs_helper": readiness.overlayfs_helper,
+        "blockers": readiness.blockers,
+    });
+    if let Some(backend) = readiness.backend {
+        destination_readiness["backend"] = serde_json::json!(backend);
+    }
+    if let Some(command) = &readiness.next_command {
+        destination_readiness["next_command"] = serde_json::json!(command);
+    }
+    let storage_capabilities = report
+        .storage_capabilities
+        .iter()
+        .map(backend_capability_json)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "native_path_encoding": native_path_encoding(),
+        "project_stage": report.project_stage,
+        "operating_system": report.operating_system,
+        "architecture": report.architecture,
+        "cow_backend_active": report.cow_backend_active,
+        "repository_enabled": report.repository_enabled,
+        "git_shim_active": report.git_shim_active,
+        "git": git,
+        "repository": repository,
+        "repository_compatibility": report.repository_compatibility,
+        "destination_readiness": destination_readiness,
+        "storage_capabilities": storage_capabilities,
+    })
+}
+
+fn backends_json(
+    requested_path: &Path,
+    capabilities: &[riftri_storage::BackendCapability],
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "native_path_encoding": native_path_encoding(),
+        "requested_path": requested_path.display().to_string(),
+        "requested_path_native_hex": native_path_hex(requested_path),
+        "storage_capabilities": capabilities
+            .iter()
+            .map(backend_capability_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// Shared native-path-aware JSON shape for one storage capability, so the
+/// `backends` and `doctor` reports describe capabilities identically.
+fn backend_capability_json(capability: &riftri_storage::BackendCapability) -> serde_json::Value {
+    let mut output = serde_json::json!({
+        "kind": capability.kind,
+        "status": capability.status,
+        "explanation": capability.explanation,
+        "requires_explicit_fallback": capability.requires_explicit_fallback,
+    });
+    if let Some(volume) = &capability.volume {
+        output["volume"] = serde_json::json!({
+            "requested_path": volume.requested_path.display().to_string(),
+            "requested_path_native_hex": native_path_hex(&volume.requested_path),
+            "probe_path": volume.probe_path.display().to_string(),
+            "probe_path_native_hex": native_path_hex(&volume.probe_path),
+            "identity": volume.identity,
+            "read_only": volume.read_only,
+        });
+    }
+    output
+}
+
 fn print_doctor(report: &riftri_core::DoctorReport) {
     println!("Riftri doctor");
     println!(
@@ -2075,12 +2389,23 @@ mod tests {
         let directory = tempfile::tempdir().expect("create temporary directory");
         clap_mangen::generate_to(Cli::command(), directory.path()).expect("generate man pages");
 
-        for page in ["riftri.1", "riftri-completions.1", "riftri-worktree-add.1"] {
+        for page in [
+            "riftri.1",
+            "riftri-completions.1",
+            "riftri-worktree-add.1",
+            "riftri-state-unregister.1",
+        ] {
             assert!(
                 directory.path().join(page).is_file(),
                 "missing man page {page}"
             );
         }
+        assert!(
+            !directory
+                .path()
+                .join("riftri-state-forget-missing.1")
+                .exists()
+        );
     }
 
     #[test]
@@ -2102,6 +2427,50 @@ mod tests {
     }
 
     #[test]
+    fn pending_recovery_receipts_require_repair_with_the_state_directory() {
+        let state_directory = std::path::PathBuf::from("/tmp/riftri-state");
+        let error = anyhow::Error::new(riftri_core::WorktreeError::RecoveryPending {
+            message: format!(
+                "a move of /tmp/view is already pending; run `riftri repair --state-dir {}`",
+                state_directory.display()
+            ),
+            state_directory: state_directory.clone(),
+        });
+        let receipt = failure_receipt("worktree-move", &error);
+
+        assert_eq!(receipt["code"], "recovery-pending");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "required");
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        assert_eq!(
+            next_command,
+            format!("riftri repair --state-dir {}", state_directory.display())
+        );
+        assert!(
+            receipt["message"]
+                .as_str()
+                .expect("message")
+                .contains(next_command),
+            "human guidance and nextCommand must agree"
+        );
+    }
+
+    #[test]
+    fn busy_receipts_ask_the_caller_to_retry_without_repair() {
+        let error = anyhow::Error::new(riftri_core::WorktreeError::Busy {
+            message: "worktree /tmp/view is busy with another Riftri operation; wait for it to finish and retry".to_owned(),
+        });
+        let receipt = failure_receipt("worktree-compact", &error);
+
+        assert_eq!(receipt["code"], "worktree-busy");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "retry");
+        assert!(receipt["nextCommand"].is_null());
+    }
+
+    #[test]
     fn policy_failures_exit_with_a_distinct_code() {
         use super::failure_exit_code;
 
@@ -2117,6 +2486,18 @@ mod tests {
 
         let operational = anyhow::anyhow!("disk on fire");
         assert_eq!(failure_exit_code(&operational), 1);
+
+        // Pending recovery and busy states are operational: the caller can
+        // proceed after repair or retry, unlike a policy refusal.
+        let pending = anyhow::Error::new(riftri_core::WorktreeError::RecoveryPending {
+            message: "a move is already pending".to_owned(),
+            state_directory: std::path::PathBuf::from("/tmp/riftri-state"),
+        });
+        assert_eq!(failure_exit_code(&pending), 1);
+        let busy = anyhow::Error::new(riftri_core::WorktreeError::Busy {
+            message: "worktree is busy".to_owned(),
+        });
+        assert_eq!(failure_exit_code(&busy), 1);
     }
 
     #[test]
@@ -2264,6 +2645,7 @@ mod tests {
                 WorktreeCommand::List {
                     repository,
                     state_dir,
+                    all_states,
                     json,
                 },
         } = list.command
@@ -2272,7 +2654,34 @@ mod tests {
         };
         assert_eq!(repository, Path::new("../app"));
         assert_eq!(state_dir.as_deref(), Some(Path::new("../state")));
+        assert!(!all_states);
         assert!(json);
+
+        let all_states = Cli::try_parse_from(["riftri", "worktree", "list", "--all-states"])
+            .expect("parse all-states inventory");
+        let Command::Worktree {
+            command:
+                WorktreeCommand::List {
+                    all_states,
+                    state_dir,
+                    ..
+                },
+        } = all_states.command
+        else {
+            panic!("unexpected all-states list command");
+        };
+        assert!(all_states);
+        assert!(state_dir.is_none());
+
+        Cli::try_parse_from([
+            "riftri",
+            "worktree",
+            "list",
+            "--all-states",
+            "--state-dir",
+            "../state",
+        ])
+        .expect_err("--all-states conflicts with an explicit --state-dir");
 
         let remove = Cli::try_parse_from([
             "riftri",

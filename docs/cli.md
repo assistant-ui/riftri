@@ -16,6 +16,10 @@ Two conventions apply everywhere:
   (`doctor`, `backends`, `status`, `repair`, `gc`, and all `worktree`
   subcommands). It emits stable machine-readable JSON on success.
 
+A third convention, [progress reporting](#progress-reporting), applies to the
+long-running lifecycle commands and is suppressed with the global
+`--no-progress` flag.
+
 Commands that operate on a repository accept it as an optional positional
 argument or a `--repository` flag, defaulting to the current directory (`.`).
 Commands that touch Riftri state accept `--state-dir <PATH>` to override the
@@ -35,6 +39,41 @@ the `--json-errors` receipt, so a wrapper can branch on the exit status
 without parsing JSON. A policy refusal means nothing was changed; consult
 [decisions.md](decisions.md) for the forms Riftri refuses and `RIFTRI_BYPASS=1`
 to run one such command through ordinary Git instead.
+
+## Progress reporting
+
+Long-running lifecycle commands — `worktree add`, `repair`, and `gc` — print
+one plain line on stderr each time the operation durably reaches a journal
+phase, starts waiting on a coordination lock another process holds, or
+resumes after acquiring it:
+
+```text
+riftri: worktree-add: intent-recorded
+riftri: worktree-add: materializing new immutable base
+riftri: worktree-add: base-ready
+riftri: waiting: read-lock immutable base (held by another process)
+riftri: resumed: read-lock immutable base
+riftri: worktree-add: active
+```
+
+Every line reflects a state the operation genuinely reached — there are no
+percentages, timers, or animations, and no terminal control sequences even
+when stderr is a terminal — so redirected logs stay clean and output is
+bounded by the number of real transitions. The phase names match the durable
+journal phases that also appear in `--json-errors` receipts.
+
+Two suppression rules keep machine-readable streams intact:
+
+- The global `--no-progress` flag disables progress lines for quiet scripted
+  use.
+- `--json-errors` implies `--no-progress`, because a caller expecting one
+  JSON failure receipt on stderr must never receive interleaved progress
+  text. There is no separate structured progress stream; parse the receipt's
+  `phase` field instead.
+
+`--json` is unaffected: its single report goes to stdout while progress uses
+stderr, so `riftri worktree add … --json 2>log` still yields exactly one
+valid JSON document on stdout.
 
 ## Destructive commands
 
@@ -63,6 +102,26 @@ without any shell-level activation.
 | Flag | Effect |
 | --- | --- |
 | `--worktree <PATH>` | Start the command from this exact, registered Git worktree root |
+
+Termination follows the platform's conventions. On Unix, without a foreground
+controlling terminal (a supervisor or script), the command runs in its own
+process group, and SIGTERM, SIGINT, or SIGHUP delivered to `riftri exec` is
+forwarded to that whole group, stopping the command's descendants without
+touching unrelated processes. With a foreground controlling terminal, the
+command stays in `riftri exec`'s process group so terminal job control is
+unchanged: the terminal keeps delivering Ctrl-C (SIGINT) and Ctrl-\ (SIGQUIT)
+to the whole foreground process group, and `riftri exec` ignores both while it
+waits — like a shell waiting on a foreground job, the command alone decides
+whether the interrupt is fatal, so a command that catches Ctrl-C (a REPL, an
+agent session) keeps running under an intact wrapper. SIGTERM and SIGHUP
+delivered to interactive `riftri exec` are still forwarded to the command
+itself. In both modes `riftri exec` waits for the command, restores its prior
+signal dispositions, removes its temporary Git shim, and exits with the
+command's status (`128 + signal` when the command dies from a signal — for
+example 130 after a fatal SIGINT). SIGKILL cannot be intercepted and still
+orphans the command. On Windows, the console already delivers Ctrl-C and
+Ctrl-Break events to the command, and a hard `TerminateProcess` cannot be
+intercepted, so no forwarding layer exists.
 
 ### `riftri shell <SUBCOMMAND>`
 
@@ -107,6 +166,10 @@ Inspect Git and show the planned storage path without changing anything.
 | `--destination <DESTINATION>` | Proposed worktree destination whose volume should be probed |
 | `--json` | Emit machine-readable JSON |
 
+The suggested command uses POSIX shell quoting on Unix and PowerShell quoting on
+Windows. If the destination is not valid Unicode, doctor omits the suggested
+command rather than substitute characters in the path.
+
 ### `riftri backends [OPTIONS] [PATH]`
 
 Probe storage backends for a concrete destination volume. `PATH` is an
@@ -137,11 +200,16 @@ Plan or apply collection of immutable bases with no journaled references.
 | `--state-dir <STATE_DIR>` | Explicit Riftri state directory |
 | `--json` | Emit stable machine-readable JSON |
 
-### `riftri state forget-missing [OPTIONS] <PATH>`
+### `riftri state unregister [OPTIONS] <PATH>`
 
-Forget an explicitly selected registration whose directory is missing.
+Remove a registration for a missing state directory. No files are deleted.
 `PATH` is the missing state directory; `--repository` names the repository
 containing the local registration (default `.`).
+
+Relative paths such as `../old-state` are resolved from the current directory
+and matched to the registered location. Existing paths, including dangling
+symlinks, cannot be unregistered. The former name `forget-missing` remains
+accepted as a hidden compatibility alias.
 
 ## Worktrees
 
@@ -151,6 +219,28 @@ All `riftri worktree` subcommands accept `--repository <REPOSITORY>`
 ### `riftri worktree list`
 
 List active Riftri-managed worktrees and their storage use.
+
+By default the inventory reads one state directory: the explicit `--state-dir`,
+or `<common-git-dir>/riftri` when none is given. That default scope is
+unchanged and its JSON keeps `schema_version` 1.
+
+| Flag | Effect |
+| --- | --- |
+| `--all-states` | Inspect every state directory the repository registers, including the default location. Conflicts with `--state-dir` |
+
+With `--all-states`, discovery reads the default location plus every
+`riftri.stateDirectory` registration recorded by `riftri worktree add
+--state-dir`. Equivalent registrations are deduplicated, and worktrees owned by
+other repositories that share a state directory are filtered out. Missing,
+non-absolute, or symlinked registrations are reported as diagnostic entries
+instead of being traversed or silently dropped; `riftri state unregister`
+removes a stale missing registration. Discovery is strictly read-only.
+
+The `--all-states --json` report uses `schema_version` 2 with
+`"scope": "all-registered-states"`: it adds a `state_directories` array
+(each entry's `source` is `default` or `registered`), each worktree carries its
+owning `state_directory`, and each diagnostic entry carries the
+`state_directory` it was found in (`null` for registration-level issues).
 
 ### `riftri worktree add [OPTIONS] <PATH> [REVISION]`
 
@@ -162,6 +252,7 @@ worktree.
 | --- | --- |
 | `-b, --branch <BRANCH>` | Create and check out a new branch |
 | `--detach` | Create a detached worktree instead of a branch |
+| `--sparse-dir <DIR>` | Materialize only this directory (plus repository-root files) with Git cone-mode sparse checkout; repeatable, repository-relative with `/` separators. See [sparse-checkout.md](sparse-checkout.md) for the supported subset and refusals |
 
 ### `riftri worktree remove [OPTIONS] <PATH>`
 

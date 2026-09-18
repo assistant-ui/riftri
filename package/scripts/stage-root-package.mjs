@@ -3,10 +3,11 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const repositoryRoot = path.resolve(scriptDirectory, "..", "..");
+const defaultRepositoryRoot = path.resolve(scriptDirectory, "..", "..");
 
 export async function stageRootPackage(
-  destination = path.join(repositoryRoot, "dist", "npm-root"),
+  destination = path.join(defaultRepositoryRoot, "dist", "npm-root"),
+  repositoryRoot = defaultRepositoryRoot,
 ) {
   const manifest = JSON.parse(
     await readFile(path.join(repositoryRoot, "package.json"), "utf8"),

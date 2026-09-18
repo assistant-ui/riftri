@@ -102,6 +102,24 @@ pub struct GitAttribute {
     pub value: Vec<u8>,
 }
 
+/// A private temporary index holding one exact tree for attribute queries.
+///
+/// The index is populated by a single `git read-tree` and removed with this
+/// value; every query against it is read-only, so one index can serve both
+/// the isolated and the effective attribute passes.
+pub struct TreeAttributeIndex {
+    /// Owns the temporary directory backing `index` for this value's lifetime.
+    _temporary: tempfile::TempDir,
+    index: PathBuf,
+}
+
+/// Effective values and conditional includes discovered in one configuration read.
+#[derive(Debug, Default)]
+pub struct ConfigValues {
+    pub values: BTreeMap<String, Vec<u8>>,
+    pub has_conditional_includes: bool,
+}
+
 /// Branch behavior for a new linked worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeHead<'a> {
@@ -287,6 +305,49 @@ impl Git {
         parse_worktree_porcelain(&output.stdout)
     }
 
+    /// Resolve Git's unique path suffix before falling back to a filesystem path.
+    pub fn resolve_worktree_path(
+        &self,
+        repository: &Path,
+        selector: &OsStr,
+    ) -> Result<PathBuf, GitError> {
+        let path = repository.join(selector);
+        let suffix = selector.as_encoded_bytes();
+        if suffix.is_empty() {
+            return Ok(path);
+        }
+        let config = self.run(
+            Some(repository),
+            &[
+                "config",
+                "--bool",
+                "--default=false",
+                "--get",
+                "core.ignorecase",
+            ],
+        )?;
+        let ignore_case = cfg!(windows) || trim_line_endings(&config.stdout) == b"true";
+        let is_separator = |byte: u8| byte == b'/' || (cfg!(windows) && byte == b'\\');
+        let worktrees = self.list_worktrees(repository)?;
+        let mut matches = worktrees.into_iter().filter(|worktree| {
+            let bytes = worktree.path.as_os_str().as_encoded_bytes();
+            let Some(start) = bytes.len().checked_sub(suffix.len()) else {
+                return false;
+            };
+            (start == 0 || is_separator(bytes[start - 1]))
+                && bytes[start..].iter().zip(suffix).all(|(left, right)| {
+                    left == right
+                        || (ignore_case && left.eq_ignore_ascii_case(right))
+                        || (cfg!(windows) && is_separator(*left) && is_separator(*right))
+                })
+        });
+        match (matches.next(), matches.next()) {
+            (Some(worktree), None) => Ok(worktree.path),
+            // Git tries the literal path when the suffix is absent or ambiguous.
+            _ => Ok(path),
+        }
+    }
+
     /// Resolve an explicit Git directory to one live non-bare worktree root.
     ///
     /// A linked worktree's Git directory does not sit below that worktree, so
@@ -438,16 +499,19 @@ impl Git {
                 };
                 target = parent.join(target);
             }
+            let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+                return Ok(false);
+            };
             let arguments = [
                 OsString::from("config"),
                 OsString::from("--file"),
-                git_path_argument(&target),
+                git_path_argument(&Path::new(".").join(name)),
                 OsString::from("--no-includes"),
                 OsString::from("--null"),
                 OsString::from("--name-only"),
                 OsString::from("--list"),
             ];
-            let output = self.output_os(Some(path), &arguments)?;
+            let output = self.output_os(Some(&path.join(parent)), &arguments)?;
             if !output.status.success()
                 || output
                     .stdout
@@ -489,22 +553,18 @@ impl Git {
         }
     }
 
-    /// Read simple `section.variable` keys in one Git process, with normal
-    /// configuration precedence and the same raw values as `config_value`.
+    /// Read simple `section.variable` keys and detect conditional includes in one
+    /// Git process, with normal precedence and the same raw values as `config_value`.
     ///
-    /// Keys are case-insensitive and returned lowercase. This supports the
-    /// conservative ASCII subset needed by checkout configuration, including
-    /// subsection keys such as `filter.lfs.clean`. Missing keys are absent,
-    /// while empty values and implicit booleans are present with empty bytes,
-    /// as with `--get`.
+    /// Section and variable names are case-insensitive and returned lowercase.
+    /// Subsection names keep their case in selectors and returned keys.
+    /// This accepts a conservative ASCII subset, including subsection keys
+    /// such as `filter.Mixed.clean`. Missing keys are absent. Empty values and
+    /// implicit booleans are present with empty bytes, as with `--get`.
     /// The result is operation-local: no answers are cached between calls.
-    pub fn config_values(
-        &self,
-        path: &Path,
-        keys: &[&str],
-    ) -> Result<BTreeMap<String, Vec<u8>>, GitError> {
+    pub fn config_values(&self, path: &Path, keys: &[&str]) -> Result<ConfigValues, GitError> {
         if keys.is_empty() {
-            return Ok(BTreeMap::new());
+            return Ok(ConfigValues::default());
         }
         let keys = keys
             .iter()
@@ -527,13 +587,17 @@ impl Git {
                         detail: "batch reads require simple section.variable keys".to_owned(),
                     });
                 }
-                Ok(key.to_ascii_lowercase())
+                let mut key = (*key).to_owned();
+                key[..components[0].len()].make_ascii_lowercase();
+                let variable = key.rfind('.').expect("validated configuration key") + 1;
+                key[variable..].make_ascii_lowercase();
+                Ok(key)
             })
             .collect::<Result<Vec<_>, _>>()?;
         // Validation above excludes regexp metacharacters other than the one
         // separating dot. Anchor the allowlist so unrelated settings cannot match.
         let pattern = format!(
-            "^({})$",
+            r"^({}|includeif\..*\.path)$",
             keys.iter()
                 .map(|key| key.replace('.', r"\."))
                 .collect::<Vec<_>>()
@@ -549,7 +613,7 @@ impl Git {
         if output.status.success() {
             parse_config_values(&output.stdout, &keys)
         } else if output.status.code() == Some(1) && output.stdout.is_empty() {
-            Ok(BTreeMap::new())
+            Ok(ConfigValues::default())
         } else {
             Err(command_failed(&arguments, &output))
         }
@@ -729,6 +793,32 @@ impl Git {
         self.attributes_for_paths_with_environment(path, paths, &[], &[])
     }
 
+    /// Load an exact tree into a private temporary index once so multiple
+    /// attribute queries can share it instead of re-running `git read-tree`.
+    ///
+    /// `read-tree` runs with only `GIT_INDEX_FILE` set, exactly as each
+    /// attribute query previously ran it for its own private index; attribute
+    /// isolation is applied per query by `check-attr`, which only reads the
+    /// index, so sharing one index cannot leak state between queries.
+    pub fn tree_attribute_index(
+        &self,
+        path: &Path,
+        tree: &ObjectId,
+    ) -> Result<TreeAttributeIndex, GitError> {
+        let temporary = tempfile::Builder::new()
+            .prefix("riftri-attributes-")
+            .tempdir()
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let index = temporary.path().join("index");
+        let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.as_os_str())];
+        let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
+        self.run_os_with_env(Some(path), &read_tree, &index_environment)?;
+        Ok(TreeAttributeIndex {
+            _temporary: temporary,
+            index,
+        })
+    }
+
     /// Return attributes for an exact tree using Git's normal external
     /// attribute precedence.
     pub fn effective_attributes_for_tree_paths(
@@ -737,7 +827,11 @@ impl Git {
         tree: &ObjectId,
         paths: &[PathBuf],
     ) -> Result<Vec<GitAttribute>, GitError> {
-        self.attributes_for_tree_paths(path, tree, paths, false)
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let index = self.tree_attribute_index(path, tree)?;
+        self.effective_attributes_for_index(path, &index, paths)
     }
 
     /// Return attributes from an exact tree while disabling global and system
@@ -749,47 +843,50 @@ impl Git {
         tree: &ObjectId,
         paths: &[PathBuf],
     ) -> Result<Vec<GitAttribute>, GitError> {
-        self.attributes_for_tree_paths(path, tree, paths, true)
-    }
-
-    fn attributes_for_tree_paths(
-        &self,
-        path: &Path,
-        tree: &ObjectId,
-        paths: &[PathBuf],
-        isolate_external: bool,
-    ) -> Result<Vec<GitAttribute>, GitError> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
-        let temporary = tempfile::Builder::new()
-            .prefix("riftri-attributes-")
-            .tempdir()
-            .map_err(|source| GitError::TemporaryState { source })?;
-        let temporary_index = temporary.path().join("index");
-        let index_environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
-        let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
-        self.run_os_with_env(Some(path), &read_tree, &index_environment)?;
+        let index = self.tree_attribute_index(path, tree)?;
+        self.in_tree_attributes_for_index(path, &index, paths)
+    }
 
-        if isolate_external {
-            #[cfg(unix)]
-            let null_device = OsStr::new("/dev/null");
-            #[cfg(not(unix))]
-            let null_device = OsStr::new("NUL");
-            let mut attributes_override = OsString::from("core.attributesFile=");
-            attributes_override.push(null_device);
-            let arguments = [OsString::from("-c"), attributes_override];
-            let environment = [
-                (OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str()),
-                (OsStr::new("GIT_ATTR_NOSYSTEM"), OsStr::new("1")),
-                (OsStr::new("GIT_CONFIG_NOSYSTEM"), OsStr::new("1")),
-                (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
-                (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
-            ];
-            self.attributes_for_paths_with_environment(path, paths, &arguments, &environment)
-        } else {
-            self.attributes_for_paths_with_environment(path, paths, &[], &index_environment)
-        }
+    /// Return attributes for an already indexed tree using Git's normal
+    /// external attribute precedence.
+    pub fn effective_attributes_for_index(
+        &self,
+        path: &Path,
+        index: &TreeAttributeIndex,
+        paths: &[PathBuf],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str())];
+        self.attributes_for_paths_with_environment(path, paths, &[], &index_environment)
+    }
+
+    /// Return attributes from an already indexed tree while disabling global
+    /// and system attribute files. Callers must separately reject
+    /// `.git/info/attributes`, which Git intentionally gives highest
+    /// precedence and cannot disable.
+    pub fn in_tree_attributes_for_index(
+        &self,
+        path: &Path,
+        index: &TreeAttributeIndex,
+        paths: &[PathBuf],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        #[cfg(unix)]
+        let null_device = OsStr::new("/dev/null");
+        #[cfg(not(unix))]
+        let null_device = OsStr::new("NUL");
+        let mut attributes_override = OsString::from("core.attributesFile=");
+        attributes_override.push(null_device);
+        let arguments = [OsString::from("-c"), attributes_override];
+        let environment = [
+            (OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str()),
+            (OsStr::new("GIT_ATTR_NOSYSTEM"), OsStr::new("1")),
+            (OsStr::new("GIT_CONFIG_NOSYSTEM"), OsStr::new("1")),
+            (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
+            (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
+        ];
+        self.attributes_for_paths_with_environment(path, paths, &arguments, &environment)
     }
 
     fn attributes_for_paths_with_environment(
@@ -876,6 +973,48 @@ impl Git {
         destination: &Path,
         temporary_index: &Path,
         configuration: &[(String, Vec<u8>)],
+    ) -> Result<(), GitError> {
+        self.materialize_tree_inner(
+            repository,
+            tree,
+            destination,
+            temporary_index,
+            configuration,
+            &[],
+        )
+    }
+
+    /// Materialize a cone-mode sparse view of the exact tree. Git's own
+    /// `sparse-checkout set --cone` computes the sparse patterns and
+    /// skip-worktree bits inside the isolated administrative directory, and
+    /// `checkout-index` then writes only the entries Git left active.
+    pub fn materialize_sparse_tree_with_config(
+        &self,
+        repository: &Path,
+        tree: &ObjectId,
+        destination: &Path,
+        temporary_index: &Path,
+        configuration: &[(String, Vec<u8>)],
+        sparse_directories: &[String],
+    ) -> Result<(), GitError> {
+        self.materialize_tree_inner(
+            repository,
+            tree,
+            destination,
+            temporary_index,
+            configuration,
+            sparse_directories,
+        )
+    }
+
+    fn materialize_tree_inner(
+        &self,
+        repository: &Path,
+        tree: &ObjectId,
+        destination: &Path,
+        temporary_index: &Path,
+        configuration: &[(String, Vec<u8>)],
+        sparse_directories: &[String],
     ) -> Result<(), GitError> {
         let objects = self.run_path(
             Some(repository),
@@ -989,6 +1128,19 @@ impl Git {
         let read_tree = [OsString::from("read-tree"), OsString::from(tree.as_str())];
         run(&read_tree)?;
 
+        if !sparse_directories.is_empty() {
+            // Real Git computes the cone patterns and applies skip-worktree
+            // bits to the isolated index; checkout-index below honors them.
+            let mut sparse = vec![
+                OsString::from("sparse-checkout"),
+                OsString::from("set"),
+                OsString::from("--cone"),
+                OsString::from("--"),
+            ];
+            sparse.extend(sparse_directories.iter().map(OsString::from));
+            run(&sparse)?;
+        }
+
         let mut prefix = git_path_argument(destination);
         prefix.push(std::path::MAIN_SEPARATOR.to_string());
         let checkout = [
@@ -1034,17 +1186,83 @@ impl Git {
         Ok(())
     }
 
+    /// Stable, read-only Git state for forced-removal consent. Keep structured
+    /// index entries rather than stat-cache bytes, which ordinary status may refresh.
+    pub fn worktree_removal_state(&self, worktree: &Path) -> Result<Vec<u8>, GitError> {
+        let mut state = Vec::new();
+        for arguments in [
+            &["rev-parse", "--verify", "HEAD"][..],
+            &["ls-files", "--stage", "-v", "--full-name", "-z"],
+            &[
+                "diff",
+                "--cached",
+                "--raw",
+                "-z",
+                "--no-abbrev",
+                "--no-color",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                // Omitting intent-to-add entries distinguishes them from
+                // fully staged empty blobs (ls-files shows the same object ID).
+                "--ita-invisible-in-index",
+                "HEAD",
+                "--",
+            ],
+        ] {
+            let output = self.run(Some(worktree), arguments)?;
+            state.extend_from_slice(&(output.stdout.len() as u64).to_le_bytes());
+            state.extend_from_slice(&output.stdout);
+        }
+        let arguments = ["symbolic-ref", "--quiet", "HEAD"];
+        let symbolic = self.output(Some(worktree), &arguments)?;
+        if !symbolic.status.success() && symbolic.status.code() != Some(1) {
+            return Err(command_failed(&arguments.map(OsString::from), &symbolic));
+        }
+        state.extend_from_slice(&(symbolic.stdout.len() as u64).to_le_bytes());
+        state.extend_from_slice(&symbolic.stdout);
+        Ok(state)
+    }
+
     /// Populate the linked worktree index from HEAD without writing files.
+    ///
+    /// SAFETY ARGUMENT: this intentionally issues no separate
+    /// `update-index --refresh`. The staged index contents are fully
+    /// determined by `reset --mixed HEAD`; a refresh only rewrites cached
+    /// stat data and reports paths whose contents differ. Every caller pairs
+    /// this call with `worktree_is_clean`, whose `git status` performs the
+    /// same full stat-and-content comparison against the freshly written
+    /// index and fails closed on any divergence, so corruption detection and
+    /// the clean-creation guarantee are unchanged while each add saves one
+    /// Git process and one full worktree traversal.
     pub fn synchronize_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
         self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+        Ok(())
+    }
+
+    /// Enable per-worktree cone sparse checkout for the listed directories and
+    /// populate the linked worktree index from HEAD. `sparse-checkout set`
+    /// stores the sparse configuration in the worktree-scoped Git
+    /// configuration, exactly as running the command by hand would, and
+    /// `sparse-checkout reapply` restores the skip-worktree bits after the
+    /// index is rebuilt.
+    pub fn synchronize_sparse_worktree_index(
+        &self,
+        worktree: &Path,
+        sparse_directories: &[String],
+    ) -> Result<(), GitError> {
+        let mut arguments = vec!["sparse-checkout", "set", "--cone", "--"];
+        arguments.extend(sparse_directories.iter().map(String::as_str));
+        self.run(Some(worktree), &arguments)?;
+        self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+        self.run(Some(worktree), &["sparse-checkout", "reapply"])?;
         self.run(Some(worktree), &["update-index", "--refresh"])?;
         Ok(())
     }
 
-    /// Reset the linked worktree index to HEAD without requiring the visible
-    /// files to remain clean while the command runs.
-    pub fn reset_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
-        self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
+    /// Refresh index stat data without changing staged entries or worktree files.
+    pub fn refresh_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
+        self.run(Some(worktree), &["update-index", "-q", "--refresh"])?;
         Ok(())
     }
 
@@ -1219,7 +1437,7 @@ impl Git {
         context: &'static str,
     ) -> Result<PathBuf, GitError> {
         let output = self.run(path, arguments)?;
-        let bytes = trim_line_endings(&output.stdout);
+        let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
         if bytes.is_empty() {
             return Err(GitError::InvalidOutput {
                 context,
@@ -1624,17 +1842,14 @@ fn os_string_from_git(bytes: &[u8], context: &'static str) -> Result<OsString, G
         })
 }
 
-fn parse_config_values(
-    output: &[u8],
-    keys: &[String],
-) -> Result<BTreeMap<String, Vec<u8>>, GitError> {
+fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, GitError> {
     let invalid = || GitError::InvalidOutput {
         context: "configuration values",
         detail: "expected NUL-terminated records for the requested keys".to_owned(),
     };
-    let mut values = BTreeMap::new();
+    let mut config = ConfigValues::default();
     if output.is_empty() {
-        return Ok(values);
+        return Ok(config);
     }
     let records = output.strip_suffix(&[0]).ok_or_else(invalid)?;
     for record in records.split(|byte| *byte == 0) {
@@ -1644,15 +1859,19 @@ fn parse_config_values(
             Some(index) => (&record[..index], &record[index + 1..]),
             None => (record, &[][..]),
         };
+        if name.starts_with(b"includeif.") && name.ends_with(b".path") {
+            config.has_conditional_includes = true;
+            continue;
+        }
         let key = keys
             .iter()
             .find(|key| key.as_bytes() == name)
             .ok_or_else(invalid)?;
         // --get-regexp returns all occurrences in Git's precedence order;
         // --get returns the last one. Preserve that exact behavior.
-        values.insert(key.clone(), value.to_vec());
+        config.values.insert(key.clone(), value.to_vec());
     }
-    Ok(values)
+    Ok(config)
 }
 
 fn display_arguments(arguments: &[OsString]) -> String {
@@ -1735,6 +1954,48 @@ mod tests {
     }
 
     #[test]
+    fn removal_state_works_through_a_private_overlay_pointer() {
+        let fixture = RepositoryFixture::committed();
+        let views = tempdir().unwrap();
+        let linked = views.path().join("linked");
+        let upper = views.path().join("upper");
+        let output = Command::new("git")
+            .current_dir(fixture.path())
+            .args(["worktree", "add", "--detach"])
+            .arg(&linked)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        fs::create_dir(&upper).unwrap();
+        fs::copy(linked.join(".git"), upper.join(".git")).unwrap();
+        let git = Git::default();
+        assert_eq!(
+            git.worktree_removal_state(&linked).unwrap(),
+            git.worktree_removal_state(&upper).unwrap()
+        );
+    }
+
+    #[test]
+    fn removal_state_distinguishes_intent_to_add_from_staged_empty_content() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(fixture.path().join("empty.txt"), []).unwrap();
+        let git = Git::default();
+        git.run(
+            Some(fixture.path()),
+            &["add", "--intent-to-add", "empty.txt"],
+        )
+        .unwrap();
+        let intent = git.worktree_removal_state(fixture.path()).unwrap();
+        git.run(Some(fixture.path()), &["add", "empty.txt"])
+            .unwrap();
+        let staged = git.worktree_removal_state(fixture.path()).unwrap();
+        assert_ne!(
+            intent, staged,
+            "staging must invalidate force consent even when bytes match"
+        );
+    }
+
+    #[test]
     fn batch_configuration_reads_lfs_subsection_keys() {
         let fixture = RepositoryFixture::unborn();
         git(
@@ -1747,7 +2008,8 @@ mod tests {
         );
         let values = Git::default()
             .config_values(fixture.path(), &["filter.lfs.clean", "filter.lfs.process"])
-            .expect("read LFS configuration");
+            .expect("read LFS configuration")
+            .values;
 
         assert_eq!(
             values.get("filter.lfs.clean").map(Vec::as_slice),
@@ -1757,6 +2019,42 @@ mod tests {
             values.get("filter.lfs.process").map(Vec::as_slice),
             Some(&b"git-lfs filter-process"[..])
         );
+    }
+
+    #[test]
+    fn batched_configuration_preserves_subsection_case() {
+        let fixture = RepositoryFixture::unborn();
+        for (key, value) in [
+            ("filter.Mixed.clean", "cat"),
+            ("filter.mixed.clean", "lowercase"),
+            ("filter.Mixed.Part.clean", "dotted"),
+        ] {
+            git(fixture.path(), &["config", key, value]);
+        }
+        let git = Git::default();
+        let values = git
+            .config_values(
+                fixture.path(),
+                &[
+                    "FILTER.Mixed.CLEAN",
+                    "filter.mixed.clean",
+                    "Filter.Mixed.Part.Clean",
+                    "filter.MIXED.clean",
+                ],
+            )
+            .unwrap()
+            .values;
+        assert_eq!(
+            values,
+            std::collections::BTreeMap::from([
+                ("filter.Mixed.clean".to_owned(), b"cat".to_vec()),
+                ("filter.mixed.clean".to_owned(), b"lowercase".to_vec()),
+                ("filter.Mixed.Part.clean".to_owned(), b"dotted".to_vec()),
+            ])
+        );
+        for (key, value) in values {
+            assert_eq!(git.config_value(fixture.path(), &key).unwrap(), Some(value));
+        }
     }
 
     fn git(path: &Path, arguments: &[&str]) {
@@ -2038,14 +2336,21 @@ mod tests {
         );
 
         fs::write(linked.join("tracked.txt"), "tracked\n").expect("materialize linked file");
+        let attempts_before = git.process_attempts();
         git.synchronize_worktree_index(&linked)
             .expect("synchronize index");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "index synchronization must stay a single Git invocation; the \
+             paired clean check performs the refresh"
+        );
         assert!(git.worktree_is_clean(&linked).expect("check clean"));
 
         fs::write(linked.join("tracked.txt"), "changed\n").expect("modify linked file");
         assert!(!git.worktree_is_clean(&linked).expect("check dirty"));
-        git.reset_worktree_index(&linked)
-            .expect("reset index while worktree is dirty");
+        git.refresh_worktree_index(&linked)
+            .expect("refresh index while worktree is dirty");
         assert!(!git.worktree_is_clean(&linked).expect("still dirty"));
         fs::write(linked.join("tracked.txt"), "tracked\n").expect("restore linked file");
         assert!(git.worktree_is_clean(&linked).expect("check restored"));
@@ -2133,8 +2438,22 @@ mod tests {
         let included = fixture.path().join("identity-é");
         fs::write(&included, "[user]\n email = work@example.invalid\n").unwrap();
         let git = Git::default();
-        git.add_local_config_path(fixture.path(), "includeIf.gitdir:never.path", &included)
-            .unwrap();
+        assert!(
+            !git.config_values(fixture.path(), &["user.email"])
+                .unwrap()
+                .has_conditional_includes
+        );
+        git.set_local_config(
+            fixture.path(),
+            "includeIf.gitdir:never.path",
+            included.canonicalize().unwrap().as_os_str(),
+        )
+        .unwrap();
+        assert!(
+            git.config_values(fixture.path(), &["user.email"])
+                .unwrap()
+                .has_conditional_includes
+        );
         assert!(
             git.conditional_config_has_only(fixture.path(), &["user.email"])
                 .unwrap()
@@ -2169,7 +2488,8 @@ mod tests {
         let before = git.process_attempts();
         let values = git
             .config_values(fixture.path(), &keys)
-            .expect("batch config");
+            .expect("batch config")
+            .values;
         assert_eq!(git.process_attempts() - before, 1);
         for key in keys {
             assert_eq!(
@@ -2205,7 +2525,10 @@ mod tests {
                     .map(|value| (key.to_string(), value))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(git.config_values(fixture.path(), &keys).unwrap(), expected);
+        assert_eq!(
+            git.config_values(fixture.path(), &keys).unwrap().values,
+            expected
+        );
         let mut individual_seconds = Vec::new();
         let mut batched_seconds = Vec::new();
         for round in 0..30 {
@@ -2217,7 +2540,7 @@ mod tests {
                 let attempts = git.process_attempts();
                 let started = std::time::Instant::now();
                 let values = if batched {
-                    git.config_values(fixture.path(), &keys).unwrap()
+                    git.config_values(fixture.path(), &keys).unwrap().values
                 } else {
                     keys.iter()
                         .filter_map(|key| {
@@ -2263,7 +2586,7 @@ mod tests {
             "riftri-test.missing",
         ];
         let git = Git::default();
-        let values = git.config_values(fixture.path(), &keys).unwrap();
+        let values = git.config_values(fixture.path(), &keys).unwrap().values;
         for key in keys {
             assert_eq!(
                 values.get(&key.to_ascii_lowercase()).cloned(),
@@ -2289,7 +2612,12 @@ mod tests {
     fn batched_configuration_handles_missing_exact_keys_and_fresh_reads() {
         let fixture = RepositoryFixture::unborn();
         let git = Git::default();
-        assert!(git.config_values(fixture.path(), &[]).unwrap().is_empty());
+        assert!(
+            git.config_values(fixture.path(), &[])
+                .unwrap()
+                .values
+                .is_empty()
+        );
         assert_eq!(git.process_attempts(), 0);
         git.set_local_config(fixture.path(), "riftri-test.other", OsStr::new("unrelated"))
             .unwrap();
@@ -2301,18 +2629,21 @@ mod tests {
         .unwrap();
         let values = git
             .config_values(fixture.path(), &["riftri-test.value"])
-            .unwrap();
+            .unwrap()
+            .values;
         assert!(values.is_empty());
         git.set_local_config(fixture.path(), "riftri-test.value", OsStr::new("first"))
             .unwrap();
         let first = git
             .config_values(fixture.path(), &["riftri-test.value"])
-            .unwrap();
+            .unwrap()
+            .values;
         git.set_local_config(fixture.path(), "riftri-test.value", OsStr::new("changed"))
             .unwrap();
         let next = git
             .config_values(fixture.path(), &["riftri-test.value"])
-            .unwrap();
+            .unwrap()
+            .values;
         assert_eq!(first["riftri-test.value"], b"first");
         assert_eq!(next["riftri-test.value"], b"changed");
     }
@@ -2435,7 +2766,7 @@ mod tests {
             "riftri.enabled",
         ];
         for repository in [fixture.path(), linked.as_path()] {
-            let values = scoped.config_values(repository, &keys).unwrap();
+            let values = scoped.config_values(repository, &keys).unwrap().values;
             for key in keys {
                 assert_eq!(
                     values.get(key).cloned(),
@@ -2457,11 +2788,11 @@ mod tests {
             );
         }
         assert_eq!(
-            scoped.config_values(fixture.path(), &keys).unwrap()["riftri-test.scope"],
+            scoped.config_values(fixture.path(), &keys).unwrap().values["riftri-test.scope"],
             b"local"
         );
         assert_eq!(
-            scoped.config_values(&linked, &keys).unwrap()["riftri-test.scope"],
+            scoped.config_values(&linked, &keys).unwrap().values["riftri-test.scope"],
             b"worktree"
         );
         git(
@@ -2630,6 +2961,63 @@ mod tests {
                 .any(|attribute| { attribute.name == b"filter" && attribute.value == b"external" })
         );
         assert!(in_tree.is_empty());
+    }
+
+    #[test]
+    fn shared_tree_index_preserves_isolation_and_runs_read_tree_once() {
+        let fixture = RepositoryFixture::committed();
+        let external = fixture.path().join("external-attributes");
+        fs::write(&external, "*.txt filter=external\n").expect("write external attributes");
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "core.attributesFile",
+                external.to_str().expect("UTF-8 temporary path"),
+            ],
+        );
+        let git_handle = Git::default();
+        let tree = git_handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve tree")
+            .tree;
+        let paths = [Path::new("tracked.txt").to_path_buf()];
+
+        let attempts_before = git_handle.process_attempts();
+        let index = git_handle
+            .tree_attribute_index(fixture.path(), &tree)
+            .expect("load shared tree index");
+        let in_tree = git_handle
+            .in_tree_attributes_for_index(fixture.path(), &index, &paths)
+            .expect("read isolated attributes");
+        let effective = git_handle
+            .effective_attributes_for_index(fixture.path(), &index, &paths)
+            .expect("read effective attributes");
+        assert_eq!(
+            git_handle.process_attempts() - attempts_before,
+            3,
+            "both attribute passes must share one read-tree invocation"
+        );
+
+        assert!(
+            effective
+                .iter()
+                .any(|attribute| { attribute.name == b"filter" && attribute.value == b"external" })
+        );
+        assert!(in_tree.is_empty());
+
+        assert_eq!(
+            in_tree,
+            git_handle
+                .in_tree_attributes_for_paths(fixture.path(), &tree, &paths)
+                .expect("read isolated attributes through the wrapper")
+        );
+        assert_eq!(
+            effective,
+            git_handle
+                .effective_attributes_for_tree_paths(fixture.path(), &tree, &paths)
+                .expect("read effective attributes through the wrapper")
+        );
     }
 
     #[cfg(unix)]

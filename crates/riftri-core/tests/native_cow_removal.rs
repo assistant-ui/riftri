@@ -14,8 +14,9 @@ use std::path::Path;
 use std::process::Command;
 
 use riftri_core::{
-    AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree, garbage_collect,
-    remove_worktree, storage_accounting,
+    AddWorktreeRequest, CompactWorktreeRequest, MoveWorktreeRequest, RemoveWorktreeRequest,
+    WorktreeMode, add_worktree, compact_worktree, force_remove_worktree, garbage_collect,
+    move_worktree, recover_incomplete_operations, remove_worktree, storage_accounting,
 };
 
 mod support;
@@ -59,6 +60,7 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/removal")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create Riftri worktree");
 
@@ -126,6 +128,97 @@ fn journaled_removal_refuses_dirty_then_releases_a_clean_view() {
     );
 }
 
+#[test]
+fn pending_move_blocks_lifecycle_changes_until_repair() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let source = fixture.path().join("source");
+    let destination = fixture.path().join("destination");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+    add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::Detached,
+        state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
+    })
+    .expect("create managed worktree");
+
+    git(&repository, &["worktree", "lock", source.to_str().unwrap()]);
+    let request = MoveWorktreeRequest {
+        repository: repository.clone(),
+        source: source.clone(),
+        destination: destination.clone(),
+        state_dir: Some(state.clone()),
+    };
+    move_worktree(request.clone()).expect_err("Git rejects the locked worktree");
+    assert_eq!(storage_accounting(&state).unwrap().pending_moves, 1);
+    git(
+        &repository,
+        &["worktree", "unlock", source.to_str().unwrap()],
+    );
+
+    remove_worktree(RemoveWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("removal must preserve the pending move source");
+    force_remove_worktree(RemoveWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("forced removal must preserve the pending move source");
+    compact_worktree(CompactWorktreeRequest {
+        repository: repository.clone(),
+        destination: source.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect_err("compaction must wait for the pending move");
+    move_worktree(request).expect_err("a second move must wait for repair");
+    assert_eq!(
+        fs::read_to_string(source.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert!(!destination.exists());
+
+    let recovered = recover_incomplete_operations(&state).expect("repair pending move");
+    assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+    assert_eq!(recovered.recovered_moves, 1);
+    assert!(!source.exists());
+    assert_eq!(
+        fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+        "base\n"
+    );
+    assert!(git(&destination, &["status", "--porcelain"]).is_empty());
+    compact_worktree(CompactWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect("completed moves do not block compaction");
+    remove_worktree(RemoveWorktreeRequest {
+        repository,
+        destination: destination.clone(),
+        state_dir: Some(state),
+    })
+    .expect("completed moves do not block removal");
+    assert!(!destination.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn base_reuse_rejects_symlinked_completion_markers() {
@@ -155,6 +248,7 @@ fn base_reuse_rejects_symlinked_completion_markers() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/marker-first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first worktree");
     remove_worktree(RemoveWorktreeRequest {
@@ -173,6 +267,7 @@ fn base_reuse_rejects_symlinked_completion_markers() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/marker-second")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect_err("symlinked completion marker must prevent base reuse");
 
@@ -207,6 +302,7 @@ fn base_reuse_rejects_symlinked_completion_markers() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/marker-third")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect_err("broken completion-marker symlink must prevent base reuse");
 
@@ -249,6 +345,7 @@ fn removal_preserves_untracked_files_when_status_configuration_hides_them() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/untracked-removal")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create Riftri worktree");
     git(&repository, &["config", "status.showUntrackedFiles", "no"]);
@@ -297,6 +394,7 @@ fn accounting_keeps_a_reference_for_a_missing_unreleased_view() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/missing-accounting")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create Riftri worktree");
     fs::remove_dir_all(&worktree).expect("simulate missing managed view");
@@ -343,6 +441,7 @@ fn accounting_tracks_two_views_that_reuse_one_retained_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/first-accounted")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first worktree");
     let second_add = add_worktree(AddWorktreeRequest {
@@ -351,6 +450,7 @@ fn accounting_tracks_two_views_that_reuse_one_retained_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/second-accounted")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create second worktree");
     assert!(!first_add.reused_base);
@@ -400,6 +500,7 @@ fn garbage_collection_requires_apply_and_never_collects_an_in_use_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/gc-first")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create first worktree");
     add_worktree(AddWorktreeRequest {
@@ -408,6 +509,7 @@ fn garbage_collection_requires_apply_and_never_collects_an_in_use_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/gc-second")),
         state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
     })
     .expect("create second worktree");
 
@@ -475,6 +577,7 @@ fn garbage_collection_requires_apply_and_never_collects_an_in_use_base() {
         revision: OsString::from("HEAD"),
         mode: WorktreeMode::NewBranch(OsString::from("feature/gc-rebuilt")),
         state_dir: Some(state),
+        sparse_directories: Vec::new(),
     })
     .expect("rebuild collected base");
     assert!(!rebuilt.reused_base);

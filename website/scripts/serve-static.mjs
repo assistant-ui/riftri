@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Preview the actual finalized build, including its public file response headers.
-const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".json": "application/json", ".md": "text/plain", ".sh": "text/plain", ".ps1": "text/plain" };
+const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".png": "image/png", ".woff2": "font/woff2", ".json": "application/json", ".md": "text/plain", ".sh": "text/plain", ".ps1": "text/plain", ".txt": "text/plain", ".xml": "application/xml" };
 
 export async function createStaticPreview(output = fileURLToPath(new URL("../.vercel/output/", import.meta.url))) {
   const root = await realpath(path.join(output, "static"));

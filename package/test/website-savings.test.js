@@ -53,10 +53,12 @@ test("only backend names animate while the APFS reference figures stay fixed", (
   assert.match(chart, /not Linux or Windows measurements/);
   assert.match(chart, /<SavingsBackendName\s*\/>/);
   assert.doesNotMatch(chart, /savings-platforms|savings-panel|useState|useEffect|Not measured/);
-  assert.match(label, /backend name animation/);
-  assert.match(label, /aria-pressed/);
-  assert.match(label, /prefers-reduced-motion: reduce/);
-  assert.match(css, /animation-play-state: paused/);
+  // The cycling names are decorative and carry no pause control, so the
+  // accessible text must come from the static description instead.
+  assert.doesNotMatch(label, /aria-pressed|<button|useState/);
+  assert.match(label, /APFS on macOS, native reflinks on Linux, and ReFS on Windows/);
+  const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+  assert.match(reduced, /\.savings-backend-item \{ animation: none/);
   assert.doesNotMatch(css, /\.savings-panel|\.savings-controls/);
   assert.match(page, /Worktree disk usage/);
   assert.doesNotMatch(page, /Ten worktrees\.|A smaller footprint|Same tracked source\. Same number/);

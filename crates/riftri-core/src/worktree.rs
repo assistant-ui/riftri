@@ -58,6 +58,7 @@ use crate::journal::{
     DecodedJournal, DecodedMoveJournal, DecodedPruneJournal, DecodedRemovalJournal, JournalError,
     JournalStore, MoveJournalStore, PruneJournalStore, RemovalJournalRecord, RemovalJournalStore,
 };
+use crate::progress::{self, ProgressEvent};
 use crate::{
     AddWorktreePhase, CompactJournalTransitionError, CompactWorktreePhase, GarbageCollectionPhase,
     JournalTransitionError, MoveJournalTransitionError, MoveWorktreePhase,
@@ -126,6 +127,13 @@ pub struct AddWorktreeRequest {
     /// Defaults to `<common-git-dir>/riftri`. A custom directory must be on the
     /// same filesystem volume as the destination.
     pub state_dir: Option<PathBuf>,
+    /// Cone-mode sparse-checkout directories, relative to the repository root
+    /// with `/` separators. Empty materializes the full tree. Directories are
+    /// canonicalized (sorted, deduplicated, nested cones collapsed into their
+    /// ancestors) and become part of the versioned checkout profile, so
+    /// different selections at the same commit never share a base. Requests
+    /// outside the supported cone subset are refused before any state exists.
+    pub sparse_directories: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -332,6 +340,22 @@ pub enum WorktreeError {
     #[error("invalid worktree request: {0}")]
     InvalidRequest(String),
 
+    /// A durable journal records an interrupted lifecycle operation, so this
+    /// request is refused until `riftri repair` runs against
+    /// `state_directory`. Distinct from [`WorktreeError::Busy`], which means
+    /// another live process currently holds the operation lock.
+    #[error("{message}")]
+    RecoveryPending {
+        message: String,
+        state_directory: PathBuf,
+    },
+
+    /// Another live process holds the operation lock right now. Nothing needs
+    /// repair; the caller should wait for the concurrent operation to finish
+    /// and retry.
+    #[error("{message}")]
+    Busy { message: String },
+
     #[error("{operation} {path}: {source}")]
     Io {
         operation: &'static str,
@@ -427,7 +451,7 @@ pub fn forget_missing_state_directory(
     match fs::symlink_metadata(&state_directory) {
         Ok(_) => {
             return Err(WorktreeError::InvalidRequest(format!(
-                "registered Riftri state path still exists; refusing to forget it: {}",
+                "registered Riftri state path still exists; refusing to unregister it: {}",
                 state_directory.display()
             )));
         }
@@ -441,11 +465,16 @@ pub fn forget_missing_state_directory(
         }
     }
 
+    let candidates = managed_destination_candidates(&state_directory)?;
     let _lock = acquire_state_directory_locator_lock(&repository.identity.common_git_dir)?;
     let registered = git
         .local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?
         .into_iter()
-        .find(|registered| paths_match(registered, &state_directory))
+        .find(|registered| {
+            candidates
+                .iter()
+                .any(|candidate| paths_match(registered, candidate))
+        })
         .ok_or_else(|| {
             WorktreeError::InvalidRequest(format!(
                 "Riftri state path is not registered in this repository: {}",
@@ -542,6 +571,185 @@ fn repository_state_directories_with_git(
     Ok(directories)
 }
 
+/// Origin of one discovered state directory in an all-states inventory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateDirectorySource {
+    /// The implicit `<common-git-dir>/riftri` location.
+    Default,
+    /// A `riftri.stateDirectory` registration in the repository-local config.
+    Registered,
+}
+
+impl StateDirectorySource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Registered => "registered",
+        }
+    }
+}
+
+/// Read-only worktree inventory for one discovered state directory.
+#[derive(Debug, Clone)]
+pub struct StateWorktreeInventory {
+    /// Resolved real state-directory path.
+    pub state_directory: PathBuf,
+    pub source: StateDirectorySource,
+    /// Active managed worktrees owned by the queried repository.
+    pub views: Vec<ViewStorageAccounting>,
+    /// Diagnostic findings inside this state directory.
+    pub diagnostic_issues: Vec<StateDiagnosticIssue>,
+}
+
+/// Read-only worktree inventory across every state directory the repository
+/// registers, including its implicit default location.
+#[derive(Debug, Clone, Default)]
+pub struct AllStatesWorktreeInventory {
+    pub states: Vec<StateWorktreeInventory>,
+    /// Registrations that discovery reported instead of traversing: missing,
+    /// malformed, or unsafe state-directory registrations.
+    pub registration_issues: Vec<StateDiagnosticIssue>,
+}
+
+/// Inventory managed worktrees across the default state location and every
+/// registered state directory of `repository`, without mutating anything.
+///
+/// Registrations that are missing, not absolute, or not real directories are
+/// reported as diagnostic entries and never traversed. Worktrees belonging to
+/// other repositories that share a state directory are filtered out by
+/// repository identity.
+pub fn worktree_inventory_across_states(
+    repository: &Path,
+) -> Result<AllStatesWorktreeInventory, WorktreeError> {
+    let git = Git::default();
+    let repository_info = git.inspect_repository(repository)?;
+    let repository_root = repository_info.root.as_deref().ok_or_else(|| {
+        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    })?;
+    let query_identity = repository_info.identity.common_git_dir.clone();
+
+    let mut inventory = AllStatesWorktreeInventory::default();
+    let mut discovered: Vec<(PathBuf, StateDirectorySource)> = Vec::new();
+
+    let default = repository_info.identity.common_git_dir.join("riftri");
+    match resolve_real_state_directory_if_present(&default) {
+        Ok(Some(resolved)) => discovered.push((resolved, StateDirectorySource::Default)),
+        Ok(None) => {}
+        Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
+            path: default,
+            reason: format!(
+                "default Riftri state path is not a real directory; discovery did not traverse it: {error}"
+            ),
+        }),
+    }
+
+    for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
+        if !configured.is_absolute() {
+            inventory.registration_issues.push(StateDiagnosticIssue {
+                path: configured,
+                reason: "registered Riftri state directory is not absolute; discovery skipped it"
+                    .to_owned(),
+            });
+            continue;
+        }
+        match fs::symlink_metadata(&configured) {
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: "registered Riftri state directory is missing; \
+                             `riftri state unregister` can remove the stale registration"
+                        .to_owned(),
+                });
+                continue;
+            }
+            Err(source) => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: format!(
+                        "registered Riftri state directory could not be inspected: {source}"
+                    ),
+                });
+                continue;
+            }
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                inventory.registration_issues.push(StateDiagnosticIssue {
+                    path: configured,
+                    reason: "registered Riftri state path is not a real directory; \
+                             discovery did not traverse it"
+                        .to_owned(),
+                });
+                continue;
+            }
+            Ok(_) => {}
+        }
+        match resolve_real_state_directory(&configured) {
+            Ok(resolved) => {
+                if !discovered
+                    .iter()
+                    .any(|(existing, _)| paths_match(existing, &resolved))
+                {
+                    discovered.push((resolved, StateDirectorySource::Registered));
+                }
+            }
+            Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
+                path: configured,
+                reason: format!("registered Riftri state directory could not be resolved: {error}"),
+            }),
+        }
+    }
+
+    let mut identity_cache: BTreeMap<PathBuf, Option<PathBuf>> = BTreeMap::new();
+    for (state_directory, source) in discovered {
+        let report = match storage_accounting(&state_directory) {
+            Ok(report) => report,
+            Err(error) => {
+                inventory.states.push(StateWorktreeInventory {
+                    diagnostic_issues: vec![StateDiagnosticIssue {
+                        path: state_directory.clone(),
+                        reason: format!(
+                            "state directory could not be inventoried; discovery reported it instead of guessing: {error}"
+                        ),
+                    }],
+                    state_directory,
+                    source,
+                    views: Vec::new(),
+                });
+                continue;
+            }
+        };
+        let mut views = Vec::new();
+        let mut diagnostic_issues = report.diagnostic_issues;
+        for view in report.views {
+            let identity = identity_cache
+                .entry(view.repository.clone())
+                .or_insert_with(|| {
+                    git.inspect_repository(&view.repository)
+                        .ok()
+                        .map(|info| info.identity.common_git_dir)
+                });
+            match identity {
+                Some(identity) if paths_match(identity, &query_identity) => views.push(view),
+                Some(_) => {}
+                None => diagnostic_issues.push(StateDiagnosticIssue {
+                    path: view.destination,
+                    reason: format!(
+                        "managed worktree belongs to a repository that could not be inspected; \
+                         it was left out of the repository-filtered inventory: {}",
+                        view.repository.display()
+                    ),
+                }),
+            }
+        }
+        inventory.states.push(StateWorktreeInventory {
+            state_directory,
+            source,
+            views,
+            diagnostic_issues,
+        });
+    }
+    Ok(inventory)
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn register_state_directory(
     git: &Git,
@@ -585,8 +793,20 @@ fn acquire_coordination_lock(
     lock_operation: &'static str,
 ) -> Result<File, WorktreeError> {
     let lock = open_coordination_lock(lock_path, open_operation)?;
-    lock.lock_exclusive()
-        .map_err(|source| io(lock_operation, lock_path, source))?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            progress::emit(ProgressEvent::LockContended {
+                operation: lock_operation,
+            });
+            lock.lock_exclusive()
+                .map_err(|source| io(lock_operation, lock_path, source))?;
+            progress::emit(ProgressEvent::LockAcquired {
+                operation: lock_operation,
+            });
+        }
+        Err(source) => return Err(io(lock_operation, lock_path, source)),
+    }
     validate_coordination_lock(&lock, lock_path)?;
     Ok(lock)
 }
@@ -1030,6 +1250,9 @@ fn garbage_collect_inner(
         0
     };
     let candidates = garbage_collection_candidates(&state_directory)?;
+    progress::emit(ProgressEvent::GcPlanned {
+        candidates: candidates.len(),
+    });
     let mut report = GarbageCollectionReport {
         applied: apply,
         candidates: candidates.clone(),
@@ -1058,6 +1281,9 @@ fn garbage_collect_inner(
         let decoded = journal.clone().decode(journal_path.clone())?;
         validate_new_collection_candidate(&state_directory, &decoded)?;
         let journal_path = store.persist(&journal)?;
+        progress::emit(ProgressEvent::GcPhase {
+            phase: journal.phase,
+        });
         fail_collection_if_requested(journal.phase, fail_after)?;
         let decoded = journal.clone().decode(journal_path)?;
         if resume_collection(&state_directory, &store, &mut journal, &decoded, fail_after)? {
@@ -1293,10 +1519,17 @@ fn validate_collection_paths(
             journal.journal_path.display()
         )));
     }
-    for directory in [&base_root, repository_directory] {
+    for directory in [
+        &state_directory.join("bases"),
+        &base_root,
+        repository_directory,
+    ] {
         let metadata = fs::symlink_metadata(directory)
             .map_err(|source| io("inspect collection parent", directory, source))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() {
+            return Err(symlinked_base_parent_error(state_directory, directory));
+        }
+        if !metadata.is_dir() {
             return Err(WorktreeError::InvalidRequest(format!(
                 "collection journal {} has a non-directory or symlinked parent {}",
                 journal.journal_path.display(),
@@ -1420,6 +1653,7 @@ fn advance_collection(
 ) -> Result<(), WorktreeError> {
     journal.transition(phase)?;
     store.persist(journal)?;
+    progress::emit(ProgressEvent::GcPhase { phase });
     fail_collection_if_requested(phase, fail_after)
 }
 
@@ -1525,7 +1759,7 @@ fn remove_worktree_with_mode(
     let store = RemovalJournalStore::create(&state_directory)?;
     let operation_id = allocate_removal_operation_id(&store)?;
     let paths = RemovalJournalPaths {
-        repository: &repository_root,
+        repository: &managed.repository,
         destination: &destination,
         base_path: &managed.base_path,
     };
@@ -1646,27 +1880,13 @@ fn move_worktree_inner(
             source.display()
         )));
     }
-    if MoveJournalStore::open(&state_directory)
-        .load_all()?
-        .iter()
-        .any(|journal| {
-            journal.source_add_operation_id == managed.operation_id
-                && journal.phase != MoveWorktreePhase::Complete
-        })
-    {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a move of {} is already pending; run `riftri repair --state-dir {}`",
-            source.display(),
-            state_directory.display()
-        )));
-    }
 
     let store = MoveJournalStore::create(&state_directory)?;
     let operation_id = allocate_move_operation_id(&store)?;
     let journal = MoveJournalRecord::new(
         operation_id,
         MoveJournalPaths {
-            repository: &repository_root,
+            repository: &managed.repository,
             source: &source,
             destination: &destination,
         },
@@ -1733,6 +1953,12 @@ fn compact_worktree_inner(
                 .to_owned(),
         ));
     }
+    if !managed.sparse_directories.is_empty() {
+        return Err(WorktreeError::Unsupported(
+            "compacting a sparse worktree is not supported yet; remove and recreate the worktree to reset its storage"
+                .to_owned(),
+        ));
+    }
     if CompactJournalStore::open(&state_directory)
         .load_all()?
         .iter()
@@ -1744,22 +1970,33 @@ fn compact_worktree_inner(
                 )
         })
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a compaction of {} is already pending; run `riftri repair --state-dir {}`",
-            destination.display(),
-            state_directory.display()
-        )));
+        return Err(pending_lifecycle_error(
+            "compaction",
+            &destination,
+            &state_directory,
+        ));
     }
 
     let _operation_lock = try_lock_add_operation(&managed.journal_path)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "worktree {} is busy with another Riftri operation",
-            destination.display()
-        ))
+        WorktreeError::Busy {
+            message: format!(
+                "worktree {} is busy with another Riftri operation; wait for it to finish and retry",
+                destination.display()
+            ),
+        }
     })?;
     let resolved = git.resolve_revision(&destination, OsStr::new("HEAD"))?;
     verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)?;
-    let compatibility = validate_resolved_compatibility(&git, &destination, &resolved)?;
+    // `verify_compaction_source` proved above that `destination` is one of
+    // this repository's registered linked worktrees, so it shares the same
+    // common Git directory that `inspect_repository` resolved.
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &destination,
+        &repository.identity.common_git_dir,
+        &resolved,
+        &[],
+    )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
     #[cfg(target_os = "windows")]
@@ -1808,7 +2045,7 @@ fn compact_worktree_inner(
     let mut journal = CompactJournalRecord::new(
         operation_id,
         CompactJournalPaths {
-            repository: &repository_root,
+            repository: &managed.repository,
             destination: &destination,
             replacement: &replacement,
             quarantine: &quarantine,
@@ -1834,6 +2071,7 @@ fn compact_worktree_inner(
         &temporary_index,
         &compatibility.checkout_config,
         &compatibility.lfs_objects,
+        &[],
     )?;
     NativeCowCloner::clone_tree(&base_path, &replacement)?;
     NativeCowCloner::make_tree_owner_writable(&replacement)?;
@@ -1955,8 +2193,27 @@ fn add_worktree_inner(
             )));
         }
     }
-    let compatibility = validate_resolved_compatibility(&git, &repository_root, &resolved)?;
+    let sparse_directories = canonicalize_sparse_directories(&request.sparse_directories)?;
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &repository_root,
+        &repository.identity.common_git_dir,
+        &resolved,
+        &sparse_directories,
+    )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
+    if !sparse_directories.is_empty() {
+        validate_sparse_directories_in_tree(
+            &sparse_directories,
+            &compatibility.checkout_paths,
+            &resolved.tree,
+        )?;
+        if !compatibility.lfs_objects.is_empty() {
+            return Err(WorktreeError::Unsupported(
+                "sparse worktrees for trees with Git LFS-managed paths are not supported yet; request the full tree instead".to_owned(),
+            ));
+        }
+    }
     let selected_backend = supported_worktree_backend(&destination)?;
     let destination_volume = &selected_backend.volume;
 
@@ -2012,6 +2269,7 @@ fn add_worktree_inner(
         temporary_index: &temporary_index,
         branch,
         branch_created,
+        sparse_directories: &sparse_directories,
     };
     let backend = selected_backend.kind;
     let mut journal = if backend == BackendKind::OverlayFs {
@@ -2043,6 +2301,9 @@ fn add_worktree_inner(
         )
     };
     let journal_path = store.persist(&journal)?;
+    progress::emit(ProgressEvent::AddPhase {
+        phase: journal.phase,
+    });
 
     let operation = fail_add_if_requested(journal.phase, fail_after).and_then(|()| {
         perform_add(
@@ -2060,6 +2321,7 @@ fn add_worktree_inner(
             &resolved.tree,
             &compatibility.checkout_config,
             &compatibility.lfs_objects,
+            &sparse_directories,
             &repository.identity.common_git_dir,
             fail_after,
         )
@@ -2091,11 +2353,19 @@ fn add_worktree_inner(
                             .map_err(WorktreeError::from)
                     });
             let rollback = rollback_journal
+                .map(|()| {
+                    progress::emit(ProgressEvent::AddPhase {
+                        phase: AddWorktreePhase::RollbackPending,
+                    });
+                })
                 .and_then(|()| decoded.map_err(WorktreeError::from))
                 .and_then(|decoded| rollback_decoded(&git, &decoded))
                 .and_then(|()| {
                     journal.transition(AddWorktreePhase::RolledBack)?;
                     store.persist(&journal)?;
+                    progress::emit(ProgressEvent::AddPhase {
+                        phase: AddWorktreePhase::RolledBack,
+                    });
                     Ok(())
                 });
 
@@ -2127,6 +2397,7 @@ fn perform_add(
     tree: &ObjectId,
     checkout_config: &[(String, Vec<u8>)],
     lfs_objects: &[GitLfsObject],
+    sparse_directories: &[String],
     common_git_dir: &Path,
     fail_after: Option<AddWorktreePhase>,
 ) -> Result<bool, WorktreeError> {
@@ -2164,6 +2435,7 @@ fn perform_add(
         temporary_index,
         checkout_config,
         lfs_objects,
+        sparse_directories,
     )?;
     advance(store, journal, AddWorktreePhase::BaseReady, fail_after)?;
 
@@ -2201,13 +2473,21 @@ fn perform_add(
         )?;
     }
 
-    git.synchronize_worktree_index(destination)?;
+    if sparse_directories.is_empty() {
+        git.synchronize_worktree_index(destination)?;
+    } else {
+        git.synchronize_sparse_worktree_index(destination, sparse_directories)?;
+    }
     advance(
         store,
         journal,
         AddWorktreePhase::IndexSynchronized,
         fail_after,
     )?;
+    // This clean check is also the index refresh: `git status` performs the
+    // full stat-and-content comparison that a separate `update-index
+    // --refresh` used to run, so any divergence between the cloned view and
+    // the exact tree still fails the add before activation.
     if !git.worktree_is_clean(destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "new worktree {} is not clean; it was not activated",
@@ -2309,6 +2589,7 @@ fn advance(
 ) -> Result<(), WorktreeError> {
     journal.transition(phase)?;
     store.persist(journal)?;
+    progress::emit(ProgressEvent::AddPhase { phase });
     fail_add_if_requested(phase, fail_after)
 }
 
@@ -2410,9 +2691,21 @@ impl Drop for BaseReadLock {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn acquire_base_read_lock(lock_path: &Path) -> Result<BaseReadLock, WorktreeError> {
+    const LOCK_OPERATION: &str = "read-lock immutable base";
     let lock = open_coordination_lock(lock_path, "open immutable-base lock")?;
-    FileExt::lock_shared(&lock)
-        .map_err(|source| io("read-lock immutable base", lock_path, source))?;
+    match FileExt::try_lock_shared(&lock) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            progress::emit(ProgressEvent::LockContended {
+                operation: LOCK_OPERATION,
+            });
+            FileExt::lock_shared(&lock).map_err(|source| io(LOCK_OPERATION, lock_path, source))?;
+            progress::emit(ProgressEvent::LockAcquired {
+                operation: LOCK_OPERATION,
+            });
+        }
+        Err(source) => return Err(io(LOCK_OPERATION, lock_path, source)),
+    }
     let lock = BaseReadLock(lock);
     validate_coordination_lock(&lock.0, lock_path)?;
     Ok(lock)
@@ -2557,12 +2850,14 @@ fn prepare_base(
     temporary_index: &Path,
     checkout_config: &[(String, Vec<u8>)],
     lfs_objects: &[GitLfsObject],
+    sparse_directories: &[String],
 ) -> Result<bool, WorktreeError> {
     let base_parent = base_path.expect_parent()?;
     let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
     let complete_path = base_parent.join(format!("{}.complete", tree.as_str()));
     let read_lock = acquire_base_read_lock(&lock_path)?;
     if verify_existing_base(base_path, &complete_path)? {
+        progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
     }
     // Never upgrade a held shared lock: concurrent cold callers could deadlock.
@@ -2575,8 +2870,10 @@ fn prepare_base(
         "lock immutable base",
     )?;
     if verify_existing_base(base_path, &complete_path)? {
+        progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
     }
+    progress::emit(ProgressEvent::BaseMaterializing);
     remove_tree_if_present(base_path)?;
     remove_file_if_present(&complete_path)?;
 
@@ -2587,13 +2884,24 @@ fn prepare_base(
             source,
         )
     })?;
-    git.materialize_tree_with_config(
-        repository,
-        tree,
-        base_staging,
-        temporary_index,
-        checkout_config,
-    )?;
+    if sparse_directories.is_empty() {
+        git.materialize_tree_with_config(
+            repository,
+            tree,
+            base_staging,
+            temporary_index,
+            checkout_config,
+        )?;
+    } else {
+        git.materialize_sparse_tree_with_config(
+            repository,
+            tree,
+            base_staging,
+            temporary_index,
+            checkout_config,
+            sparse_directories,
+        )?;
+    }
     materialize_git_lfs_objects(base_staging, lfs_objects)?;
     remove_file_if_present(temporary_index)?;
     fs::rename(base_staging, base_path)
@@ -2625,13 +2933,123 @@ fn prepare_base(
 fn validate_resolved_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     resolved: &ResolvedRevision,
+    sparse_directories: &[String],
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
-    let analysis = analyze_resolved_repository_compatibility(git, repository, resolved)?;
+    let analysis = analyze_resolved_repository_compatibility(
+        git,
+        repository,
+        common_git_dir,
+        resolved,
+        sparse_directories,
+    )?;
     if let Some(blocker) = analysis.report.blockers.first() {
         return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
     }
     Ok(analysis)
+}
+
+/// Canonicalize a requested cone-mode sparse directory list into the exact
+/// form that keys the immutable base: sorted, deduplicated, trailing-slash
+/// free, with nested cones collapsed into their listed ancestors so base
+/// identity always equals materialized content. Anything outside the
+/// supported literal-directory subset is refused before any state exists.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn canonicalize_sparse_directories(requested: &[String]) -> Result<Vec<String>, WorktreeError> {
+    let mut normalized = Vec::new();
+    for raw in requested {
+        let directory = raw.strip_suffix('/').unwrap_or(raw);
+        if directory.is_empty() {
+            return Err(WorktreeError::InvalidRequest(
+                "sparse directory names cannot be empty; cone mode selects repository-relative directories such as `crates/riftri-core`"
+                    .to_owned(),
+            ));
+        }
+        if raw.starts_with('/') {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {raw} is absolute; cone mode selects directories relative to the repository root"
+            )));
+        }
+        if let Some(unsupported) = directory
+            .chars()
+            .find(|c| matches!(c, '*' | '?' | '[' | ']' | '\\') || c.is_control())
+        {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {raw} contains {unsupported:?}; only literal directory paths with `/` separators are supported, not sparse patterns"
+            )));
+        }
+        if directory.starts_with('!') {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {raw} looks like a negated sparse pattern; only literal cone-mode directory lists are supported"
+            )));
+        }
+        for component in directory.split('/') {
+            if component.is_empty() || component == "." || component == ".." {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "sparse directory {raw} must use non-empty path components without `.` or `..`"
+                )));
+            }
+            if component.eq_ignore_ascii_case(".git") {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "sparse directory {raw} names a Git administrative path"
+                )));
+            }
+        }
+        normalized.push(directory.to_owned());
+    }
+    normalized.sort_unstable();
+    normalized.dedup();
+    let mut canonical: Vec<String> = Vec::new();
+    for directory in normalized {
+        let covered = canonical.iter().any(|kept| {
+            directory
+                .strip_prefix(kept.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if !covered {
+            canonical.push(directory);
+        }
+    }
+    Ok(canonical)
+}
+
+/// Require every requested cone directory to exist as a directory in the
+/// exact requested tree, so a misspelled selection cannot silently
+/// materialize a nearly empty worktree.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn validate_sparse_directories_in_tree(
+    sparse_directories: &[String],
+    checkout_paths: &[PathBuf],
+    tree: &ObjectId,
+) -> Result<(), WorktreeError> {
+    for directory in sparse_directories {
+        let prefix = Path::new(directory);
+        let mut is_file = false;
+        let mut is_directory = false;
+        for path in checkout_paths {
+            if path.as_path() == prefix {
+                is_file = true;
+            } else if path.starts_with(prefix) {
+                is_directory = true;
+                break;
+            }
+        }
+        if is_directory {
+            continue;
+        }
+        if is_file {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "sparse directory {directory} is a file in tree {}; cone mode selects directories",
+                tree.as_str()
+            )));
+        }
+        return Err(WorktreeError::InvalidRequest(format!(
+            "sparse directory {directory} does not exist in tree {}",
+            tree.as_str()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2772,24 +3190,75 @@ fn ascii_lowercase_path(path: &Path) -> PathBuf {
 pub(crate) fn inspect_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<RepositoryCompatibilityReport, WorktreeError> {
-    Ok(analyze_repository_compatibility(git, repository, revision)?.report)
+    Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
 fn analyze_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let resolved = git.resolve_revision(repository, revision)?;
-    analyze_resolved_repository_compatibility(git, repository, &resolved)
+    analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[])
+}
+
+fn checkout_hook_blocker(common_git_dir: &Path, custom_hooks_path: bool) -> Option<String> {
+    if custom_hooks_path {
+        // Relative paths are interpreted from the new worktree, not necessarily
+        // the invoking worktree. Do not declare them safe by inspecting here.
+        return Some(
+            "core.hooksPath is configured; Riftri cannot safely reproduce custom post-checkout hook behavior yet; use ordinary git worktree add"
+                .to_owned(),
+        );
+    }
+    // Git already resolved the common directory for this operation. Without
+    // hooksPath, linked worktrees share its hooks directory.
+    let hook = common_git_dir.join("hooks/post-checkout");
+    // Git for Windows can discover executable hooks with an .exe suffix.
+    #[cfg(windows)]
+    let candidates = [hook.clone(), hook.with_extension("exe")];
+    #[cfg(not(windows))]
+    let candidates = [hook];
+    for path in candidates {
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Some(format!(
+                    "post-checkout hook {} could not be inspected safely: {error}; use ordinary git worktree add",
+                    path.display()
+                ));
+            }
+        };
+        #[cfg(unix)]
+        let executable = {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        };
+        #[cfg(not(unix))]
+        let executable = true;
+        if executable {
+            return Some(format!(
+                "post-checkout hook {} is present; optimized creation cannot run checkout hooks safely yet; use ordinary git worktree add",
+                path.display()
+            ));
+        }
+        // A non-executable Unix hook is ignored by Git as well.
+        let _ = metadata;
+    }
+    None
 }
 
 fn analyze_resolved_repository_compatibility(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     resolved: &ResolvedRevision,
+    sparse_directories: &[String],
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
@@ -2797,21 +3266,6 @@ fn analyze_resolved_repository_compatibility(
         .map(|entry| entry.path.clone())
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
-    if !git.conditional_config_has_only(
-        repository,
-        &[
-            "user.name",
-            "user.email",
-            "user.signingkey",
-            "user.useconfigonly",
-        ],
-    )? {
-        blockers.push(RepositoryCompatibilityBlocker {
-            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
-            explanation: "conditional Git configuration includes must contain only identity settings (user.name, user.email, user.signingKey, user.useConfigOnly); other keys, nested includes, and unreadable targets are not supported"
-                .to_owned(),
-        });
-    }
     let mut has_submodules = false;
     for entry in &entries {
         if entry.path == Path::new(".gitmodules") || entry.object_kind == b"commit" {
@@ -2827,7 +3281,14 @@ fn analyze_resolved_repository_compatibility(
     }
     let mut lfs_paths = Vec::new();
 
-    let info_attributes_path = git.info_attributes_path(repository)?;
+    // Callers pass the common Git directory that `inspect_repository` already
+    // resolved with `rev-parse --path-format=absolute --git-common-dir`, the
+    // exact command `Git::info_attributes_path` would re-run here; joining the
+    // fixed relative path avoids one Git invocation without changing which
+    // file is inspected. `--git-path` is still avoided because its absolute
+    // form can resolve a symlink at the final path and hide it from the
+    // symlink-refusing metadata checks below.
+    let info_attributes_path = common_git_dir.join("info/attributes");
     // Only an absent or empty regular file is supported. Inspect its metadata
     // without reading contents: FIFOs must not block, symlinks must not escape
     // this path, and a large unsupported file needs no memory allocation.
@@ -2870,8 +3331,13 @@ fn analyze_resolved_repository_compatibility(
             false
         }
     };
-    if info_attributes_safe {
-        let mut in_tree = git.in_tree_attributes_for_paths(repository, &resolved.tree, &paths)?;
+    if info_attributes_safe && !paths.is_empty() {
+        // Both attribute passes query the same exact tree, so populate one
+        // temporary index once instead of running `git read-tree` twice; the
+        // isolated and effective environments still apply per `check-attr`
+        // query, which never writes the shared index.
+        let tree_index = git.tree_attribute_index(repository, &resolved.tree)?;
+        let mut in_tree = git.in_tree_attributes_for_index(repository, &tree_index, &paths)?;
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
             Err(explanation) => {
@@ -2882,8 +3348,7 @@ fn analyze_resolved_repository_compatibility(
             }
         }
 
-        let mut effective =
-            git.effective_attributes_for_tree_paths(repository, &resolved.tree, &paths)?;
+        let mut effective = git.effective_attributes_for_index(repository, &tree_index, &paths)?;
         in_tree.sort_unstable();
         effective.sort_unstable();
         if effective != in_tree {
@@ -2900,6 +3365,20 @@ fn analyze_resolved_repository_compatibility(
         profile.update(b"riftri-checkout-profile-v3-lfs\0");
         let git_version = git.detect()?.version;
         hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
+        // The canonical cone directory list is part of the checkout profile,
+        // so two sparse selections at the same tree, or a sparse and a full
+        // request, can never resolve to the same immutable-base key. Full
+        // requests add no input and keep their existing base identities.
+        if !sparse_directories.is_empty() {
+            hash_profile_input(&mut profile, b"riftri.sparse.mode", Some(b"cone"));
+            for directory in sparse_directories {
+                hash_profile_input(
+                    &mut profile,
+                    b"riftri.sparse.directory",
+                    Some(directory.as_bytes()),
+                );
+            }
+        }
         profile
     };
 
@@ -2950,7 +3429,6 @@ fn analyze_resolved_repository_compatibility(
         "core.protectntfs",
     ];
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     config_keys.extend(profile_keys);
     let lfs_config_keys = [
         "filter.lfs.clean",
@@ -2962,7 +3440,34 @@ fn analyze_resolved_repository_compatibility(
     if !lfs_paths.is_empty() {
         config_keys.extend(lfs_config_keys);
     }
-    let config_values = git.config_values(repository, &config_keys)?;
+    config_keys.push("core.hookspath");
+    let config = git.config_values(repository, &config_keys)?;
+    if config.has_conditional_includes
+        && !git.conditional_config_has_only(
+            repository,
+            &[
+                "user.name",
+                "user.email",
+                "user.signingkey",
+                "user.useconfigonly",
+            ],
+        )?
+    {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+            explanation: "conditional Git configuration includes must contain only identity settings (user.name, user.email, user.signingKey, user.useConfigOnly); other keys, nested includes, and unreadable targets are not supported"
+                .to_owned(),
+        });
+    }
+    let config_values = config.values;
+    if let Some(explanation) =
+        checkout_hook_blocker(common_git_dir, config_values.contains_key("core.hookspath"))
+    {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+            explanation,
+        });
+    }
     for (key, accepted, kind) in checked_config {
         let value = config_values.get(key).cloned();
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -3733,6 +4238,12 @@ fn find_managed_add_journal(
         .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    let pending_moves = MoveJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+        .map(|journal| journal.source_add_operation_id)
+        .collect::<HashSet<_>>();
     let pending_compactions = CompactJournalStore::open(state_directory)
         .load_all()?
         .into_iter()
@@ -3763,23 +4274,53 @@ fn find_managed_add_journal(
         .as_ref()
         .is_some_and(|journal| pending.contains(journal.operation_id.as_str()))
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a removal of {} is already pending; run `riftri repair --state-dir {}`",
-            destination.display(),
-            state_directory.display()
-        )));
+        return Err(pending_lifecycle_error(
+            "removal",
+            destination,
+            state_directory,
+        ));
+    }
+    if managed
+        .as_ref()
+        .is_some_and(|journal| pending_moves.contains(journal.operation_id.as_str()))
+    {
+        return Err(pending_lifecycle_error(
+            "move",
+            destination,
+            state_directory,
+        ));
     }
     if managed
         .as_ref()
         .is_some_and(|journal| pending_compactions.contains(journal.operation_id.as_str()))
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "a compaction of {} is already pending; run `riftri repair --state-dir {}`",
-            destination.display(),
-            state_directory.display()
-        )));
+        return Err(pending_lifecycle_error(
+            "compaction",
+            destination,
+            state_directory,
+        ));
     }
     Ok(managed)
+}
+
+/// A durable journal shows an interrupted lifecycle operation touching this
+/// worktree. Journals record durable phases, not liveness, so this cannot tell
+/// an interrupted operation from one still running in another process; repair
+/// is safe either way because it takes the same per-operation locks and skips
+/// live operations.
+fn pending_lifecycle_error(
+    operation: &str,
+    subject: &Path,
+    state_directory: &Path,
+) -> WorktreeError {
+    WorktreeError::RecoveryPending {
+        message: format!(
+            "a {operation} of {} is already pending; run `riftri repair --state-dir {}`",
+            subject.display(),
+            state_directory.display()
+        ),
+        state_directory: state_directory.to_path_buf(),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -4139,15 +4680,16 @@ fn diagnose_base_directories(
     coordination_locks: &mut usize,
 ) -> Result<(), WorktreeError> {
     let bases = state_directory.join("bases");
-    if is_real_directory_if_present(&bases)? {
-        for path in child_paths(&bases, "read immutable-base layout")? {
-            if path != bases.join("v1") {
-                add_state_issue(
-                    issues,
-                    path,
-                    "not part of the supported immutable-base layout version",
-                );
-            }
+    if !is_real_directory_if_present(&bases)? {
+        return Ok(());
+    }
+    for path in child_paths(&bases, "read immutable-base layout")? {
+        if path != bases.join("v1") {
+            add_state_issue(
+                issues,
+                path,
+                "not part of the supported immutable-base layout version",
+            );
         }
     }
 
@@ -4268,8 +4810,18 @@ fn diagnose_overlay_directories(
     }
 
     let root = overlays.join("v1");
-    if !is_real_directory_if_present(&root)? {
-        return Ok(());
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            add_state_issue(
+                issues,
+                root,
+                "OverlayFS layout root must be a real directory",
+            );
+            return Ok(());
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io("inspect OverlayFS layout root", &root, source)),
     }
     let completed_removals = removal_journals
         .iter()
@@ -4388,22 +4940,42 @@ enum UnsafeBaseInventory {
     Reject,
 }
 
+fn symlinked_base_parent_error(state_directory: &Path, directory: &Path) -> WorktreeError {
+    WorktreeError::InvalidRequest(format!(
+        "cleanup stopped: immutable-base path {} is a symbolic link, not a real directory.\n\
+         Following it could access data outside Riftri's expected storage layout. \
+         Riftri did not follow this link or delete data through it.\n\
+         Next: run `riftri status --state-dir <STATE_DIR>` to inspect the affected state, \
+         replacing <STATE_DIR> with your state directory (quote paths in your shell).\n\
+         State directory: {}\n\
+         Do not delete or move the linked data manually. For new worktrees, use --state-dir \
+         with a real directory; this does not repair an existing redirected layout.",
+        directory.display(),
+        state_directory.display(),
+    ))
+}
+
 fn retained_base_paths(
     state_directory: &Path,
     unsafe_inventory: UnsafeBaseInventory,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
     let root = state_directory.join("bases/v1");
-    match fs::symlink_metadata(&root) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) if unsafe_inventory == UnsafeBaseInventory::Ignore => return Ok(Vec::new()),
-        Ok(_) => {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "immutable-base root {} is not a real directory",
-                root.display()
-            )));
+    for directory in [&state_directory.join("bases"), &root] {
+        match fs::symlink_metadata(directory) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) if unsafe_inventory == UnsafeBaseInventory::Ignore => return Ok(Vec::new()),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(symlinked_base_parent_error(state_directory, directory));
+            }
+            Ok(_) => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "immutable-base root {} is not a real directory",
+                    directory.display()
+                )));
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(io("inspect immutable-base root", directory, source)),
         }
-        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => return Err(io("inspect immutable-base root", &root, source)),
     }
     let mut bases = Vec::new();
     for repository_entry in
@@ -4556,6 +5128,9 @@ pub fn recover_incomplete_operations(
             .saturating_add(collection_journals.len()),
         ..RecoveryReport::default()
     };
+    progress::emit(ProgressEvent::RepairScanned {
+        operations: report.scanned,
+    });
     let git = Git::default();
 
     for (operation_id, error) in invalid_removal_journals {
@@ -4612,6 +5187,10 @@ pub fn recover_incomplete_operations(
             }
             AddWorktreePhase::RolledBack => {}
             _ => {
+                progress::emit(ProgressEvent::RepairRecovering {
+                    kind: "add",
+                    operation_id: journal.operation_id.clone(),
+                });
                 if let Err(error) = validate_recovery_paths(&state_directory, &journal)
                     .and_then(|()| adopt_overlayfs_mount_identity(&store, journal.clone()))
                     .and_then(|journal| {
@@ -4637,6 +5216,10 @@ pub fn recover_incomplete_operations(
             report.completed_removals += 1;
             continue;
         }
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "removal",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_removal(&git, &removal_store, journal.clone()) {
             report.errors.push(format!(
                 "removal operation {}: {error}",
@@ -4655,6 +5238,10 @@ pub fn recover_incomplete_operations(
             report.completed_moves += 1;
             continue;
         }
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "move",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_move(&git, &move_store, journal.clone(), None) {
             report
                 .errors
@@ -4701,6 +5288,10 @@ pub fn recover_incomplete_operations(
                 continue;
             }
         };
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "compaction",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_compaction(&git, &compact_store, journal.clone(), None) {
             report.errors.push(format!(
                 "compaction operation {}: {error}",
@@ -4725,6 +5316,10 @@ pub fn recover_incomplete_operations(
             report.completed_prunes += 1;
             continue;
         }
+        progress::emit(ProgressEvent::RepairRecovering {
+            kind: "prune",
+            operation_id: journal.operation_id.clone(),
+        });
         if let Err(error) = resume_prune(&git, &prune_store, journal.clone(), None) {
             report
                 .errors
@@ -4741,6 +5336,10 @@ pub fn recover_incomplete_operations(
             GarbageCollectionPhase::Complete => report.completed_collections += 1,
             GarbageCollectionPhase::Cancelled => {}
             _ => {
+                progress::emit(ProgressEvent::RepairRecovering {
+                    kind: "garbage-collection",
+                    operation_id: journal.operation_id.clone(),
+                });
                 match resume_decoded_collection(&state_directory, &collection_store, &journal, None)
                 {
                     Ok(true) => {
@@ -5160,7 +5759,7 @@ fn resume_compaction(
                 journal.journal_path.display()
             )));
         }
-        git.reset_worktree_index(&journal.destination)?;
+        git.refresh_worktree_index(&journal.destination)?;
         if !git
             .list_worktrees(&journal.repository)?
             .into_iter()
@@ -5258,10 +5857,23 @@ fn validate_compaction_paths(
     }
     let source =
         JournalStore::open(state_directory).load_operation(&journal.source_add_operation_id)?;
-    let expected_base = if matches!(
+    if source.phase != AddWorktreePhase::Active
+        || source.repository != journal.repository
+        || source.backend != journal.backend
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} does not match its active add operation",
+            journal.journal_path.display()
+        )));
+    }
+    validate_recovery_paths(state_directory, &source)?;
+    if matches!(
         journal.phase,
-        CompactWorktreePhase::AddJournalUpdated | CompactWorktreePhase::Complete
+        CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
     ) {
+        return Ok(());
+    }
+    let expected_base = if journal.phase == CompactWorktreePhase::AddJournalUpdated {
         &journal.base_path
     } else if source.base_path == journal.old_base_path || source.base_path == journal.base_path {
         &source.base_path
@@ -5271,10 +5883,7 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     };
-    if source.phase != AddWorktreePhase::Active
-        || source.repository != journal.repository
-        || source.destination != journal.destination
-        || source.backend != journal.backend
+    if source.destination != journal.destination
         || source.base_path.as_path() != expected_base.as_path()
     {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -5282,7 +5891,6 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     }
-    validate_recovery_paths(state_directory, &source)?;
     Ok(())
 }
 
@@ -5392,7 +6000,7 @@ fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
 }
 
 #[cfg(unix)]
-fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+fn hash_entry_xattrs(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     use std::os::unix::ffi::OsStrExt;
 
     let mut name_buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -5418,8 +6026,26 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         digest.update((value_buffer.len() as u64).to_le_bytes());
         digest.update(value_buffer);
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    use std::os::unix::fs::PermissionsExt;
+
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
+    // Git does not reproduce these bits from its tree. Refuse both new
+    // compactions and recovery cleanup instead of silently dropping them.
+    // Leave the legacy digest format unchanged for ordinary permissions.
+    if !metadata.file_type().is_symlink() && metadata.permissions().mode() & 0o7000 != 0 {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} has special Unix permissions (setuid, setgid, or sticky); compaction preserved it",
+            path.display()
+        )));
+    }
+
+    hash_entry_xattrs(path, digest)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         let mut entries = fs::read_dir(path)
             .map_err(|source| io("read worktree snapshot directory", path, source))?
@@ -5428,6 +6054,55 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         entries.sort_unstable_by_key(|entry| entry.file_name());
         for entry in entries {
             hash_extended_attributes(&entry.path(), digest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hash metadata Git does not reproduce from its tree: the full native mode
+/// (including setuid, setgid, and sticky bits) and, on Unix, every extended
+/// attribute name and value. The base-integrity content hash deliberately
+/// ignores these, so the forced-removal snapshot composes them separately;
+/// metadata-only edits after force intent must stop deletion.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect forced removal snapshot metadata", path, source))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        digest.update(metadata.mode().to_le_bytes());
+        hash_entry_xattrs(path, digest)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        digest.update(metadata.file_attributes().to_le_bytes());
+    }
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|source| io("read forced removal snapshot directory", path, source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| io("read forced removal snapshot entry", path, source))?;
+        entries.sort_unstable_by_key(|entry| entry.file_name());
+        digest.update((entries.len() as u64).to_le_bytes());
+        for entry in entries {
+            let name = entry.file_name();
+            #[cfg(unix)]
+            {
+                let bytes = name.as_bytes();
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let units = name.encode_wide().collect::<Vec<_>>();
+                digest.update((units.len() as u64).to_le_bytes());
+                for unit in units {
+                    digest.update(unit.to_le_bytes());
+                }
+            }
+            hash_forced_removal_metadata(&entry.path(), digest)?;
         }
     }
     Ok(())
@@ -5783,10 +6458,13 @@ fn verify_prune_safe(
                     && Some(journal.operation_id.as_str()) != current_prune
             })
     {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "another Riftri lifecycle operation is pending; run `riftri repair --state-dir {}` first",
-            state_directory.display()
-        )));
+        return Err(WorktreeError::RecoveryPending {
+            message: format!(
+                "another Riftri lifecycle operation is pending; run `riftri repair --state-dir {}` first",
+                state_directory.display()
+            ),
+            state_directory: state_directory.to_path_buf(),
+        });
     }
     let inventory = git.list_worktrees(repository)?;
     for journal in adds.iter().filter(|journal| {
@@ -5968,24 +6646,54 @@ fn snapshot_overlayfs_private_layer(
 }
 
 fn snapshot_managed_worktree_for_force(managed: &DecodedJournal) -> Result<String, WorktreeError> {
-    if managed.backend == BackendKind::OverlayFs {
-        return snapshot_overlayfs_private_layer(managed)?.ok_or_else(|| {
-            WorktreeError::InvalidRequest(format!(
-                "OverlayFS worktree {} has no private-layer snapshot",
-                managed.destination.display()
-            ))
-        });
-    }
-    let marker = crate::base_integrity::marker(&managed.destination).map_err(|source| {
-        io(
-            "snapshot managed worktree before forced removal",
-            &managed.destination,
-            source,
-        )
-    })?;
+    let mut git_root = managed.destination.clone();
+    let content = if managed.backend == BackendKind::OverlayFs {
+        // The private .git pointer remains usable even while the merged view
+        // is unmounted during removal recovery.
+        if let Some(overlayfs) = &managed.overlayfs {
+            let upper = overlayfs.layout_root.join("upper");
+            if upper
+                .join(".git")
+                .try_exists()
+                .map_err(|source| io("inspect OverlayFS Git pointer", &upper, source))?
+            {
+                git_root = upper;
+            }
+        }
+        snapshot_overlayfs_private_layer(managed)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidRequest(format!(
+                    "OverlayFS worktree {} has no private-layer snapshot",
+                    managed.destination.display()
+                ))
+            })?
+            .into_bytes()
+    } else {
+        crate::base_integrity::marker(&managed.destination).map_err(|source| {
+            io(
+                "snapshot managed worktree before forced removal",
+                &managed.destination,
+                source,
+            )
+        })?
+    };
+    let git_state = Git::default().worktree_removal_state(&git_root)?;
     let mut digest = Sha256::new();
-    digest.update(b"riftri-forced-removal-snapshot-v1\0");
-    digest.update(marker);
+    // Older snapshot formats deliberately cannot authorize deletion after this
+    // upgrade: v1 could not prove that the staged index or HEAD was unchanged,
+    // and v2 could not prove that special permission bits or extended
+    // attributes were unchanged. A pending older snapshot never matches, so
+    // recovery preserves the worktree instead of trusting it.
+    digest.update(b"riftri-forced-removal-snapshot-v3\0");
+    digest.update((content.len() as u64).to_le_bytes());
+    digest.update(content);
+    if managed.backend != BackendKind::OverlayFs {
+        // The OverlayFS private-layer snapshot above already covers native
+        // modes and metadata-driven ctime changes; other backends need an
+        // explicit metadata pass over the worktree itself.
+        hash_forced_removal_metadata(&managed.destination, &mut digest)?;
+    }
+    digest.update(git_state);
     Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
 
@@ -6205,7 +6913,7 @@ fn remove_managed_worktree_files(
                     destination,
                 );
                 let safe = if force {
-                    let current_snapshot = overlayfs_layer_snapshot(layout.upper())?;
+                    let current_snapshot = snapshot_managed_worktree_for_force(managed)?;
                     force_snapshot.is_some_and(|expected| current_snapshot == expected)
                 } else {
                     git.worktree_is_clean(destination)?
@@ -6217,7 +6925,8 @@ fn remove_managed_worktree_files(
             }
             OverlayFsMountState::Absent => {
                 let safe = if force {
-                    force_snapshot.is_some_and(|expected| local_snapshot == expected)
+                    let current_snapshot = snapshot_managed_worktree_for_force(managed)?;
+                    force_snapshot.is_some_and(|expected| current_snapshot == expected)
                 } else {
                     expected_snapshot.is_some() || overlayfs_private_layer_is_clean(&layout)?
                 };
@@ -6238,10 +6947,14 @@ fn remove_managed_worktree_files(
                 )));
             }
         }
-        let expected_after_unmount = force_snapshot
-            .or(expected_snapshot)
-            .unwrap_or(&local_snapshot);
-        if overlayfs_layer_snapshot(layout.upper())? != expected_after_unmount {
+        let unchanged = if force {
+            let current = snapshot_managed_worktree_for_force(managed)?;
+            force_snapshot.is_some_and(|expected| current == expected)
+        } else {
+            overlayfs_layer_snapshot(layout.upper())?
+                == expected_snapshot.unwrap_or(&local_snapshot)
+        };
+        if !unchanged {
             return Err(changed_rollback_worktree(managed));
         }
         restore_overlayfs_pointer(&layout)?;
@@ -6411,7 +7124,16 @@ fn remove_registered_worktree_for_rollback(
     } else if git.worktree_is_clean(&journal.destination)? {
         remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
-        git.synchronize_worktree_index(&journal.destination)?;
+        if journal.sparse_directories.is_empty() {
+            git.synchronize_worktree_index(&journal.destination)?;
+        } else {
+            // A sparse view compares against its sparse base; rebuilding a
+            // full index here would misreport out-of-cone entries as deleted.
+            git.synchronize_sparse_worktree_index(
+                &journal.destination,
+                &journal.sparse_directories,
+            )?;
+        }
         if !git.worktree_is_clean(&journal.destination)? {
             return Err(changed_rollback_worktree(journal));
         }
@@ -7258,6 +7980,7 @@ mod tests {
             let fixture = tempdir().expect("fixture");
             let repository = fixture.path().join("repository");
             let destination = fixture.path().join("worktree");
+            let caller = fixture.path().join("caller");
             let state = fixture.path().join("state");
             fs::create_dir(&repository).expect("create repository");
             git(&repository, &["init", "--quiet"]);
@@ -7270,6 +7993,10 @@ mod tests {
             fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
             git(&repository, &["add", "--", "tracked.txt"]);
             git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            git(
+                &repository,
+                &["worktree", "add", "--detach", caller.to_str().unwrap()],
+            );
             add_worktree_inner(
                 AddWorktreeRequest {
                     repository: repository.clone(),
@@ -7277,6 +8004,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from("feature/compact-recovery")),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -7288,7 +8016,7 @@ mod tests {
 
             compact_worktree_inner(
                 CompactWorktreeRequest {
-                    repository: repository.clone(),
+                    repository: caller,
                     destination: destination.clone(),
                     state_dir: Some(state.clone()),
                 },
@@ -7324,6 +8052,27 @@ mod tests {
                 accounting.diagnostic_issues.is_empty(),
                 "{phase:?}: {accounting:?}"
             );
+
+            move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository,
+                    source: destination,
+                    destination: fixture.path().join("moved"),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("move recovered worktree");
+            let moved = storage_accounting(&state).expect("account after move");
+            assert_eq!(
+                moved.completed_compactions,
+                accounting.completed_compactions
+            );
+            assert_eq!(
+                moved.cancelled_compactions,
+                accounting.cancelled_compactions
+            );
+            assert!(moved.diagnostic_issues.is_empty(), "{phase:?}: {moved:?}");
         }
     }
 
@@ -7355,6 +8104,34 @@ mod tests {
         assert_eq!(fs::read(source).expect("source preserved"), b"evil");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn compaction_snapshots_preserve_special_unix_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempdir().unwrap();
+        let child = fixture.path().join("file");
+        fs::write(&child, "private\n").unwrap();
+        for (path, mode) in [
+            (fixture.path(), 0o1755),
+            (child.as_path(), 0o2644),
+            (child.as_path(), 0o4644),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+            let error = super::directory_snapshot(fixture.path())
+                .expect_err("special bits cannot disappear from a compaction snapshot");
+            assert!(
+                error.to_string().contains("special Unix permissions"),
+                "{error}"
+            );
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                mode
+            );
+            fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777)).unwrap();
+        }
+        super::directory_snapshot(fixture.path()).expect("ordinary permissions remain supported");
+    }
+
     #[test]
     fn compaction_recovery_preserves_edits_made_after_replacement_activation() {
         let fixture = tempdir().expect("fixture");
@@ -7379,6 +8156,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/compact-live-edit")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -7394,6 +8172,9 @@ mod tests {
             Some(CompactWorktreePhase::ReplacementActivated),
         )
         .expect_err("interrupt after activation");
+        fs::write(destination.join("tracked.txt"), "staged-only contents\n")
+            .expect("write staged version");
+        git(&destination, &["add", "--", "tracked.txt"]);
         fs::write(
             destination.join("tracked.txt"),
             "edit in the new active view\n",
@@ -7406,6 +8187,13 @@ mod tests {
             fs::read_to_string(destination.join("tracked.txt")).unwrap(),
             "edit in the new active view\n"
         );
+        let staged = Command::new("git")
+            .args(["show", ":tracked.txt"])
+            .current_dir(&destination)
+            .output()
+            .expect("read staged version");
+        assert!(staged.status.success());
+        assert_eq!(staged.stdout, b"staged-only contents\n");
         let accounting = storage_accounting(&state).expect("inspect completed compaction");
         assert_eq!(accounting.completed_compactions, 1);
         assert_eq!(accounting.pending_compactions, 0);
@@ -7480,9 +8268,19 @@ mod tests {
         for (autocrlf, compatible) in [("false", true), ("true", false)] {
             git.set_local_config(repository, "core.autocrlf", std::ffi::OsStr::new(autocrlf))
                 .unwrap();
-            let analysis =
-                super::analyze_resolved_repository_compatibility(&git, repository, &resolved)
-                    .unwrap();
+            let common_git_dir = git
+                .inspect_repository(repository)
+                .unwrap()
+                .identity
+                .common_git_dir;
+            let analysis = super::analyze_resolved_repository_compatibility(
+                &git,
+                repository,
+                &common_git_dir,
+                &resolved,
+                &[],
+            )
+            .unwrap();
             // Reconstruct the previous, individual-read profile independently.
             let mut profile = Sha256::new();
             profile.update(b"riftri-checkout-profile-v3-lfs\0");
@@ -7764,9 +8562,16 @@ mod tests {
         fs::write(&empty, "").expect("empty file");
         symlink(&empty, &attributes).expect("symlink attributes");
         let inspect = || {
+            let git = Git::default();
+            let common_git_dir = git
+                .inspect_repository(fixture.path())
+                .expect("inspect fixture repository")
+                .identity
+                .common_git_dir;
             super::inspect_repository_compatibility(
-                &Git::default(),
+                &git,
                 fixture.path(),
+                &common_git_dir,
                 std::ffi::OsStr::new("HEAD"),
             )
             .expect("compatibility report")
@@ -7864,6 +8669,101 @@ mod tests {
             fs::read_to_string(outside_base.join("private.txt")).expect("read outside file"),
             "outside\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_and_gc_preserve_bases_behind_a_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        for pending_collection in [false, true] {
+            let fixture = tempdir().expect("fixture");
+            let state = fixture.path().join("state");
+            let base = state
+                .join("bases/v1/repository")
+                .join("0123456789abcdef0123456789abcdef01234567");
+            fs::create_dir_all(&base).expect("create base");
+            fs::write(base.join("private.txt"), "outside\n").expect("write base file");
+            fs::write(base.with_extension("complete"), "").expect("write base marker");
+            let state = state.canonicalize().expect("resolve state");
+            if pending_collection {
+                assert!(matches!(
+                    garbage_collect_inner(
+                        &state,
+                        true,
+                        Some(GarbageCollectionPhase::IntentRecorded)
+                    ),
+                    Err(super::WorktreeError::InjectedCollectionFailure(
+                        GarbageCollectionPhase::IntentRecorded
+                    ))
+                ));
+            }
+            let parent = state.join("bases");
+            let outside = fixture.path().join("outside");
+            fs::rename(&parent, &outside).expect("move bases outside state");
+            fs::write(outside.join("v1/unexplained"), "private\n").expect("write outside entry");
+            symlink(&outside, &parent).expect("symlink base parent");
+
+            let status = storage_accounting(&state).expect("diagnose symlinked parent");
+            assert!(status.bases.is_empty());
+            assert!(
+                status
+                    .diagnostic_issues
+                    .iter()
+                    .any(|issue| issue.path == parent)
+            );
+            assert!(
+                status
+                    .diagnostic_issues
+                    .iter()
+                    .all(|issue| { issue.path == parent || !issue.path.starts_with(&parent) })
+            );
+            for apply in [false, true] {
+                let error = garbage_collect_inner(&state, apply, None)
+                    .expect_err("reject symlinked base parent")
+                    .to_string();
+                assert!(error.contains("cleanup stopped"), "{error}");
+                assert!(error.contains("is a symbolic link"), "{error}");
+                assert!(error.contains(&parent.display().to_string()), "{error}");
+                assert!(
+                    error.contains("outside Riftri's expected storage layout"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("did not follow this link or delete data through it"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("riftri status --state-dir <STATE_DIR>"),
+                    "{error}"
+                );
+                assert!(error.contains(&state.display().to_string()), "{error}");
+                assert!(
+                    error.contains("Do not delete or move the linked data manually"),
+                    "{error}"
+                );
+                assert!(
+                    error.contains("does not repair an existing redirected layout"),
+                    "{error}"
+                );
+            }
+            if pending_collection {
+                let recovery = recover_incomplete_operations(&state).expect("attempt recovery");
+                assert_eq!(recovery.recovered_collections, 0);
+                assert_eq!(recovery.errors.len(), 1);
+                assert!(recovery.errors[0].contains("is a symbolic link"));
+                assert!(recovery.errors[0].contains("riftri status --state-dir <STATE_DIR>"));
+            }
+            let outside_base = outside
+                .join("v1/repository")
+                .join("0123456789abcdef0123456789abcdef01234567");
+            assert_eq!(
+                fs::read_to_string(outside_base.join("private.txt")).expect("read outside file"),
+                "outside\n"
+            );
+            assert!(outside_base.with_extension("complete").is_file());
+            assert!(parent.is_symlink());
+        }
     }
 
     #[cfg(unix)]
@@ -7970,6 +8870,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from(&branch)),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(phase),
                 false,
@@ -8062,6 +8963,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/overlay-gap")),
                 state_dir: Some(required_path("RIFTRI_OVERLAYFS_CORE_STATE")),
+                sparse_directories: Vec::new(),
             },
             None,
             false,
@@ -8100,6 +9002,7 @@ mod tests {
                         "feature/overlay-remove-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -8154,6 +9057,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::Detached,
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -8248,6 +9152,65 @@ mod tests {
         assert!(unknown_root.is_dir());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_unsafe_overlay_roots_without_traversing_or_removing_them() {
+        use std::os::unix::fs::symlink;
+
+        for kind in [
+            "missing",
+            "directory",
+            "file",
+            "symlink",
+            "dangling-symlink",
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let state = fixture.path().join("state");
+            fs::create_dir_all(state.join("overlays")).expect("create overlays directory");
+            let state = state.canonicalize().expect("resolve state");
+            let root = state.join("overlays/v1");
+            let outside = fixture.path().join("outside");
+            match kind {
+                "missing" => {}
+                "directory" => fs::create_dir(&root).expect("create layout root"),
+                "file" => fs::write(&root, "preserve root\n").expect("write layout root"),
+                _ => {
+                    if kind == "symlink" {
+                        fs::create_dir(&outside).expect("create outside directory");
+                        fs::write(outside.join("private.txt"), "preserve outside\n")
+                            .expect("write outside file");
+                    }
+                    symlink(&outside, &root).expect("symlink layout root");
+                }
+            }
+
+            let report = storage_accounting(&state).expect("diagnose state");
+            let paths = report
+                .diagnostic_issues
+                .iter()
+                .map(|issue| issue.path.as_path())
+                .collect::<Vec<_>>();
+            if matches!(kind, "missing" | "directory") {
+                assert!(paths.is_empty(), "{kind}: {paths:?}");
+            } else {
+                assert_eq!(paths, [root.as_path()], "{kind}");
+            }
+            match kind {
+                "file" => assert_eq!(fs::read_to_string(&root).unwrap(), "preserve root\n"),
+                "symlink" | "dangling-symlink" => {
+                    assert_eq!(fs::read_link(&root).unwrap(), outside);
+                    if kind == "symlink" {
+                        assert_eq!(
+                            fs::read_to_string(outside.join("private.txt")).unwrap(),
+                            "preserve outside\n"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn status_does_not_scan_an_unregistered_journal_destination() {
         let fixture = tempdir().expect("fixture");
@@ -8282,6 +9245,7 @@ mod tests {
                 temporary_index: &state.join("tmp/index-operation"),
                 branch: None,
                 branch_created: false,
+                sparse_directories: &[],
             },
             "0123456789abcdef0123456789abcdef01234567".to_owned(),
             BackendKind::ApfsClone,
@@ -8373,6 +9337,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/live-view")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -8441,6 +9406,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/interrupted")),
                 state_dir: Some(state),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::GitPointerRestored),
             true,
@@ -8490,6 +9456,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/recover")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::GitPointerRestored),
             false,
@@ -8553,6 +9520,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from(&branch_name)),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(phase),
                 false,
@@ -8585,6 +9553,83 @@ mod tests {
     }
 
     #[test]
+    fn sparse_add_recovery_is_idempotent_after_every_transition() {
+        let phases = [
+            AddWorktreePhase::IntentRecorded,
+            AddWorktreePhase::GitMetadataCreated,
+            AddWorktreePhase::BaseReady,
+            AddWorktreePhase::ViewCreated,
+            AddWorktreePhase::GitPointerRestored,
+            AddWorktreePhase::IndexSynchronized,
+            AddWorktreePhase::CleanVerified,
+        ];
+
+        for (index, phase) in phases.into_iter().enumerate() {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            let branch_name = format!("feature/sparse-recover-{index}");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::create_dir_all(repository.join("a")).expect("create cone directory");
+            fs::create_dir_all(repository.join("b")).expect("create out-of-cone directory");
+            fs::write(repository.join("root.txt"), "root\n").expect("write root file");
+            fs::write(repository.join("a/file.txt"), "a\n").expect("write cone file");
+            fs::write(repository.join("b/file.txt"), "b\n").expect("write out-of-cone file");
+            git(&repository, &["add", "-A"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            let request = AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from(&branch_name)),
+                state_dir: Some(state.clone()),
+                sparse_directories: vec!["a".to_owned()],
+            };
+
+            let error = add_worktree_inner(request.clone(), Some(phase), false)
+                .expect_err("simulate process termination");
+            assert!(
+                error.to_string().contains("injected failure"),
+                "unexpected failure after {phase:?}: {error}"
+            );
+
+            let recovered = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("recover after {phase:?}: {error}"));
+            assert_eq!(recovered.recovered, 1, "phase {phase:?}");
+            assert!(recovered.errors.is_empty(), "phase {phase:?}");
+            assert!(!destination.exists(), "phase {phase:?}");
+
+            let repeated = recover_incomplete_operations(&state)
+                .unwrap_or_else(|error| panic!("repeat recovery after {phase:?}: {error}"));
+            assert_eq!(repeated.recovered, 0, "phase {phase:?}");
+            assert!(repeated.errors.is_empty(), "phase {phase:?}");
+
+            // The same sparse request succeeds after the rollback and yields a
+            // clean, correctly shaped cone view.
+            add_worktree_inner(request, None, true)
+                .unwrap_or_else(|error| panic!("retry after {phase:?}: {error}"));
+            assert!(destination.join("a/file.txt").is_file(), "phase {phase:?}");
+            assert!(destination.join("root.txt").is_file(), "phase {phase:?}");
+            assert!(!destination.join("b").exists(), "phase {phase:?}");
+            let status = Command::new("git")
+                .args(["status", "--porcelain=v1", "--untracked-files=all"])
+                .current_dir(&destination)
+                .output()
+                .expect("inspect recreated sparse worktree");
+            assert!(status.status.success(), "phase {phase:?}");
+            assert!(status.stdout.is_empty(), "phase {phase:?}");
+        }
+    }
+
+    #[test]
     fn recovery_preserves_a_changed_interrupted_view() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
@@ -8609,6 +9654,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/preserve")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::GitPointerRestored),
             false,
@@ -8657,6 +9703,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::NewBranch(OsString::from("feature/raced-rollback")),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(phase),
                 false,
@@ -8725,6 +9772,7 @@ mod tests {
                     revision: OsString::from("HEAD"),
                     mode: WorktreeMode::Detached,
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(AddWorktreePhase::GitMetadataCreated),
                 false,
@@ -8790,6 +9838,7 @@ mod tests {
                         WorktreeMode::NewBranch(OsString::from("feature/interrupted"))
                     },
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 Some(AddWorktreePhase::IndexSynchronized),
                 false,
@@ -8856,6 +9905,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/committed")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::IndexSynchronized),
             false,
@@ -8901,6 +9951,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/remove-recover")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -8971,6 +10022,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::Detached,
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9018,6 +10070,185 @@ mod tests {
     }
 
     #[test]
+    fn forced_removal_recovery_preserves_later_index_and_head_changes() {
+        for change in ["index", "head", "legacy-v1-snapshot", "legacy-v2-snapshot"] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+            git(&repository, &["add", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            super::add_worktree(AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            })
+            .unwrap();
+            force_remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(RemoveWorktreePhase::IntentRecorded),
+            )
+            .expect_err("interrupt force intent");
+            if change == "index" {
+                fs::write(destination.join("tracked.txt"), "later staged work\n").unwrap();
+                git(&destination, &["add", "tracked.txt"]);
+                fs::write(destination.join("tracked.txt"), "tracked\n").unwrap();
+            } else if change == "head" {
+                git(
+                    &destination,
+                    &["commit", "--quiet", "--allow-empty", "-m", "later commit"],
+                );
+            } else {
+                use sha2::{Digest, Sha256};
+                let mut digest = Sha256::new();
+                let content = crate::base_integrity::marker(&destination).unwrap();
+                if change == "legacy-v1-snapshot" {
+                    digest.update(b"riftri-forced-removal-snapshot-v1\0");
+                    digest.update(&content);
+                } else {
+                    // The exact digest a v2 binary recorded: the content
+                    // marker and Git state, with no metadata pass.
+                    digest.update(b"riftri-forced-removal-snapshot-v2\0");
+                    digest.update((content.len() as u64).to_le_bytes());
+                    digest.update(&content);
+                    digest.update(
+                        super::Git::default()
+                            .worktree_removal_state(&destination)
+                            .unwrap(),
+                    );
+                }
+                let store = RemovalJournalStore::open(&state);
+                let journal = store.load_all().unwrap().remove(0);
+                let mut record = store.reload(&journal).unwrap();
+                record.force_snapshot = Some(crate::base_integrity::hex_lower(digest.finalize()));
+                store.persist(&record).unwrap();
+            }
+            for _ in 0..2 {
+                let report = recover_incomplete_operations(&state).unwrap();
+                assert_eq!(report.recovered_removals, 0, "{change}: {report:?}");
+                assert_eq!(report.errors.len(), 1, "{change}: {report:?}");
+                assert!(destination.exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forced_removal_recovery_preserves_later_metadata_only_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        #[cfg(target_os = "macos")]
+        const ATTRIBUTE: &str = "com.riftri.forced-removal-test";
+        #[cfg(not(target_os = "macos"))]
+        const ATTRIBUTE: &str = "user.riftri.forced-removal-test";
+
+        for change in ["xattr", "special-bit"] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            fs::create_dir(destination.join("scratch")).expect("create scratch directory");
+
+            force_remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(RemoveWorktreePhase::IntentRecorded),
+            )
+            .expect_err("simulate interruption after durable force intent");
+            assert!(destination.exists());
+
+            // Metadata-only changes: neither edits file contents nor Git
+            // state, so only the snapshot's metadata pass can see them.
+            if change == "xattr" {
+                rustix::fs::setxattr(
+                    destination.join("tracked.txt"),
+                    ATTRIBUTE,
+                    b"added after intent",
+                    rustix::fs::XattrFlags::empty(),
+                )
+                .expect("set xattr after intent");
+            } else {
+                fs::set_permissions(
+                    destination.join("scratch"),
+                    fs::Permissions::from_mode(0o1755),
+                )
+                .expect("set sticky bit after intent");
+            }
+
+            for _ in 0..2 {
+                let recovery = recover_incomplete_operations(&state).expect("repair report");
+                assert_eq!(recovery.recovered_removals, 0, "{change}: {recovery:?}");
+                assert_eq!(recovery.errors.len(), 1, "{change}: {recovery:?}");
+                assert!(
+                    recovery.errors[0].contains("changed after forced removal intent"),
+                    "{change}: {recovery:?}"
+                );
+                assert!(destination.exists(), "{change}");
+            }
+
+            if change == "xattr" {
+                let mut value: Vec<u8> = Vec::with_capacity(64);
+                rustix::fs::lgetxattr(
+                    destination.join("tracked.txt"),
+                    ATTRIBUTE,
+                    rustix::buffer::spare_capacity(&mut value),
+                )
+                .expect("read preserved xattr");
+                assert_eq!(value, b"added after intent");
+            } else {
+                let mode = fs::symlink_metadata(destination.join("scratch"))
+                    .expect("inspect preserved directory")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o7777, 0o1755, "{mode:o}");
+            }
+        }
+    }
+
+    #[test]
     fn forced_removal_recovers_an_unchanged_dirty_view_after_intent() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
@@ -9041,6 +10272,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::Detached,
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9048,6 +10280,30 @@ mod tests {
         .expect("create worktree");
         fs::write(destination.join("untracked.txt"), "explicitly discarded\n")
             .expect("dirty worktree");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Metadata present before force intent must not cause a false
+            // refusal: the snapshot records and re-verifies it unchanged.
+            #[cfg(target_os = "macos")]
+            let attribute = "com.riftri.forced-removal-test";
+            #[cfg(not(target_os = "macos"))]
+            let attribute = "user.riftri.forced-removal-test";
+            fs::create_dir(destination.join("scratch")).expect("create scratch directory");
+            fs::set_permissions(
+                destination.join("scratch"),
+                fs::Permissions::from_mode(0o1755),
+            )
+            .expect("set pre-intent sticky bit");
+            rustix::fs::setxattr(
+                destination.join("untracked.txt"),
+                attribute,
+                b"recorded before intent",
+                rustix::fs::XattrFlags::empty(),
+            )
+            .expect("set pre-intent xattr");
+        }
 
         let error = force_remove_worktree_inner(
             RemoveWorktreeRequest {
@@ -9061,6 +10317,7 @@ mod tests {
         assert!(error.to_string().contains("injected removal failure"));
         assert!(destination.exists());
 
+        git(&destination, &["status", "--porcelain"]);
         let recovery = recover_incomplete_operations(&state).expect("recover forced removal");
         assert!(recovery.errors.is_empty(), "{recovery:?}");
         assert_eq!(recovery.recovered_removals, 1);
@@ -9085,6 +10342,7 @@ mod tests {
             let fixture = tempdir().expect("fixture");
             let repository = fixture.path().join("repository");
             let destination = fixture.path().join("worktree");
+            let caller = fixture.path().join("caller");
             let state = fixture.path().join("state");
             fs::create_dir(&repository).expect("create repository");
             git(&repository, &["init", "--quiet"]);
@@ -9097,6 +10355,10 @@ mod tests {
             fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
             git(&repository, &["add", "--", "tracked.txt"]);
             git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            git(
+                &repository,
+                &["worktree", "add", "--detach", caller.to_str().unwrap()],
+            );
             add_worktree_inner(
                 AddWorktreeRequest {
                     repository: repository.clone(),
@@ -9106,6 +10368,7 @@ mod tests {
                         "feature/remove-phase-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -9114,7 +10377,7 @@ mod tests {
 
             let error = remove_worktree_inner(
                 RemoveWorktreeRequest {
-                    repository,
+                    repository: caller,
                     destination: destination.clone(),
                     state_dir: Some(state.clone()),
                 },
@@ -9179,6 +10442,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/remove-preserve")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9241,6 +10505,7 @@ mod tests {
                         "feature/gc-phase-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -9316,6 +10581,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/gc-incomplete")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             Some(AddWorktreePhase::BaseReady),
             false,
@@ -9363,6 +10629,7 @@ mod tests {
                 revision: OsString::from("HEAD"),
                 mode: WorktreeMode::NewBranch(OsString::from("feature/gc-marker")),
                 state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
             },
             None,
             true,
@@ -9436,6 +10703,7 @@ mod tests {
             let repository = fixture.path().join("repository");
             let source = fixture.path().join("source");
             let destination = fixture.path().join("destination");
+            let caller = fixture.path().join("caller");
             let state = fixture.path().join("state");
             fs::create_dir(&repository).expect("create repository");
             git(&repository, &["init", "--quiet"]);
@@ -9448,6 +10716,10 @@ mod tests {
             fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
             git(&repository, &["add", "--", "tracked.txt"]);
             git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            git(
+                &repository,
+                &["worktree", "add", "--detach", caller.to_str().unwrap()],
+            );
             add_worktree_inner(
                 AddWorktreeRequest {
                     repository: repository.clone(),
@@ -9457,6 +10729,7 @@ mod tests {
                         "feature/move-phase-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
@@ -9466,7 +10739,7 @@ mod tests {
 
             let error = move_worktree_inner(
                 MoveWorktreeRequest {
-                    repository: repository.clone(),
+                    repository: caller,
                     source: source.clone(),
                     destination: destination.clone(),
                     state_dir: Some(state.clone()),
@@ -9537,6 +10810,7 @@ mod tests {
                         "feature/prune-managed-{index}"
                     ))),
                     state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
                 },
                 None,
                 true,
