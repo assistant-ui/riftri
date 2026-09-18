@@ -358,11 +358,17 @@ fn doctor_explains_destination_readiness_and_repository_activation() {
     assert_eq!(readiness["copy_on_write"], readiness["backend"].is_string());
     if readiness["backend"].is_string() {
         assert_eq!(readiness["status"], "needs-activation");
+        let root = git(
+            &fixture.repository,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        );
+        assert!(root.status.success());
+        let root = String::from_utf8(root.stdout).expect("UTF-8 fixture root");
         assert_eq!(
             readiness["next_command"],
             format!(
                 "riftri enable '{}'",
-                fs::canonicalize(&fixture.repository).unwrap().display()
+                root.strip_suffix('\n').expect("Git path terminator")
             )
         );
     } else {
@@ -499,11 +505,17 @@ fn doctor_marks_an_enabled_supported_destination_ready() {
         } else {
             destination.to_str().unwrap().replace('\'', "'\"'\"'")
         };
+        let root = git(
+            &fixture.repository,
+            &["rev-parse", "--path-format=absolute", "--show-toplevel"],
+        );
+        assert!(root.status.success());
+        let root = String::from_utf8(root.stdout).expect("UTF-8 fixture root");
         assert_eq!(
             readiness["next_command"],
             format!(
                 "riftri worktree add '{escaped}' --detach HEAD --repository '{}'",
-                fs::canonicalize(&fixture.repository).unwrap().display()
+                root.strip_suffix('\n').expect("Git path terminator")
             )
         );
     } else {
