@@ -111,6 +111,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- Intercepted `git worktree add --quiet` commands no longer print a success
+  message. Error messages remain visible.
 - Shell status and deactivation retain the activated shim path after a directory
   change when `RIFTRI_CACHE_DIR` is relative.
 - `riftri doctor --json` preserves non-UTF-8 paths through display strings and
