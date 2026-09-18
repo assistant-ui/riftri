@@ -5840,10 +5840,23 @@ fn validate_compaction_paths(
     }
     let source =
         JournalStore::open(state_directory).load_operation(&journal.source_add_operation_id)?;
-    let expected_base = if matches!(
+    if source.phase != AddWorktreePhase::Active
+        || source.repository != journal.repository
+        || source.backend != journal.backend
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} does not match its active add operation",
+            journal.journal_path.display()
+        )));
+    }
+    validate_recovery_paths(state_directory, &source)?;
+    if matches!(
         journal.phase,
-        CompactWorktreePhase::AddJournalUpdated | CompactWorktreePhase::Complete
+        CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
     ) {
+        return Ok(());
+    }
+    let expected_base = if journal.phase == CompactWorktreePhase::AddJournalUpdated {
         &journal.base_path
     } else if source.base_path == journal.old_base_path || source.base_path == journal.base_path {
         &source.base_path
@@ -5853,10 +5866,7 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     };
-    if source.phase != AddWorktreePhase::Active
-        || source.repository != journal.repository
-        || source.destination != journal.destination
-        || source.backend != journal.backend
+    if source.destination != journal.destination
         || source.base_path.as_path() != expected_base.as_path()
     {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -5864,7 +5874,6 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     }
-    validate_recovery_paths(state_directory, &source)?;
     Ok(())
 }
 
@@ -8026,6 +8035,27 @@ mod tests {
                 accounting.diagnostic_issues.is_empty(),
                 "{phase:?}: {accounting:?}"
             );
+
+            move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository,
+                    source: destination,
+                    destination: fixture.path().join("moved"),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("move recovered worktree");
+            let moved = storage_accounting(&state).expect("account after move");
+            assert_eq!(
+                moved.completed_compactions,
+                accounting.completed_compactions
+            );
+            assert_eq!(
+                moved.cancelled_compactions,
+                accounting.cancelled_compactions
+            );
+            assert!(moved.diagnostic_issues.is_empty(), "{phase:?}: {moved:?}");
         }
     }
 
