@@ -44,13 +44,53 @@ test("breakpoint edges keep framed content inside the viewport", async ({ page }
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/");
     await page.evaluate(() => document.fonts.ready);
-    const clipped = await page.locator(".hero-install, .command, .graph-frame, .frame-title, .diagram-controls").evaluateAll((elements) =>
+    const clipped = await page.locator(".hero-install, .command, .graph-frame, .frame-title, .diagram-controls, .faq-item summary, .faq-answer").evaluateAll((elements) =>
       elements.filter((element) => {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && (rect.left < -1 || rect.right > innerWidth + 1);
       }).map((element) => element.className));
     expect(clipped, `clipped content at ${width}px`).toEqual([]);
   }
+});
+
+test("FAQ answers toggle with the keyboard and keep focus on the question", async ({ page }, testInfo) => {
+  await page.goto("/#faq");
+  const faq = page.getByRole("region", { name: "Common questions" });
+  const first = faq.locator("details").first();
+  const second = faq.locator("details").nth(1);
+  await expect(first.locator(".faq-answer")).toBeVisible();
+  await expect(second.locator(".faq-answer")).toBeHidden();
+  const question = first.locator("summary");
+  await question.focus();
+  await page.keyboard.press("Enter");
+  await expect(first.locator(".faq-answer")).toBeHidden();
+  await expect(question).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(first.locator(".faq-answer")).toBeVisible();
+  await page.keyboard.press("Tab");
+  await expect(second.locator("summary")).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(second.locator(".faq-answer")).toBeVisible();
+  await expect(first.locator(".faq-answer")).toBeVisible();
+  await faq.screenshot({ path: testInfo.outputPath(`faq-${testInfo.project.name}.png`) });
+});
+
+test.describe("FAQ without JavaScript", () => {
+  test.use({ javaScriptEnabled: false });
+
+  test("static answers remain expandable with usable documentation links", async ({ page }) => {
+    await page.goto("/#faq");
+    const faq = page.getByRole("region", { name: "Common questions" });
+    const agentQuestion = faq.locator("details").filter({ hasText: "Does my coding agent need special integration?" });
+    await expect(agentQuestion.locator(".faq-answer")).toBeHidden();
+    await agentQuestion.locator("summary").click();
+    await expect(agentQuestion.getByRole("link", { name: "agent setup" })).toHaveAttribute(
+      "href", "https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md",
+    );
+    await expect(agentQuestion.locator(".faq-answer")).toBeVisible();
+    await agentQuestion.locator("summary").click();
+    await expect(agentQuestion.locator(".faq-answer")).toBeHidden();
+  });
 });
 
 test("repeated clipboard successes each retain a full confirmation interval", async ({ page, context }) => {
