@@ -1152,7 +1152,7 @@ fn posix_quote_path(path: &Path) -> Result<String, ActivationError> {
             path.display()
         )));
     }
-    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+    Ok(super::quote_shell_argument(value))
 }
 
 #[cfg(target_os = "windows")]
@@ -1169,7 +1169,7 @@ fn powershell_quote_path(path: &Path) -> Result<String, ActivationError> {
             path.display()
         )));
     }
-    Ok(format!("'{}'", value.replace('\'', "''")))
+    Ok(super::quote_shell_argument(value))
 }
 
 fn activation_with_git(git: &Git, path: &Path) -> Result<RepositoryActivation, ActivationError> {

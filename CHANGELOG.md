@@ -111,6 +111,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- Doctor's suggested add and activation commands keep the inspected repository
+  when doctor runs from a different directory. Repository and destination paths
+  use shell quotes to preserve spaces and shell metacharacters.
+  Non-UTF-8 repository paths retain the `riftri enable` suggestion for use
+  inside that repository.
 - Release preparation uses the selected repository for the root launcher
   package as well as the native packages.
 - The static website preview serves `robots.txt` as plain text and `sitemap.xml`
@@ -131,8 +136,6 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   change when `RIFTRI_CACHE_DIR` is relative.
 - `riftri doctor --json` preserves non-UTF-8 paths through display strings and
   exact native hexadecimal fields instead of rejecting the report.
-- Doctor's suggested worktree command quotes the destination as one shell argument,
-  including paths with spaces or apostrophes.
 - `riftri backends --json` emits a versioned report that preserves non-UTF-8
   requested and probe paths through display strings and exact native
   hexadecimal fields instead of rejecting serialization. The report is now an

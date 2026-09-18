@@ -612,16 +612,22 @@ fn destination_readiness(
         Err(error) if error.to_string().contains("helper") => OverlayFsHelperReadiness::Unavailable,
         Ok(_) | Err(_) => OverlayFsHelperReadiness::NotApplicable,
     };
+    let repository_root = repository
+        .value
+        .as_ref()
+        .and_then(|info| info.root.as_deref());
     let next_command = match status {
-        DestinationReadinessStatus::Ready => destination.to_str().map(|path| {
-            let escaped = if cfg!(windows) {
-                path.replace('\'', "''")
-            } else {
-                path.replace('\'', "'\"'\"'")
-            };
-            format!("riftri worktree add '{escaped}' --detach HEAD")
+        DestinationReadinessStatus::Ready => repository_root.and_then(|root| {
+            Some(format!(
+                "riftri worktree add {} --detach HEAD --repository {}",
+                quote_shell_argument(destination.to_str()?),
+                quote_shell_argument(root.to_str()?)
+            ))
         }),
-        DestinationReadinessStatus::NeedsActivation => Some("riftri enable".to_owned()),
+        DestinationReadinessStatus::NeedsActivation => repository_root
+            .and_then(Path::to_str)
+            .map(|root| format!("riftri enable {}", quote_shell_argument(root)))
+            .or_else(|| Some("riftri enable".to_owned())),
         DestinationReadinessStatus::Blocked
             if overlayfs_helper == OverlayFsHelperReadiness::Unavailable =>
         {
@@ -639,6 +645,15 @@ fn destination_readiness(
         blockers,
         next_command,
     }
+}
+
+fn quote_shell_argument(value: &str) -> String {
+    let escaped = if cfg!(windows) {
+        value.replace('\'', "''")
+    } else {
+        value.replace('\'', "'\"'\"'")
+    };
+    format!("'{escaped}'")
 }
 
 fn compatibility_remedy(kind: RepositoryCompatibilityBlockerKind) -> &'static str {
@@ -706,6 +721,50 @@ mod tests {
         AddWorktreeJournal, AddWorktreePhase, BaseKey, CheckoutProfile, CheckoutProfileInput,
         CompactWorktreePhase, MoveWorktreePhase, PruneWorktreesPhase, RemoveWorktreePhase,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_keeps_activation_guidance_for_non_utf8_repositories() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        use super::{Diagnostic, GitInfo, RepositoryCompatibilityReport, RepositoryInfo};
+
+        let destination = tempfile::tempdir().unwrap();
+        let root = PathBuf::from(OsStr::from_bytes(b"/repo-\xff"));
+        let object = ObjectId::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
+        let readiness = super::destination_readiness(
+            destination.path(),
+            Some(false),
+            &Diagnostic::success(GitInfo {
+                command: PathBuf::from("git"),
+                version: "git version 2.50.0".to_owned(),
+            }),
+            &Diagnostic::success(RepositoryInfo {
+                identity: RepositoryIdentity {
+                    common_git_dir: root.join(".git"),
+                },
+                root: Some(root),
+                is_bare: false,
+                head_commit: Some(object.clone()),
+                head_tree: Some(object.clone()),
+                clean: Some(true),
+            }),
+            &Diagnostic::success(RepositoryCompatibilityReport {
+                commit: object.clone(),
+                tree: object,
+                compatible: true,
+                blockers: Vec::new(),
+            }),
+        );
+        if readiness.backend.is_some() {
+            assert_eq!(
+                readiness.status,
+                super::DestinationReadinessStatus::NeedsActivation
+            );
+            assert_eq!(readiness.next_command.as_deref(), Some("riftri enable"));
+        }
+    }
 
     #[test]
     fn checkout_profiles_are_canonical() {
