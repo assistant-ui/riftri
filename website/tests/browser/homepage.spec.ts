@@ -2,6 +2,20 @@ import { expect, test } from "@playwright/test";
 
 const install = "curl -fsSL https://riftri.dev/install.sh | bash";
 
+test("footer stays compact with comfortable link targets", async ({ page }, testInfo) => {
+  await page.goto("/");
+  const footer = page.getByRole("contentinfo");
+  const heights = await footer.getByRole("link").evaluateAll((links) =>
+    links.map((link) => link.getBoundingClientRect().height));
+  expect(heights).toHaveLength(3);
+  const rowHeight = testInfo.project.name === "mobile" ? 48 : 60;
+  for (const height of heights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+    expect(height).toBeLessThanOrEqual(rowHeight);
+  }
+  await footer.screenshot({ path: testInfo.outputPath(`footer-${testInfo.project.name}.png`) });
+});
+
 test("homepage renders without browser errors and captures the final layout", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

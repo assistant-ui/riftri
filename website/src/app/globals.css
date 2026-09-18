@@ -760,7 +760,7 @@ code, pre { font-family: var(--font-mono); }
 
 .site-footer {
   display: grid;
-  min-height: 82px;
+  min-height: 60px;
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   color: var(--ink-faint);
@@ -768,7 +768,7 @@ code, pre { font-family: var(--font-mono); }
   letter-spacing: 0.04em;
 }
 
-.site-footer > * { display: flex; height: 100%; align-items: center; padding: 1.5rem; }
+.site-footer > * { display: flex; height: 100%; align-items: center; padding: 0.875rem 1.5rem; }
 .site-footer > * + * { border-left: 1px solid var(--line); }
 .site-footer a { gap: 0.55rem; color: var(--ink-muted); }
 .site-footer a:last-child { justify-content: flex-end; }
@@ -844,7 +844,7 @@ code, pre { font-family: var(--font-mono); }
   .install-notes { margin-left: 0; }
   .faq-answer { padding-right: 0; }
   .site-footer { grid-template-columns: 1fr; }
-  .site-footer > * { min-height: 58px; justify-content: flex-start !important; border-left: 0 !important; }
+  .site-footer > * { min-height: 48px; justify-content: flex-start !important; border-left: 0 !important; }
   .site-footer > * + * { border-top: 1px solid var(--line); }
 }
 
