@@ -2,9 +2,14 @@
 
 The Riftri product site is a single-page Farm.js application. The page at `/`
 has a hero with the copyable installer command, a storage-model overview, a
-worktree disk-usage comparison, and a three-step get-started section; deeper
+worktree disk-usage comparison, a three-step get-started section, and a compact
+FAQ about manual COW copies, Git behavior, storage, activation, and recovery; deeper
 concepts, safety, lifecycle, and compatibility material stays in the
 repository documentation and the Markdown overview described below.
+
+The FAQ at `/#faq` uses native `details` disclosures so answers remain usable
+without JavaScript. The first answer is open initially; readers can open several
+answers to compare them. Keep its capability claims aligned with the roadmap.
 
 `public/index.md` is the plain-Markdown overview served at `https://riftri.dev/index.md`.
 It covers setup, internals, supported backends, lifecycle, and benchmark context,
