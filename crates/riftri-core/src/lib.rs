@@ -613,10 +613,14 @@ fn destination_readiness(
         Ok(_) | Err(_) => OverlayFsHelperReadiness::NotApplicable,
     };
     let next_command = match status {
-        DestinationReadinessStatus::Ready => Some(format!(
-            "riftri worktree add {} --detach HEAD",
-            destination.display()
-        )),
+        DestinationReadinessStatus::Ready => destination.to_str().map(|path| {
+            let escaped = if cfg!(windows) {
+                path.replace('\'', "''")
+            } else {
+                path.replace('\'', "'\"'\"'")
+            };
+            format!("riftri worktree add '{escaped}' --detach HEAD")
+        }),
         DestinationReadinessStatus::NeedsActivation => Some("riftri enable".to_owned()),
         DestinationReadinessStatus::Blocked
             if overlayfs_helper == OverlayFsHelperReadiness::Unavailable =>
