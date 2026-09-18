@@ -57,6 +57,24 @@ pub enum StorageError {
 pub struct ApfsCloner;
 
 impl ApfsCloner {
+    /// Clone an immutable base and restore owner permissions in one traversal.
+    #[cfg(target_os = "macos")]
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        apfs::clone_tree_owner_writable(source, destination)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        Self::clone_tree(source, destination)?;
+        Self::make_tree_owner_writable(destination)
+    }
+
     /// Clone a directory tree without permitting a byte-copy fallback.
     #[cfg(target_os = "macos")]
     pub fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
@@ -114,6 +132,15 @@ pub fn has_macos_acl(path: &Path) -> Result<bool, StorageError> {
 pub struct ReflinkCloner;
 
 impl ReflinkCloner {
+    /// Clone an immutable base and restore owner permissions.
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        Self::clone_tree(source, destination)?;
+        Self::make_tree_owner_writable(destination)
+    }
+
     /// Actively verify reflink support using two unnamed files on the target
     /// volume. No probe artifact remains after this call or a process exit.
     #[cfg(target_os = "linux")]
@@ -894,6 +921,15 @@ mod overlayfs_helper;
 pub struct RefsBlockCloner;
 
 impl RefsBlockCloner {
+    /// Clone an immutable base and restore owner permissions.
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        Self::clone_tree(source, destination)?;
+        Self::make_tree_owner_writable(destination)
+    }
+
     /// Actively verify ReFS block cloning and private-write isolation on the
     /// destination volume.
     #[cfg(target_os = "windows")]
