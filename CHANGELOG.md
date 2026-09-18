@@ -46,6 +46,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- Documented and regression-tested ordinary Git sparse-selection changes in
+  managed views, including later clean/dirty removal and preserving a changed
+  interrupted view. Added an exact-tree sparse/full benchmark harness with
+  real Git shape/index checks and separate allocation/latency fields.
+
 - The standalone `Website deployment check` workflow is removed. It duplicated
   the post-deploy verification that the `Website deploy` workflow already runs
   against https://riftri.dev, and its `deployment_status` trigger produced a

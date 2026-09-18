@@ -1,5 +1,22 @@
 # Native COW benchmark
 
+For a sparse/full comparison on an exported source tree, run:
+
+```sh
+node docs/benchmarks/sparse-cone.mjs /path/to/riftri /path/to/source \
+  EXACT_COMMIT /path/to/new-output-directory packages/react
+```
+
+The [sparse harness](benchmarks/sparse-cone.mjs) verifies that its independent
+fixture has the source's exact Git tree ID. Ordinary Git supplies the expected
+cone shape and skip-worktree bits. It checks every created view against those
+semantics, keeps sparse and full bases separate, records one cold and three
+cached samples for each profile, then removes the views and collects the bases.
+Logical bytes/file counts, latency, and volume-level allocation deltas are
+separate fields. Volume deltas are noisy on a busy host; use a quiet volume with
+ample free space. Dependencies and builds are not included, and incomplete runs
+are not benchmark evidence. The selected directory must exist in the exact tree.
+
 For a real-project, ten-agent run using the public direct-download CLI, see
 [the assistant-ui experiment](benchmarks/assistant-ui-ten-agents-2026-09-12.md).
 It records both allocation savings and slower creation, along with the

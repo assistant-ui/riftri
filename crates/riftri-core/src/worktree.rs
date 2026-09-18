@@ -9921,6 +9921,62 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_sparse_add_preserves_a_later_git_selection_change() {
+        for phase in [
+            AddWorktreePhase::IndexSynchronized,
+            AddWorktreePhase::CleanVerified,
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("view");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            for dir in ["a", "b"] {
+                fs::create_dir(repository.join(dir)).unwrap();
+                fs::write(repository.join(dir).join("file.txt"), dir).unwrap();
+            }
+            git(&repository, &["add", "-A"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            let request = AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: vec!["a".to_owned()],
+            };
+            let error = add_worktree_inner(request, Some(phase), false).unwrap_err();
+            assert!(error.to_string().contains("injected failure"));
+            git(&destination, &["sparse-checkout", "set", "--cone", "b"]);
+            let before = Command::new("git")
+                .current_dir(&destination)
+                .args(["ls-files", "-t", "-z"])
+                .output()
+                .unwrap()
+                .stdout;
+            for _ in 0..2 {
+                let report = recover_incomplete_operations(&state).unwrap();
+                assert!(!report.errors.is_empty(), "{phase:?}: {report:?}");
+                assert!(destination.join("b/file.txt").exists());
+                assert!(!destination.join("a").exists());
+                let after = Command::new("git")
+                    .current_dir(&destination)
+                    .args(["ls-files", "-t", "-z"])
+                    .output()
+                    .unwrap()
+                    .stdout;
+                assert_eq!(before, after);
+            }
+        }
+    }
+
+    #[test]
     fn recovery_preserves_a_changed_interrupted_view() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
