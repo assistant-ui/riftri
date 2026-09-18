@@ -91,7 +91,7 @@ function Hero() {
         <GraphLabel index="00" icon={<GitHubIcon />}>
           OPEN SOURCE / NATIVE COPY-ON-WRITE
         </GraphLabel>
-        <h1 id="top-title">Git worktrees.<br /><span>Shared storage.</span></h1>
+        <h1 id="top-title">Git worktrees.<br /><span>Shared <mark className="hero-highlight">storage.</mark></span></h1>
         <p className="hero-lede">
           Real, isolated Git worktrees that share the unchanged parts of your project.
           Keep using normal files, normal Git, and the tools you already have.

@@ -24,3 +24,14 @@ test("small fixed-size text does not shrink below 0.7rem", () => {
     assert.ok(Number(match[1]) >= 0.7, match[0]);
   }
 });
+
+test("the storage headline has an accessible selection-style highlight", () => {
+  const page = fs.readFileSync(path.resolve(__dirname, "../../website/src/app/page.tsx"), "utf8");
+  assert.match(page, /Shared <mark className="hero-highlight">storage\.<\/mark>/);
+  const highlight = css.match(/\.hero-highlight\s*\{([^}]+)\}/)?.[1];
+  assert.ok(highlight);
+  assert.match(highlight, /background:\s*var\(--accent\)/);
+  assert.match(highlight, /color:\s*var\(--canvas-deep\)/);
+  const contrast = (luminance(token("accent")) + 0.05) / (luminance(token("canvas-deep")) + 0.05);
+  assert.ok(contrast >= 4.5, `highlight contrast: ${contrast.toFixed(2)}:1`);
+});

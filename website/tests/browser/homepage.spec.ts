@@ -22,10 +22,12 @@ test("homepage renders without browser errors and captures the final layout", as
   page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Git worktrees. Shared storage.", exact: true })).toBeVisible();
+  await expect(page.locator(".hero-highlight")).toHaveText("storage.");
+  await expect(page.locator(".hero-highlight")).toHaveCSS("background-color", "rgb(240, 106, 58)");
   await expect(page.getByRole("heading", { name: "Worktree disk usage" })).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  const clipped = await page.locator(".site-header a, .storage-backends, .hero-install, .command, .graph-frame, .frame-title, .diagram-controls").evaluateAll((elements) =>
+  const clipped = await page.locator(".site-header a, .storage-backends, .hero-highlight, .hero-install, .command, .graph-frame, .frame-title, .diagram-controls").evaluateAll((elements) =>
     elements.filter((element) => {
       const rect = element.getBoundingClientRect();
       return rect.width > 0 && (rect.left < -1 || rect.right > innerWidth + 1);
@@ -76,7 +78,7 @@ test("breakpoint edges keep framed content inside the viewport", async ({ page }
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/");
     await page.evaluate(() => document.fonts.ready);
-    const clipped = await page.locator(".site-header a, .storage-backends, .hero-install, .command, .graph-frame, .frame-title, .diagram-controls, .faq-item summary, .faq-answer").evaluateAll((elements) =>
+    const clipped = await page.locator(".site-header a, .storage-backends, .hero-highlight, .hero-install, .command, .graph-frame, .frame-title, .diagram-controls, .faq-item summary, .faq-answer").evaluateAll((elements) =>
       elements.filter((element) => {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && (rect.left < -1 || rect.right > innerWidth + 1);

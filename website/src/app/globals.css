@@ -169,6 +169,13 @@ code, pre { font-family: var(--font-mono); }
 
 .hero h1 > span { color: var(--ink-muted); }
 
+.hero-highlight {
+  padding: 0 0.025em;
+  background: var(--accent);
+  color: var(--canvas-deep);
+  white-space: nowrap;
+}
+
 .hero-kicker {
   max-width: 34rem;
   margin: 1.1rem 0 0;
