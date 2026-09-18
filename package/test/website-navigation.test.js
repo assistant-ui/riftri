@@ -47,3 +47,14 @@ test("quick start is a named programmatic focus target, outside normal tab order
   assert.match(page, /<h2 id="start-title">/);
   assert.match(source, /scrollToSection\(href, true\)/);
 });
+
+test("header navigation has named, keyboard-focusable section destinations", () => {
+  const page = fs.readFileSync(path.join(root, "website/src/app/page.tsx"), "utf8");
+  assert.match(page, /<nav aria-label="Main navigation">/);
+  for (const id of ["top", "overview", "savings", "faq"]) {
+    assert.match(page, new RegExp(`id="${id}"[^>]*tabIndex=\\{-1\\}[^>]*aria-labelledby="${id}-title"`));
+    assert.match(page, new RegExp(`<h[12] id="${id}-title">`));
+  }
+  assert.match(page, /className="skip-link" href="#main-content"/);
+  assert.match(page, /<main id="main-content" tabIndex=\{-1\}>/);
+});
