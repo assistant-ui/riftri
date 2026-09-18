@@ -166,6 +166,12 @@ Inspect Git and show the planned storage path without changing anything.
 | `--destination <DESTINATION>` | Proposed worktree destination whose volume should be probed |
 | `--json` | Emit machine-readable JSON |
 
+The suggested commands retain the inspected repository and use POSIX shell
+quoting on Unix and PowerShell quoting on Windows. If the repository or
+destination path is not valid Unicode, doctor omits the suggested add command.
+For a non-Unicode repository path that needs activation, doctor suggests
+`riftri enable` for use inside that repository.
+
 ### `riftri backends [OPTIONS] [PATH]`
 
 Probe storage backends for a concrete destination volume. `PATH` is an

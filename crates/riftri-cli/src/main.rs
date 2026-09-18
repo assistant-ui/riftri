@@ -21,10 +21,10 @@ Environment:
   RIFTRI_CACHE_DIR=PATH  Directory holding the shell-activation Git shim
                          (defaults to the platform cache directory).
 
-RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE are set by riftri itself inside
-activated scopes; RIFTRI_REQUIRE_* variables only make the test suites fail
-instead of falling back. See docs/agent-integration.md for the automation
-contract.";
+Riftri sets RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE inside activated scopes.
+Shell hooks also set RIFTRI_SHELL_SHIM_DIR to the absolute shim directory.
+RIFTRI_REQUIRE_* variables only make the test suites fail instead of falling
+back. See docs/agent-integration.md for the automation contract.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -569,7 +569,8 @@ fn run(cli: Cli) -> Result<()> {
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&report).context("serialize doctor report")?
+                    serde_json::to_string_pretty(&doctor_json(&report))
+                        .context("serialize doctor report")?
                 );
             } else {
                 print_doctor(&report);
@@ -1138,7 +1139,9 @@ fn print_shell_status(repository: &Path) -> Result<()> {
             );
             println!(
                 "Effective optimized interception: {}",
-                if shell.active && activation.enabled {
+                if shell.bypass {
+                    "inactive (RIFTRI_BYPASS)"
+                } else if shell.active && activation.enabled {
                     "active"
                 } else {
                     "inactive"
@@ -1257,17 +1260,19 @@ fn run_git_shim() -> Result<i32> {
 
     match riftri_core::proxy_git_command(&current_directory, &arguments)? {
         riftri_core::GitProxyOutcome::Passthrough(status) => Ok(status),
-        riftri_core::GitProxyOutcome::OptimizedAdd(result) => {
-            eprintln!(
-                "Riftri created an optimized {} worktree at {} ({})",
-                result.backend.display_name(),
-                result.destination.display(),
-                if result.reused_base {
-                    "reused base"
-                } else {
-                    "new base"
-                }
-            );
+        riftri_core::GitProxyOutcome::OptimizedAdd { result, quiet } => {
+            if !quiet {
+                eprintln!(
+                    "Riftri created an optimized {} worktree at {} ({})",
+                    result.backend.display_name(),
+                    result.destination.display(),
+                    if result.reused_base {
+                        "reused base"
+                    } else {
+                        "new base"
+                    }
+                );
+            }
             Ok(0)
         }
         riftri_core::GitProxyOutcome::OptimizedRemove(result) => {
@@ -1977,6 +1982,73 @@ fn print_allocation_note() {
         "Allocation note: filesystem-accounted allocation may count shared COW blocks more than once; it is not exclusive physical disk use"
     );
     println!("Physical-sharing proof: use the platform volume-delta benchmark on a quiet volume");
+}
+
+fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
+    let git = match &report.git.value {
+        Some(git) => serde_json::json!({
+            "available": report.git.available,
+            "value": {
+                "command": git.command.display().to_string(),
+                "command_native_hex": native_path_hex(&git.command),
+                "version": git.version,
+            },
+        }),
+        None => serde_json::json!(report.git),
+    };
+    let repository = match &report.repository.value {
+        Some(repository) => serde_json::json!({
+            "available": report.repository.available,
+            "value": {
+                "root": repository.root.as_deref().map(|path| path.display().to_string()),
+                "root_native_hex": repository.root.as_deref().map(native_path_hex),
+                "identity": {
+                    "common_git_dir": repository.identity.common_git_dir.display().to_string(),
+                    "common_git_dir_native_hex": native_path_hex(&repository.identity.common_git_dir),
+                },
+                "is_bare": repository.is_bare,
+                "head_commit": repository.head_commit,
+                "head_tree": repository.head_tree,
+                "clean": repository.clean,
+            },
+        }),
+        None => serde_json::json!(report.repository),
+    };
+    let readiness = &report.destination_readiness;
+    let mut destination_readiness = serde_json::json!({
+        "destination": readiness.destination.display().to_string(),
+        "destination_native_hex": native_path_hex(&readiness.destination),
+        "status": readiness.status,
+        "copy_on_write": readiness.copy_on_write,
+        "overlayfs_helper": readiness.overlayfs_helper,
+        "blockers": readiness.blockers,
+    });
+    if let Some(backend) = readiness.backend {
+        destination_readiness["backend"] = serde_json::json!(backend);
+    }
+    if let Some(command) = &readiness.next_command {
+        destination_readiness["next_command"] = serde_json::json!(command);
+    }
+    let storage_capabilities = report
+        .storage_capabilities
+        .iter()
+        .map(backend_capability_json)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "native_path_encoding": native_path_encoding(),
+        "project_stage": report.project_stage,
+        "operating_system": report.operating_system,
+        "architecture": report.architecture,
+        "cow_backend_active": report.cow_backend_active,
+        "repository_enabled": report.repository_enabled,
+        "git_shim_active": report.git_shim_active,
+        "git": git,
+        "repository": repository,
+        "repository_compatibility": report.repository_compatibility,
+        "destination_readiness": destination_readiness,
+        "storage_capabilities": storage_capabilities,
+    })
 }
 
 fn backends_json(

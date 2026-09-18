@@ -4793,8 +4793,18 @@ fn diagnose_overlay_directories(
     }
 
     let root = overlays.join("v1");
-    if !is_real_directory_if_present(&root)? {
-        return Ok(());
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            add_state_issue(
+                issues,
+                root,
+                "OverlayFS layout root must be a real directory",
+            );
+            return Ok(());
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io("inspect OverlayFS layout root", &root, source)),
     }
     let completed_removals = removal_journals
         .iter()
@@ -5830,10 +5840,23 @@ fn validate_compaction_paths(
     }
     let source =
         JournalStore::open(state_directory).load_operation(&journal.source_add_operation_id)?;
-    let expected_base = if matches!(
+    if source.phase != AddWorktreePhase::Active
+        || source.repository != journal.repository
+        || source.backend != journal.backend
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} does not match its active add operation",
+            journal.journal_path.display()
+        )));
+    }
+    validate_recovery_paths(state_directory, &source)?;
+    if matches!(
         journal.phase,
-        CompactWorktreePhase::AddJournalUpdated | CompactWorktreePhase::Complete
+        CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
     ) {
+        return Ok(());
+    }
+    let expected_base = if journal.phase == CompactWorktreePhase::AddJournalUpdated {
         &journal.base_path
     } else if source.base_path == journal.old_base_path || source.base_path == journal.base_path {
         &source.base_path
@@ -5843,10 +5866,7 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     };
-    if source.phase != AddWorktreePhase::Active
-        || source.repository != journal.repository
-        || source.destination != journal.destination
-        || source.backend != journal.backend
+    if source.destination != journal.destination
         || source.base_path.as_path() != expected_base.as_path()
     {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -5854,7 +5874,6 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     }
-    validate_recovery_paths(state_directory, &source)?;
     Ok(())
 }
 
@@ -8016,6 +8035,27 @@ mod tests {
                 accounting.diagnostic_issues.is_empty(),
                 "{phase:?}: {accounting:?}"
             );
+
+            move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository,
+                    source: destination,
+                    destination: fixture.path().join("moved"),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("move recovered worktree");
+            let moved = storage_accounting(&state).expect("account after move");
+            assert_eq!(
+                moved.completed_compactions,
+                accounting.completed_compactions
+            );
+            assert_eq!(
+                moved.cancelled_compactions,
+                accounting.cancelled_compactions
+            );
+            assert!(moved.diagnostic_issues.is_empty(), "{phase:?}: {moved:?}");
         }
     }
 
@@ -9093,6 +9133,65 @@ mod tests {
         assert!(stray_temporary.is_file());
         assert!(stray_overlay.is_dir());
         assert!(unknown_root.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_unsafe_overlay_roots_without_traversing_or_removing_them() {
+        use std::os::unix::fs::symlink;
+
+        for kind in [
+            "missing",
+            "directory",
+            "file",
+            "symlink",
+            "dangling-symlink",
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let state = fixture.path().join("state");
+            fs::create_dir_all(state.join("overlays")).expect("create overlays directory");
+            let state = state.canonicalize().expect("resolve state");
+            let root = state.join("overlays/v1");
+            let outside = fixture.path().join("outside");
+            match kind {
+                "missing" => {}
+                "directory" => fs::create_dir(&root).expect("create layout root"),
+                "file" => fs::write(&root, "preserve root\n").expect("write layout root"),
+                _ => {
+                    if kind == "symlink" {
+                        fs::create_dir(&outside).expect("create outside directory");
+                        fs::write(outside.join("private.txt"), "preserve outside\n")
+                            .expect("write outside file");
+                    }
+                    symlink(&outside, &root).expect("symlink layout root");
+                }
+            }
+
+            let report = storage_accounting(&state).expect("diagnose state");
+            let paths = report
+                .diagnostic_issues
+                .iter()
+                .map(|issue| issue.path.as_path())
+                .collect::<Vec<_>>();
+            if matches!(kind, "missing" | "directory") {
+                assert!(paths.is_empty(), "{kind}: {paths:?}");
+            } else {
+                assert_eq!(paths, [root.as_path()], "{kind}");
+            }
+            match kind {
+                "file" => assert_eq!(fs::read_to_string(&root).unwrap(), "preserve root\n"),
+                "symlink" | "dangling-symlink" => {
+                    assert_eq!(fs::read_link(&root).unwrap(), outside);
+                    if kind == "symlink" {
+                        assert_eq!(
+                            fs::read_to_string(outside.join("private.txt")).unwrap(),
+                            "preserve outside\n"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     #[test]

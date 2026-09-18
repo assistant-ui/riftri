@@ -1254,9 +1254,17 @@ fn current_mount_entry(path: &Path) -> Result<MountEntry, StorageError> {
             source,
         )
     })?;
+    parse_mount_entry(&mountinfo, mount_id, path)
+}
+
+fn parse_mount_entry(
+    mountinfo: &[u8],
+    mount_id: u64,
+    path: &Path,
+) -> Result<MountEntry, StorageError> {
     for line in mountinfo.split(|byte| *byte == b'\n') {
         let fields = line
-            .split(|byte| byte.is_ascii_whitespace())
+            .split(|byte| *byte == b' ')
             .filter(|field| !field.is_empty())
             .collect::<Vec<_>>();
         if fields.len() < 7 {
@@ -1836,6 +1844,19 @@ fn last_errno() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mountinfo_preserves_native_path_bytes() {
+        let mountinfo =
+            b"42 1 0:50 / /work/carriage\rreturn/form\x0cfeed/space\\040tab\\011line\\012slash\\134\xff rw - overlay overlay rw\n";
+        let entry = parse_mount_entry(mountinfo, 42, Path::new("/fixture")).unwrap();
+        assert_eq!(
+            entry.mount_point.as_os_str().as_bytes(),
+            b"/work/carriage\rreturn/form\x0cfeed/space tab\tline\nslash\\\xff"
+        );
+        assert_eq!(entry.mount_id, 42);
+        assert_eq!(entry.filesystem_type, "overlay");
+    }
 
     struct DescriptorContext {
         retained: RawFd,
