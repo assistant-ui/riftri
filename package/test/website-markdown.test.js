@@ -21,8 +21,9 @@ test("Markdown guide covers setup, internals, lifecycle, and measured savings", 
     "riftri exec --worktree ../app-auth -- claude",
   ]) assert.ok(markdown.includes(command), command);
   assert.match(markdown, /experimental/i);
-  assert.match(markdown, /Guided setup \(unreleased\)/);
-  assert.match(markdown, /not in the v0\.3\.0 release/);
+  assert.match(markdown, /### Guided setup\n/);
+  assert.match(markdown, /Available starting with v0\.3\.1/);
+  assert.doesNotMatch(markdown, /Guided setup \(unreleased\)|not in the v0\.3\.0 release/);
   assert.match(markdown, /never silently falls back/);
   const data = JSON.parse(read("website/src/data/space-savings.json"));
   for (const value of [

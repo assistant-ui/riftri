@@ -69,7 +69,7 @@ standalone installer or GitHub release assets for now.
 
 ## Quick start
 
-For an interactive walkthrough in source builds (not yet in v0.3.0), run
+For an interactive walkthrough (v0.3.1 and later), run
 `riftri setup` inside your existing repository. It checks the destination,
 confirms a new worktree at `HEAD`, and then asks whether to open Claude Code,
 Codex, another installed executable, or no agent. Repository enablement and
@@ -180,8 +180,7 @@ to create or use Riftri worktrees. It explains explicit creation, process-scoped
 Git interception, and safe cleanup; it is not required for copy-on-write safety
 and does not install Riftri or enable a repository.
 
-After the skill is available on the repository's default branch, install it
-through the [skills CLI](https://skills.sh/docs/cli):
+Install it through the [skills CLI](https://skills.sh/docs/cli):
 
 ```sh
 npx skills add assistant-ui/riftri --skill riftri-worktrees
