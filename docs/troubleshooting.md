@@ -51,6 +51,19 @@ explanation rather than producing an inexact worktree. Sparse-checkout
 profiles and submodule support are tracked in the
 [roadmap](../ROADMAP.md).
 
+### Conditional Git configuration is rejected
+
+Riftri accepts conditional includes that contain only `user.name`, `user.email`,
+`user.signingKey`, and `user.useConfigOnly`. This includes identity files from
+system, global, and repository configuration.
+
+Riftri reads each conditional target even when its condition does not match the
+source worktree. Other keys, nested includes, and unreadable targets remain
+unsupported. Branch and Git-directory conditions can select different checkout
+settings in the destination. A clean Git status does not prove that the checkout
+bytes match ordinary Git. Use `RIFTRI_BYPASS=1 git worktree add` for unsupported
+conditional configuration.
+
 ### Git LFS paths are rejected
 
 Riftri accepts a deliberately narrow, deterministic LFS profile: canonical

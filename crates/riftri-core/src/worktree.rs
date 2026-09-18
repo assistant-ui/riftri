@@ -3429,7 +3429,6 @@ fn analyze_resolved_repository_compatibility(
         "core.protectntfs",
     ];
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     config_keys.extend(profile_keys);
     let lfs_config_keys = [
         "filter.lfs.clean",
@@ -3442,7 +3441,25 @@ fn analyze_resolved_repository_compatibility(
         config_keys.extend(lfs_config_keys);
     }
     config_keys.push("core.hookspath");
-    let config_values = git.config_values(repository, &config_keys)?;
+    let config = git.config_values(repository, &config_keys)?;
+    if config.has_conditional_includes
+        && !git.conditional_config_has_only(
+            repository,
+            &[
+                "user.name",
+                "user.email",
+                "user.signingkey",
+                "user.useconfigonly",
+            ],
+        )?
+    {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+            explanation: "conditional Git configuration includes must contain only identity settings (user.name, user.email, user.signingKey, user.useConfigOnly); other keys, nested includes, and unreadable targets are not supported"
+                .to_owned(),
+        });
+    }
+    let config_values = config.values;
     if let Some(explanation) =
         checkout_hook_blocker(common_git_dir, config_values.contains_key("core.hookspath"))
     {
