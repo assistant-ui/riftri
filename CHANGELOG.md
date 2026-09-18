@@ -113,6 +113,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   near the mobile layout breakpoint.
 - Status keeps completed and cancelled compaction counts after later compactions
   or managed moves, without false unsafe-journal diagnostics.
+- Linux mount identity checks keep complete paths that contain carriage-return
+  or form-feed bytes.
+- Batched Git configuration reads keep case-sensitive subsection names and
+  lowercase only section and variable names.
+- Intercepted `git worktree add --quiet` commands no longer print a success
+  message. Error messages remain visible.
+- Shell status and deactivation retain the activated shim path after a directory
+  change when `RIFTRI_CACHE_DIR` is relative.
+- `riftri doctor --json` preserves non-UTF-8 paths through display strings and
+  exact native hexadecimal fields instead of rejecting the report.
+- Doctor's suggested worktree command quotes the destination as one shell argument,
+  including paths with spaces or apostrophes.
 - `riftri backends --json` emits a versioned report that preserves non-UTF-8
   requested and probe paths through display strings and exact native
   hexadecimal fields instead of rejecting serialization. The report is now an
