@@ -162,6 +162,26 @@ Every command that reports or changes state accepts `--json`, and any command
 accepts `--json-errors` to emit a versioned failure receipt, so automation never
 has to scrape human text. The full reference is in [docs/cli.md](docs/cli.md).
 
+## Optional agent skill
+
+The repository includes a reviewable
+[`riftri-worktrees` skill](skills/riftri-worktrees/SKILL.md) for agents that need
+to create or use Riftri worktrees. It explains explicit creation, process-scoped
+Git interception, and safe cleanup; it is not required for copy-on-write safety
+and does not install Riftri or enable a repository.
+
+After the skill is available on the repository's default branch, install it
+through the [skills CLI](https://skills.sh/docs/cli):
+
+```sh
+npx skills add assistant-ui/riftri --skill riftri-worktrees
+```
+
+Review the skill first and choose the agent and installation scope in the CLI.
+The skill files are hosted here on GitHub; [skills.sh](https://skills.sh/docs/faq)
+discovers and ranks skills through CLI installation telemetry. A directory
+listing is not a separate package publication or a guarantee of inclusion.
+
 ## Documentation
 
 [docs/README.md](docs/README.md) indexes everything. Start with:
