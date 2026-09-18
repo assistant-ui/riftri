@@ -394,6 +394,77 @@ impl Git {
         }
     }
 
+    /// Read every conditional target, including conditions that do not match.
+    /// Nested includes and unreadable targets cannot satisfy the key allowlist.
+    pub fn conditional_config_has_only(
+        &self,
+        path: &Path,
+        allowed_keys: &[&str],
+    ) -> Result<bool, GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--null"),
+            OsString::from("--show-origin"),
+            OsString::from("--path"),
+            OsString::from("--get-regexp"),
+            OsString::from(r"^includeif\..*\.path$"),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(true);
+        }
+        if !output.status.success() {
+            return Err(command_failed(&arguments, &output));
+        }
+        let mut records = output.stdout.split(|byte| *byte == 0);
+        while let Some(origin) = records.next().filter(|record| !record.is_empty()) {
+            let Some(value) = records
+                .next()
+                .and_then(|record| record.splitn(2, |byte| *byte == b'\n').nth(1))
+            else {
+                return Err(GitError::InvalidOutput {
+                    context: "conditional configuration",
+                    detail: "missing include path".to_owned(),
+                });
+            };
+            let mut target = PathBuf::from(os_string_from_git(value, "include path")?);
+            if !target.is_absolute() {
+                let Some(origin) = origin.strip_prefix(b"file:") else {
+                    return Ok(false);
+                };
+                let origin = PathBuf::from(os_string_from_git(origin, "configuration origin")?);
+                let Some(parent) = origin.parent() else {
+                    return Ok(false);
+                };
+                target = parent.join(target);
+            }
+            let arguments = [
+                OsString::from("config"),
+                OsString::from("--file"),
+                git_path_argument(&target),
+                OsString::from("--no-includes"),
+                OsString::from("--null"),
+                OsString::from("--name-only"),
+                OsString::from("--list"),
+            ];
+            let output = self.output_os(Some(path), &arguments)?;
+            if !output.status.success()
+                || output
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|key| !key.is_empty())
+                    .any(|key| {
+                        !allowed_keys
+                            .iter()
+                            .any(|allowed| key.eq_ignore_ascii_case(allowed.as_bytes()))
+                    })
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Read one repository configuration value as raw Git bytes.
     pub fn config_value(&self, path: &Path, key: &str) -> Result<Option<Vec<u8>>, GitError> {
         let arguments = [
@@ -2053,6 +2124,25 @@ mod tests {
             git.config_value(fixture.path(), "filter.missing.clean")
                 .expect("read missing config"),
             None
+        );
+    }
+
+    #[test]
+    fn conditional_targets_preserve_native_paths_and_reject_missing_files() {
+        let fixture = RepositoryFixture::committed();
+        let included = fixture.path().join("identity-é");
+        fs::write(&included, "[user]\n email = work@example.invalid\n").unwrap();
+        let git = Git::default();
+        git.add_local_config_path(fixture.path(), "includeIf.gitdir:never.path", &included)
+            .unwrap();
+        assert!(
+            git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+        fs::remove_file(included).unwrap();
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
         );
     }
 

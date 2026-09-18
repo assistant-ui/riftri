@@ -2797,10 +2797,18 @@ fn analyze_resolved_repository_compatibility(
         .map(|entry| entry.path.clone())
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
-    if git.has_config_matching(repository, r"^includeif\..*\.path$")? {
+    if !git.conditional_config_has_only(
+        repository,
+        &[
+            "user.name",
+            "user.email",
+            "user.signingkey",
+            "user.useconfigonly",
+        ],
+    )? {
         blockers.push(RepositoryCompatibilityBlocker {
             kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
-            explanation: "conditional Git configuration includes can change checkout settings between worktrees and are not supported yet"
+            explanation: "conditional Git configuration includes must contain only identity settings (user.name, user.email, user.signingKey, user.useConfigOnly); other keys, nested includes, and unreadable targets are not supported"
                 .to_owned(),
         });
     }

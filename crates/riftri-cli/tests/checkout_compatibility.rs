@@ -350,6 +350,81 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
 }
 
 #[test]
+fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
+    let fixture = RepositoryFixture::new();
+    let global = fixture._directory.path().join("global-config");
+    let included = fixture._directory.path().join("identity-config");
+    for condition in ["gitdir:**/repository/.git", "gitdir:**/worktrees/**"] {
+        fs::write(
+            &global,
+            format!("[includeIf \"{condition}\"]\n path = identity-config\n"),
+        )
+        .expect("write global configuration");
+        for (contents, compatible) in [
+            (
+                "[user]\n name = Work User\n email = work@example.invalid\n",
+                true,
+            ),
+            ("[core]\n eol = crlf\n", false),
+            ("[include]\n path = hidden-config\n", false),
+        ] {
+            fs::write(&included, contents).expect("write included configuration");
+            let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .args(["doctor", "--json"])
+                .current_dir(&fixture.repository)
+                .env("GIT_CONFIG_GLOBAL", &global)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("run doctor with global configuration");
+            assert!(doctor.status.success(), "{:?}", doctor);
+            let report: serde_json::Value =
+                serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+            assert_eq!(
+                report["repository_compatibility"]["value"]["compatible"], compatible,
+                "condition {condition}, configuration {contents}",
+            );
+            #[cfg(target_os = "macos")]
+            if compatible {
+                let destination =
+                    fixture
+                        ._directory
+                        .path()
+                        .join(if condition.contains("worktrees") {
+                            "destination-identity"
+                        } else {
+                            "source-identity"
+                        });
+                let state = fixture._directory.path().join("state");
+                let add = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                    .args(["worktree", "add"])
+                    .arg(&destination)
+                    .args(["--detach", "HEAD", "--state-dir"])
+                    .arg(&state)
+                    .current_dir(&fixture.repository)
+                    .env("GIT_CONFIG_GLOBAL", &global)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()
+                    .expect("add with global identity configuration");
+                assert!(add.status.success(), "{add:?}");
+                assert_eq!(
+                    fs::read(destination.join("tracked.txt")).unwrap(),
+                    b"tracked\n"
+                );
+                let status = Command::new("git")
+                    .args(["status", "--porcelain"])
+                    .current_dir(&destination)
+                    .env("GIT_CONFIG_GLOBAL", &global)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()
+                    .expect("inspect worktree");
+                assert!(status.status.success(), "{status:?}");
+                assert!(status.stdout.is_empty(), "{status:?}");
+            }
+        }
+    }
+}
+
+#[test]
 fn unsafe_checkout_inputs_are_diagnosed_and_rejected_without_mutation() {
     for case in UnsafeCheckoutCase::ALL {
         let fixture = RepositoryFixture::new();
