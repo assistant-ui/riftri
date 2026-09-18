@@ -14,11 +14,15 @@ test("Markdown guide covers setup, internals, lifecycle, and measured savings", 
   }
   for (const command of [
     "curl -fsSL https://riftri.dev/install.sh | bash",
+    "riftri setup",
     "riftri doctor --destination ../app-auth",
-    "riftri worktree add ../app-auth -b feature/auth main",
+    "riftri worktree add ../app-auth -b feature/auth HEAD",
     "riftri exec -- claude",
+    "riftri exec --worktree ../app-auth -- claude",
   ]) assert.ok(markdown.includes(command), command);
   assert.match(markdown, /experimental/i);
+  assert.match(markdown, /Guided setup \(unreleased\)/);
+  assert.match(markdown, /not in the v0\.3\.0 release/);
   assert.match(markdown, /never silently falls back/);
   const data = JSON.parse(read("website/src/data/space-savings.json"));
   for (const value of [
