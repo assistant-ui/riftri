@@ -525,10 +525,15 @@ extents. Any aligned block-clone failure aborts and rolls back; it never
 triggers a full-file copy. The same immutable bases, locks, journals, recovery,
 clean removal, move/prune, and garbage-collection rules apply.
 
-Recovery validates every recorded cleanup path. It removes a visible incomplete
-view only when Git reports it clean or a byte/mode/symlink comparison proves it
-still equals the immutable base. Otherwise it retains the view and journal for
-manual attention.
+Recovery validates every recorded cleanup path. Before removing a materialized
+incomplete view, it requires a complete byte/mode/symlink and directory-entry
+comparison with the immutable base, even when Git calls the worktree clean.
+Ignored files and unexpected empty directories count as private changes and
+are preserved. Native rollback repeats this check at the final removal boundary;
+OverlayFS checks the merged view before unmounting and revalidates its private
+layer afterward. Otherwise it retains the view and journal for manual attention.
+This stronger automatic-rollback rule does not change explicit removal's
+ordinary Git semantics.
 
 Storage accounting is derived from add/removal journals and completion markers.
 It reports active views, retained bases, per-base reference counts, logical
