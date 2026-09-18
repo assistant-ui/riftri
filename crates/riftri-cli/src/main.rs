@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod setup;
+
 const CLI_EXAMPLES: &str = "\
 Examples:
+  riftri setup                             Create a worktree, then choose an agent
   riftri enable                            Opt the current repository in
   riftri worktree add ../feature -b f/x    Create a COW-backed worktree
   riftri worktree remove ../feature        Safely remove it again
@@ -49,6 +52,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Interactively create a COW worktree, then optionally open a coding agent.
+    Setup {
+        /// Existing repository to use; paths entered at prompts are relative to the caller.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Proposed destination (skip the directory question).
+        #[arg(long, value_name = "PATH")]
+        destination: Option<PathBuf>,
+
+        /// New branch at HEAD (skip the branch question; never resets an existing branch).
+        #[arg(short = 'b', long, value_name = "BRANCH")]
+        branch: Option<OsString>,
+    },
+
     /// Enable optimized worktree creation for one repository.
     Enable {
         /// Repository to enable.
@@ -230,6 +248,7 @@ enum Command {
 impl Command {
     fn operation_name(&self) -> &'static str {
         match self {
+            Self::Setup { .. } => "setup",
             Self::Enable { .. } => "enable",
             Self::Disable { .. } => "disable",
             Self::Exec { .. } => "exec",
@@ -526,6 +545,16 @@ fn confirm_destructive_action(warning: &str, yes: bool) -> Result<()> {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Setup {
+            repository,
+            destination,
+            branch,
+        } => {
+            let status = setup::run(repository, destination, branch, cli.json_errors)?;
+            if status != 0 {
+                std::process::exit(status);
+            }
+        }
         Command::Enable { path, repository } => {
             let path = repository.unwrap_or(path);
             let activation = riftri_core::enable_repository(&path)?;
