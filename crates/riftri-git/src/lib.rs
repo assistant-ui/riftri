@@ -1232,7 +1232,11 @@ impl Git {
         if !sparse_directories.is_empty() {
             run(&["sparse-checkout", "reapply"])?;
         }
-        std::fs::File::open(&temporary_index)
+        // Windows FlushFileBuffers requires a handle opened for writing.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary_index)
             .and_then(|file| file.sync_all())
             .map_err(|source| GitError::TemporaryState { source })?;
         let temporary_index = tempfile::TempPath::try_from_path(temporary_index)
@@ -1952,6 +1956,52 @@ mod tests {
         fn path(&self) -> &Path {
             self.directory.path()
         }
+    }
+
+    #[test]
+    fn recovery_initializes_only_a_missing_worktree_index() {
+        let fixture = RepositoryFixture::committed();
+        let parent = tempdir().unwrap();
+        let worktree = parent.path().join("view");
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let git_handle = Git::default();
+        assert!(!git_handle.worktree_index_has_changes(&worktree).unwrap());
+        assert!(
+            git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        let index = git_handle.worktree_index_path(&worktree).unwrap();
+        let before = fs::read(&index).unwrap();
+        assert!(
+            !git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        assert_eq!(fs::read(&index).unwrap(), before);
+        assert!(!git_handle.worktree_index_has_changes(&worktree).unwrap());
+        git(
+            &worktree,
+            &["update-index", "--force-remove", "tracked.txt"],
+        );
+        let staged = fs::read(&index).unwrap();
+        assert!(git_handle.worktree_index_has_changes(&worktree).unwrap());
+        assert!(
+            !git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        assert_eq!(fs::read(&index).unwrap(), staged);
     }
 
     #[test]
