@@ -387,12 +387,14 @@ pub enum WorktreeError {
 }
 
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     add_worktree_inner(request, None, true)
 }
 
 pub fn remove_worktree(
     request: RemoveWorktreeRequest,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     remove_worktree_inner(request, None)
 }
 
@@ -402,22 +404,26 @@ pub fn remove_worktree(
 pub fn force_remove_worktree(
     request: RemoveWorktreeRequest,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     force_remove_worktree_inner(request, None)
 }
 
 pub fn move_worktree(request: MoveWorktreeRequest) -> Result<MoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     move_worktree_inner(request, None)
 }
 
 pub fn compact_worktree(
     request: CompactWorktreeRequest,
 ) -> Result<CompactWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     compact_worktree_inner(request, None)
 }
 
 pub fn prune_worktrees(
     request: PruneWorktreesRequest,
 ) -> Result<PruneWorktreesResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     prune_worktrees_inner(request, None)
 }
 
@@ -426,7 +432,29 @@ pub fn garbage_collect(
     state_directory: &Path,
     apply: bool,
 ) -> Result<GarbageCollectionReport, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     garbage_collect_inner(state_directory, apply, None)
+}
+
+/// Internal lifecycle commands address several different Git worktrees. A
+/// caller's repository/index override would take precedence over each command's
+/// working directory, potentially resetting or deleting the wrong Git state.
+/// Refuse before mutation rather than silently changing the caller's context.
+/// Ordinary Git passthrough deliberately does not use this guard.
+fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+    ] {
+        if std::env::var_os(name).is_some() {
+            return Err(WorktreeError::Unsupported(format!(
+                "{name} is set and can redirect internal Git operations; unset {name} before using Riftri lifecycle commands, and select the repository with --repository instead"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Return whether `destination` is an active Riftri-managed worktree in any
@@ -442,6 +470,7 @@ pub fn forget_missing_state_directory(
     repository: &Path,
     state_directory: &Path,
 ) -> Result<PathBuf, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     let git = Git::default();
     let repository = git.inspect_repository(repository)?;
     let repository_root = repository.root.as_deref().ok_or_else(|| {
@@ -3193,6 +3222,7 @@ pub(crate) fn inspect_repository_compatibility(
     common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<RepositoryCompatibilityReport, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
@@ -5067,6 +5097,7 @@ fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, Worktre
 pub fn recover_incomplete_operations(
     state_directory: &Path,
 ) -> Result<RecoveryReport, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     let state_directory = absolute_path(state_directory)?;
     let state_directory =
         resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
