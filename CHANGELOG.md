@@ -113,6 +113,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   near the mobile layout breakpoint.
 - Linux mount identity checks keep complete paths that contain carriage-return
   or form-feed bytes.
+- Batched Git configuration reads keep case-sensitive subsection names and
+  lowercase only section and variable names.
 - Intercepted `git worktree add --quiet` commands no longer print a success
   message. Error messages remain visible.
 - Shell status and deactivation retain the activated shim path after a directory
