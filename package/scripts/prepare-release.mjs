@@ -91,7 +91,7 @@ export async function prepareRelease(options) {
     path.join(releaseDirectory, "SHA256SUMS"),
     `${checksums.join("\n")}\n`,
   );
-  await stageRootPackage(rootPackageDirectory);
+  await stageRootPackage(rootPackageDirectory, repositoryRoot);
   return {
     nativePackageCount: checksums.length,
     releaseDirectory,
