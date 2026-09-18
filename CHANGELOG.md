@@ -68,6 +68,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - Lifecycle operations now reject inherited Git repository/index overrides
   before mutation, preventing worktree creation from resetting the source
   repository's staged index through `GIT_DIR`. Ordinary Git passthrough is unchanged.
+- Interrupted-add recovery preserves staged modifications, staged deletions,
+  intent-to-add entries, and conflicts even when working files match the base.
+  Recovery initializes only a missing index and never overwrites an existing one.
 
 - Interactive `riftri exec` no longer dies from Ctrl-C while its scoped
   command survives the interrupt. With a foreground controlling terminal,

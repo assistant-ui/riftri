@@ -273,6 +273,14 @@ intent-recorded
 Every incomplete forward state may transition to `rollback-pending`, followed
 by `rolled-back`. `active` and `rolled-back` are terminal for an add operation.
 
+Rollback checks staged index changes separately from working-file bytes,
+including intent-to-add and conflicted entries. An existing index is never
+reset to make a failed creation appear clean. If the index is absent and the
+view still matches its exact base, real Git builds a replacement index in a
+temporary file; installation cannot overwrite an index created concurrently.
+This also covers a crash after Git initialized the index but before the
+`index-synchronized` journal transition was persisted.
+
 ## Removal-operation journal state machine
 
 Removal uses separate journals under `removals/`:
