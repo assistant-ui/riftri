@@ -81,6 +81,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   command does die from SIGINT). The command starts with its inherited
   dispositions restored, prior dispositions are reinstated after the command
   is reaped, and supervised process-group forwarding is unchanged.
+- Interrupted-add recovery preserves ignored files and unexpected empty
+  directories, even when Git reports a clean worktree. Rollback verifies the
+  complete view before deleting it; explicit removal semantics are unchanged.
 - Repair of an interrupted forced managed removal no longer deletes a worktree
   whose metadata changed after force intent was recorded. The forced-removal
   snapshot now covers each entry's full native permission bits (setuid,

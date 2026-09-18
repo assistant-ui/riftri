@@ -7139,7 +7139,12 @@ fn remove_registered_worktree_for_rollback(
     if !journal.destination.exists() || contains_only_git_pointer(&journal.destination)? {
         remove_pointer_only_worktree(git, &journal.repository, journal)?;
     } else if git.worktree_is_clean(&journal.destination)? {
-        remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
+        remove_worktree_for_rollback(
+            git,
+            &journal.repository,
+            &journal.destination,
+            Some(&journal.base_path),
+        )?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
         if !git
             .initialize_missing_worktree_index(&journal.destination, &journal.sparse_directories)?
@@ -7149,7 +7154,12 @@ fn remove_registered_worktree_for_rollback(
         if !git.worktree_is_clean(&journal.destination)? {
             return Err(changed_rollback_worktree(journal));
         }
-        remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
+        remove_worktree_for_rollback(
+            git,
+            &journal.repository,
+            &journal.destination,
+            Some(&journal.base_path),
+        )?;
     } else {
         return Err(changed_rollback_worktree(journal));
     }
@@ -7216,7 +7226,7 @@ fn remove_pointer_only_worktree(
     }
     // Git can remove a missing directory without force. If a writer recreates
     // it first, Git's ordinary safety checks apply to that new directory.
-    if let Err(error) = remove_worktree_for_rollback(git, repository, &journal.destination) {
+    if let Err(error) = remove_worktree_for_rollback(git, repository, &journal.destination, None) {
         restore_staged_git_pointer(journal)?;
         return Err(error);
     }
@@ -7227,12 +7237,25 @@ fn remove_worktree_for_rollback(
     git: &Git,
     repository: &Path,
     destination: &Path,
+    expected_base: Option<&Path>,
 ) -> Result<(), WorktreeError> {
     #[cfg(test)]
     crate::test_hooks::fire(
         crate::test_hooks::FilesystemRacePoint::RollbackGitRemoval,
         destination,
     );
+    // Git's ordinary clean status omits ignored files and empty directories.
+    // Add rollback is not an explicit request to discard those private entries.
+    // Revalidate the complete view at the final removal boundary, not only when
+    // a missing index made Git report the initial checkout as dirty.
+    if let Some(base) = expected_base
+        && !view_matches_base(base, destination)?
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} has changes or private entries; recovery preserved it",
+            destination.display()
+        )));
+    }
     git.remove_worktree(repository, destination)?;
     Ok(())
 }
@@ -7511,8 +7534,7 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
         && OverlayFsMounter::mount_state(&layout, identity)? == OverlayFsMountState::Active
     {
         let clean_snapshot = overlayfs_layer_snapshot(layout.upper())?;
-        let safe_to_remove = git.worktree_is_clean(&journal.destination)?
-            || view_matches_base(&journal.base_path, &journal.destination)?;
+        let safe_to_remove = view_matches_base(&journal.base_path, &journal.destination)?;
         if !safe_to_remove {
             return Err(WorktreeError::InvalidRequest(format!(
                 "worktree {} has changes; recovery preserved it",
@@ -9861,6 +9883,9 @@ mod tests {
                 .pop()
                 .expect("incomplete add journal");
 
+            // A late ignored write must also survive: Git's normal clean
+            // status cannot serve as the final protection for add rollback.
+            fs::write(repository.join(".git/info/exclude"), "raced.txt\n").unwrap();
             let _hook = crate::test_hooks::install(
                 crate::test_hooks::FilesystemRacePoint::RollbackGitRemoval,
                 |path| {
@@ -9876,6 +9901,7 @@ mod tests {
                 matches!(
                     &error,
                     super::WorktreeError::Git(GitError::CommandFailed { .. })
+                        | super::WorktreeError::InvalidRequest(_)
                 ),
                 "unexpected rollback error: {error}"
             );
@@ -10615,6 +10641,99 @@ mod tests {
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved change"),
             "changed after intent\n"
         );
+    }
+
+    #[test]
+    fn interrupted_add_recovery_preserves_ignored_and_empty_entries() {
+        for (phase, sparse) in [
+            (AddWorktreePhase::GitPointerRestored, false),
+            (AddWorktreePhase::IndexSynchronized, false),
+            (AddWorktreePhase::GitPointerRestored, true),
+            (AddWorktreePhase::IndexSynchronized, true),
+        ] {
+            for private_entry in ["ignored-file", "ignored-directory", "empty-directory"] {
+                let fixture = tempdir().unwrap();
+                let repository = fixture.path().join("repository");
+                let destination = fixture.path().join("view");
+                let state = fixture.path().join("state");
+                fs::create_dir(&repository).unwrap();
+                git(&repository, &["init", "--quiet"]);
+                git(&repository, &["config", "user.name", "Riftri Tests"]);
+                git(
+                    &repository,
+                    &["config", "user.email", "riftri@example.invalid"],
+                );
+                git(&repository, &["config", "core.autocrlf", "false"]);
+                fs::write(repository.join("tracked.txt"), "original\n").unwrap();
+                fs::write(repository.join(".gitignore"), "secret.txt\nprivate/\n").unwrap();
+                fs::create_dir(repository.join("selected")).unwrap();
+                fs::write(repository.join("selected/file"), "selected\n").unwrap();
+                git(&repository, &["add", "."]);
+                git(&repository, &["commit", "--quiet", "-m", "initial"]);
+                add_worktree_inner(
+                    AddWorktreeRequest {
+                        repository: repository.clone(),
+                        destination: destination.clone(),
+                        revision: OsString::from("HEAD"),
+                        mode: WorktreeMode::Detached,
+                        state_dir: Some(state.clone()),
+                        sparse_directories: if sparse {
+                            vec!["selected".to_owned()]
+                        } else {
+                            vec![]
+                        },
+                    },
+                    Some(phase),
+                    false,
+                )
+                .expect_err("interrupt creation");
+                if phase == AddWorktreePhase::GitPointerRestored {
+                    if sparse {
+                        riftri_git::Git::default()
+                            .synchronize_sparse_worktree_index(
+                                &destination,
+                                &["selected".to_owned()],
+                            )
+                            .unwrap();
+                    } else {
+                        riftri_git::Git::default()
+                            .synchronize_worktree_index(&destination)
+                            .unwrap();
+                    }
+                }
+                let private_path = match private_entry {
+                    "ignored-file" => destination.join("secret.txt"),
+                    "ignored-directory" => {
+                        fs::create_dir(destination.join("private")).unwrap();
+                        destination.join("private/notes.txt")
+                    }
+                    "empty-directory" => destination.join("empty-private-directory"),
+                    _ => unreachable!(),
+                };
+                if private_entry == "empty-directory" {
+                    fs::create_dir(&private_path).unwrap();
+                } else {
+                    fs::write(&private_path, "private data\n").unwrap();
+                }
+                assert!(
+                    riftri_git::Git::default()
+                        .worktree_is_clean(&destination)
+                        .unwrap()
+                );
+                for _ in 0..2 {
+                    let report = recover_incomplete_operations(&state).unwrap();
+                    assert_eq!(
+                        report.recovered, 0,
+                        "{private_entry}, {phase:?}: {report:?}"
+                    );
+                    assert_eq!(report.errors.len(), 1, "{report:?}");
+                    assert!(private_path.exists());
+                    if private_entry != "empty-directory" {
+                        assert_eq!(fs::read(&private_path).unwrap(), b"private data\n");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
