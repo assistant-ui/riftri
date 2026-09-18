@@ -98,7 +98,7 @@ existing automation keeps working unchanged.
 ### `riftri setup [OPTIONS]`
 
 Interactive first-worktree onboarding, followed by an optional coding-agent
-launch. Available in source builds; not included in the v0.3.0 binary release.
+launch. Available starting with v0.3.1.
 
 ```sh
 riftri setup

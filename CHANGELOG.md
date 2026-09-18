@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.3.1] - 2026-09-18
+
 ### Added
 
 - `riftri setup` guides terminal users through destination checks and an
@@ -13,6 +15,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   repository and starts the chosen executable through `riftri exec --worktree`.
   Cancellation preserves completed work, no agent or shell profile is installed
   or changed, and automation continues to use the existing explicit commands.
+- An optional `riftri-worktrees` agent skill documents explicit creation,
+  process-scoped Git integration, and permission-respecting cleanup. It is
+  installable through the skills CLI and is not required for COW correctness.
+
+### Documentation
+
+- The Markdown guide at `riftri.dev/index.md` explains guided setup, opening an
+  agent in a ready COW worktree, and wrapping an agent that creates additional
+  worktrees. Installation examples and package metadata now target v0.3.1.
 
 ## [0.3.0] - 2026-09-18
 

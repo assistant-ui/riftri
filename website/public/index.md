@@ -62,9 +62,9 @@ SHA-256 checks are not a separate signature or notarization guarantee.
 
 ## Quick start
 
-### Guided setup (unreleased)
+### Guided setup
 
-Source builds with the guided setup command can start with:
+Available starting with v0.3.1. From an existing Git repository, run:
 
 ```sh
 riftri setup
@@ -79,12 +79,11 @@ wrapper. It does not install an agent, edit shell profiles, or change the agent'
 permissions. Choosing **Not now** keeps the ready worktree without changing
 repository enablement.
 
-This command is not in the v0.3.0 release. Until it ships, use the explicit
+On an older release, upgrade using the installer above or use the explicit
 commands below. The [CLI reference](https://github.com/assistant-ui/riftri/blob/main/docs/cli.md)
-documents commands as they land on the main branch; check `riftri --help` for
-your installed version.
+documents the full workflow; check `riftri --help` for your installed version.
 
-### Explicit setup (current release)
+### Explicit setup and automation
 
 From an existing Git repository, check the proposed destination:
 
