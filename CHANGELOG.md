@@ -111,6 +111,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- Status keeps completed and cancelled compaction counts after later compactions
+  or managed moves, without false unsafe-journal diagnostics.
 - Linux mount identity checks keep complete paths that contain carriage-return
   or form-feed bytes.
 - Batched Git configuration reads keep case-sensitive subsection names and
