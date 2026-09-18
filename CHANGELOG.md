@@ -111,6 +111,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- Batched Git configuration reads keep case-sensitive subsection names and
+  lowercase only section and variable names.
 - Intercepted `git worktree add --quiet` commands no longer print a success
   message. Error messages remain visible.
 - Shell status and deactivation retain the activated shim path after a directory
