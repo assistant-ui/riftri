@@ -1,6 +1,6 @@
 {
   "name": "riftri-linux-x64-gnu",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Riftri native binary for Linux x64 (glibc)",
   "license": "MIT",
   "os": [
