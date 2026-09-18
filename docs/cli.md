@@ -20,8 +20,15 @@ A third convention, [progress reporting](#progress-reporting), applies to the
 long-running lifecycle commands and is suppressed with the global
 `--no-progress` flag.
 
-Commands that operate on a repository accept it as an optional positional
-argument or a `--repository` flag, defaulting to the current directory (`.`).
+Repository-selecting commands consistently accept `--repository <PATH>`,
+defaulting to the current directory (`.`). `enable`, `disable`, `doctor`,
+`status`, `repair`, `gc`, and `shell status` also keep their older positional
+repository argument. Use one form, not both; conflicting selectors are a usage
+error, never a silent override. For example, `riftri status --repository ../app
+--json` and `riftri status ../app --json` inspect the same repository.
+`backends` takes a filesystem destination rather than a repository, and `exec`
+uses `--worktree` to select the child's working directory; neither accepts
+`--repository`.
 Commands that touch Riftri state accept `--state-dir <PATH>` to override the
 default state directory at `<common-git-dir>/riftri`.
 
