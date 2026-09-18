@@ -349,7 +349,12 @@ attributes, and Windows file attributes across the complete view. Unix
 setuid, setgid, and sticky bits are not represented by Git trees;
 compaction refuses entries carrying these special bits, including during
 recovery, rather than dropping them. Ordinary-mode snapshot compatibility is
-unchanged. Windows alternate data streams fail closed. Riftri then prepares or
+unchanged. macOS extended ACLs and ACL-wide inheritance flags also fail closed:
+Git cannot reconstruct them and they are not visible through xattr enumeration.
+Native ACL inspection does not follow symlink targets; unreadable ACLs stop the
+operation. This guard also preserves a quarantined view if an ACL appears before
+recovery cleanup, including for older compaction journals. Windows alternate
+data streams fail closed. Riftri then prepares or
 reuses the exact current-tree base,
 creates a fresh native COW replacement, and copies the real linked-worktree
 pointer into it. Immediately before the same-parent directory swap, Riftri

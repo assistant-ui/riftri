@@ -6047,6 +6047,13 @@ fn hash_entry_xattrs(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeErr
 fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(target_os = "macos")]
+    if riftri_storage::has_macos_acl(path)? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} has a macOS ACL that Git cannot reproduce; compaction preserved it",
+            path.display()
+        )));
+    }
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
     // Git does not reproduce these bits from its tree. Refuse both new
@@ -8144,6 +8151,122 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777)).unwrap();
         }
         super::directory_snapshot(fixture.path()).expect("ordinary permissions remain supported");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compaction_snapshots_refuse_macos_access_control_rules() {
+        let fixture = tempdir().unwrap();
+        let file = fixture.path().join("file");
+        fs::write(&file, "private\n").unwrap();
+        for (path, rule) in [
+            (file.as_path(), "everyone deny write"),
+            (
+                fixture.path(),
+                "everyone allow read,file_inherit,directory_inherit",
+            ),
+        ] {
+            let before = super::directory_snapshot(fixture.path()).unwrap();
+            assert!(
+                Command::new("chmod")
+                    .args(["+a", rule])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let error = super::verify_snapshot(fixture.path(), &before)
+                .expect_err("ACLs must prevent destructive compaction cleanup");
+            assert!(error.to_string().contains("ACL"), "{error}");
+            assert!(
+                Command::new("chmod")
+                    .arg("-N")
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert_eq!(
+                super::directory_snapshot(fixture.path()).unwrap(),
+                before,
+                "ordinary snapshot format stays compatible"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compaction_recovery_preserves_new_macos_acls() {
+        for phase in [
+            CompactWorktreePhase::ReplacementReady,
+            CompactWorktreePhase::ReplacementActivated,
+            CompactWorktreePhase::AddJournalUpdated,
+        ] {
+            let fixture = tempdir().unwrap();
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("view");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("file"), "original\n").unwrap();
+            git(&repository, &["add", "."]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: vec![],
+                },
+                None,
+                true,
+            )
+            .unwrap();
+            compact_worktree_inner(
+                CompactWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("interrupt compaction");
+            let journal = super::CompactJournalStore::open(&state)
+                .load_all()
+                .unwrap()
+                .pop()
+                .unwrap();
+            let protected = if phase == CompactWorktreePhase::ReplacementReady {
+                destination.join("file")
+            } else {
+                journal.quarantine.join("file")
+            };
+            assert!(
+                Command::new("chmod")
+                    .args(["+a", "everyone deny write"])
+                    .arg(&protected)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            for _ in 0..2 {
+                let report = recover_incomplete_operations(&state).unwrap();
+                assert_eq!(report.recovered_compactions, 0, "{phase:?}: {report:?}");
+                assert_eq!(report.errors.len(), 1, "{report:?}");
+                assert!(report.errors[0].contains("ACL"), "{report:?}");
+                assert!(riftri_storage::has_macos_acl(&protected).unwrap());
+                assert_eq!(fs::read(&protected).unwrap(), b"original\n");
+                assert_eq!(fs::read(destination.join("file")).unwrap(), b"original\n");
+            }
+        }
     }
 
     #[test]
