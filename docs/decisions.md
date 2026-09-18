@@ -556,6 +556,21 @@ or rewinds that branch. Once materialization advances, branch or HEAD changes
 preserve the view for explicit user resolution. Version 1 journals that lack
 the ownership field retain the legacy created-branch interpretation.
 
+### Terminal presentation is not lifecycle state
+
+Ratatui lives only in `riftri-cli`. Guided questions call the existing
+doctor/add/enable/exec path; their choices neither bypass safety checks nor add
+a new workspace abstraction. Arrow-key confirmations default to No. Raw mode
+and the alternate screen exist only during a question, and must be restored
+before transactions or child processes run.
+
+Human reports stay in scrollback. Animated progress is indeterminate and driven
+by actual core progress events, never artificial percentages or delays. The
+plain interface, JSON receipts, generated shell code, Git shim, and child
+process output retain their existing contracts. `--plain`, `--no-animation`,
+and `NO_COLOR` provide explicit accessibility and presentation controls. There
+is no state migration and no new activation or shell-profile behavior.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
