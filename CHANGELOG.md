@@ -93,6 +93,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   digest and therefore also fail closed instead of authorizing deletion.
   Immutable-base content hashing is unchanged, so existing cached bases stay
   valid.
+- macOS compaction now refuses extended ACLs instead of silently dropping
+  access-control rules. Native, symlink-aware inspection protects initial
+  compaction and recovery cleanup without changing ordinary snapshot formats.
 - Terminating the native `riftri exec` with SIGTERM, SIGINT, or SIGHUP now
   forwards the signal to the scoped command instead of orphaning it.
   Supervised invocations run the command in its own process group and signal

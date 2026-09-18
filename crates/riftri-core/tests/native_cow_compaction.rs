@@ -189,6 +189,60 @@ fn compaction_refuses_special_permissions_before_recording_intent() {
     assert_eq!(fs::read_dir(state.join("compactions")).unwrap().count(), 0);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn compaction_refuses_macos_acls_before_recording_intent() {
+    use std::os::unix::fs::MetadataExt;
+    for directory_acl in [false, true] {
+        let (fixture, repository) = fixture();
+        let state = fixture.path().join("state");
+        let worktree = fixture.path().join("worktree");
+        add_worktree(AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: worktree.clone(),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.clone()),
+            sparse_directories: vec![],
+        })
+        .unwrap();
+        let protected = if directory_acl {
+            worktree.clone()
+        } else {
+            worktree.join("tracked.txt")
+        };
+        let rule = if directory_acl {
+            "everyone allow read,file_inherit,directory_inherit"
+        } else {
+            "everyone deny write"
+        };
+        assert!(
+            Command::new("chmod")
+                .args(["+a", rule])
+                .arg(&protected)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(riftri_storage::has_macos_acl(&protected).unwrap());
+        let inode = fs::metadata(&protected).unwrap().ino();
+        let pointer = fs::read(worktree.join(".git")).unwrap();
+        assert!(git(&worktree, &["status", "--porcelain"]).is_empty());
+        let error = compact_worktree(CompactWorktreeRequest {
+            repository,
+            destination: worktree.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect_err("ACL must be preserved before compaction intent");
+        assert!(error.to_string().contains("macOS ACL"), "{error}");
+        assert_eq!(fs::metadata(&protected).unwrap().ino(), inode);
+        assert!(riftri_storage::has_macos_acl(&protected).unwrap());
+        assert_eq!(fs::read(worktree.join(".git")).unwrap(), pointer);
+        assert_eq!(fs::read(worktree.join("tracked.txt")).unwrap(), b"base\n");
+        assert_eq!(fs::read_dir(state.join("compactions")).unwrap().count(), 0);
+    }
+}
+
 #[test]
 fn compaction_rekeys_the_active_view_after_a_clean_commit() {
     let (fixture, repository) = fixture();
