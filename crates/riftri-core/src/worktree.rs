@@ -9937,6 +9937,7 @@ mod tests {
                 &repository,
                 &["config", "user.email", "riftri@example.invalid"],
             );
+            git(&repository, &["config", "core.autocrlf", "false"]);
             for dir in ["a", "b"] {
                 fs::create_dir(repository.join(dir)).unwrap();
                 fs::write(repository.join(dir).join("file.txt"), dir).unwrap();
@@ -9952,7 +9953,10 @@ mod tests {
                 sparse_directories: vec!["a".to_owned()],
             };
             let error = add_worktree_inner(request, Some(phase), false).unwrap_err();
-            assert!(error.to_string().contains("injected failure"));
+            assert!(
+                error.to_string().contains("injected failure"),
+                "unexpected failure after {phase:?}: {error}"
+            );
             git(&destination, &["sparse-checkout", "set", "--cone", "b"]);
             let before = Command::new("git")
                 .current_dir(&destination)
