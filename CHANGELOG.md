@@ -5,6 +5,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- `riftri setup` guides terminal users through destination checks and an
+  explicitly confirmed, journaled worktree creation at `HEAD`, then offers an
+  optional installed-agent choice. A separate confirmation enables the
+  repository and starts the chosen executable through `riftri exec --worktree`.
+  Cancellation preserves completed work, no agent or shell profile is installed
+  or changed, and automation continues to use the existing explicit commands.
+
 ## [0.3.0] - 2026-09-18
 
 ### Added

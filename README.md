@@ -69,6 +69,15 @@ standalone installer or GitHub release assets for now.
 
 ## Quick start
 
+For an interactive walkthrough in source builds (not yet in v0.3.0), run
+`riftri setup` inside your existing repository. It checks the destination,
+confirms a new worktree at `HEAD`, and then asks whether to open Claude Code,
+Codex, another installed executable, or no agent. Repository enablement and
+agent launch require a separate confirmation. See the
+[setup reference](docs/cli.md#riftri-setup-options).
+
+The explicit commands below work in the current release and in automation.
+
 Check that the repository and destination are compatible — this creates
 nothing:
 
@@ -158,9 +167,10 @@ $ riftri repair                      # resume or roll back interrupted work
 $ riftri gc --apply                  # delete unreferenced bases
 ```
 
-Every command that reports or changes state accepts `--json`, and any command
-accepts `--json-errors` to emit a versioned failure receipt, so automation never
-has to scrape human text. The full reference is in [docs/cli.md](docs/cli.md).
+Explicit lifecycle and diagnostic commands accept `--json` and `--json-errors`
+for structured success and failure receipts, so automation does not have to
+scrape human text. Interactive `setup` is for terminal users, not automation.
+The full reference is in [docs/cli.md](docs/cli.md).
 
 ## Documentation
 

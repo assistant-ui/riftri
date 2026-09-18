@@ -24,6 +24,7 @@ fn completions_emit_a_script_for_each_supported_shell() {
             script.contains("worktree"),
             "{shell} completion script never mentions the worktree subcommand"
         );
+        assert!(script.contains("setup"), "{shell} is missing setup");
         assert!(
             script.contains("unregister"),
             "{shell} completion script is missing state unregister"

@@ -12,9 +12,13 @@ Two conventions apply everywhere:
   machine-readable JSON receipt on stderr instead of human-readable text. The
   receipt contract is documented in the
   [agent integration guide](agent-integration.md).
-- **`--json`** is accepted by every command that reports or changes state
+- **`--json`** is accepted by the explicit commands that report or change state
   (`doctor`, `backends`, `status`, `repair`, `gc`, and all `worktree`
   subcommands). It emits stable machine-readable JSON on success.
+
+The interactive-only `setup` command rejects `--json-errors` with a single JSON
+receipt before prompting or making changes; use the explicit commands for
+automation. It has no `--json` or `--yes` mode.
 
 A third convention, [progress reporting](#progress-reporting), applies to the
 long-running lifecycle commands and is suppressed with the global
@@ -90,6 +94,60 @@ Non-interactive callers — agents, scripts, CI — are never prompted, so
 existing automation keeps working unchanged.
 
 ## Enablement and activation
+
+### `riftri setup [OPTIONS]`
+
+Interactive first-worktree onboarding, followed by an optional coding-agent
+launch. Available in source builds; not included in the v0.3.0 binary release.
+
+```sh
+riftri setup
+riftri setup --repository ../app --destination ../app-auth --branch feature/auth
+```
+
+Standard input, output, and error must all be terminals. `--repository <PATH>`
+defaults to the caller's current directory. The repository must already exist;
+setup does not clone repositories or fetch revisions.
+
+Setup asks for a destination and a new branch, defaulting to a sibling directory
+named `<repository>.task` and `task/first`. `--destination <PATH>` and
+`-b, --branch <BRANCH>` skip their respective questions, not confirmation.
+Relative paths resolve from the caller's working directory, including when
+`--repository` selects a different checkout. Native paths supplied as arguments
+are preserved. The start point is always `HEAD`: uncommitted source changes are
+not copied. Use `worktree add` directly for an existing branch, another revision,
+detached HEAD, sparse checkout, or custom state placement.
+
+Doctor checks the actual destination's storage and checkout compatibility.
+Explicit creation does not need repository enablement. Other blockers stop the
+flow with remedies before creation; there is no full-copy fallback. A printed
+plan and `Create this worktree? [y/N]` confirmation precede the normal journaled
+add transaction. Existing destinations or branches are never overwritten. A
+decline or end-of-input before creation leaves no new worktree or enablement.
+
+After creation, setup asks which coding agent to open:
+
+- **Not now** (the default): keep the worktree without launching anything or
+  changing repository enablement.
+- **Claude Code** (`claude`) or **Codex** (`codex`): resolve the installed CLI
+  through PATH. Setup neither installs nor signs in to an agent.
+- **Another executable**: accept one executable name or path, without arguments
+  or shell evaluation. Missing or non-executable choices return to the menu.
+  For custom arguments, finish setup and use `riftri exec` yourself.
+
+The separate `Enable this repository and launch the agent now? [y/N]` prompt
+explains that enablement is repository-local and shared by its linked worktrees.
+Only explicit approval sets `riftri.enabled=true` and launches through the
+existing `exec --worktree` machinery. Paths are resolved before changing the
+child's directory, arguments are not interpreted by a shell, and no agent
+permission settings or shell profiles are changed. Existing bypass settings are
+preserved. Agent exit status and signal handling follow `riftri exec`.
+
+Declining launch, EOF, a launch failure, or an agent exit does not delete the
+created worktree. Once approved, repository enablement remains in effect even
+if launch fails; use `riftri disable` to reverse it. The agent must still decide
+to create future worktrees and call `git` through the inherited PATH. Absolute
+Git paths and embedded Git libraries are outside interception.
 
 ### `riftri enable [PATH]`
 
