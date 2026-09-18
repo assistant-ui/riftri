@@ -65,6 +65,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Lifecycle operations now reject inherited Git repository/index overrides
+  before mutation, preventing worktree creation from resetting the source
+  repository's staged index through `GIT_DIR`. Ordinary Git passthrough is unchanged.
+
 - Interactive `riftri exec` no longer dies from Ctrl-C while its scoped
   command survives the interrupt. With a foreground controlling terminal,
   `riftri exec` now ignores SIGINT and SIGQUIT while waiting — the terminal
