@@ -65,6 +65,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- npm publication now waits for every native platform package to be visible
+  before publishing the launcher, preventing a propagation delay or incomplete
+  platform release from producing an unusable first-time install.
+
 - Lifecycle operations now reject inherited Git repository/index overrides
   before mutation, preventing worktree creation from resetting the source
   repository's staged index through `GIT_DIR`. Ordinary Git passthrough is unchanged.
