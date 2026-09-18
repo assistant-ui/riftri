@@ -22,7 +22,7 @@ const child = spawn(binary, process.argv.slice(2), {
   windowsHide: false,
 });
 
-const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
+const signals = ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"];
 const forwardSignal = (signal) => child.kill(signal);
 for (const signal of signals) {
   process.on(signal, forwardSignal);

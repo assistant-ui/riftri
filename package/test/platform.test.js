@@ -138,7 +138,12 @@ test("launcher preserves Rust CLI failures", () => {
   assert.match(result.stderr, /unrecognized subcommand/);
 });
 
-for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+for (const [signal, exitCode, expectedSignal] of [
+  ["SIGTERM", 143, null],
+  ["SIGINT", 130, null],
+  ["SIGHUP", 129, null],
+  ["SIGQUIT", null, "SIGQUIT"],
+]) {
   test(`launcher forwards PID-directed ${signal} to native Riftri`, {
     skip: process.platform === "win32",
     timeout: 10000,
@@ -167,8 +172,8 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
 
     child.kill(signal);
     const [code, exitSignal] = await exited;
-    assert.equal(code, null);
-    assert.equal(exitSignal, signal);
+    assert.equal(code, exitCode);
+    assert.equal(exitSignal, expectedSignal);
     assert.throws(() => process.kill(nativePid, 0), { code: "ESRCH" });
   });
 }
