@@ -1231,27 +1231,19 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             index += 2;
         } else if argument == "--git-dir" || argument == "--work-tree" {
             let value = arguments.get(index + 1)?;
-            let path = resolve_command_path(&repository, value);
             if argument == "--work-tree" {
-                work_tree = Some(path);
+                work_tree = Some(value.clone());
             } else {
-                git_directory = Some(path.clone());
-                if path.file_name() == Some(OsStr::new(".git")) {
-                    repository = path.parent()?.to_path_buf();
-                }
+                git_directory = Some(value.clone());
             }
             optimization_compatible = false;
             index += 2;
         } else if let Some(value) = option_value(argument, "--git-dir=") {
-            let path = resolve_command_path(&repository, &value);
-            git_directory = Some(path.clone());
-            if path.file_name() == Some(OsStr::new(".git")) {
-                repository = path.parent()?.to_path_buf();
-            }
+            git_directory = Some(value);
             optimization_compatible = false;
             index += 1;
         } else if let Some(value) = option_value(argument, "--work-tree=") {
-            work_tree = Some(resolve_command_path(&repository, &value));
+            work_tree = Some(value);
             optimization_compatible = false;
             index += 1;
         } else if argument == "--no-pager"
@@ -1288,6 +1280,8 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
         } else if argument.to_string_lossy().starts_with('-') {
             return None;
         } else {
+            let work_tree = work_tree.map(|path| resolve_command_path(&repository, &path));
+            let git_directory = git_directory.map(|path| resolve_command_path(&repository, &path));
             let git_directory = work_tree.is_none().then_some(git_directory).flatten();
             return Some(CommandContext {
                 repository: work_tree.unwrap_or(repository),
