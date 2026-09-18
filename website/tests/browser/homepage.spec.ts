@@ -181,6 +181,52 @@ test("Markdown link navigates in the same tab without a download", async ({ page
   expect(context.pages()).toHaveLength(count);
 });
 
+test("materialization backend cycles without a progress indicator", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/#overview");
+  const decoration = await page.locator(".backend-cycle, .backend-cycle-item").evaluateAll((elements) =>
+    elements.map((element) => getComputedStyle(element, "::after").content));
+  expect(decoration.every((content) => content === "none")).toBe(true);
+  await expect(page.locator(".backend-cycle-item").first()).toHaveCSS("animation-name", "backend-cycle");
+});
+
+test("savings underline follows the width of every animated filesystem name", async ({ page }, testInfo) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.goto("/#savings");
+  await page.evaluate(() => document.fonts.ready);
+  const cycle = page.locator(".savings-backend-cycle");
+  await expect(cycle).toHaveCSS("border-bottom-width", "0px");
+  const frames = ["APFS", "Linux reflink", "ReFS"];
+  const widths: number[] = [];
+  const containerWidths: number[] = [];
+  for (const [index, name] of frames.entries()) {
+    await page.locator(".savings-backend-item").evaluateAll((elements, time) => {
+      for (const element of elements) {
+        for (const animation of element.getAnimations()) {
+          animation.pause();
+          animation.currentTime = time;
+        }
+      }
+    }, 1000 + index * 4000);
+    const item = cycle.getByText(name, { exact: true });
+    await expect(item).toHaveCSS("opacity", "1");
+    await expect(item).toHaveCSS("border-bottom-style", "dotted");
+    await expect(item).toHaveCSS("border-bottom-width", "1px");
+    const bounds = await item.evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return { item: element.getBoundingClientRect().width, text: range.getBoundingClientRect().width };
+    });
+    expect(Math.abs(bounds.item - bounds.text)).toBeLessThanOrEqual(1);
+    widths.push(bounds.item);
+    containerWidths.push(await cycle.evaluate((element) => element.getBoundingClientRect().width));
+    await page.locator(".savings-map").screenshot({ path: testInfo.outputPath(`savings-${index}-${testInfo.project.name}.png`) });
+  }
+  expect(widths[1]).toBeGreaterThan(widths[0]);
+  expect(widths[1]).toBeGreaterThan(widths[2]);
+  expect(new Set(containerWidths).size).toBe(1);
+});
+
 test("wrapped backend status stays inside the animated diagram", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "exercise the narrow four-column layout once");
   await page.setViewportSize({ width: 761, height: 1000 });
@@ -212,6 +258,16 @@ test("reduced motion stops loops while preserving readable diagram content", asy
   await expect(page.locator(".storage-map, .materialization-map").getByRole("button")).toHaveCount(0);
   const names = await page.locator(".track-counter, .backend-cycle-item, .savings-backend-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName));
   expect(names.every((name) => name === "none")).toBe(true);
+  const underline = await page.locator(".savings-backend-item").first().evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    return {
+      border: getComputedStyle(element).borderBottomStyle,
+      excess: element.getBoundingClientRect().width - range.getBoundingClientRect().width,
+    };
+  });
+  expect(underline.border).toBe("dotted");
+  expect(Math.abs(underline.excess)).toBeLessThanOrEqual(1);
   await expect(page.locator(".materialization-map")).toContainText("FROM TREE TO WORKSPACE");
 });
 
