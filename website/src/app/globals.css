@@ -674,7 +674,6 @@ code, pre { font-family: var(--font-mono); }
   min-height: 50px;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  border: 1px solid var(--line);
   border-left: 2px solid var(--accent);
   background: var(--surface);
 }

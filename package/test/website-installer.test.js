@@ -64,3 +64,11 @@ test("hero and quick start reuse one install command and the same quick-start co
   assert.match(steps, /command: installCommand/);
   assert.doesNotMatch(css, /\.start-list li:first-child \.command/);
 });
+
+test("command blocks keep the original left accent without an outer border", () => {
+  const css = fs.readFileSync(path.join(root, "website/src/app/globals.css"), "utf8");
+  const command = css.match(/^\.command\s*\{([^}]+)\}/m)?.[1];
+  assert.ok(command);
+  assert.match(command, /border-left:\s*2px solid var\(--accent\)/);
+  assert.doesNotMatch(command, /\bborder(?:-top|-right|-bottom|-block|-inline)?:/);
+});
