@@ -239,8 +239,6 @@ code, pre { font-family: var(--font-mono); }
   padding: 3rem var(--gutter);
   border-left: 1px solid var(--line);
   background-color: var(--canvas-deep);
-  background-image: linear-gradient(rgb(239 239 236 / 0.025) 1px, transparent 1px), linear-gradient(90deg, rgb(239 239 236 / 0.025) 1px, transparent 1px);
-  background-size: 32px 32px;
 }
 
 .hero-graph-label { display: flex; justify-content: space-between; gap: 1rem; margin: 0 0 1.75rem; color: var(--ink-faint); font-size: 0.7rem; letter-spacing: 0.06em; }

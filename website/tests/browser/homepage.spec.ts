@@ -24,6 +24,8 @@ test("homepage renders without browser errors and captures the final layout", as
   await expect(page.getByRole("heading", { name: "Git worktrees. Shared storage.", exact: true })).toBeVisible();
   await expect(page.locator(".hero-highlight")).toHaveText("storage.");
   await expect(page.locator(".hero-highlight")).toHaveCSS("background-color", "rgb(240, 106, 58)");
+  await expect(page.locator(".hero-graph")).toHaveCSS("background-image", "none");
+  await expect(page.locator(".hero-graph")).toHaveCSS("background-color", "rgb(5, 5, 5)");
   await expect(page.getByRole("heading", { name: "Worktree disk usage" })).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

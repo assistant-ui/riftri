@@ -8,7 +8,7 @@ concepts, safety, lifecycle, and compatibility material stays in the
 repository documentation and the Markdown overview described below.
 
 The visual system keeps Riftri's dark canvas and orange accent, with a shared
-page frame, fine stacked section rules, and a subtle grid behind the storage
+page frame, fine stacked section rules, and a plain dark surface behind the storage
 example. Self-hosted Geist Sans carries the headings and body; Geist Mono is
 reserved for navigation, commands, diagrams, and metadata. The compact header
 wraps onto two rows on phones without hiding links behind a menu. Its section
