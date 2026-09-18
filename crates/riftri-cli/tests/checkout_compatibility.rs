@@ -21,6 +21,9 @@ impl RepositoryFixture {
             &["config", "user.name", "Riftri Tests"][..],
             &["config", "user.email", "riftri@example.invalid"][..],
             &["config", "core.autocrlf", "false"][..],
+            // Git for Windows writes core.symlinks=false at init when the
+            // system configuration is hidden, and doctor rejects that value.
+            &["config", "core.symlinks", "true"][..],
         ] {
             assert_git_success(&repository, arguments);
         }
