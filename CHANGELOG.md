@@ -111,6 +111,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- `riftri status` reports a file or symlink at `overlays/v1` as an unsafe
+  layout root without traversal or removal of the path.
 - Status keeps completed and cancelled compaction counts after later compactions
   or managed moves, without false unsafe-journal diagnostics.
 - Linux mount identity checks keep complete paths that contain carriage-return
