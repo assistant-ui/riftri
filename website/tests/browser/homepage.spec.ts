@@ -7,11 +7,11 @@ test("homepage renders without browser errors and captures the final layout", as
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Riftri", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Git worktrees. Shared storage.", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Worktree disk usage" })).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  const clipped = await page.locator(".hero-install, .command, .graph-frame, .frame-title, .diagram-controls").evaluateAll((elements) =>
+  const clipped = await page.locator(".site-header a, .storage-backends, .hero-install, .command, .graph-frame, .frame-title, .diagram-controls").evaluateAll((elements) =>
     elements.filter((element) => {
       const rect = element.getBoundingClientRect();
       return rect.width > 0 && (rect.left < -1 || rect.right > innerWidth + 1);
@@ -20,6 +20,24 @@ test("homepage renders without browser errors and captures the final layout", as
   expect(errors).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath(`hero-${testInfo.project.name}.png`) });
   await page.screenshot({ path: testInfo.outputPath(`homepage-${testInfo.project.name}.png`), fullPage: true });
+});
+
+test("header links and skip link transfer keyboard focus to their destinations", async ({ page }) => {
+  await page.goto("/");
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#main-content")).toBeFocused();
+  const navigation = page.getByRole("navigation", { name: "Main navigation" });
+  for (const [name, id] of [["How it works", "overview"], ["Savings", "savings"], ["FAQ", "faq"]]) {
+    const link = navigation.getByRole("link", { name, exact: true });
+    await link.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`#${id}$`));
+    await expect(page.locator(`#${id}`)).toBeFocused();
+  }
+  await page.getByRole("link", { name: "Riftri home" }).click();
+  await expect(page.locator("#top")).toBeFocused();
 });
 
 test("Get started transfers keyboard focus and continues inside quick start", async ({ page }) => {
@@ -44,7 +62,7 @@ test("breakpoint edges keep framed content inside the viewport", async ({ page }
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/");
     await page.evaluate(() => document.fonts.ready);
-    const clipped = await page.locator(".hero-install, .command, .graph-frame, .frame-title, .diagram-controls, .faq-item summary, .faq-answer").evaluateAll((elements) =>
+    const clipped = await page.locator(".site-header a, .storage-backends, .hero-install, .command, .graph-frame, .frame-title, .diagram-controls, .faq-item summary, .faq-answer").evaluateAll((elements) =>
       elements.filter((element) => {
         const rect = element.getBoundingClientRect();
         return rect.width > 0 && (rect.left < -1 || rect.right > innerWidth + 1);
