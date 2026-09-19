@@ -7,6 +7,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Suggested recovery commands in messages and JSON receipts now use POSIX
+  shell quoting on every platform instead of choosing the dialect at build
+  time. A Windows build previously emitted PowerShell quoting that a POSIX
+  shell such as Git Bash or WSL — where Git work commonly happens on Windows —
+  parses as a different path. The exact path stays in each receipt's
+  native-path field for any other shell.
 - Four machine-contract defects found by a contract audit of the CLI's JSON
   reports and failure receipts. `worktree list --all-states --json` now emits
   a `state_directory_native_hex` sibling beside each diagnostic entry's
