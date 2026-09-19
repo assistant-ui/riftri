@@ -5415,7 +5415,16 @@ fn classify_active_destination(
         reference
     });
     for worktree in registered {
-        if worktree.bare || claimed.contains(&worktree.path) {
+        // Git reports its registry in its own spelling (forward slashes, no
+        // verbatim prefix on Windows), so comparisons against journal paths
+        // must go through `paths_match`, never raw equality: a missed match
+        // here would let a worktree another journal owns pass as this
+        // journal's relocation.
+        if worktree.bare
+            || claimed
+                .iter()
+                .any(|destination| paths_match(destination, &worktree.path))
+        {
             continue;
         }
         let plausible = match &expected_branch {
@@ -5434,7 +5443,15 @@ fn classify_active_destination(
             }
         };
         if plausible {
-            return Ok(ActiveDestinationState::Relocated(worktree.path.clone()));
+            // Report the location in the same canonical filesystem form that
+            // journal destinations (and therefore `worktree list`) use, not
+            // Git's slash-normalized spelling — on Windows those differ
+            // (`R:/...` versus `\\?\R:\...`). The worktree exists, so
+            // canonicalization normally succeeds; if it does not, the raw
+            // registry spelling is still a truthful report.
+            let registered_path =
+                fs::canonicalize(&worktree.path).unwrap_or_else(|_| worktree.path.clone());
+            return Ok(ActiveDestinationState::Relocated(registered_path));
         }
     }
     Ok(ActiveDestinationState::Vanished)
@@ -5482,7 +5499,7 @@ fn active_add_journals_for_destination(
         .into_iter()
         .filter(|journal| {
             journal.phase == AddWorktreePhase::Active
-                && journal.destination == destination
+                && paths_match(&journal.destination, destination)
                 && !completed.contains(journal.operation_id.as_str())
         })
         .collect())
@@ -5631,7 +5648,7 @@ fn reconcile_active_add_journals(
             || completed.contains(journal.operation_id.as_str())
             // A pending removal already owns this add journal's fate.
             || pending_removals.contains(journal.operation_id.as_str())
-            || only_destination.is_some_and(|destination| journal.destination != destination)
+            || only_destination.is_some_and(|destination| !paths_match(&journal.destination, destination))
         {
             continue;
         }
@@ -5707,8 +5724,8 @@ fn superseding_add_journal(
         .find(|candidate| {
             candidate.operation_id != journal.operation_id
                 && candidate.phase == AddWorktreePhase::Active
-                && candidate.destination == journal.destination
-                && candidate.repository == journal.repository
+                && paths_match(&candidate.destination, &journal.destination)
+                && paths_match(&candidate.repository, &journal.repository)
         });
     let Some(owner) = owner else {
         return Ok(None);

@@ -258,11 +258,15 @@ fn repair_retires_racing_add_losers_without_touching_the_winner() {
         accounting.diagnostic_issues
     );
     assert!(destination.join("tracked.txt").is_file());
+    // Git prints its own path spelling (forward slashes, no verbatim prefix
+    // on Windows), so compare canonicalized paths rather than display text.
     let registered = git(&repository, &["worktree", "list", "--porcelain"]);
-    assert!(
-        registered.contains(&destination.display().to_string()),
-        "{registered}"
-    );
+    let winner_listed = registered
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .filter_map(|path| PathBuf::from(path).canonicalize().ok())
+        .any(|path| path == destination);
+    assert!(winner_listed, "{registered}");
 }
 
 /// Defect 4: a base no active worktree references but an unfinished journal
