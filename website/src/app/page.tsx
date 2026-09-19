@@ -75,7 +75,7 @@ function Header() {
         <SectionLink href="#overview">How it works</SectionLink>
         <SectionLink href="#savings">Savings</SectionLink>
         <SectionLink href="#faq">FAQ</SectionLink>
-        <a href={`${githubUrl}/blob/main/docs/README.md`}>Docs <ArrowUpRightIcon /></a>
+        <a href="/docs">Docs <ArrowUpRightIcon /></a>
       </nav>
       <a className="header-github" href={githubUrl} aria-label="Riftri on GitHub">
         <GitHubIcon /> <span>GitHub</span> <ArrowUpRightIcon />

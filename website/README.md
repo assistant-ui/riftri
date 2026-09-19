@@ -1,11 +1,48 @@
 # Riftri website
 
-The Riftri product site is a single-page Farm.js application. The page at `/`
+The Riftri product site is a Farm.js application. The page at `/`
 has a hero with the copyable installer command, a storage-model overview, a
 worktree disk-usage comparison, a three-step get-started section, and a compact
 FAQ about manual COW copies, Git behavior, storage, activation, and recovery; deeper
-concepts, safety, lifecycle, and compatibility material stays in the
-repository documentation and the Markdown overview described below.
+concepts, safety, lifecycle, and compatibility material is available at `/docs`
+and in the repository documentation and Markdown overview described below.
+
+## Documentation site
+
+`/docs` uses `@farming-labs/docs`, the official `@farming-labs/farmjs` adapter,
+and its pixel-border theme. `docs.config.ts` owns the grouped sidebar, search,
+table of contents, copy actions, and dark theme. `src/app/docs-theme.css`
+adapts those components to the homepage's Geist typography, orange accents,
+square controls, and dashed borders. AI chat, telemetry, and MCP are disabled;
+reading and searching docs need no API key.
+
+The canonical technical sources remain in `../docs/`. `content/docs.json`
+maps them to titles and routes; only the introduction is authored in
+`content/introduction.md`. The site focuses on getting started, day-to-day use,
+platform support, and core internals. Benchmark reports, allocation evidence,
+and design-decision logs stay in the repository; links to those documents point
+to GitHub instead of adding them to the sidebar or search index.
+`pnpm stage` regenerates ignored `src/app/docs/`
+Markdown before development/build, rewrites internal documentation links,
+and adds an edit link to each original GitHub file. Do not edit staged files.
+Each sidebar entry also names a Lucide icon in `content/docs.json`.
+Staging regenerates `content/docs-icons.json` as SVG strings for the adapter;
+it also generates small action-icon masks in `public/docs-icons/`. The icon
+library and SVG renderer run at build time, not in the browser.
+Use `node scripts/stage-doc-icons.mjs --check` to check the generated registry.
+After editing a canonical Markdown file during development, rerun `pnpm stage`.
+After changing `docs.config.ts`, restart the dev server.
+
+The build keeps the adapter's Vercel function for `/docs`, Markdown mirrors,
+and `/api/docs` search. All other routes retain the existing static handling.
+Docs responses are not CDN-cached because HTML and client navigation payloads
+share URLs. `pnpm preview:static` now previews both parts of this finalized
+output; it imports the built function, not the source dev server.
+`RIFTRI_PREVIEW_PORT` overrides the default preview/browser-test port.
+
+`pnpm stage && pnpm generate` refreshes Farm's route types when the page map
+changes. Browser tests exercise every generated page, Markdown mirrors,
+search, copying, sidebar navigation, and responsive layout.
 
 The visual system keeps Riftri's dark canvas and orange accent, with a shared
 page frame, fine stacked section rules, and a plain dark surface behind the storage
@@ -66,8 +103,8 @@ The `/#savings` section visualizes the historical assistant-ui experiment in
 `../docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md`. Its raw allocation
 measurements live in `src/data/space-savings.json`; the chart derives MiB,
 saved bytes, and bar proportions from those values. Keep the benchmark version,
-APFS scope, and dependency exclusions visible. The expandable benchmark details
-retain the timing comparison, adjusted-fixture caveat, methodology, and source link.
+APFS scope, and dependency exclusions visible. A direct benchmark link keeps
+the full timing comparison, fixture details, and methodology accessible.
 `node --test package/test/website-savings.test.js` from the repository root
 checks the displayed dataset against the source report. This is not a live
 benchmark or a claim about the latest release's performance.
@@ -91,10 +128,10 @@ Windows setup, sharing metadata, and inline Markdown navigation. Its Markdown
 navigation test routes the canonical URL to the local build's exact response,
 so CI does not depend on the public deployment. Screenshots and failure traces
 are retained in `test-results/` and uploaded by CI. Run `pnpm preview:static`
-to inspect that same build at `http://127.0.0.1:4318` without a dev runtime.
+to inspect that same build at `http://127.0.0.1:4318` without a dev server.
 The preview honors the finalized static-file overrides and error-phase 404
 route, including its status, HTML body, and HEAD behavior. It is a preview of
-this site's static output, not a general Vercel routing emulator.
+this site's hybrid output, not a general Vercel routing emulator.
 
 ## Automatic deployment
 

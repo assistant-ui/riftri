@@ -37,6 +37,7 @@ const notFoundRoute = {
 
 export async function finalizeStaticWebsite(
   outputDirectory = path.join(root, "website/.vercel/output"),
+  { docs = false } = {},
 ) {
   const configPath = path.join(outputDirectory, "config.json");
   const staticDirectory = path.join(outputDirectory, "static");
@@ -64,8 +65,14 @@ export async function finalizeStaticWebsite(
 
   await writeFile(path.join(staticDirectory, "build-info.json"), `${JSON.stringify({ revision: currentRevision() })}\n`);
 
-  await rm(path.join(outputDirectory, "functions"), { recursive: true, force: true });
-  await rm(path.join(outputDirectory, "nitro.json"), { force: true });
+  if (docs) {
+    // Fail the build if the official adapter runtime or its content is missing.
+    await access(path.join(outputDirectory, "functions/__nitro.func/index.mjs"));
+    await access(path.join(outputDirectory, "functions/__nitro.func/chunks/nitro/farm-docs-content/page.md"));
+  } else {
+    await rm(path.join(outputDirectory, "functions"), { recursive: true, force: true });
+    await rm(path.join(outputDirectory, "nitro.json"), { force: true });
+  }
 
   const staticConfig = {
     version: 3,
@@ -77,8 +84,20 @@ export async function finalizeStaticWebsite(
       { src: "^/build-info\\.json$", headers: { "Cache-Control": "no-store", "Content-Type": "application/json" }, continue: true },
       installerRoute,
       markdownRoute,
+      docs && {
+        src: "^/docs(?:/.*)?\\.md$",
+        headers: {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Content-Disposition": "inline",
+          "X-Content-Type-Options": "nosniff",
+        },
+        continue: true,
+      },
       immutableAssetRoute,
       { handle: "filesystem" },
+      // Only documentation uses SSR. Installers, the landing page, and the raw
+      // /index.md guide retain their static responses and existing headers.
+      docs && { src: "^/(?:docs(?:/.*|\\.md)?|api/docs)$", dest: "/__nitro", headers: { "Cache-Control": "no-store", "Vary": "x-farm-docs-navigation, Accept" } },
       { handle: "error" },
       notFoundRoute,
     ].filter(Boolean),
@@ -88,5 +107,5 @@ export async function finalizeStaticWebsite(
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  await finalizeStaticWebsite();
+  await finalizeStaticWebsite(undefined, { docs: true });
 }

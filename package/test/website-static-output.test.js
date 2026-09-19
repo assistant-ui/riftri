@@ -105,3 +105,36 @@ test("website build always runs static output finalization", () => {
   );
   assert.match(scripts.build, /farm build && node \.\.\/package\/scripts\/finalize-static-website\.mjs$/);
 });
+
+test("docs finalization retains only the narrow docs runtime routes", async (t) => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-docs-output-"));
+  t.after(() => fs.rmSync(output, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(output, "static/404"), { recursive: true });
+  for (const name of ["index.html", "index.md", "install.sh", "install.ps1", "robots.txt", "sitemap.xml", "404/index.html"]) {
+    fs.writeFileSync(path.join(output, "static", name), name);
+  }
+  fs.writeFileSync(path.join(output, "config.json"), JSON.stringify({ version: 3 }));
+  const { finalizeStaticWebsite } = await import("../scripts/finalize-static-website.mjs");
+  await assert.rejects(finalizeStaticWebsite(output, { docs: true }), { code: "ENOENT" });
+  const runtime = path.join(output, "functions/__nitro.func");
+  fs.mkdirSync(path.join(runtime, "chunks/nitro/farm-docs-content"), { recursive: true });
+  fs.writeFileSync(path.join(runtime, "index.mjs"), "export default {};");
+  fs.writeFileSync(path.join(runtime, "chunks/nitro/farm-docs-content/page.md"), "# Docs");
+  await finalizeStaticWebsite(output, { docs: true });
+  assert.ok(fs.existsSync(path.join(runtime, "index.mjs")));
+  const config = JSON.parse(fs.readFileSync(path.join(output, "config.json")));
+  const markdownRoute = config.routes.find((entry) => entry.headers?.["Content-Disposition"] === "inline");
+  assert.equal(markdownRoute.headers["Content-Type"], "text/plain; charset=utf-8");
+  assert.equal(markdownRoute.headers["X-Content-Type-Options"], "nosniff");
+  assert.equal(markdownRoute.continue, true);
+  for (const url of ["/docs.md", "/docs/cli.md", "/docs/benchmarks/assistant-ui.md"]) assert.ok(new RegExp(markdownRoute.src).test(url));
+  for (const url of ["/docs", "/docs/cli", "/api/docs", "/docs-unrelated.md"]) assert.ok(!new RegExp(markdownRoute.src).test(url));
+  const route = config.routes.find((entry) => entry.dest === "/__nitro");
+  const pattern = new RegExp(route.src);
+  for (const url of ["/docs", "/docs.md", "/docs/cli", "/docs/cli.md", "/api/docs"]) assert.ok(pattern.test(url), url);
+  for (const url of ["/", "/index.md", "/install.sh", "/api/unknown", "/api/docs/mcp", "/docs-unrelated"]) assert.ok(!pattern.test(url), url);
+  assert.equal(route.headers["Cache-Control"], "no-store");
+  assert.match(route.headers.Vary, /x-farm-docs-navigation/);
+  assert.ok(config.routes.indexOf(route) > config.routes.findIndex((entry) => entry.handle === "filesystem"));
+  assert.ok(config.routes.indexOf(route) < config.routes.findIndex((entry) => entry.handle === "error"));
+});

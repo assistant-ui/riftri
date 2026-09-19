@@ -16,6 +16,10 @@ export async function createStaticPreview(output = fileURLToPath(new URL("../.ve
   const routes = config.routes || [];
   const errorIndex = routes.findIndex((route) => route.handle === "error");
   const errorRoutes = errorIndex < 0 ? [] : routes.slice(errorIndex + 1);
+  const docsRoute = routes.find((route) => route.dest === "/__nitro");
+  const docsHandler = docsRoute
+    ? (await import(pathToFileURL(path.join(output, "functions/__nitro.func/index.mjs")).href)).default
+    : undefined;
 
   async function resolveFile(pathname) {
     const file = await realpath(path.join(root, aliases.get(pathname) ?? (pathname === "/" ? "index.html" : pathname)));
@@ -33,6 +37,21 @@ export async function createStaticPreview(output = fileURLToPath(new URL("../.ve
     }
     try {
       const pathname = decodeURIComponent(new URL(request.url, "http://localhost").pathname);
+      if (docsHandler && new RegExp(docsRoute.src).test(pathname)) {
+        const rendered = await docsHandler.fetch(new Request(new URL(request.url, `http://${request.headers.host}`), { method: request.method, headers: request.headers }));
+        const headers = new Headers(rendered.headers);
+        // Match the build-output header rules for raw docs as well as static files.
+        if (rendered.ok) for (const route of routes) {
+          if (route.handle) break;
+          if (route.src && route.headers && new RegExp(route.src).test(pathname)) {
+            for (const [name, value] of Object.entries(route.headers)) headers.set(name, value);
+          }
+        }
+        for (const [name, value] of Object.entries(docsRoute.headers || {})) headers.set(name, value);
+        response.writeHead(rendered.status, Object.fromEntries(headers));
+        response.end(request.method === "HEAD" ? undefined : Buffer.from(await rendered.arrayBuffer()));
+        return;
+      }
       let result;
       let status = 200;
       try {

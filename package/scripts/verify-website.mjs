@@ -39,6 +39,12 @@ export async function verifyWebsite({ baseUrl = "https://riftri.dev", revision =
   }
   const missing = await get("/__riftri_deployment_check_missing__", 404, "text/html");
   assert.ok((await missing.text()).includes("THAT PAGE DOES NOT EXIST_"), "expected the branded 404 page");
+  for (const route of ["/docs", "/docs/installation"]) {
+    const html = await (await get(route, 200, "text/html")).text();
+    assert.ok(html.includes("@farming-labs/farmjs") && html.includes("farm-docs-root") && !html.includes("Page module missing"), `${route}: expected rendered Farm.js docs`);
+  }
+  const search = await (await get("/api/docs?query=OverlayFS", 200, "application/json")).json();
+  assert.ok(Array.isArray(search) && search.length > 0, "expected documentation search results");
   return checked;
 }
 

@@ -104,12 +104,24 @@ test("FAQ answers toggle with the keyboard and keep focus on the question", asyn
   await expect(first.locator(".faq-answer")).toBeVisible();
   await expect(second.locator(".faq-answer")).toBeHidden();
   const question = first.locator("summary");
+  await expect(question.locator(".faq-prompt")).toHaveText(">");
+  await expect(question.locator(".faq-prompt")).toHaveAttribute("aria-hidden", "true");
+  await expect(question.locator(".faq-prompt")).toHaveCSS("color", "rgb(240, 106, 58)");
+  await expect(question.locator(".faq-toggle")).toHaveAttribute("aria-hidden", "true");
+  await expect(first.locator(".faq-minus")).toHaveText("[−]");
+  await expect(first.locator(".faq-minus")).toBeVisible();
+  await expect(first.locator(".faq-plus")).toBeHidden();
+  await expect(second.locator(".faq-plus")).toHaveText("[+]");
+  await expect(second.locator(".faq-plus")).toBeVisible();
   await question.focus();
   await page.keyboard.press("Enter");
   await expect(first.locator(".faq-answer")).toBeHidden();
+  await expect(first.locator(".faq-plus")).toBeVisible();
+  await expect(first.locator(".faq-minus")).toBeHidden();
   await expect(question).toBeFocused();
   await page.keyboard.press("Space");
   await expect(first.locator(".faq-answer")).toBeVisible();
+  await expect(first.locator(".faq-minus")).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(second.locator("summary")).toBeFocused();
   await page.keyboard.press("Enter");
@@ -195,6 +207,17 @@ test("materialization backend cycles without a progress indicator", async ({ pag
     elements.map((element) => getComputedStyle(element, "::after").content));
   expect(decoration.every((content) => content === "none")).toBe(true);
   await expect(page.locator(".backend-cycle-item").first()).toHaveCSS("animation-name", "backend-cycle");
+});
+
+test("savings keeps the figures and source link without the extra benchmark notes", async ({ page }, testInfo) => {
+  await page.goto("/#savings");
+  const chart = page.locator(".savings-map");
+  await expect(chart.locator("details")).toHaveCount(0);
+  await expect(chart).not.toContainText(/Creation time:|12 Sep 2026|linguist-generated|Backend names show support|Results vary/);
+  await expect(chart).toContainText("APFS reference measurement");
+  await expect(chart).toContainText("87.0");
+  await expect(chart.getByRole("link", { name: "Read full benchmark" })).toHaveAttribute("href", "https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md");
+  await chart.screenshot({ path: testInfo.outputPath(`savings-clean-${testInfo.project.name}.png`) });
 });
 
 test("savings underline follows the width of every animated filesystem name", async ({ page }, testInfo) => {

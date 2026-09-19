@@ -137,10 +137,13 @@ export function Faq() {
       {questions.map(({ question, answer }, index) => (
         <details className="faq-item" key={question} open={index === 0}>
           <summary>
-            <span>{question}</span>
+            <span className="faq-question">
+              <span className="faq-prompt" aria-hidden="true">&gt;</span>
+              <span>{question}</span>
+            </span>
             <span className="faq-toggle" aria-hidden="true">
-              <span className="faq-plus">+</span>
-              <span className="faq-minus">−</span>
+              <span className="faq-plus">[+]</span>
+              <span className="faq-minus">[−]</span>
             </span>
           </summary>
           <div className="faq-answer">{answer}</div>
