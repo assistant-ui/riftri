@@ -71,6 +71,33 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   the optimized path checks out an existing local branch and pointing at
   `--detach`, `-b <new-branch>`, and `RIFTRI_BYPASS=1`. It previously failed
   part-way through with a misleading "existing local branch does not exist".
+- `riftri repair` now reconciles active add journals against Git's own worktree
+  registry. A journal whose worktree Git no longer registers and whose
+  directory is gone is retired by a journaled completion, so a worktree deleted
+  by hand no longer leaves a path claimed forever. `riftri worktree add`
+  reclaims such a journal instead of creating a second active claim on one
+  path, which previously left `riftri worktree remove` and `riftri repair`
+  failing permanently with "multiple active Riftri journals reference". Nothing
+  is retired while its directory still exists or still has content.
+- `riftri repair` reports a managed worktree that Git registers under a
+  different path — the result of `mv` plus `git worktree repair` — instead of
+  silently dropping it from `riftri status` and `riftri worktree list`. The
+  journal is preserved and the live worktree is never touched.
+- `riftri repair` can now retire the journal of an add that lost a race for a
+  destination another active operation owns. Those journals were stuck in
+  `rollback-pending` and made every later repair exit non-zero while
+  `riftri status` reported no issue. The winner's worktree, branch and
+  immutable base are untouched.
+- `riftri gc` now accounts for retained bases it refuses to collect, naming the
+  base, the journal that claims it and why, in both the human and JSON reports.
+  `riftri status` reports the same explanation for a base no active worktree
+  references, so the two commands no longer disagree about unreclaimable
+  storage.
+- `riftri repair` removes the temporary files an interrupted journal write
+  leaves in Riftri's own state directory, and `riftri status` no longer reports
+  Riftri's own temporaries and coordination locks as unrecognized foreign
+  files. One crash no longer breaks an automation gate on
+  `diagnostic_issues == []` permanently.
 
 ## [0.3.1] - 2026-09-18
 

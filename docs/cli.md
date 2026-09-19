@@ -280,9 +280,29 @@ always safe: complete journals are resumed, incomplete ones are rolled back,
 and a healthy state directory is left unchanged. Supports `--state-dir` and
 `--json`.
 
+Repair also reconciles active journals against Git's own worktree registry:
+
+- A journal whose worktree Git no longer registers and whose directory is gone
+  — for example after `rm -rf` plus `git worktree prune` — is retired by a
+  journaled completion, releasing its immutable base. Reported as
+  `Retired add operations` (`retired_adds`).
+- A journal whose worktree Git registers under a *different* path is reported,
+  not adopted, under `Relocated worktrees Riftri no longer tracks`
+  (`relocated_worktrees`). The live worktree and its contents are untouched.
+- Temporary files left by an interrupted journal write are removed, reported as
+  `Reaped interrupted journal writes` (`reaped_artifacts`).
+
+Nothing is retired while its directory still exists or still has content.
+
 ### `riftri gc [OPTIONS] [REPOSITORY]`
 
 Plan or apply collection of immutable bases with no journaled references.
+
+A base that an unfinished journal still claims is never collected, and is now
+reported rather than dropped silently: `Skipped because a journaled operation
+still claims them` (`skipped_protected`) names each base, the operation that
+claims it, and why. `riftri repair` retires those operations when it safely
+can, after which the base becomes collectible.
 
 | Flag | Effect |
 | --- | --- |
