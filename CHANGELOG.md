@@ -7,6 +7,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- One worktree whose HEAD file cannot be resolved (empty, garbage, or an empty
+  symref target — classic crash and power-loss shapes) no longer makes every
+  Riftri command in the repository fail with "invalid Git output". Git lists
+  such a worktree with a null `HEAD` and none of `branch`, `detached`, or
+  `bare`; the porcelain parser now represents that state instead of rejecting
+  it, while still rejecting records that claim more than one of the three.
+  Unrelated operations — add, remove, move, prune, gc, status, list, and the
+  intercepted shim path — keep working; `status`, `worktree list`, and
+  `repair` name the corrupt worktree in a diagnostic that points at
+  `git worktree repair`; and removing, moving, or shell-binding the corrupt
+  worktree itself fails closed with the same guidance instead of risking work
+  in a worktree whose cleanliness cannot be verified.
 - Intercepted `git worktree prune -v` no longer bypasses the journaled prune.
   Git's `-v` is a verbose prune, not a report, so delegating it let ordinary
   Git remove managed lifecycle metadata outside the Riftri journal; verbose

@@ -477,12 +477,18 @@ fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError
         )));
     }
 
-    let registered = git.list_worktrees(&root)?.into_iter().any(|worktree| {
+    let registered = git.list_worktrees(&root)?.into_iter().find(|worktree| {
         !worktree.bare && fs::canonicalize(&worktree.path).is_ok_and(|path| path == canonical)
     });
-    if !registered {
+    let Some(registered) = registered else {
         return Err(worktree_binding_error(format!(
             "{} is not a live entry in Git's worktree inventory",
+            canonical.display()
+        )));
+    };
+    if registered.head_unresolvable {
+        return Err(worktree_binding_error(format!(
+            "Git cannot resolve the worktree HEAD of {}; run `git worktree repair` first",
             canonical.display()
         )));
     }

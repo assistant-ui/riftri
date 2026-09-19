@@ -337,6 +337,10 @@ pub struct RecoveryReport {
     pub retired_adds: usize,
     /// Journaled worktrees Git registers under a different path.
     pub relocations: Vec<RelocatedWorktree>,
+    /// Worktrees Git lists without a resolvable HEAD (corrupt or empty HEAD
+    /// file). Repair reports them instead of touching them; `git worktree
+    /// repair` or removing the worktree clears the state.
+    pub unresolvable_worktrees: Vec<PathBuf>,
     /// Riftri's own interrupted atomic-write temporaries removed this pass.
     pub reaped_artifacts: Vec<PathBuf>,
     pub errors: Vec<String>,
@@ -1035,6 +1039,31 @@ pub fn storage_accounting(
         .map(|journal| journal.source_add_operation_id.clone())
         .collect::<HashSet<_>>();
     let git = Git::default();
+    // Name every worktree Git itself lists without a resolvable HEAD, managed
+    // or not: it needs `git worktree repair` (or removal), and nothing else in
+    // this report may treat it as clean. Listing failures are not reported
+    // here; the per-journal validation below already surfaces them.
+    let mut unresolvable_worktree_issues = Vec::new();
+    let mut inspected_repositories = HashSet::new();
+    for journal in &loaded_add_journals {
+        if !inspected_repositories.insert(journal.repository.clone()) {
+            continue;
+        }
+        let Ok(registered) = git.list_worktrees(&journal.repository) else {
+            continue;
+        };
+        for worktree in registered {
+            if worktree.head_unresolvable {
+                unresolvable_worktree_issues.push(StateDiagnosticIssue {
+                    path: worktree.path,
+                    reason: "Git cannot resolve this worktree's HEAD; Riftri left it \
+                             alone. `git worktree repair` or removing the worktree \
+                             clears this"
+                        .to_owned(),
+                });
+            }
+        }
+    }
     let mut add_journals = Vec::with_capacity(loaded_add_journals.len());
     let mut registered_worktrees = BTreeMap::new();
     let mut invalid_add_journals = Vec::new();
@@ -1170,6 +1199,7 @@ pub fn storage_accounting(
     state_diagnosis.issues.extend(invalid_add_journals);
     state_diagnosis.issues.extend(invalid_removal_journals);
     state_diagnosis.issues.extend(invalid_compact_journals);
+    state_diagnosis.issues.extend(unresolvable_worktree_issues);
     state_diagnosis
         .issues
         .sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -1273,6 +1303,13 @@ fn validate_status_add_journal(
                 journal.repository.display()
             ))
         })?;
+    if registered.head_unresolvable {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "Git cannot resolve the worktree HEAD of active destination {}; \
+             `git worktree repair` or removing the worktree clears this",
+            journal.destination.display()
+        )));
+    }
     if registered.head.is_none() {
         return Err(WorktreeError::InvalidRequest(format!(
             "active destination {} has no Git HEAD commit",
@@ -1857,13 +1894,23 @@ fn remove_worktree_with_mode(
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
-    if !git
+    let registered = git
         .list_worktrees(&repository_root)?
         .into_iter()
-        .any(|worktree| paths_match(&worktree.path, &destination))
-    {
+        .find(|worktree| paths_match(&worktree.path, &destination))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "{} is not registered as a Git linked worktree",
+                destination.display()
+            ))
+        })?;
+    if registered.head_unresolvable {
+        // Fail closed: without a resolvable HEAD neither cleanliness nor the
+        // recorded branch state can be verified, so a journaled removal could
+        // destroy unsaved work.
         return Err(WorktreeError::InvalidRequest(format!(
-            "{} is not registered as a Git linked worktree",
+            "Git cannot resolve the worktree HEAD of {}; run `git worktree repair` \
+             before removing it",
             destination.display()
         )));
     }
@@ -1995,12 +2042,21 @@ fn move_worktree_inner(
         ));
     }
     let inventory = git.list_worktrees(&repository_root)?;
-    if !inventory
+    let registered = inventory
         .iter()
-        .any(|worktree| paths_match(&worktree.path, &source))
-    {
+        .find(|worktree| paths_match(&worktree.path, &source))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "{} is not registered as a Git linked worktree",
+                source.display()
+            ))
+        })?;
+    if registered.head_unresolvable {
+        // Fail closed: a move re-registers the worktree with Git, and a
+        // worktree whose HEAD cannot be resolved must be repaired first.
         return Err(WorktreeError::InvalidRequest(format!(
-            "{} is not registered as a Git linked worktree",
+            "Git cannot resolve the worktree HEAD of {}; run `git worktree repair` \
+             before moving it",
             source.display()
         )));
     }
@@ -5896,6 +5952,28 @@ pub fn recover_incomplete_operations(
         operations: report.scanned,
     });
     let git = Git::default();
+
+    // Report every worktree Git itself lists without a resolvable HEAD, so a
+    // repair pass names the corruption it cannot fix instead of silently
+    // working around it. Listing failures are surfaced by the per-journal
+    // recovery below, not here.
+    let mut inspected_repositories = HashSet::new();
+    for journal in &journals {
+        if !inspected_repositories.insert(journal.repository.clone()) {
+            continue;
+        }
+        let Ok(registered) = git.list_worktrees(&journal.repository) else {
+            continue;
+        };
+        report.unresolvable_worktrees.extend(
+            registered
+                .into_iter()
+                .filter(|worktree| worktree.head_unresolvable)
+                .map(|worktree| worktree.path),
+        );
+    }
+    report.unresolvable_worktrees.sort_unstable();
+    report.unresolvable_worktrees.dedup();
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     match reconciliation {
@@ -12104,5 +12182,160 @@ mod tests {
             assert_eq!(repeated.recovered_prunes, 0, "phase {phase:?}");
             assert_eq!(repeated.completed_prunes, 1, "phase {phase:?}");
         }
+    }
+
+    /// One fixture: a repository with one managed worktree, one plain linked
+    /// worktree whose HEAD file is overwritten with garbage, and the Riftri
+    /// state directory.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn corrupt_head_fixture() -> (
+        crate::test_support::WritableTempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let fixture = tempdir().expect("fixture");
+        let root = fixture
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let repository = root.join("repository");
+        let managed = root.join("managed");
+        let corrupt = root.join("corrupt");
+        let state = root.join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: managed.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/corrupt-head-managed")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+        let corrupt_text = corrupt.to_string_lossy().into_owned();
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "corrupt",
+                corrupt_text.as_str(),
+            ],
+        );
+        fs::write(repository.join(".git/worktrees/corrupt/HEAD"), "garbage\n")
+            .expect("corrupt linked worktree HEAD");
+        (fixture, repository, managed, corrupt, state)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn tolerates_an_unrelated_worktree_without_resolvable_head() {
+        let (_fixture, repository, managed, corrupt, state) = corrupt_head_fixture();
+
+        // Status keeps working, keeps the managed view, and names the corrupt
+        // worktree as a diagnostic instead of failing repo-wide.
+        let accounting = storage_accounting(&state).expect("storage accounting");
+        assert_eq!(accounting.active_views, 1);
+        assert_eq!(accounting.views[0].destination, managed);
+        assert!(
+            accounting
+                .diagnostic_issues
+                .iter()
+                .any(|issue| { issue.path == corrupt && issue.reason.contains("cannot resolve") }),
+            "diagnostics must name the corrupt worktree: {:?}",
+            accounting.diagnostic_issues
+        );
+
+        // Repair keeps working and names the corruption it cannot fix.
+        let recovered = recover_incomplete_operations(&state).expect("repair");
+        assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+        assert_eq!(recovered.unresolvable_worktrees, vec![corrupt.clone()]);
+
+        // Unrelated lifecycle operations keep working: prune, then removal of
+        // the healthy managed worktree.
+        prune_worktrees_inner(
+            PruneWorktreesRequest {
+                repository: repository.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("prune despite corrupt worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: managed.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove healthy managed worktree despite corrupt worktree");
+        assert!(!managed.exists());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn refuses_lifecycle_operations_on_the_worktree_whose_head_is_unresolvable() {
+        let (fixture, repository, managed, _corrupt, state) = corrupt_head_fixture();
+        // Corrupt the managed worktree's own HEAD: operations on THE corrupt
+        // worktree must fail closed with an actionable error.
+        fs::write(repository.join(".git/worktrees/managed/HEAD"), "garbage\n")
+            .expect("corrupt managed worktree HEAD");
+
+        let error = remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: managed.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect_err("removal of a corrupt worktree must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve the worktree HEAD"),
+            "unexpected removal error: {error}"
+        );
+        assert!(
+            managed.is_dir(),
+            "failed removal must preserve the worktree"
+        );
+
+        let error = move_worktree_inner(
+            MoveWorktreeRequest {
+                repository,
+                source: managed.clone(),
+                destination: fixture.path().join("moved"),
+                state_dir: Some(state),
+            },
+            None,
+        )
+        .expect_err("move of a corrupt worktree must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve the worktree HEAD"),
+            "unexpected move error: {error}"
+        );
+        assert!(managed.is_dir(), "failed move must preserve the worktree");
     }
 }
