@@ -22,6 +22,11 @@ function Invoke-RiftriInstaller {
   }
 
   function Assert-HttpsResponse($Response, [string]$RequestedUri) {
+    # Windows PowerShell 5.1 reports the redirect-following final URI on
+    # HttpWebResponse.ResponseUri; PowerShell 7+ reports it on
+    # HttpResponseMessage.RequestMessage.RequestUri. When neither yields a
+    # final URI the downgrade check cannot run, so fail closed rather than
+    # skipping it.
     $finalUri = $null
     if ($null -ne $Response -and $null -ne $Response.BaseResponse) {
       if ($Response.BaseResponse.PSObject.Properties.Name -contains 'ResponseUri') {
@@ -34,13 +39,20 @@ function Invoke-RiftriInstaller {
         $finalUri = $Response.BaseResponse.RequestMessage.RequestUri
       }
     }
-    if ($null -ne $finalUri -and $finalUri.Scheme -ne 'https') {
+    if ($null -eq $finalUri) {
+      Fail "Could not verify the final download URI for: $RequestedUri"
+    }
+    if ($finalUri.Scheme -ne 'https') {
       Fail "Download redirected away from HTTPS: $RequestedUri"
     }
   }
 
   function Download([string]$Uri, [string]$Destination) {
-    $response = Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing
+    # Invoke-WebRequest returns nothing to the pipeline when -OutFile is used
+    # unless -PassThru is also given, which both Windows PowerShell 5.1 and
+    # PowerShell 7+ support alongside -OutFile. Without -PassThru the HTTPS
+    # check would receive $null and could never observe the final URI.
+    $response = Invoke-WebRequest -Uri $Uri -OutFile $Destination -UseBasicParsing -PassThru
     Assert-HttpsResponse $response $Uri
   }
 

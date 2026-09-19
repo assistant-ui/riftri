@@ -119,6 +119,20 @@ fn prepare(
     let backend = readiness
         .backend
         .context("doctor did not select a COW backend")?;
+    // Refuse a destination the explicit add would refuse — existence, a
+    // symlink to an existing target, or checkout paths that collide on the
+    // destination filesystem — before showing a plan and asking for
+    // confirmation. The core call reuses the add path's own checks, so the
+    // diagnostic wording and the policy exit code match `riftri worktree add`
+    // exactly; setup adds only the Blocked framing the doctor gate above uses.
+    if let Err(error) = riftri_core::validate_new_worktree_destination(
+        &repository,
+        &destination,
+        OsStr::new("HEAD"),
+    ) {
+        writeln!(output, "Blocked: {error}")?;
+        return Err(error).context("setup stopped before creation; choose a destination that riftri worktree add can create");
+    }
     writeln!(
         output,
         "\nDestination: {}\nNew branch: {}\nStart at: HEAD\nBackend: {}",

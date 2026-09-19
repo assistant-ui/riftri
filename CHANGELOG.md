@@ -7,6 +7,168 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri setup` now validates the destination before printing the plan and
+  asking for confirmation. The plan step runs the same destination pre-checks
+  the explicit `riftri worktree add` performs — an existing destination
+  (including a symlink to an existing target) and checkout paths that cannot
+  coexist on the destination filesystem (case or Unicode-normalization
+  collisions) — by calling the add path's own validation, so the diagnostics
+  and the policy exit code are identical to the explicit command's.
+  Previously setup confidently printed the full plan and asked "Create this
+  worktree?" for a destination the creation step was always going to refuse;
+  the refusal itself was already safe, but the guided flow confirmed a plan
+  it had enough information to reject.
+- Termination forwarding now enforces the single-waiter invariant its design
+  relies on, and no longer loses a termination signal delivered during its
+  own teardown. The forwarding state behind `riftri exec` and the Git shim is
+  process-global, so two overlapping waits would each capture the other's
+  handler as "previous" and restore it, leaving a handler forwarding to a
+  dead PID while the single target slot signalled the wrong child; a second
+  overlapping call is now refused with a clear error instead (Riftri performs
+  one such wait per process lifetime, so nothing supported changes).
+  Separately, a SIGTERM or SIGHUP that landed after the child was reaped but
+  before the original dispositions were restored used to be recorded and then
+  silently discarded; it was aimed at Riftri itself, so it is now re-raised
+  once restoration completes and takes effect under the restored disposition
+  — the waiter dies with the conventional `128 + signal` status exactly as a
+  shell does after its foreground child, while a `nohup`-style inherited
+  ignore still discards it.
+- Garbage collection that cancels after removing a base's `.complete` marker —
+  because a new reference raced in between the marker removal and the
+  protected re-check — now restores the completion marker in the same
+  journaled step as the cancellation. The marker is recomputed from the base
+  on disk with the current versioned digest — the same content-and-metadata
+  hash reuse verification checks, never replayed from remembered bytes, so it
+  cannot vouch for a base modified behind Riftri's back — and staged next to
+  the base before an atomic rename, so no interruption window can leave a
+  truncated marker.
+  Previously the cancellation dropped the marker on the floor; if the racing
+  add then rolled back before rebuilding the base, the fully materialized tree
+  became invisible to marker-driven enumeration forever — `gc` could never
+  propose it again and `status` never accounted for it. Recovery of an
+  interruption anywhere around the restore is idempotent: it settles on either
+  the completed collection or the restored marker, and a base leaked by the
+  old behavior is at least surfaced by `status` as an unexplained
+  immutable-base artifact diagnostic.
+
+- The Windows ReFS block cloner now verifies the length of the sub-cluster
+  tail copy that follows aligned extent cloning. The tail was written with
+  `std::io::copy` over a `take` adaptor and the returned byte count discarded,
+  so a source that yielded fewer bytes than the recorded file size — a base
+  file truncated concurrently, or a stale size — left the clone's tail
+  zero-filled (the destination had already been extended with `set_len`) while
+  the clone reported success. A short read now fails the clone with an
+  explicit error naming the source and destination files and the expected
+  versus copied byte counts, mirroring the read-length check the base
+  integrity hash already performs.
+
+- Linux OverlayFS recovery no longer resets the private work directory of a
+  mount that may still be live in another mount namespace. When a crash left a
+  mount without a journaled identity, the no-identity recovery branch ran the
+  destructive remount loader — which cannot see mounts in other namespaces and
+  `remove_dir_all`s the work directory — before the boot/namespace/liveness
+  determination, so "recovery preserved it" could report a worktree whose
+  overlay was already damaged (copy-up failing with ESTALE/EIO in its original
+  namespace). Both recovery branches now load non-destructively, decide
+  boot/namespace/liveness first, and reset disposable work state only after
+  that determination proves the mount absent; the same guard now protects the
+  elevated helper's work-directory reset, which receives the journaled mount
+  context and refuses a reset the journaled namespace cannot rule out.
+
+- Linux OverlayFS hygiene around live mounts: the recovery marker is no longer
+  unlinked directly from the upper layer while the overlay is mounted —
+  modifying an underlying layer of a live overlay is undefined per kernel
+  OverlayFS rules and could leave a stale marker entry in the merged root that
+  failed the add's clean check. The marker is now cleared through the merged
+  view (and only when that view provably exposes this journal's marker; a
+  mount that does not is reported and the marker preserved), with the direct
+  upper unlink reserved for unmounted layouts. Abandoned probe mounts — the
+  `.riftri-overlay-probe-*` directories deliberately leaked next to worktrees
+  when a probe unmount fails — are also no longer invisible and unbounded:
+  `riftri status` names each one in its diagnostics, and `riftri repair`
+  removes one only when the kernel mount inventory proves nothing is mounted
+  at or below it, preserving and reporting any probe root a mount still
+  covers.
+- Reusing a cached immutable base no longer trusts metadata its completion
+  marker never covered. The v1 marker hashed contents, tree shape, symlink
+  targets, and `mode & 0o777`, while the native cloners faithfully propagate
+  more than that: the Linux reflink backend restores the full `st_mode`
+  (setuid, setgid, and sticky bits land) and APFS `clonefile` copies mode,
+  extended attributes, and ACLs verbatim. Anything that modified a cached
+  base under `bases/v1` could therefore inject special permission bits or
+  xattrs into every later worktree cloned from it, with Git reporting the
+  new worktree clean. Completion markers now use a versioned v2 digest that
+  also covers the full native Unix mode, every extended attribute name and
+  value, and macOS ACL presence — hashed in the same traversal that already
+  reads file contents — and a mismatch refuses reuse and preserves the base,
+  exactly like content corruption. Windows continues to cover only the
+  read-only attribute, matching what the ReFS cloner propagates. An existing
+  base with an intact v1 marker migrates predictably: its content digest is
+  still verified, then the base is rebuilt once and re-marked with v2
+  instead of being trusted or silently mass-invalidated; cache keys, journal
+  formats, and the persisted compaction and forced-removal snapshot digests
+  are unchanged.
+- Git failures now report how the process ended. A Git killed by a signal —
+  an OOM kill during `checkout-index` on a big tree, a SIGSEGV — usually
+  wrote nothing to stderr, so the error rendered as
+  `Git command failed (checkout-index …): ` with nothing after the colon.
+  The message now appends the exit disposition: the exit code when the
+  process exited (`fatal: … (exit code 128)`), or on Unix the terminating
+  signal (`killed by signal 9 (SIGKILL)`). Optional-result probes were also
+  audited so a signal death is never misread as "absent": a killed
+  `rev-parse` now surfaces as a real error instead of an unborn HEAD.
+- `doctor` and repository inspection no longer report a corrupt object store
+  as an unborn HEAD. `git rev-parse --verify --quiet HEAD^{commit}` exits 1
+  both for a genuinely unborn repository and for a HEAD whose commit object
+  is missing or unreadable; a cheap follow-up probe of the unpeeled `HEAD`
+  now distinguishes them. A broken repository reports "could not peel
+  HEAD^{commit}: HEAD resolves to `<object>`, but that object is unreadable;
+  the repository object store may be corrupt (try `git fsck`)" in both human
+  and JSON reports, while a real unborn repository keeps its friendly
+  "repository HEAD is unborn; commit a tree first" guidance.
+
+- Compacting a worktree after a checkout-profile input changed — a Git
+  upgrade, a checked config flip such as `core.autocrlf` or `core.eol`, or a
+  different Git LFS object set — no longer wedges the worktree's add journal.
+  Compaction used to rewrite the journal's `base_path` into the newly keyed
+  immutable-base bucket while `base_staging` stayed in the old one, so
+  recovery validation rejected the journal forever afterwards: remove, move,
+  compact, and repair all refused with "journal … contains paths outside its
+  operation scope", storage accounting dropped the view, and an interruption
+  between the base update and completion stranded the original tree in
+  `.riftri-compact-old-<id>`. The base update now retargets `base_path` and
+  `base_staging` in the same durable journal write, recovery validation
+  accepts the cross-bucket staging record an older Riftri left behind in an
+  Active journal (staging is confined to the immutable-base layout either
+  way), repair resumes previously stuck compactions, and the next compaction
+  heals the stale staging record in place. A compaction cancelled before its
+  base build also removes the empty bucket it created for the new profile
+  instead of leaving it as permanently unexplained state.
+
+- One worktree whose HEAD file cannot be resolved (empty, garbage, or an empty
+  symref target — classic crash and power-loss shapes) no longer makes every
+  Riftri command in the repository fail with "invalid Git output". Git lists
+  such a worktree with a null `HEAD` and none of `branch`, `detached`, or
+  `bare`; the porcelain parser now represents that state instead of rejecting
+  it, while still rejecting records that claim more than one of the three.
+  Unrelated operations — add, remove, move, prune, gc, status, list, and the
+  intercepted shim path — keep working; `status`, `worktree list`, and
+  `repair` name the corrupt worktree in a diagnostic that points at
+  `git worktree repair`; and removing, moving, or shell-binding the corrupt
+  worktree itself fails closed with the same guidance instead of risking work
+  in a worktree whose cleanliness cannot be verified.
+- The npm launcher now mirrors the termination contract of native `riftri
+  exec`. A native process killed by a signal Node ignores or reserves
+  (SIGUSR1, SIGPIPE, ...) previously made the launcher exit 0 — a killed run
+  reported success — because the death was re-raised through `process.kill`,
+  which is a silent no-op for those signals; the launcher now computes
+  `128 + signal` numerically for every signal death. While the native process
+  runs, the launcher also stays alive through Ctrl-C (SIGINT) and Ctrl-\
+  (SIGQUIT), which the terminal delivers to the whole foreground process
+  group, so a command that catches the interrupt keeps its wrapper instead of
+  outliving a dead launcher on the terminal; PID-directed SIGTERM and SIGHUP
+  are forwarded to the native process, and the child's exit code propagates
+  unchanged.
 - Intercepted `git worktree prune -v` no longer bypasses the journaled prune.
   Git's `-v` is a verbose prune, not a report, so delegating it let ordinary
   Git remove managed lifecycle metadata outside the Riftri journal; verbose
@@ -98,6 +260,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Riftri's own temporaries and coordination locks as unrecognized foreign
   files. One crash no longer breaks an automation gate on
   `diagnostic_issues == []` permanently.
+- The PowerShell installer's HTTPS-downgrade check now actually runs for the
+  `SHA256SUMS` and archive downloads. `Invoke-WebRequest -OutFile` returns
+  nothing to the pipeline, so the assertion always received `$null` and
+  returned without inspecting anything; downloads now pass `-PassThru`
+  (supported alongside `-OutFile` on Windows PowerShell 5.1 and PowerShell 7+),
+  and the check fails closed when no final URI is observable instead of
+  silently skipping. The installer test mock now matches the real cmdlet's
+  contract — no pipeline output with `-OutFile` unless `-PassThru` — and a
+  regression test proves the installer refuses a download whose final URI is
+  not HTTPS.
 
 ## [0.3.1] - 2026-09-18
 

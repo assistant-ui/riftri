@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(any(test, target_os = "windows"))]
+mod exact_copy;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod parallel;
 
@@ -591,19 +593,46 @@ impl OverlayFsMounter {
         })
     }
 
+    /// Reopen a layout for recovery without touching existing state; only a
+    /// missing disposable work directory (which no live mount can lack) is
+    /// recreated empty.
+    #[cfg(target_os = "linux")]
+    pub fn load_for_recovery(
+        layout_root: &Path,
+        lower: &Path,
+        merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        overlayfs::load_for_recovery(layout_root, lower, merged)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn load_for_recovery(
+        _layout_root: &Path,
+        _lower: &Path,
+        _merged: &Path,
+    ) -> Result<OverlayFsLayout, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
+    }
+
     /// Reload a durable layout and reset only its disposable work directory
-    /// when no mount occupies the merged destination.
+    /// when the journaled mount context proves no mount can occupy the merged
+    /// destination — neither here nor in another namespace of the same boot.
     #[cfg(target_os = "linux")]
     pub fn load_for_remount(
         layout_root: &Path,
         lower: &Path,
         merged: &Path,
+        context: &OverlayFsMountContext,
     ) -> Result<OverlayFsLayout, StorageError> {
-        match overlayfs::load_for_remount(layout_root, lower, merged) {
+        match overlayfs::load_for_remount(layout_root, lower, merged, context) {
             Ok(layout) => Ok(layout),
             Err(error) if overlayfs::storage_permission_denied(&error) => {
-                match overlayfs_helper::reset_work(layout_root, lower, merged) {
-                    Ok(Some(())) => overlayfs::load_for_remount(layout_root, lower, merged),
+                match overlayfs_helper::reset_work(layout_root, lower, merged, context) {
+                    Ok(Some(())) => {
+                        overlayfs::load_for_remount(layout_root, lower, merged, context)
+                    }
                     Ok(None) => Err(error),
                     Err(detail) => Err(StorageError::OverlayFsHelper {
                         operation: "reset a disposable work directory for remount",
@@ -621,6 +650,7 @@ impl OverlayFsMounter {
         _layout_root: &Path,
         _lower: &Path,
         _merged: &Path,
+        _context: &OverlayFsMountContext,
     ) -> Result<OverlayFsLayout, StorageError> {
         Err(StorageError::UnsupportedPlatform {
             backend: "Linux OverlayFS",
@@ -866,7 +896,12 @@ impl OverlayFsMounter {
         let layout = overlayfs::load(layout_root, lower, merged)?;
         overlayfs::validate_helper_layout_owner(&layout, requester_uid)?;
         let unmounted = overlayfs::unmount_for_owner(&layout, identity, Some(requester_uid))?;
-        overlayfs::reset_helper_work_directory(&layout, requester_uid, requester_gid)?;
+        overlayfs::reset_helper_work_directory(
+            &layout,
+            requester_uid,
+            requester_gid,
+            &identity.context(),
+        )?;
         Ok(unmounted)
     }
 
@@ -879,9 +914,38 @@ impl OverlayFsMounter {
         merged: &Path,
         requester_uid: u32,
         requester_gid: u32,
+        context: &OverlayFsMountContext,
     ) -> Result<(), StorageError> {
         let layout = overlayfs::load(layout_root, lower, merged)?;
-        overlayfs::reset_helper_work_directory(&layout, requester_uid, requester_gid)
+        overlayfs::reset_helper_work_directory(&layout, requester_uid, requester_gid, context)
+    }
+
+    /// Whether `name` is a Riftri OverlayFS probe directory name.
+    ///
+    /// A failed probe unmount deliberately abandons its directory next to the
+    /// user's worktrees instead of deleting layers under a live mount; this
+    /// predicate lets diagnostics name those leftovers on every platform.
+    pub fn is_abandoned_probe_name(name: &std::ffi::OsStr) -> bool {
+        #[cfg(target_os = "linux")]
+        const PREFIX: &str = overlayfs::ABANDONED_PROBE_PREFIX;
+        #[cfg(not(target_os = "linux"))]
+        const PREFIX: &str = ".riftri-overlay-probe-";
+        name.to_str().is_some_and(|name| name.starts_with(PREFIX))
+    }
+
+    /// Remove one abandoned probe root only when the kernel mount inventory
+    /// proves nothing is mounted at or below it; `Ok(false)` reports a still
+    /// covered root that was deliberately left untouched.
+    #[cfg(target_os = "linux")]
+    pub fn remove_abandoned_probe_root(root: &Path) -> Result<bool, StorageError> {
+        overlayfs::remove_abandoned_probe_root(root)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    pub fn remove_abandoned_probe_root(_root: &Path) -> Result<bool, StorageError> {
+        Err(StorageError::UnsupportedPlatform {
+            backend: "Linux OverlayFS",
+        })
     }
 }
 

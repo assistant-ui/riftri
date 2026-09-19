@@ -430,7 +430,9 @@ fn wait_for_scoped_child(
     program: &OsStr,
 ) -> Result<ExitStatus, ActivationError> {
     riftri_git::termination::run_forwarding_terminations(command).map_err(|error| match error {
-        TerminationError::Disposition { .. } => process_error(error.to_string()),
+        TerminationError::Disposition { .. } | TerminationError::AlreadyWaiting => {
+            process_error(error.to_string())
+        }
         TerminationError::Spawn(source) => process_error(format!(
             "start process-scoped command {}: {source}",
             Path::new(program).display()
@@ -477,12 +479,18 @@ fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError
         )));
     }
 
-    let registered = git.list_worktrees(&root)?.into_iter().any(|worktree| {
+    let registered = git.list_worktrees(&root)?.into_iter().find(|worktree| {
         !worktree.bare && fs::canonicalize(&worktree.path).is_ok_and(|path| path == canonical)
     });
-    if !registered {
+    let Some(registered) = registered else {
         return Err(worktree_binding_error(format!(
             "{} is not a live entry in Git's worktree inventory",
+            canonical.display()
+        )));
+    };
+    if registered.head_unresolvable {
+        return Err(worktree_binding_error(format!(
+            "Git cannot resolve the worktree HEAD of {}; run `git worktree repair` first",
             canonical.display()
         )));
     }

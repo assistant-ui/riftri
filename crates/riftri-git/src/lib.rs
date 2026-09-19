@@ -132,6 +132,13 @@ pub struct WorktreeInfo {
     pub branch: Option<Vec<u8>>,
     pub detached: bool,
     pub bare: bool,
+    /// Git listed this worktree with neither `branch`, `detached`, nor `bare`:
+    /// its HEAD file exists but cannot be resolved (empty, garbage, or an
+    /// empty symref target — classic crash and power-loss shapes). Git still
+    /// registers the worktree and prints a null `HEAD` for it. Callers must
+    /// never treat such a worktree as clean or operable; unrelated operations
+    /// should skip it and surface a diagnostic instead of failing.
+    pub head_unresolvable: bool,
     pub locked_reason: Option<Vec<u8>>,
     pub prunable_reason: Option<Vec<u8>>,
 }
@@ -146,8 +153,23 @@ pub enum GitError {
         source: std::io::Error,
     },
 
-    #[error("Git command failed ({arguments}): {stderr}")]
-    CommandFailed { arguments: String, stderr: String },
+    #[error("Git command failed ({arguments}): {}", command_failure_detail(.disposition, .stderr))]
+    CommandFailed {
+        arguments: String,
+        stderr: String,
+        /// How the process ended: an exit code, or the terminating signal.
+        disposition: String,
+    },
+
+    #[error(
+        "could not peel {revision}: {base} resolves to {target}, but that object is unreadable; \
+         the repository object store may be corrupt (try `git fsck`)"
+    )]
+    UnreadableObject {
+        revision: String,
+        base: String,
+        target: String,
+    },
 
     #[error("invalid Git output for {context}: {detail}")]
     InvalidOutput {
@@ -238,7 +260,8 @@ impl Git {
                 command: self.command.clone(),
                 source,
             },
-            error @ termination::TerminationError::Disposition { .. } => GitError::Start {
+            error @ (termination::TerminationError::Disposition { .. }
+            | termination::TerminationError::AlreadyWaiting) => GitError::Start {
                 command: self.command.clone(),
                 source: std::io::Error::other(error.to_string()),
             },
@@ -1439,21 +1462,45 @@ impl Git {
         path: &Path,
         revision: &str,
     ) -> Result<Option<ObjectId>, GitError> {
-        let output = self.output(
-            Some(path),
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                "--end-of-options",
-                revision,
-            ],
-        )?;
-        if !output.status.success() {
+        let arguments = [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            revision,
+        ];
+        let output = self.output(Some(path), &arguments)?;
+        if output.status.success() {
+            return parse_object_output(&output.stdout).map(Some);
+        }
+        // `--verify --quiet` exits 1 both when the revision does not exist
+        // (an unborn HEAD) and when the ref exists but its object cannot be
+        // read (a corrupt object store); stderr is identical either way. Any
+        // other disposition — a signal death included — is a real failure
+        // and must never be reported as an absent revision.
+        if output.status.code() != Some(1) {
+            return Err(command_failed(&arguments.map(OsString::from), &output));
+        }
+        // Distinguish the two exit-1 states with one cheap follow-up that
+        // runs only on this already-failing path: resolving the unpeeled
+        // base needs no object read, so it succeeds over a corrupt store
+        // but still fails in a genuinely unborn repository.
+        let Some((base, _)) = revision.split_once("^{") else {
+            return Ok(None);
+        };
+        let base_arguments = ["rev-parse", "--verify", "--quiet", "--end-of-options", base];
+        let probe = self.output(Some(path), &base_arguments)?;
+        if probe.status.success() {
+            return Err(GitError::UnreadableObject {
+                revision: revision.to_owned(),
+                base: base.to_owned(),
+                target: String::from_utf8_lossy(trim_line_endings(&probe.stdout)).into_owned(),
+            });
+        }
+        if probe.status.code() == Some(1) {
             return Ok(None);
         }
-
-        parse_object_output(&output.stdout).map(Some)
+        Err(command_failed(&base_arguments.map(OsString::from), &probe))
     }
 
     fn resolve_required_object(
@@ -1678,11 +1725,10 @@ pub fn parse_worktree_porcelain(input: &[u8]) -> Result<Vec<WorktreeInfo>, GitEr
             context: "worktree porcelain",
             detail: "record did not contain a worktree path".to_owned(),
         })?;
-        if usize::from(partial.detached)
+        let head_states = usize::from(partial.detached)
             + usize::from(partial.bare)
-            + usize::from(partial.branch.is_some())
-            != 1
-        {
+            + usize::from(partial.branch.is_some());
+        if head_states > 1 {
             return Err(GitError::InvalidOutput {
                 context: "worktree porcelain",
                 detail: format!(
@@ -1691,12 +1737,18 @@ pub fn parse_worktree_porcelain(input: &[u8]) -> Result<Vec<WorktreeInfo>, GitEr
                 ),
             });
         }
+        // Zero of the three is real Git output, not a protocol violation: a
+        // worktree whose HEAD file cannot be resolved (empty, garbage, or an
+        // empty symref target) is listed with a null HEAD and no state
+        // attribute. Represent it instead of failing so one corrupt worktree
+        // cannot poison every listing of the repository.
         worktrees.push(WorktreeInfo {
             path,
             head: partial.head,
             branch: partial.branch,
             detached: partial.detached,
             bare: partial.bare,
+            head_unresolvable: head_states == 0,
             locked_reason: partial.locked_reason,
             prunable_reason: partial.prunable_reason,
         });
@@ -1929,7 +1981,61 @@ fn command_failed(arguments: &[OsString], output: &Output) -> GitError {
     GitError::CommandFailed {
         arguments: display_arguments(arguments),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        disposition: describe_exit_disposition(output.status),
     }
+}
+
+/// Render trimmed stderr with the exit disposition appended, or the
+/// disposition alone, so a signal-killed Git that wrote nothing to stderr
+/// still explains itself instead of ending the message at a bare colon.
+fn command_failure_detail(disposition: &str, stderr: &str) -> String {
+    if stderr.is_empty() {
+        disposition.to_owned()
+    } else {
+        format!("{stderr} ({disposition})")
+    }
+}
+
+/// Describe how a Git process ended: its exit code when it exited, or on
+/// Unix the terminating signal, following the 128+signal convention used by
+/// the activation layer for propagating such deaths.
+fn describe_exit_disposition(status: ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit code {code}");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        if let Some(signal) = status.signal() {
+            return match signal_name(signal) {
+                Some(name) => format!("killed by signal {signal} ({name})"),
+                None => format!("killed by signal {signal}"),
+            };
+        }
+    }
+    "terminated without an exit code".to_owned()
+}
+
+#[cfg(unix)]
+fn signal_name(signal: i32) -> Option<&'static str> {
+    Some(match signal {
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGINT => "SIGINT",
+        libc::SIGQUIT => "SIGQUIT",
+        libc::SIGILL => "SIGILL",
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGFPE => "SIGFPE",
+        libc::SIGKILL => "SIGKILL",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGPIPE => "SIGPIPE",
+        libc::SIGALRM => "SIGALRM",
+        libc::SIGTERM => "SIGTERM",
+        libc::SIGXCPU => "SIGXCPU",
+        libc::SIGXFSZ => "SIGXFSZ",
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -2198,6 +2304,126 @@ mod tests {
         assert!(repository.head_commit.is_none());
         assert!(repository.head_tree.is_none());
         assert_eq!(repository.clean, Some(true));
+    }
+
+    /// Remove the loose object file backing `object_id`, clearing the
+    /// read-only permission Git leaves on loose objects first so the
+    /// deletion also works on Windows.
+    fn delete_loose_object(repository: &Path, object_id: &str) {
+        let object = repository
+            .join(".git/objects")
+            .join(&object_id[..2])
+            .join(&object_id[2..]);
+        let mut permissions = fs::metadata(&object)
+            .expect("loose object metadata")
+            .permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&object, permissions).expect("make loose object writable");
+        fs::remove_file(&object).expect("delete loose object");
+    }
+
+    #[test]
+    fn a_corrupt_object_store_is_not_reported_as_an_unborn_head() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(fixture.path())
+            .output()
+            .expect("read HEAD object ID");
+        assert!(head.status.success());
+        let head = String::from_utf8(head.stdout)
+            .expect("UTF-8 object ID")
+            .trim()
+            .to_owned();
+        delete_loose_object(fixture.path(), &head);
+
+        let error = git
+            .inspect_repository(fixture.path())
+            .expect_err("a corrupt object store must fail inspection");
+        match &error {
+            super::GitError::UnreadableObject {
+                revision,
+                base,
+                target,
+            } => {
+                assert_eq!(revision, "HEAD^{commit}");
+                assert_eq!(base, "HEAD");
+                assert_eq!(target, &head);
+            }
+            other => panic!("expected an unreadable-object error, got {other:?}"),
+        }
+        let message = error.to_string();
+        assert!(message.contains("unreadable"), "{message}");
+        assert!(message.contains("corrupt"), "{message}");
+        assert!(!message.contains("unborn"), "{message}");
+    }
+
+    #[test]
+    fn command_failures_append_the_exit_code_to_stderr() {
+        let fixture = RepositoryFixture::committed();
+        let error = Git::default()
+            .run(
+                Some(fixture.path()),
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    "no-such-revision",
+                ],
+            )
+            .expect_err("an unknown revision must fail");
+        let message = error.to_string();
+        assert!(message.contains("(exit code 128)"), "{message}");
+        assert!(message.contains("fatal:"), "{message}");
+    }
+
+    #[cfg(unix)]
+    fn self_killing_git_stand_in(directory: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let stand_in = directory.join("killed-git");
+        fs::write(&stand_in, "#!/bin/sh\nkill -9 $$\n").expect("write Git stand-in");
+        let mut permissions = fs::metadata(&stand_in)
+            .expect("stand-in metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&stand_in, permissions).expect("mark stand-in executable");
+        stand_in
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_failures_name_the_terminating_signal() {
+        let directory = tempdir().expect("temporary directory");
+        let git = Git::new(self_killing_git_stand_in(directory.path()));
+        let error = retry_while_wrapper_is_busy(|| {
+            git.run(Some(directory.path()), &["status", "--porcelain=v1"])
+        })
+        .expect_err("a signal death must be an error");
+        let message = error.to_string();
+        assert!(
+            message.contains("killed by signal 9 (SIGKILL)"),
+            "{message}"
+        );
+        assert!(!message.trim_end().ends_with(':'), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_killed_probe_is_not_reported_as_an_absent_revision() {
+        let directory = tempdir().expect("temporary directory");
+        let git = Git::new(self_killing_git_stand_in(directory.path()));
+        let error = retry_while_wrapper_is_busy(|| {
+            git.resolve_optional_object(directory.path(), "HEAD^{commit}")
+        })
+        .expect_err("a signal death must not resolve to an absent revision");
+        let message = error.to_string();
+        assert!(
+            message.contains("killed by signal 9 (SIGKILL)"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -3283,6 +3509,73 @@ mod tests {
         let error = parse_worktree_porcelain(input).expect_err("ambiguous state must fail");
 
         assert!(error.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn porcelain_parser_tolerates_a_worktree_without_resolvable_head() {
+        // Exact shape git 2.50.1 emits when a linked worktree's HEAD file is
+        // empty, garbage, or an empty symref target: a null HEAD and none of
+        // branch, detached, or bare.
+        let input = b"worktree /tmp/main\0HEAD 0123456789abcdef0123456789abcdef01234567\0branch refs/heads/main\0\0worktree /tmp/corrupt\0HEAD 0000000000000000000000000000000000000000\0\0";
+
+        let worktrees = parse_worktree_porcelain(input).expect("parse porcelain");
+
+        assert_eq!(worktrees.len(), 2);
+        assert!(!worktrees[0].head_unresolvable);
+        assert_eq!(
+            worktrees[0].branch.as_deref(),
+            Some(b"refs/heads/main".as_slice())
+        );
+        let corrupt = &worktrees[1];
+        assert_eq!(corrupt.path, Path::new("/tmp/corrupt"));
+        assert!(corrupt.head_unresolvable);
+        assert!(corrupt.head.is_none());
+        assert!(corrupt.branch.is_none());
+        assert!(!corrupt.detached);
+        assert!(!corrupt.bare);
+    }
+
+    #[test]
+    fn lists_a_worktree_whose_head_file_is_corrupt() {
+        let fixture = RepositoryFixture::committed();
+        let linked_parent = tempdir().expect("linked parent");
+        let linked = linked_parent.path().join("corrupt-head");
+        let linked_string = linked.to_str().expect("UTF-8 fixture path");
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "corrupt-head",
+                linked_string,
+            ],
+        );
+        fs::write(
+            fixture.path().join(".git/worktrees/corrupt-head/HEAD"),
+            "garbage\n",
+        )
+        .expect("corrupt linked worktree HEAD");
+
+        let worktrees = Git::default()
+            .list_worktrees(fixture.path())
+            .expect("a corrupt linked worktree must not poison the listing");
+
+        assert_eq!(worktrees.len(), 2);
+        assert!(!worktrees[0].head_unresolvable);
+        let corrupt = worktrees
+            .iter()
+            .find(|worktree| {
+                worktree.path.canonicalize().ok().as_deref()
+                    == linked.canonicalize().ok().as_deref()
+            })
+            .expect("corrupt worktree stays listed");
+        assert!(corrupt.head_unresolvable);
+        assert!(corrupt.head.is_none());
+        assert!(corrupt.branch.is_none());
+        assert!(!corrupt.detached);
+        assert!(!corrupt.bare);
     }
 
     #[cfg(unix)]

@@ -14,8 +14,9 @@ use std::process::Command;
 #[cfg(unix)]
 use riftri_core::recover_incomplete_operations;
 use riftri_core::{
-    AddWorktreeRequest, CompactWorktreeRequest, MoveWorktreeRequest, WorktreeMode, add_worktree,
-    compact_worktree, move_worktree, storage_accounting,
+    AddWorktreeRequest, CompactWorktreeRequest, MoveWorktreeRequest, RemoveWorktreeRequest,
+    WorktreeMode, add_worktree, compact_worktree, move_worktree, remove_worktree,
+    storage_accounting,
 };
 
 mod support;
@@ -314,6 +315,79 @@ fn compaction_rekeys_the_active_view_after_a_clean_commit() {
     let accounting = storage_accounting(&state).expect("inspect moved state");
     assert_eq!(accounting.completed_compactions, 2);
     assert!(accounting.diagnostic_issues.is_empty());
+}
+
+#[test]
+fn compaction_survives_a_checkout_profile_change_since_the_add() {
+    let (fixture, repository) = fixture();
+    let state = fixture.path().join("state");
+    let worktree = fixture.path().join("worktree");
+    let added = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/profile-flip")),
+        state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
+    })
+    .expect("create managed worktree");
+
+    // `core.eol lf` is an accepted checkout value, but it is hashed into the
+    // checkout profile, so the recomputed immutable base lands in a new
+    // repository bucket.
+    git(&repository, &["config", "core.eol", "lf"]);
+
+    let compacted = compact_worktree(CompactWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect("compact across base buckets");
+
+    assert_ne!(
+        compacted.base_path.parent(),
+        added.base_path.parent(),
+        "the profile change must retarget the base bucket"
+    );
+    assert!(!compacted.reused_base);
+    assert!(git(&worktree, &["status", "--porcelain"]).is_empty());
+    let accounting = storage_accounting(&state).expect("inspect retargeted state");
+    assert_eq!(accounting.active_views, 1);
+    assert_eq!(accounting.completed_compactions, 1);
+    assert!(
+        accounting.diagnostic_issues.is_empty(),
+        "{:?}",
+        accounting.diagnostic_issues
+    );
+
+    // The worktree must stay fully manageable after the retarget.
+    let recompacted = compact_worktree(CompactWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect("compact the retargeted worktree again");
+    assert!(recompacted.reused_base);
+    let moved = fixture.path().join("moved");
+    move_worktree(MoveWorktreeRequest {
+        repository: repository.clone(),
+        source: worktree,
+        destination: moved.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect("move the retargeted worktree");
+    remove_worktree(RemoveWorktreeRequest {
+        repository,
+        destination: moved,
+        state_dir: Some(state.clone()),
+    })
+    .expect("remove the retargeted worktree");
+    let accounting = storage_accounting(&state).expect("inspect retired state");
+    assert!(
+        accounting.diagnostic_issues.is_empty(),
+        "{:?}",
+        accounting.diagnostic_issues
+    );
 }
 
 #[cfg(unix)]

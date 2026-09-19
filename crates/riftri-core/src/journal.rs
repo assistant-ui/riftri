@@ -1469,7 +1469,42 @@ impl JournalStore {
                 detail: "only the expected active add journal can be compacted".to_owned(),
             });
         }
+        // Compaction recomputes the checkout profile, so `base_path` may move
+        // into a different immutable-base bucket than the one the add staged
+        // in. Recovery validation requires `base_path` and `base_staging` to
+        // share a parent bucket, so the staging record — a path that no
+        // longer exists once the journal is Active — is re-parented onto the
+        // new bucket in the same durable write that retargets the base. The
+        // file name keeps embedding this add operation's own ID.
+        let bucket = base_path
+            .parent()
+            .ok_or_else(|| JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: format!(
+                    "compacted base {} has no parent bucket",
+                    base_path.display()
+                ),
+            })?;
+        let staging_name =
+            decoded
+                .base_staging
+                .file_name()
+                .ok_or_else(|| JournalError::InvalidRecord {
+                    path: journal_path.to_path_buf(),
+                    detail: format!(
+                        "base staging {} has no file name",
+                        decoded.base_staging.display()
+                    ),
+                })?;
+        let base_staging = bucket.join(staging_name);
         if decoded.base_path == base_path && decoded.expected_commit == expected_commit {
+            if decoded.base_staging != base_staging {
+                // An earlier Riftri retargeted `base_path` without moving
+                // `base_staging`, leaving the journal failing recovery
+                // validation. Re-running the same compaction step heals it.
+                record.base_staging = NativeOsString::encode(base_staging.as_os_str());
+                self.persist(&record)?;
+            }
             return Ok(());
         }
         if decoded.base_path != expected_old_base {
@@ -1483,6 +1518,7 @@ impl JournalStore {
             });
         }
         record.base_path = NativeOsString::encode(base_path.as_os_str());
+        record.base_staging = NativeOsString::encode(base_staging.as_os_str());
         record.expected_commit = expected_commit.to_owned();
         self.persist(&record)?;
         Ok(())
