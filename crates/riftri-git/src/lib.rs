@@ -260,7 +260,8 @@ impl Git {
                 command: self.command.clone(),
                 source,
             },
-            error @ termination::TerminationError::Disposition { .. } => GitError::Start {
+            error @ (termination::TerminationError::Disposition { .. }
+            | termination::TerminationError::AlreadyWaiting) => GitError::Start {
                 command: self.command.clone(),
                 source: std::io::Error::other(error.to_string()),
             },

@@ -430,7 +430,9 @@ fn wait_for_scoped_child(
     program: &OsStr,
 ) -> Result<ExitStatus, ActivationError> {
     riftri_git::termination::run_forwarding_terminations(command).map_err(|error| match error {
-        TerminationError::Disposition { .. } => process_error(error.to_string()),
+        TerminationError::Disposition { .. } | TerminationError::AlreadyWaiting => {
+            process_error(error.to_string())
+        }
         TerminationError::Spawn(source) => process_error(format!(
             "start process-scoped command {}: {source}",
             Path::new(program).display()
