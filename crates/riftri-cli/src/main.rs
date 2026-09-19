@@ -1497,6 +1497,16 @@ fn print_recovery_report(
             "recovered_collections": report.recovered_collections,
             "retired_adds": report.retired_adds,
             "relocated_worktrees": relocated_worktrees_json(report),
+            "unresolvable_worktrees": report
+                .unresolvable_worktrees
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
             "reaped_artifacts": report
                 .reaped_artifacts
                 .iter()
@@ -1555,6 +1565,15 @@ fn print_recovery_report(
                 relocation.operation_id,
                 relocation.journal_destination.display(),
                 relocation.registered_path.display()
+            );
+        }
+    }
+    if !report.unresolvable_worktrees.is_empty() {
+        println!("Worktrees Git lists without a resolvable HEAD:");
+        for path in &report.unresolvable_worktrees {
+            println!(
+                "- {}: run `git worktree repair` or remove the worktree",
+                path.display()
             );
         }
     }
