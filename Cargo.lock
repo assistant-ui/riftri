@@ -336,6 +336,7 @@ dependencies = [
 name = "riftri-git"
 version = "0.3.1"
 dependencies = [
+ "libc",
  "serde",
  "tempfile",
  "thiserror",
