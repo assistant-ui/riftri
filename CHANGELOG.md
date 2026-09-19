@@ -25,6 +25,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   base build also removes the empty bucket it created for the new profile
   instead of leaving it as permanently unexplained state.
 
+- One worktree whose HEAD file cannot be resolved (empty, garbage, or an empty
+  symref target — classic crash and power-loss shapes) no longer makes every
+  Riftri command in the repository fail with "invalid Git output". Git lists
+  such a worktree with a null `HEAD` and none of `branch`, `detached`, or
+  `bare`; the porcelain parser now represents that state instead of rejecting
+  it, while still rejecting records that claim more than one of the three.
+  Unrelated operations — add, remove, move, prune, gc, status, list, and the
+  intercepted shim path — keep working; `status`, `worktree list`, and
+  `repair` name the corrupt worktree in a diagnostic that points at
+  `git worktree repair`; and removing, moving, or shell-binding the corrupt
+  worktree itself fails closed with the same guidance instead of risking work
+  in a worktree whose cleanliness cannot be verified.
 - The npm launcher now mirrors the termination contract of native `riftri
   exec`. A native process killed by a signal Node ignores or reserves
   (SIGUSR1, SIGPIPE, ...) previously made the launcher exit 0 — a killed run

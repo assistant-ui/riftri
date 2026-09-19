@@ -132,6 +132,13 @@ pub struct WorktreeInfo {
     pub branch: Option<Vec<u8>>,
     pub detached: bool,
     pub bare: bool,
+    /// Git listed this worktree with neither `branch`, `detached`, nor `bare`:
+    /// its HEAD file exists but cannot be resolved (empty, garbage, or an
+    /// empty symref target — classic crash and power-loss shapes). Git still
+    /// registers the worktree and prints a null `HEAD` for it. Callers must
+    /// never treat such a worktree as clean or operable; unrelated operations
+    /// should skip it and surface a diagnostic instead of failing.
+    pub head_unresolvable: bool,
     pub locked_reason: Option<Vec<u8>>,
     pub prunable_reason: Option<Vec<u8>>,
 }
@@ -1678,11 +1685,10 @@ pub fn parse_worktree_porcelain(input: &[u8]) -> Result<Vec<WorktreeInfo>, GitEr
             context: "worktree porcelain",
             detail: "record did not contain a worktree path".to_owned(),
         })?;
-        if usize::from(partial.detached)
+        let head_states = usize::from(partial.detached)
             + usize::from(partial.bare)
-            + usize::from(partial.branch.is_some())
-            != 1
-        {
+            + usize::from(partial.branch.is_some());
+        if head_states > 1 {
             return Err(GitError::InvalidOutput {
                 context: "worktree porcelain",
                 detail: format!(
@@ -1691,12 +1697,18 @@ pub fn parse_worktree_porcelain(input: &[u8]) -> Result<Vec<WorktreeInfo>, GitEr
                 ),
             });
         }
+        // Zero of the three is real Git output, not a protocol violation: a
+        // worktree whose HEAD file cannot be resolved (empty, garbage, or an
+        // empty symref target) is listed with a null HEAD and no state
+        // attribute. Represent it instead of failing so one corrupt worktree
+        // cannot poison every listing of the repository.
         worktrees.push(WorktreeInfo {
             path,
             head: partial.head,
             branch: partial.branch,
             detached: partial.detached,
             bare: partial.bare,
+            head_unresolvable: head_states == 0,
             locked_reason: partial.locked_reason,
             prunable_reason: partial.prunable_reason,
         });
@@ -3283,6 +3295,73 @@ mod tests {
         let error = parse_worktree_porcelain(input).expect_err("ambiguous state must fail");
 
         assert!(error.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn porcelain_parser_tolerates_a_worktree_without_resolvable_head() {
+        // Exact shape git 2.50.1 emits when a linked worktree's HEAD file is
+        // empty, garbage, or an empty symref target: a null HEAD and none of
+        // branch, detached, or bare.
+        let input = b"worktree /tmp/main\0HEAD 0123456789abcdef0123456789abcdef01234567\0branch refs/heads/main\0\0worktree /tmp/corrupt\0HEAD 0000000000000000000000000000000000000000\0\0";
+
+        let worktrees = parse_worktree_porcelain(input).expect("parse porcelain");
+
+        assert_eq!(worktrees.len(), 2);
+        assert!(!worktrees[0].head_unresolvable);
+        assert_eq!(
+            worktrees[0].branch.as_deref(),
+            Some(b"refs/heads/main".as_slice())
+        );
+        let corrupt = &worktrees[1];
+        assert_eq!(corrupt.path, Path::new("/tmp/corrupt"));
+        assert!(corrupt.head_unresolvable);
+        assert!(corrupt.head.is_none());
+        assert!(corrupt.branch.is_none());
+        assert!(!corrupt.detached);
+        assert!(!corrupt.bare);
+    }
+
+    #[test]
+    fn lists_a_worktree_whose_head_file_is_corrupt() {
+        let fixture = RepositoryFixture::committed();
+        let linked_parent = tempdir().expect("linked parent");
+        let linked = linked_parent.path().join("corrupt-head");
+        let linked_string = linked.to_str().expect("UTF-8 fixture path");
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "corrupt-head",
+                linked_string,
+            ],
+        );
+        fs::write(
+            fixture.path().join(".git/worktrees/corrupt-head/HEAD"),
+            "garbage\n",
+        )
+        .expect("corrupt linked worktree HEAD");
+
+        let worktrees = Git::default()
+            .list_worktrees(fixture.path())
+            .expect("a corrupt linked worktree must not poison the listing");
+
+        assert_eq!(worktrees.len(), 2);
+        assert!(!worktrees[0].head_unresolvable);
+        let corrupt = worktrees
+            .iter()
+            .find(|worktree| {
+                worktree.path.canonicalize().ok().as_deref()
+                    == linked.canonicalize().ok().as_deref()
+            })
+            .expect("corrupt worktree stays listed");
+        assert!(corrupt.head_unresolvable);
+        assert!(corrupt.head.is_none());
+        assert!(corrupt.branch.is_none());
+        assert!(!corrupt.detached);
+        assert!(!corrupt.bare);
     }
 
     #[cfg(unix)]
