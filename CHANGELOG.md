@@ -19,6 +19,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `git worktree repair`; and removing, moving, or shell-binding the corrupt
   worktree itself fails closed with the same guidance instead of risking work
   in a worktree whose cleanliness cannot be verified.
+- The npm launcher now mirrors the termination contract of native `riftri
+  exec`. A native process killed by a signal Node ignores or reserves
+  (SIGUSR1, SIGPIPE, ...) previously made the launcher exit 0 — a killed run
+  reported success — because the death was re-raised through `process.kill`,
+  which is a silent no-op for those signals; the launcher now computes
+  `128 + signal` numerically for every signal death. While the native process
+  runs, the launcher also stays alive through Ctrl-C (SIGINT) and Ctrl-\
+  (SIGQUIT), which the terminal delivers to the whole foreground process
+  group, so a command that catches the interrupt keeps its wrapper instead of
+  outliving a dead launcher on the terminal; PID-directed SIGTERM and SIGHUP
+  are forwarded to the native process, and the child's exit code propagates
+  unchanged.
 - Intercepted `git worktree prune -v` no longer bypasses the journaled prune.
   Git's `-v` is a verbose prune, not a report, so delegating it let ordinary
   Git remove managed lifecycle metadata outside the Riftri journal; verbose
@@ -110,6 +122,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Riftri's own temporaries and coordination locks as unrecognized foreign
   files. One crash no longer breaks an automation gate on
   `diagnostic_issues == []` permanently.
+- The PowerShell installer's HTTPS-downgrade check now actually runs for the
+  `SHA256SUMS` and archive downloads. `Invoke-WebRequest -OutFile` returns
+  nothing to the pipeline, so the assertion always received `$null` and
+  returned without inspecting anything; downloads now pass `-PassThru`
+  (supported alongside `-OutFile` on Windows PowerShell 5.1 and PowerShell 7+),
+  and the check fails closed when no final URI is observable instead of
+  silently skipping. The installer test mock now matches the real cmdlet's
+  contract — no pipeline output with `-OutFile` unless `-PassThru` — and a
+  regression test proves the installer refuses a download whose final URI is
+  not HTTPS.
 
 ## [0.3.1] - 2026-09-18
 
