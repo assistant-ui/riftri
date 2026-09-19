@@ -50,8 +50,14 @@ fn symlinked_base_parents_have_actionable_human_and_json_errors() {
                     message.contains("outside Riftri's expected storage layout"),
                     "{message}"
                 );
+                // The affected state directory contains a space, so the
+                // suggested command must quote it as one shell argument.
                 assert!(
-                    message.contains("riftri status --state-dir <STATE_DIR>"),
+                    message.contains(&format!(
+                        "riftri status --state-dir {}",
+                        riftri_core::shell_quoted_path(&state)
+                            .expect("the fixture path is representable")
+                    )),
                     "{message}"
                 );
                 assert!(message.contains(&state.display().to_string()), "{message}");

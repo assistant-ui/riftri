@@ -4436,13 +4436,35 @@ fn pending_lifecycle_error(
     subject: &Path,
     state_directory: &Path,
 ) -> WorktreeError {
-    WorktreeError::RecoveryPending {
-        message: format!(
-            "a {operation} of {} is already pending; run `riftri repair --state-dir {}`",
-            subject.display(),
+    recovery_pending_error(
+        format!("a {operation} of {} is already pending", subject.display()),
+        state_directory,
+    )
+}
+
+/// Build a pending-recovery error whose prose names exactly the command the
+/// caller can run against the state directory that holds the journal.
+///
+/// The directory is made absolute first, because the caller may act on this
+/// guidance from a different working directory and the machine-readable
+/// receipt repeats this value verbatim. The command is omitted entirely when
+/// the path cannot be written as a shell argument: an unquoted or lossy
+/// rendering names a *different* directory, and repair reports a confident
+/// all-clear for any state directory it does not find.
+pub fn recovery_pending_error(situation: String, state_directory: &Path) -> WorktreeError {
+    let state_directory = crate::command_path(state_directory);
+    let message = match crate::repair_command(&state_directory) {
+        Some(command) => format!("{situation}; run `{command}`"),
+        None => format!(
+            "{situation}; run riftri repair against the state directory {} \
+             (its exact native path is in the JSON receipt, because it cannot \
+             be written as a shell argument)",
             state_directory.display()
         ),
-        state_directory: state_directory.to_path_buf(),
+    };
+    WorktreeError::RecoveryPending {
+        message,
+        state_directory,
     }
 }
 
@@ -5179,12 +5201,21 @@ enum UnsafeBaseInventory {
 }
 
 fn symlinked_base_parent_error(state_directory: &Path, directory: &Path) -> WorktreeError {
+    // Name the affected state directory inside the command when it can be
+    // written as a shell argument; otherwise keep the placeholder rather than
+    // print a path the caller's shell would split or mangle.
+    let state_directory = crate::command_path(state_directory);
+    let next = match crate::shell_quoted_path(&state_directory) {
+        Some(quoted) => format!("run `riftri status --state-dir {quoted}`"),
+        None => "run `riftri status --state-dir <STATE_DIR>`, replacing <STATE_DIR> with the \
+                 exact state directory below"
+            .to_owned(),
+    };
     WorktreeError::InvalidRequest(format!(
         "cleanup stopped: immutable-base path {} is a symbolic link, not a real directory.\n\
          Following it could access data outside Riftri's expected storage layout. \
          Riftri did not follow this link or delete data through it.\n\
-         Next: run `riftri status --state-dir <STATE_DIR>` to inspect the affected state, \
-         replacing <STATE_DIR> with your state directory (quote paths in your shell).\n\
+         Next: {next} to inspect the affected state.\n\
          State directory: {}\n\
          Do not delete or move the linked data manually. For new worktrees, use --state-dir \
          with a real directory; this does not repair an existing redirected layout.",
@@ -7178,13 +7209,10 @@ fn verify_prune_safe(
                     && Some(journal.operation_id.as_str()) != current_prune
             })
     {
-        return Err(WorktreeError::RecoveryPending {
-            message: format!(
-                "another Riftri lifecycle operation is pending; run `riftri repair --state-dir {}` first",
-                state_directory.display()
-            ),
-            state_directory: state_directory.to_path_buf(),
-        });
+        return Err(recovery_pending_error(
+            "another Riftri lifecycle operation is pending".to_owned(),
+            state_directory,
+        ));
     }
     let inventory = git.list_worktrees(repository)?;
     for journal in adds.iter().filter(|journal| {
@@ -9599,7 +9627,10 @@ mod tests {
                     "{error}"
                 );
                 assert!(
-                    error.contains("riftri status --state-dir <STATE_DIR>"),
+                    error.contains(&format!(
+                        "riftri status --state-dir {}",
+                        crate::shell_quoted_path(&state).expect("representable state directory")
+                    )),
                     "{error}"
                 );
                 assert!(error.contains(&state.display().to_string()), "{error}");
@@ -9617,7 +9648,10 @@ mod tests {
                 assert_eq!(recovery.recovered_collections, 0);
                 assert_eq!(recovery.errors.len(), 1);
                 assert!(recovery.errors[0].contains("is a symbolic link"));
-                assert!(recovery.errors[0].contains("riftri status --state-dir <STATE_DIR>"));
+                assert!(recovery.errors[0].contains(&format!(
+                    "riftri status --state-dir {}",
+                    crate::shell_quoted_path(&state).expect("representable state directory")
+                )));
             }
             let outside_base = outside
                 .join("v1/repository")

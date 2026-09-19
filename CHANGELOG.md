@@ -7,6 +7,47 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Recovery guidance no longer sends callers to the wrong Riftri state. Failure
+  receipts and the human-readable messages beside them previously interpolated
+  a state directory with `Path::display` and no shell quoting, so a repository
+  under a path containing a space split into two shell arguments; `riftri
+  repair` then inspected a directory that did not exist and reported "No
+  journaled operation needs manual attention" while the real pending journal
+  sat untouched. Suggested commands now quote every path for the platform
+  shell, and a path that cannot be written as a shell argument — non-Unicode,
+  or containing control characters — produces no command at all rather than a
+  broken one.
+
+- Failure receipts carry the repository and state directory the failing
+  invocation actually selected, so `nextCommand` targets that state instead of
+  whatever the caller's working directory would resolve to. Receipts also gain
+  `repository`, `stateDirectory`, their `*NativeHex` twins, and
+  `nativePathEncoding`, so automation can act on the exact native path without
+  parsing a shell string. `schemaVersion` stays `1`; the fields are additive.
+
+- `riftri repair`, `status`, `gc`, and `worktree list` now refuse an explicitly
+  named `--state-dir` that does not exist, with a diagnostic and exit code 3,
+  instead of treating the missing directory as empty and reporting an
+  all-clear. A repository that has simply never created Riftri state is
+  unaffected and still reports an all-clear with exit code 0.
+
+- `riftri status` and `riftri gc` name the state directory they are reporting
+  on in their `riftri repair` and `riftri gc --apply` hints, and `riftri
+  doctor` and `riftri setup` share one quoting helper with these paths.
+- `riftri exec` no longer strips a scoped command of the signal dispositions it
+  should have inherited. The command now starts from the disposition Riftri
+  itself inherited for every signal Riftri touches, not just the ones Riftri
+  ignores, so `nohup riftri exec -- <command>` survives a hangup exactly like
+  bare `nohup <command>`, and `riftri exec` started asynchronously by a shell
+  without job control keeps the ignored SIGINT and SIGQUIT that POSIX requires
+  for a background job. Commands launched from an ordinary foreground shell are
+  unaffected and still see Ctrl-C.
+- Terminating `riftri exec -- git …` no longer orphans the real Git. The scoped
+  `git` is Riftri's own shim, which previously died instantly on a forwarded
+  SIGTERM or SIGHUP and left a `clone` or `fetch` running and still writing.
+  The shim now applies the same termination contract to its delegation, so the
+  signal reaches the real Git process, and it still propagates Git's exit
+  status under the `128 + signal` rule.
 - Intercepted `git worktree prune` no longer refuses ordinary invocations in an
   enabled repository that holds managed Riftri state. `--no-optional-locks`,
   which VS Code and most IDE Git integrations pass unconditionally, now reaches
