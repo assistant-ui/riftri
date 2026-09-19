@@ -153,7 +153,7 @@ test("repeated clipboard successes each retain a full confirmation interval", as
   await page.clock.install();
   await page.goto("/");
   await page.clock.pauseAt(new Date(Date.now() + 60_000));
-  const button = page.locator(".hero-install").getByRole("button");
+  const button = page.locator(".hero-install .command").getByRole("button");
   await button.click();
   await expect(button).toHaveText("COPIED");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(install);
@@ -174,7 +174,7 @@ test("clipboard denial offers manual copy and a usable retry", async ({ page }) 
     } });
   });
   await page.goto("/");
-  const command = page.locator(".hero-install");
+  const command = page.locator(".hero-install .command");
   await command.getByRole("button").click();
   await expect(command.getByRole("status")).toContainText("Select the command");
   await expect(command.getByRole("button")).toHaveAccessibleName(`Retry copying command: ${install}`);
