@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
@@ -343,6 +343,12 @@ pub struct RecoveryReport {
     pub unresolvable_worktrees: Vec<PathBuf>,
     /// Riftri's own interrupted atomic-write temporaries removed this pass.
     pub reaped_artifacts: Vec<PathBuf>,
+    /// Abandoned OverlayFS probe roots removed this pass after the kernel
+    /// mount inventory proved nothing was mounted at or below them.
+    pub reaped_probe_roots: Vec<PathBuf>,
+    /// Abandoned OverlayFS probe roots preserved because a mount still covers
+    /// them; repair never touches a probe root that may be live.
+    pub preserved_probe_mounts: Vec<PathBuf>,
     pub errors: Vec<String>,
 }
 
@@ -1797,12 +1803,12 @@ fn restored_marker_staging_path(
 
 /// Rebuild the completion marker for a base whose collection is cancelling
 /// after `MarkerRemoved`. The caller holds the exclusive base coordination
-/// lock, so the base content is stable while it is re-hashed; recomputing the
-/// integrity marker from the content on disk (instead of replaying remembered
-/// bytes) means the restored marker never vouches for anything except what
-/// reuse verification will re-hash later, so it can never bless a base that
-/// was modified behind Riftri's back. The marker is staged and renamed into
-/// place so no interruption window can leave a truncated marker.
+/// lock, so the base is stable while it is re-hashed; recomputing the current
+/// (v2) integrity marker from the tree on disk (instead of replaying
+/// remembered bytes) means the restored marker never vouches for anything
+/// except what reuse verification will re-hash later, so it can never bless a
+/// base that was modified behind Riftri's back. The marker is staged and
+/// renamed into place so no interruption window can leave a truncated marker.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn restore_completion_marker(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
     match fs::symlink_metadata(&journal.marker_path) {
@@ -1839,7 +1845,7 @@ fn restore_completion_marker(journal: &DecodedCollectionJournal) -> Result<(), W
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => return Err(io("inspect collectible base", &journal.base_path, source)),
     }
-    let integrity = crate::base_integrity::marker(&journal.base_path).map_err(|source| {
+    let integrity = crate::base_integrity::marker_v2(&journal.base_path).map_err(|source| {
         io(
             "recompute immutable-base integrity",
             &journal.base_path,
@@ -2960,14 +2966,36 @@ fn verify_existing_base(base_path: &Path, complete_path: &Path) -> Result<bool, 
                     source,
                 )
             })?;
-        if stored
-            != crate::base_integrity::marker(base_path)
-                .map_err(|source| io("verify immutable-base integrity", base_path, source))?
-        {
-            return Err(WorktreeError::InvalidRequest(format!(
+        let mismatch = || {
+            Err(WorktreeError::InvalidRequest(format!(
                 "immutable-base integrity check failed for {}; the base was preserved and cannot be reused",
                 base_path.display()
-            )));
+            )))
+        };
+        if stored.starts_with(crate::base_integrity::MARKER_V2_PREFIX) {
+            if stored
+                != crate::base_integrity::marker_v2(base_path)
+                    .map_err(|source| io("verify immutable-base integrity", base_path, source))?
+            {
+                return mismatch();
+            }
+        } else if stored.starts_with(crate::base_integrity::MARKER_V1_PREFIX) {
+            if stored
+                != crate::base_integrity::marker(base_path)
+                    .map_err(|source| io("verify immutable-base integrity", base_path, source))?
+            {
+                return mismatch();
+            }
+            // The content matches, but a v1 marker attests nothing about
+            // special permission bits, extended attributes, or macOS ACLs —
+            // exactly the metadata the native cloners propagate into views.
+            // Report a cache miss so this base is rebuilt once under the
+            // exclusive lock and records a v2 marker, instead of trusting
+            // metadata no marker ever covered. Legacy content tampering
+            // still refuses above; existing views are never disturbed.
+            return Ok(false);
+        } else {
+            return mismatch();
         }
         return Ok(true);
     }
@@ -3211,7 +3239,7 @@ fn prepare_base(
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
     NativeCowCloner::make_tree_read_only(base_path)?;
-    let integrity = crate::base_integrity::marker(base_path)
+    let integrity = crate::base_integrity::marker_v2(base_path)
         .map_err(|source| io("record immutable-base integrity", base_path, source))?;
     let mut marker = OpenOptions::new()
         .create_new(true)
@@ -4969,12 +4997,69 @@ fn diagnose_state_paths(
         }
     }
 
+    // A probe unmount that failed through every retry deliberately abandons
+    // its mount and layer directories next to the user's worktrees instead of
+    // deleting under a possibly live mount. Name each leftover so the leak
+    // stops being invisible; only `riftri repair` removes one, and only when
+    // the kernel mount inventory proves it unmounted.
+    for directory in probe_scan_directories(add_journals) {
+        for path in abandoned_probe_roots(&directory) {
+            add_state_issue(
+                &mut issues,
+                path,
+                "an abandoned OverlayFS probe mount was preserved here after a failed \
+                 unmount; `riftri repair` removes it only when the kernel reports it \
+                 unmounted",
+            );
+        }
+    }
+
     issues.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     issues.dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
     Ok(StatePathDiagnosis {
         issues,
         coordination_locks,
     })
+}
+
+/// Directories a Riftri capability probe may have run in: each journaled
+/// destination and its parent, because probing resolves to the nearest
+/// existing ancestor of the requested destination.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn probe_scan_directories(add_journals: &[DecodedJournal]) -> BTreeSet<PathBuf> {
+    let mut directories = BTreeSet::new();
+    for journal in add_journals {
+        if let Some(parent) = journal.destination.parent() {
+            directories.insert(parent.to_path_buf());
+        }
+        directories.insert(journal.destination.clone());
+    }
+    directories
+}
+
+/// Riftri OverlayFS probe roots present in `directory`, best effort: these
+/// live in user-owned directories, so an unreadable entry is skipped rather
+/// than failing the whole diagnosis.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn abandoned_probe_roots(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for entry in entries.flatten() {
+        if !riftri_storage::OverlayFsMounter::is_abandoned_probe_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        if matches!(
+            fs::symlink_metadata(&path),
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
+        ) {
+            roots.push(path);
+        }
+    }
+    roots.sort_unstable();
+    roots
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -6040,6 +6125,8 @@ pub fn recover_incomplete_operations(
         .iter()
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    #[cfg(target_os = "linux")]
+    let probe_directories = probe_scan_directories(&journals);
     let mut report = RecoveryReport {
         scanned: journals
             .len()
@@ -6346,6 +6433,25 @@ pub fn recover_incomplete_operations(
         Err(error) => report
             .errors
             .push(format!("interrupted journal writes: {error}")),
+    }
+
+    // A failed probe unmount deliberately abandons its mount and layers next
+    // to the user's worktrees; the leak is unbounded because probing reruns on
+    // every add. Remove each leftover only when the kernel mount inventory
+    // proves nothing is mounted at or below it, and preserve — but report —
+    // any root a mount still covers.
+    #[cfg(target_os = "linux")]
+    for directory in probe_directories {
+        for root in abandoned_probe_roots(&directory) {
+            match OverlayFsMounter::remove_abandoned_probe_root(&root) {
+                Ok(true) => report.reaped_probe_roots.push(root),
+                Ok(false) => report.preserved_probe_mounts.push(root),
+                Err(error) => report.errors.push(format!(
+                    "abandoned OverlayFS probe {}: {error}",
+                    root.display()
+                )),
+            }
+        }
     }
     Ok(report)
 }
@@ -7091,9 +7197,10 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
 
 /// Hash metadata Git does not reproduce from its tree: the full native mode
 /// (including setuid, setgid, and sticky bits) and, on Unix, every extended
-/// attribute name and value. The base-integrity content hash deliberately
-/// ignores these, so the forced-removal snapshot composes them separately;
-/// metadata-only edits after force intent must stop deletion.
+/// attribute name and value. The persisted snapshot composes the v1 content
+/// digest, which deliberately ignores these, so the forced-removal snapshot
+/// adds them separately; metadata-only edits after force intent must stop
+/// deletion. This layout stays frozen — journals recorded it durably.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     let metadata = fs::symlink_metadata(path)
@@ -8358,6 +8465,13 @@ fn recover_active_overlayfs_mount(
             journal.journal_path.display()
         ))
     })?;
+    // Both branches load non-destructively: the boot/namespace/liveness
+    // determination below (`mount_state` or `recover_mount`) must run before
+    // any destructive reset, because a mount created in another namespace of
+    // this boot is invisible here and `load_for_remount` would wipe the work
+    // directory of that still-live overlay. The disposable work directory is
+    // reset only on the remount path, after the guards preserved-and-reported
+    // every live-elsewhere shape.
     let layout = if overlayfs.mount_identity.is_some() {
         OverlayFsMounter::load(
             &overlayfs.layout_root,
@@ -8365,7 +8479,7 @@ fn recover_active_overlayfs_mount(
             &journal.destination,
         )?
     } else {
-        OverlayFsMounter::load_for_remount(
+        OverlayFsMounter::load_for_recovery(
             &overlayfs.layout_root,
             &journal.base_path,
             &journal.destination,
@@ -8452,6 +8566,7 @@ fn recover_active_overlayfs_mount(
         &remount.layout_root,
         &remount_journal.base_path,
         &remount_journal.destination,
+        context,
     )?;
     match OverlayFsMounter::recover_mount(&remount_layout, context, &remount.recovery_token)? {
         OverlayFsRecoveryState::Mounted(identity) => {
@@ -10629,6 +10744,246 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn overlayfs_recovery_preserves_a_workdir_the_journaled_namespace_cannot_rule_out() {
+        use riftri_storage::{OverlayFsMounter, OverlayFsRecoveryState};
+
+        let fixture = tempdir().expect("fixture");
+        if !require_overlayfs_test_namespace(fixture.path()) {
+            return;
+        }
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        create_overlayfs_repository(&repository);
+
+        // Reproduce the crash window: exit after the mount syscall succeeds
+        // but before the mount identity reaches the journal.
+        let status = Command::new(std::env::current_exe().expect("unit test executable"))
+            .arg("--exact")
+            .arg("worktree::tests::overlayfs_mount_gap_helper")
+            .arg("--nocapture")
+            .env("RIFTRI_OVERLAYFS_CORE_HELPER", "1")
+            .env("RIFTRI_TEST_EXIT_AFTER_OVERLAYFS_MOUNT", "1")
+            .env("RIFTRI_OVERLAYFS_CORE_REPOSITORY", &repository)
+            .env("RIFTRI_OVERLAYFS_CORE_DESTINATION", &destination)
+            .env("RIFTRI_OVERLAYFS_CORE_STATE", &state)
+            .status()
+            .expect("run mount-gap helper");
+        assert_eq!(status.code(), Some(86));
+
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load interrupted journal")
+            .pop()
+            .expect("one interrupted journal");
+        let overlayfs = journal.overlayfs.clone().expect("OverlayFS intent");
+        assert!(overlayfs.mount_identity.is_none(), "crash window closed");
+        let context = overlayfs.mount_context.clone().expect("mount context");
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )
+        .expect("load interrupted layout");
+        let identity =
+            match OverlayFsMounter::recover_mount(&layout, &context, &overlayfs.recovery_token)
+                .expect("adopt interrupted mount")
+            {
+                OverlayFsRecoveryState::Mounted(identity) => identity,
+                state => panic!("expected mounted recovery state, got {state:?}"),
+            };
+        // Make the mount invisible to this namespace, exactly what recovery
+        // sees when the mount lives on in a namespace it cannot inspect.
+        OverlayFsMounter::unmount(&layout, &identity).expect("hide interrupted mount");
+
+        // Give the journal the interrupted-remount shape (active, identity
+        // never journaled) and a mount context recorded in a different
+        // namespace of this boot: from here, the mount may still be live.
+        let mut record: serde_json::Value = serde_json::from_slice(
+            &fs::read(&journal.journal_path).expect("read interrupted journal"),
+        )
+        .expect("decode interrupted journal");
+        record["phase"] = "active".into();
+        record["last_forward_phase"] = "active".into();
+        let recorded_inode = record["overlayfs"]["mount_context"]["mount_namespace_inode"]
+            .as_u64()
+            .expect("journaled namespace inode");
+        record["overlayfs"]["mount_context"]["mount_namespace_inode"] = (recorded_inode + 1).into();
+        fs::write(
+            &journal.journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode foreign-namespace journal"),
+        )
+        .expect("persist foreign-namespace journal");
+        let sentinel = layout.work().join("live-mount-sentinel");
+        fs::write(&sentinel, b"must survive").expect("plant work-directory sentinel");
+
+        let preserved =
+            recover_incomplete_operations(&state).expect("repair with a possibly live mount");
+        assert_eq!(preserved.recovered_mounts, 0);
+        assert_eq!(preserved.errors.len(), 1, "{:?}", preserved.errors);
+        assert!(
+            preserved.errors[0].contains("different mount namespace"),
+            "{:?}",
+            preserved.errors
+        );
+        assert!(
+            sentinel.exists(),
+            "a destructive work-directory reset ran before the namespace guard"
+        );
+        assert!(layout.upper().join(".git").exists());
+
+        // Back in the journaled namespace the absence of the mount is
+        // provable, so recovery may reset the disposable work state and
+        // remount the view.
+        record["overlayfs"]["mount_context"]["mount_namespace_inode"] = recorded_inode.into();
+        fs::write(
+            &journal.journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode restored journal"),
+        )
+        .expect("persist restored journal");
+        let repaired =
+            recover_incomplete_operations(&state).expect("repair in the journaled namespace");
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        assert_eq!(repaired.recovered_mounts, 1);
+        assert!(
+            Command::new("mountpoint")
+                .arg("--quiet")
+                .arg(&destination)
+                .status()
+                .expect("inspect remounted view")
+                .success()
+        );
+        let marker_name = format!(".riftri-overlayfs-recovery-{}", overlayfs.recovery_token);
+        assert!(
+            !destination.join(&marker_name).exists(),
+            "recovery marker still visible in the merged view"
+        );
+
+        let remounted = JournalStore::open(&state)
+            .load_all()
+            .expect("reload remounted journal")
+            .pop()
+            .expect("one remounted journal");
+        let remounted_overlayfs = remounted.overlayfs.expect("remounted OverlayFS intent");
+        let identity = remounted_overlayfs
+            .mount_identity
+            .expect("remounted identity");
+        let layout = OverlayFsMounter::load(
+            &remounted_overlayfs.layout_root,
+            &remounted.base_path,
+            &remounted.destination,
+        )
+        .expect("reload remounted layout");
+        OverlayFsMounter::unmount(&layout, &identity).expect("unmount remounted view");
+    }
+
+    #[test]
+    fn abandoned_probe_scan_names_only_real_probe_directories() {
+        let fixture = tempdir().expect("fixture");
+        let probe = fixture.path().join(".riftri-overlay-probe-42-1-0");
+        fs::create_dir(&probe).expect("create probe directory");
+        fs::write(probe.join("leftover"), b"layer").expect("write probe leftover");
+        fs::write(
+            fixture.path().join(".riftri-overlay-probe-42-1-1"),
+            b"not a directory",
+        )
+        .expect("write probe-named file");
+        fs::create_dir(fixture.path().join("user-directory")).expect("create user directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&probe, fixture.path().join(".riftri-overlay-probe-42-1-2"))
+            .expect("create probe-named symlink");
+
+        assert_eq!(super::abandoned_probe_roots(fixture.path()), vec![probe]);
+        assert!(super::abandoned_probe_roots(&fixture.path().join("absent")).is_empty());
+    }
+
+    #[test]
+    fn status_names_an_abandoned_overlayfs_probe_next_to_a_worktree() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/probe-diagnostic")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+
+        // A failed probe unmount abandons its directory beside the worktree.
+        // Diagnostics scan the journaled destination's canonical parent, so
+        // compare against the canonical probe path.
+        let probe = fixture.path().join(".riftri-overlay-probe-4242-7-0");
+        fs::create_dir(&probe).expect("create abandoned probe");
+        fs::write(probe.join("leftover"), b"layer").expect("write abandoned layer");
+        let probe = probe.canonicalize().expect("resolve abandoned probe");
+
+        let status = storage_accounting(&state).expect("account with abandoned probe");
+        assert!(
+            status.diagnostic_issues.iter().any(|issue| {
+                issue.path == probe && issue.reason.contains("abandoned OverlayFS probe")
+            }),
+            "abandoned probe not named: {:?}",
+            status.diagnostic_issues
+        );
+
+        let repaired = recover_incomplete_operations(&state).expect("repair with abandoned probe");
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(repaired.reaped_probe_roots, vec![probe.clone()]);
+            assert!(repaired.preserved_probe_mounts.is_empty());
+            assert!(!probe.exists(), "unmounted probe leftover not reaped");
+            let clean = storage_accounting(&state).expect("account after probe reap");
+            assert!(
+                !clean
+                    .diagnostic_issues
+                    .iter()
+                    .any(|issue| issue.reason.contains("abandoned OverlayFS probe")),
+                "{:?}",
+                clean.diagnostic_issues
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Only the Linux mount inventory can prove the probe unmounted,
+            // so other platforms report it and leave it alone.
+            assert!(repaired.reaped_probe_roots.is_empty());
+            assert!(probe.is_dir(), "probe removed without a liveness proof");
+        }
+
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state),
+            },
+            None,
+        )
+        .expect("remove probe-diagnostic worktree");
+        assert!(!destination.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn overlayfs_removal_recovers_after_every_persisted_transition() {
         let probe = tempdir().expect("probe fixture");
         if !require_overlayfs_test_namespace(probe.path()) {
@@ -12094,6 +12449,88 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_marker_base_upgrades_with_one_rebuild() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let request = |name: &str| AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: fixture.path().join(name),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
+        };
+        let first = add_worktree_inner(request("first"), None, true).expect("first view");
+        let marker_path = first.base_path.with_extension("complete");
+        assert!(
+            fs::read(&marker_path)
+                .expect("fresh marker")
+                .starts_with(crate::base_integrity::MARKER_V2_PREFIX)
+        );
+
+        // Rewrite the completion marker exactly as a pre-v2 binary recorded
+        // it: the v1 content digest of the same base.
+        fs::write(
+            &marker_path,
+            crate::base_integrity::marker(&first.base_path).expect("v1 digest"),
+        )
+        .expect("write legacy marker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Metadata tampering is invisible to a v1 marker. The migration
+            // rebuild must discard it rather than clone it into views.
+            let file = first.base_path.join("tracked.txt");
+            let mode = fs::symlink_metadata(&file)
+                .expect("base file metadata")
+                .permissions()
+                .mode();
+            fs::set_permissions(&file, fs::Permissions::from_mode((mode & 0o777) | 0o4000))
+                .expect("set setuid bit");
+        }
+
+        let second = add_worktree_inner(request("second"), None, true).expect("migrating view");
+        assert!(!second.reused_base, "a v1 marker must trigger one rebuild");
+        let upgraded = fs::read(&marker_path).expect("upgraded marker");
+        assert!(upgraded.starts_with(crate::base_integrity::MARKER_V2_PREFIX));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            for path in [
+                first.base_path.join("tracked.txt"),
+                second.destination.join("tracked.txt"),
+            ] {
+                let mode = fs::symlink_metadata(&path)
+                    .expect("rebuilt metadata")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o7000, 0, "{}: {mode:o}", path.display());
+            }
+        }
+
+        let third = add_worktree_inner(request("third"), None, true).expect("cached view");
+        assert!(third.reused_base, "the upgraded marker must be reusable");
+        assert_eq!(fs::read(&marker_path).expect("stable marker"), upgraded);
+        for destination in [&first.destination, &second.destination, &third.destination] {
+            git(destination, &["status", "--porcelain=v1"]);
+        }
+    }
+
+    #[test]
     fn forced_removal_recovers_an_unchanged_dirty_view_after_intent() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
@@ -12576,7 +13013,7 @@ mod tests {
         assert!(resumed.collected.is_empty());
         assert_eq!(
             fs::read(&marker).expect("read restored marker"),
-            crate::base_integrity::marker(&base_path).expect("hash restored base"),
+            crate::base_integrity::marker_v2(&base_path).expect("hash restored base"),
         );
 
         let accounting = storage_accounting(&state).expect("account cancelled collection");
@@ -12653,7 +13090,7 @@ mod tests {
         let marker = base_path.with_extension("complete");
         garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
             .expect_err("interrupt collection after marker removal");
-        let content = crate::base_integrity::marker(&base_path).expect("hash base");
+        let content = crate::base_integrity::marker_v2(&base_path).expect("hash base");
         fs::write(&marker, &content).expect("simulate a restore interrupted before cancellation");
         let recovered = recover_incomplete_operations(&state).expect("recover restored marker");
         assert!(recovered.errors.is_empty(), "{recovered:?}");
@@ -12693,7 +13130,7 @@ mod tests {
         assert!(!staging.exists());
         assert_eq!(
             fs::read(&marker).expect("read restored marker"),
-            crate::base_integrity::marker(&base_path).expect("hash restored base"),
+            crate::base_integrity::marker_v2(&base_path).expect("hash restored base"),
         );
 
         // If the racing reference disappears before the retry, the collection
