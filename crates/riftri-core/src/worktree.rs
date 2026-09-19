@@ -12228,7 +12228,14 @@ mod tests {
             true,
         )
         .expect("create managed worktree");
+        // Plain `git` cannot create directories from a Windows verbatim
+        // (\\?\) spelling, so hand it the drive-letter form the CLI would.
         let corrupt_text = corrupt.to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let corrupt_text = corrupt_text
+            .strip_prefix("\\\\?\\")
+            .map(str::to_owned)
+            .unwrap_or(corrupt_text);
         git(
             &repository,
             &[
@@ -12256,10 +12263,9 @@ mod tests {
         assert_eq!(accounting.active_views, 1);
         assert_eq!(accounting.views[0].destination, managed);
         assert!(
-            accounting
-                .diagnostic_issues
-                .iter()
-                .any(|issue| { issue.path == corrupt && issue.reason.contains("cannot resolve") }),
+            accounting.diagnostic_issues.iter().any(|issue| {
+                super::paths_match(&issue.path, &corrupt) && issue.reason.contains("cannot resolve")
+            }),
             "diagnostics must name the corrupt worktree: {:?}",
             accounting.diagnostic_issues
         );
@@ -12267,7 +12273,11 @@ mod tests {
         // Repair keeps working and names the corruption it cannot fix.
         let recovered = recover_incomplete_operations(&state).expect("repair");
         assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
-        assert_eq!(recovered.unresolvable_worktrees, vec![corrupt.clone()]);
+        assert_eq!(recovered.unresolvable_worktrees.len(), 1);
+        assert!(super::paths_match(
+            &recovered.unresolvable_worktrees[0],
+            &corrupt
+        ));
 
         // Unrelated lifecycle operations keep working: prune, then removal of
         // the healthy managed worktree.
