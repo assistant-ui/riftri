@@ -488,6 +488,29 @@ and garbage collection treats both journaled bases as protected while the
 operation is pending. OverlayFS is excluded until private-upper reset can use
 the same mount-identity and recovery guarantees.
 
+### D038: suggested commands are quoted, contextual, or absent
+
+Every command Riftri suggests — in a `--json-errors` receipt's `nextCommand`,
+in the human-readable message beside it, in `doctor`, and in `setup` — is a
+shell string produced by one shared helper. Paths are quoted for the platform
+shell, and a path that cannot be written as a shell argument, because it is
+not valid Unicode or contains control characters, produces no command at all.
+There is no lossy rendering that stays correct: an unquoted or
+`U+FFFD`-substituted path names a *different* directory, and Riftri would then
+answer questions about state it never inspected. Receipts keep the exact
+native path in `*NativeHex` fields so automation never has to parse the shell
+string.
+
+Suggested recovery and inspection commands also carry context. `repair` and
+`status` resolve their state directory from the current directory unless told
+otherwise, so a receipt repeats the `--state-dir` the failing invocation
+selected, or the `--repository` that resolves the same default; a pending
+journal's own directory outranks both. For the same reason, an explicitly
+named `--state-dir` that does not exist is refused rather than scanned as
+empty. A missing default state directory still means "this repository has no
+Riftri state yet" and reports an all-clear; a missing directory the caller
+named means "Riftri did not find what you pointed at" and must not.
+
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 
 Pointer-only worktree cleanup stages the real `.git` pointer at a journal-derived

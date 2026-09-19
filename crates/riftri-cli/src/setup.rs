@@ -232,15 +232,10 @@ fn display(value: &OsStr) -> String {
 }
 
 fn print_next_steps(output: &mut impl Write, destination: &Path) -> Result<()> {
-    if let Some(path) = destination
-        .to_str()
-        .filter(|path| !path.chars().any(char::is_control))
-    {
-        #[cfg(windows)]
-        let quoted = path.replace('\'', "''");
-        #[cfg(not(windows))]
-        let quoted = path.replace('\'', "'\"'\"'");
-        writeln!(output, "Start working:\n  cd '{quoted}'\n  git status")?;
+    // One shared quoting rule across doctor, setup, and failure receipts: a
+    // path that cannot be written as a shell argument prints no command.
+    if let Some(quoted) = riftri_core::shell_quoted_path(destination) {
+        writeln!(output, "Start working:\n  cd {quoted}\n  git status")?;
     } else {
         writeln!(
             output,

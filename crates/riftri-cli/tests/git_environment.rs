@@ -113,7 +113,12 @@ fn explicit_and_intercepted_adds_reject_repository_overrides_without_mutation() 
 fn lifecycle_commands_reject_even_empty_repository_overrides() {
     let fixture_dir = tempfile::tempdir().unwrap();
     let repository = fixture(fixture_dir.path());
+    // The state directory exists so that inspection commands reach the Git
+    // environment guard rather than stopping earlier on a missing
+    // `--state-dir`; the guard must still refuse before writing anything into
+    // it.
     let state = fixture_dir.path().join("state");
+    fs::create_dir(&state).unwrap();
     for args in [
         &["worktree", "add", "../view", "--detach"][..],
         &["worktree", "remove", "../view"],
@@ -137,7 +142,11 @@ fn lifecycle_commands_reject_even_empty_repository_overrides() {
             message.contains("GIT_INDEX_FILE") && message.contains("unset"),
             "{args:?}: {message}"
         );
-        assert!(!state.exists());
+        assert_eq!(
+            fs::read_dir(&state).unwrap().count(),
+            0,
+            "{args:?}: refused commands must not write state"
+        );
     }
 }
 

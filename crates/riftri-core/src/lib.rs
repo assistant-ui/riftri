@@ -13,6 +13,7 @@ mod activation;
 mod base_integrity;
 mod journal;
 pub mod progress;
+mod shell;
 #[cfg(test)]
 mod test_hooks;
 #[cfg(all(
@@ -40,6 +41,7 @@ pub use activation::{
     stripped_shim_scope_detected,
 };
 pub use riftri_git::REAL_GIT_ENV;
+pub use shell::{command_path, repair_command, shell_quoted_path};
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
     CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,
@@ -48,8 +50,8 @@ pub use worktree::{
     StateDiagnosticIssue, StateDirectorySource, StateWorktreeInventory, StorageAccountingReport,
     ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree, compact_worktree,
     force_remove_worktree, forget_missing_state_directory, garbage_collect, is_managed_worktree,
-    move_worktree, prune_worktrees, recover_incomplete_operations, remove_worktree,
-    storage_accounting, worktree_inventory_across_states,
+    move_worktree, prune_worktrees, recover_incomplete_operations, recovery_pending_error,
+    remove_worktree, storage_accounting, worktree_inventory_across_states,
 };
 
 /// A diagnostic check and its optional failure explanation.
@@ -615,14 +617,8 @@ fn destination_readiness(
         Ok(_) | Err(_) => OverlayFsHelperReadiness::NotApplicable,
     };
     let next_command = match status {
-        DestinationReadinessStatus::Ready => destination.to_str().map(|path| {
-            let escaped = if cfg!(windows) {
-                path.replace('\'', "''")
-            } else {
-                path.replace('\'', "'\"'\"'")
-            };
-            format!("riftri worktree add '{escaped}' --detach HEAD")
-        }),
+        DestinationReadinessStatus::Ready => shell::shell_quoted_path(destination)
+            .map(|quoted| format!("riftri worktree add {quoted} --detach HEAD")),
         DestinationReadinessStatus::NeedsActivation => Some("riftri enable".to_owned()),
         DestinationReadinessStatus::Blocked
             if overlayfs_helper == OverlayFsHelperReadiness::Unavailable =>

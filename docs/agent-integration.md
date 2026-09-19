@@ -111,6 +111,25 @@ policy refusals from operational failures, the durable `phase` reached, a
 `nextCommand`. A harness should treat a non-zero exit with a
 `"category": "policy"` receipt as a configuration to report, not retry.
 
+Receipts also carry the context the failing invocation used: `repository` and
+`stateDirectory` display strings, their `repositoryNativeHex` and
+`stateDirectoryNativeHex` twins, and `nativePathEncoding`. `nextCommand`
+targets that same context rather than the caller's working directory, so
+running it inspects or repairs the state that actually failed.
+
+`nextCommand` is a **shell string**, with every path quoted for the platform
+shell: run it through a shell rather than splitting it on whitespace. It is
+`null` when no command applies and also when a path cannot be written as a
+shell argument — a non-Unicode path, or one containing control characters.
+Riftri never emits a lossy or unquoted command, because one would silently
+address a different directory. Automation that needs the exact path should
+read the `*NativeHex` fields, which are faithful in every case.
+
+An explicitly passed `--state-dir` that does not exist is refused with
+`"code": "invalid-request"` and exit code 3, rather than scanned as empty: a
+directory Riftri never found cannot support an all-clear. A repository that
+has simply never created Riftri state still reports an all-clear and exits 0.
+
 `--json-errors` also suppresses the human-readable lifecycle progress lines
 that `worktree add`, `repair`, and `gc` otherwise print on stderr, so stderr
 stays reserved for that single receipt. Harnesses that parse stdout with
