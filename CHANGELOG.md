@@ -34,6 +34,23 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - `riftri status` and `riftri gc` name the state directory they are reporting
   on in their `riftri repair` and `riftri gc --apply` hints, and `riftri
   doctor` and `riftri setup` share one quoting helper with these paths.
+- Intercepted `git worktree prune` no longer refuses ordinary invocations in an
+  enabled repository that holds managed Riftri state. `--no-optional-locks`,
+  which VS Code and most IDE Git integrations pass unconditionally, now reaches
+  the journaled prune, and the read-only `-n`/`--dry-run`, `-v`/`--verbose`, and
+  `-h`/`--help` forms delegate to real Git because they change nothing. Options
+  that could remove lifecycle metadata outside the journal are still refused,
+  now quoting the arguments actually passed and naming `RIFTRI_BYPASS=1`.
+- `git worktree add --help` and `git worktree add -h` print Git's usage instead
+  of being refused as unsupported options, matching `worktree remove -h` and
+  `worktree list -h`. An add carrying only checkout-neutral global options
+  (`--no-optional-locks`, `--no-advice`, `--literal-pathspecs`) delegates to
+  ordinary Git rather than failing.
+- `git worktree add <path> <commit-ish>` now refuses a tag, a raw commit, a
+  remote-tracking ref, or `HEAD` before running any Git process, explaining that
+  the optimized path checks out an existing local branch and pointing at
+  `--detach`, `-b <new-branch>`, and `RIFTRI_BYPASS=1`. It previously failed
+  part-way through with a misleading "existing local branch does not exist".
 
 ## [0.3.1] - 2026-09-18
 

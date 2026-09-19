@@ -164,30 +164,26 @@ pub fn plan_git_command(
         return Ok(GitProxyPlan::Passthrough);
     };
     match subcommand.to_string_lossy().as_ref() {
-        "add" => {
-            if !context.optimization_compatible {
-                return Err(unsupported(format!(
-                    "Git invocation-level configuration is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
-                )));
-            }
-            parse_enabled_add(&repository, &arguments[context.command_index + 2..])
-                .map(|(request, quiet)| GitProxyPlan::OptimizedAdd { request, quiet })
-        }
+        "add" => plan_enabled_add(
+            &repository,
+            &arguments[context.command_index + 2..],
+            context.global_options,
+        ),
         "remove" => plan_enabled_remove(
             &repository,
             &arguments[context.command_index + 2..],
-            context.optimization_compatible,
+            context.global_options.optimization_compatible(),
         ),
         "move" => plan_enabled_move(
             &repository,
             &arguments[context.command_index + 2..],
-            context.optimization_compatible,
+            context.global_options.optimization_compatible(),
         ),
         "prune" => plan_enabled_prune(
             &repository,
             &activation,
             &arguments[context.command_index + 2..],
-            context.optimization_compatible,
+            context.global_options,
         ),
         _ => Ok(GitProxyPlan::Passthrough),
     }
@@ -1231,18 +1227,46 @@ fn activation_for_proxy(path: &Path) -> Result<Option<RepositoryActivation>, Act
     }))
 }
 
+/// How the global Git options in front of `worktree` constrain optimization.
+///
+/// Riftri separates options that can change what Git would produce from
+/// options that only affect reporting or locking, because the first class must
+/// be refused while the second only has to keep Riftri from claiming that an
+/// optimized result reproduces the requested invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GlobalOptionScope {
+    /// No invocation-level option that Riftri has to account for.
+    None,
+    /// Only options that cannot change the content of a created worktree.
+    CheckoutNeutral,
+    /// At least one option that can change what Git would produce.
+    Significant,
+}
+
+impl GlobalOptionScope {
+    fn observe(&mut self, scope: Self) {
+        if scope == Self::Significant || *self == Self::None {
+            *self = scope;
+        }
+    }
+
+    fn optimization_compatible(self) -> bool {
+        self == Self::None
+    }
+}
+
 struct CommandContext {
     repository: PathBuf,
     git_directory: Option<PathBuf>,
     command_index: usize,
-    optimization_compatible: bool,
+    global_options: GlobalOptionScope,
 }
 
 fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
     let mut repository = current_directory.to_path_buf();
     let mut work_tree = None;
     let mut git_directory = None;
-    let mut optimization_compatible = true;
+    let mut global_options = GlobalOptionScope::None;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "-C" {
@@ -1261,15 +1285,15 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             } else {
                 git_directory = Some(value.clone());
             }
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if let Some(value) = option_value(argument, "--git-dir=") {
             git_directory = Some(value);
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if let Some(value) = option_value(argument, "--work-tree=") {
             work_tree = Some(value);
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument == "--no-pager"
             || argument == "--paginate"
@@ -1279,28 +1303,36 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             index += 1;
         } else if argument == "-c" {
             arguments.get(index + 1)?;
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if argument.to_string_lossy().starts_with("--config-env=") {
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument == "--namespace" {
             arguments.get(index + 1)?;
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 2;
+        } else if argument == "--no-optional-locks"
+            || argument == "--no-advice"
+            || argument == "--literal-pathspecs"
+        {
+            // Advice suppression and optional-lock avoidance never change what
+            // a checkout contains, and `git worktree` takes no pathspec, so
+            // literal pathspec matching cannot change it either. IDEs pass
+            // `--no-optional-locks` on every Git call, so refusing these would
+            // break ordinary editor integration.
+            global_options.observe(GlobalOptionScope::CheckoutNeutral);
+            index += 1;
         } else if argument.to_string_lossy().starts_with("--namespace=")
             || argument.as_encoded_bytes().starts_with(b"--exec-path=")
             || argument == "--no-replace-objects"
             || argument == "--no-lazy-fetch"
-            || argument == "--no-optional-locks"
-            || argument == "--no-advice"
-            || argument == "--literal-pathspecs"
             || argument == "--glob-pathspecs"
             || argument == "--noglob-pathspecs"
             || argument == "--icase-pathspecs"
             || argument == "--bare"
         {
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument.to_string_lossy().starts_with('-') {
             return None;
@@ -1312,7 +1344,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
                 repository: work_tree.unwrap_or(repository),
                 git_directory,
                 command_index: index,
-                optimization_compatible,
+                global_options,
             });
         }
     }
@@ -1334,6 +1366,40 @@ fn option_value(argument: &OsStr, prefix: &str) -> Option<OsString> {
     // SAFETY: the split occurs immediately after an ASCII prefix, which is a
     // valid boundary in the platform-independent encoded representation.
     Some(unsafe { OsStr::from_encoded_bytes_unchecked(value) }.to_os_string())
+}
+
+/// `-h` and `--help` ask Git to print usage and exit without touching the
+/// repository, exactly like the `remove` and `list` subcommands Riftri already
+/// delegates. Intercepting them would leave `worktree add` as the one
+/// subcommand whose documentation is unreachable inside an enabled repository.
+fn requests_git_help(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .any(|argument| argument == "-h" || argument == "--help")
+}
+
+fn plan_enabled_add(
+    repository: &Path,
+    arguments: &[OsString],
+    global_options: GlobalOptionScope,
+) -> Result<GitProxyPlan, ActivationError> {
+    if requests_git_help(arguments) {
+        return Ok(GitProxyPlan::Passthrough);
+    }
+    match global_options {
+        // An option Riftri cannot reproduce must not be silently dropped, and
+        // an add is not safe to hand to ordinary Git once Riftri would have
+        // optimized it, so this stays a visible refusal.
+        GlobalOptionScope::Significant => Err(unsupported(format!(
+            "Git invocation-level configuration is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+        ))),
+        // Nothing about the request is unreproducible, but Riftri also gains
+        // nothing by claiming the option: ordinary Git honors it exactly.
+        GlobalOptionScope::CheckoutNeutral => Ok(GitProxyPlan::Passthrough),
+        GlobalOptionScope::None => parse_enabled_add(repository, arguments)
+            .map(|(request, quiet)| GitProxyPlan::OptimizedAdd { request, quiet }),
+    }
 }
 
 fn parse_enabled_add(
@@ -1392,7 +1458,25 @@ fn parse_enabled_add(
         .unwrap_or_else(|| OsString::from("HEAD"));
     let mode = match mode {
         Some(mode) => mode,
-        None if positional.len() == 2 => WorktreeMode::ExistingBranch(revision.clone()),
+        // `git worktree add <path> <commit-ish>` without a mode flag only
+        // checks out a branch when `<commit-ish>` names an existing local
+        // branch. For a tag, a raw commit, `HEAD`, or a remote-tracking ref
+        // real Git detaches or creates a DWIM tracking branch instead, neither
+        // of which the optimized path reproduces. Decide that here, from one
+        // ref lookup, rather than letting the request fail deep inside the add
+        // after several Git processes have already run.
+        None if positional.len() == 2 => {
+            if Git::default()
+                .local_branch_target(repository, &revision)?
+                .is_none()
+            {
+                let revision = revision.to_string_lossy().into_owned();
+                return Err(unsupported(format!(
+                    "optimized add checks out an existing local branch, and `{revision}` is not one; ordinary Git would create a detached or remote-tracking worktree instead. Use `--detach` to check out `{revision}` detached, `-b <new-branch>` to create a branch, or set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+                )));
+            }
+            WorktreeMode::ExistingBranch(revision.clone())
+        }
         None => {
             return Err(unsupported(format!(
                 "optimized add requires an existing local branch, `-b <new-branch>`, or `--detach`; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
@@ -1506,12 +1590,28 @@ fn plan_enabled_move(
     Ok(GitProxyPlan::Passthrough)
 }
 
+/// `git worktree prune` options that only report what a prune would do.
+///
+/// `-n`/`--dry-run` is Git's own "do not remove anything; just report what it
+/// would remove", and the verbosity and help options change nothing either, so
+/// real Git can answer all of them without touching lifecycle metadata.
+fn is_read_only_prune_option(argument: &OsString) -> bool {
+    matches!(
+        argument.to_str(),
+        Some("-n" | "--dry-run" | "-v" | "--verbose" | "-h" | "--help")
+    )
+}
+
 fn plan_enabled_prune(
     repository: &Path,
     activation: &RepositoryActivation,
     arguments: &[OsString],
-    optimization_compatible: bool,
+    global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
+    if !arguments.is_empty() && arguments.iter().all(is_read_only_prune_option) {
+        return Ok(GitProxyPlan::Passthrough);
+    }
+
     let mut managed_states = Vec::new();
     for state_directory in repository_state_directories(&activation.repository)? {
         let status = storage_accounting(&state_directory)?;
@@ -1528,15 +1628,27 @@ fn plan_enabled_prune(
     if managed_states.is_empty() {
         return Ok(GitProxyPlan::Passthrough);
     }
-    if optimization_compatible && arguments.is_empty() {
-        return Ok(GitProxyPlan::OptimizedPrune(PruneWorktreesRequest {
-            repository: repository.to_path_buf(),
-            state_dir: managed_states.into_iter().next(),
-        }));
+    if arguments.is_empty() {
+        // A checkout-neutral global option cannot change what a prune removes,
+        // so the journaled prune still reproduces the requested invocation.
+        if global_options != GlobalOptionScope::Significant {
+            return Ok(GitProxyPlan::OptimizedPrune(PruneWorktreesRequest {
+                repository: repository.to_path_buf(),
+                state_dir: managed_states.into_iter().next(),
+            }));
+        }
+        return Err(unsupported(format!(
+            "refusing `git worktree prune` under invocation-level Git configuration while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+        )));
     }
-    Err(unsupported(
-        "refusing `git worktree prune` options while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal",
-    ))
+    let options = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Err(unsupported(format!(
+        "refusing `git worktree prune {options}` while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+    )))
 }
 
 fn guard_managed_path_lifecycle(
@@ -1892,7 +2004,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        GitProxyPlan, disable_repository, enable_repository, plan_git_command,
+        BYPASS_ENV, GitProxyPlan, disable_repository, enable_repository, plan_git_command,
         repository_activation,
     };
     #[cfg(unix)]
@@ -2001,6 +2113,7 @@ mod tests {
     #[test]
     fn enabled_existing_branch_add_is_planned_as_an_optimized_worktree() {
         let fixture = repository_fixture();
+        git(fixture.path(), &["branch", "feature/existing"]);
         enable_repository(fixture.path()).expect("enable repository");
         let arguments = [
             OsString::from("worktree"),
@@ -2127,6 +2240,134 @@ mod tests {
         let error = plan_git_command(fixture.path(), &arguments)
             .expect_err("invocation config must not be ignored");
         assert!(error.to_string().contains("invocation-level configuration"));
+    }
+
+    /// `worktree add` is the only subcommand Riftri intercepts eagerly, so its
+    /// usage text has to stay reachable exactly like `remove -h` and `list -h`.
+    #[test]
+    fn enabled_add_delegates_help_requests_to_git() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for help in ["--help", "-h"] {
+            let arguments = [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from(help),
+            ];
+
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan help request"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`worktree add {help}` was not delegated to Git"
+            );
+        }
+    }
+
+    /// A `--` separator ends option parsing, so a later `--help` is a path.
+    #[test]
+    fn enabled_add_treats_help_after_a_separator_as_a_path() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let arguments = [
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("--detach"),
+            OsString::from("--"),
+            OsString::from("--help"),
+        ];
+
+        let GitProxyPlan::OptimizedAdd { request, .. } =
+            plan_git_command(fixture.path(), &arguments).expect("plan separated add")
+        else {
+            panic!("`worktree add --detach -- --help` was not an optimized add");
+        };
+        assert_eq!(request.destination, fixture.path().join("--help"));
+    }
+
+    /// IDE Git integrations pass `--no-optional-locks` on every invocation.
+    /// None of these options can change what a checkout contains, so an add
+    /// carrying one delegates to ordinary Git instead of failing.
+    #[test]
+    fn enabled_add_delegates_checkout_neutral_global_options() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for option in ["--no-optional-locks", "--no-advice", "--literal-pathspecs"] {
+            let arguments = [
+                OsString::from(option),
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("--detach"),
+                OsString::from("../neutral-view"),
+                OsString::from("HEAD"),
+            ];
+
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan neutral add"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`git {option} worktree add` was not delegated to Git"
+            );
+        }
+    }
+
+    /// Without a mode flag, only an existing local branch is checked out.
+    /// Every other revision would make ordinary Git detach or create a
+    /// tracking branch, so the refusal has to name that limitation before any
+    /// Git process runs rather than surface as a missing-branch failure later.
+    #[test]
+    fn enabled_add_refuses_a_revision_that_is_not_a_local_branch() {
+        let fixture = repository_fixture();
+        git(fixture.path(), &["tag", "v1.0.0"]);
+        enable_repository(fixture.path()).expect("enable repository");
+        for revision in ["v1.0.0", "origin/main", "HEAD"] {
+            let arguments = [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("../detached-candidate"),
+                OsString::from(revision),
+            ];
+
+            let error = plan_git_command(fixture.path(), &arguments)
+                .expect_err("a non-branch revision must be refused before any mutation");
+            let message = error.to_string();
+            assert!(
+                message.contains("is not one") && message.contains(revision),
+                "{revision}: {message}"
+            );
+            assert!(message.contains("--detach"), "{revision}: {message}");
+            assert!(message.contains(BYPASS_ENV), "{revision}: {message}");
+            assert!(
+                !message.contains("existing local branch does not exist"),
+                "{revision}: {message}"
+            );
+        }
+    }
+
+    /// `-n`/`--dry-run` is Git's own "show what would be pruned", and the
+    /// verbosity and help options report just as harmlessly, so none of them
+    /// may be refused as journal-bypassing mutations.
+    #[test]
+    fn enabled_prune_delegates_read_only_options_to_git() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for option in ["-n", "--dry-run", "-v", "--verbose", "-h", "--help"] {
+            let arguments = [
+                OsString::from("worktree"),
+                OsString::from("prune"),
+                OsString::from(option),
+            ];
+
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan read-only prune"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`worktree prune {option}` was not delegated to Git"
+            );
+        }
     }
 
     /// Deactivation evaluated inside a `riftri exec` session must strip the

@@ -130,7 +130,15 @@ receive the same behavior as interactive PowerShell commands. Riftri never
 evaluates the hook or edits a shell profile itself. In either scope, the shim delegates
 commands outside enabled repositories and non-worktree Git commands unchanged.
 Unsupported optimized add forms fail visibly; `RIFTRI_BYPASS=1` is the explicit
-ordinary-Git escape hatch.
+ordinary-Git escape hatch. Interception never hides Git from the caller:
+`git worktree add -h` and `--help` print Git's own usage, and an add carrying
+only global options that cannot change a checkout — `--no-optional-locks`,
+`--no-advice`, `--literal-pathspecs` — runs as ordinary Git instead of failing,
+because editors pass those on every invocation. Without `-b` or `--detach`, a
+second positional is optimized only when it names an existing local branch;
+a tag, a raw commit, a remote-tracking ref, or `HEAD` would make ordinary Git
+detach or create a tracking branch, so Riftri refuses before any Git process
+runs and names `--detach`, `-b <new-branch>`, and the bypass.
 
 Shell activation and repository consent remain deliberately independent.
 Status reports both. Deactivation is emitted as shell code because a child
@@ -188,7 +196,11 @@ their storage semantics are not an atomic same-volume rename. Before `worktree p
 requires every active managed view to exist and remain in Git's structured
 inventory and refuses to proceed while another lifecycle journal is pending.
 Prune can then be repeated safely during recovery. Unsupported configured or
-forced forms fail closed for managed state.
+forced forms fail closed for managed state, quoting the arguments actually
+passed. A prune that only reports — `-n`/`--dry-run`, `-v`/`--verbose`,
+`-h`/`--help` — removes nothing and is delegated to real Git unchanged, and a
+plain prune still takes the journaled path under global options that cannot
+change what a prune would remove.
 
 ### D022: deterministic in-tree attributes and canonical local Git LFS are resolved safely
 

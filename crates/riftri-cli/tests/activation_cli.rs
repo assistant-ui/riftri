@@ -2265,3 +2265,155 @@ fn shell_hook_routes_normal_git_adds_in_enabled_repositories_through_apfs() {
     );
     assert!(fixture.repository.join(".git/riftri/operations").is_dir());
 }
+
+/// Editors and IDE Git integrations run `git worktree add -h` to discover the
+/// options they may pass, so the one subcommand Riftri intercepts eagerly must
+/// still be able to answer for itself.
+#[test]
+fn enabled_add_help_reaches_real_git() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for help in ["--help", "-h"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", "worktree", "add", help])
+            .current_dir(&fixture.repository)
+            // Keep any Git installation that would page its help from blocking
+            // on a terminal this test does not have.
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat")
+            .output()
+            .expect("ask Git for worktree add usage");
+
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            rendered.contains("git worktree add"),
+            "`worktree add {help}` printed no usage: {rendered}"
+        );
+        assert!(
+            !rendered.contains("is not supported by the optimized add path"),
+            "`worktree add {help}` was refused: {rendered}"
+        );
+    }
+}
+
+/// `git worktree add <path> <commit-ish>` only checks out a branch when
+/// `<commit-ish>` is an existing local branch. A tag, a raw commit, a
+/// remote-tracking ref, or `HEAD` must be refused up front, with the real
+/// limitation and the bypass escape hatch, instead of failing part-way through
+/// as a branch that does not exist.
+#[test]
+fn enabled_add_refuses_a_non_branch_revision_before_mutating_anything() {
+    let fixture = RepositoryFixture::new();
+    assert!(
+        git(&fixture.repository, &["tag", "v1.0.0"])
+            .status
+            .success()
+    );
+    let head = git(&fixture.repository, &["rev-parse", "HEAD"]);
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).expect("UTF-8 commit id");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for revision in ["v1.0.0", head.trim(), "origin/main", "HEAD"] {
+        let destination = fixture.directory.path().join("non-branch-view");
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", "worktree", "add"])
+            .arg(&destination)
+            .arg(revision)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("add a worktree at a non-branch revision");
+
+        assert!(!output.status.success(), "{revision} was not refused");
+        let message = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            message.contains(revision) && message.contains("is not one"),
+            "{revision}: {message}"
+        );
+        assert!(message.contains("--detach"), "{revision}: {message}");
+        assert!(message.contains("RIFTRI_BYPASS=1"), "{revision}: {message}");
+        assert!(
+            !message.contains("existing local branch does not exist"),
+            "{revision}: {message}"
+        );
+        assert!(!destination.exists(), "{revision} left a partial worktree");
+    }
+}
+
+/// `git worktree prune` must keep working for ordinary callers once managed
+/// Riftri state exists: IDEs pass `--no-optional-locks` unconditionally, and
+/// `--dry-run` only reports. Options that could remove metadata outside the
+/// journal stay refused, now naming what was actually passed.
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_prune_delegates_neutral_and_read_only_invocations() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("prune-neutral-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/prune-neutral",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    for arguments in [
+        &["worktree", "prune", "--dry-run"][..],
+        &["worktree", "prune", "-n"][..],
+        &["worktree", "prune", "-v"][..],
+        &["--no-optional-locks", "worktree", "prune"][..],
+        &["--no-advice", "worktree", "prune"][..],
+        &["worktree", "prune"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("prune through the intercepted shim");
+
+        assert!(
+            output.status.success(),
+            "git {arguments:?} was refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Every form above leaves the live managed view in place.
+        assert!(
+            destination.is_dir(),
+            "git {arguments:?} removed a live view"
+        );
+    }
+
+    let expired = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "prune", "--expire"])
+        .arg("1.day.ago")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("prune with an expiry window");
+    assert!(!expired.status.success());
+    let message = String::from_utf8_lossy(&expired.stderr);
+    assert!(
+        message.contains("`git worktree prune --expire 1.day.ago`"),
+        "refusal did not describe the actual input: {message}"
+    );
+    assert!(message.contains("RIFTRI_BYPASS=1"), "{message}");
+}
