@@ -68,13 +68,13 @@ mod terminal {
         command
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_COUNT", "0");
+            .env("GIT_CONFIG_NOSYSTEM", "1");
         for name in [
             "GIT_DIR",
             "GIT_WORK_TREE",
             "GIT_COMMON_DIR",
             "GIT_INDEX_FILE",
+            "GIT_CONFIG_COUNT",
             "GIT_CONFIG_PARAMETERS",
             "RIFTRI_BYPASS",
             "RIFTRI_REAL_GIT",

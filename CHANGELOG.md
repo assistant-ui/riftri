@@ -7,6 +7,20 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Lifecycle commands now refuse the remaining inherited Git environment
+  overrides that could redirect their internal Git operations:
+  `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES`, plus
+  environment-based configuration injection via `GIT_CONFIG_COUNT` (the
+  `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` family) and
+  `GIT_CONFIG_PARAMETERS`, exactly as `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_COMMON_DIR`, and `GIT_INDEX_FILE` were already refused before any
+  mutation. Ordinary Git passthrough through the shim and `riftri exec` is
+  unchanged and still delegates these variables to the user's own Git
+  commands. Separately, the isolated base materialization no longer re-injects
+  a caller-set `GIT_ALTERNATE_OBJECT_DIRECTORIES` into its private checkout
+  environment; its comment always said every inherited override is removed,
+  and now the behavior matches, so a foreign object store can no longer
+  satisfy a materialization with objects absent from the source repository.
 - `riftri setup` now validates the destination before printing the plan and
   asking for confirmation. The plan step runs the same destination pre-checks
   the explicit `riftri worktree add` performs — an existing destination
