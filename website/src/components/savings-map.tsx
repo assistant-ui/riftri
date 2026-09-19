@@ -59,22 +59,9 @@ export function SavingsMap() {
         <p id="savings-scope">
           Source files only on APFS. Dependencies and builds excluded.
         </p>
-        <details className="savings-details">
-          <summary>Benchmark details</summary>
-          <p>
-            Creation time: Riftri {data.riftriSeconds.toFixed(2)} s · Git {data.gitSeconds.toFixed(2)} s.
-          </p>
-          <p>
-            <time dateTime={data.date}>12 Sep 2026</time> · adjusted assistant-ui snapshot
-            {" "}(<code>linguist-generated</code> removed). Disk use measured at the volume level.
-          </p>
-          <p>
-            Backend names show support, not Linux or Windows measurements. Results vary.
-          </p>
-          <a href={`https://github.com/assistant-ui/riftri/blob/main/${data.reportPath}`}>
-            Read full benchmark <span aria-hidden="true">↗</span>
-          </a>
-        </details>
+        <a href={`https://github.com/assistant-ui/riftri/blob/main/${data.reportPath}`}>
+          Read full benchmark <span aria-hidden="true">↗</span>
+        </a>
       </div>
     </figure>
   );

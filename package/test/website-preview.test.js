@@ -4,6 +4,36 @@ const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
 
+test("static agent references take precedence over the docs runtime", async (t) => {
+  const output = await fs.mkdtemp(path.join(os.tmpdir(), "riftri-agent-preview-test-"));
+  t.after(() => fs.rm(output, { recursive: true, force: true }));
+  await fs.mkdir(path.join(output, "static/docs/installation"), { recursive: true });
+  await fs.mkdir(path.join(output, "functions/__nitro.func"), { recursive: true });
+  await fs.writeFile(path.join(output, "static/docs/installation/agent.md"), "# Full installation reference");
+  await fs.writeFile(path.join(output, "functions/__nitro.func/index.mjs"),
+    'export default { fetch: () => new Response("docs runtime", { headers: { "Content-Type": "text/html" } }) };');
+  await fs.writeFile(path.join(output, "config.json"), JSON.stringify({ version: 3, routes: [
+    { src: "^/docs/.*\\.md$", headers: { "Content-Type": "text/plain; charset=utf-8", "Content-Disposition": "inline" }, continue: true },
+    { handle: "filesystem" },
+    { src: "^/docs(?:/.*)?$", dest: "/__nitro", headers: { "Cache-Control": "no-store" } },
+  ] }));
+  const { createStaticPreview } = await import("../../website/scripts/serve-static.mjs");
+  const server = await createStaticPreview(output);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (const method of ["GET", "HEAD"]) {
+    const response = await fetch(`${base}/docs/installation/agent.md`, { method });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-disposition"), "inline");
+    assert.match(response.headers.get("content-type"), /text\/plain/);
+    assert.equal(await response.text(), method === "HEAD" ? "" : "# Full installation reference");
+  }
+  const rendered = await fetch(`${base}/docs/installation`);
+  assert.equal(await rendered.text(), "docs runtime");
+  assert.equal(rendered.headers.get("cache-control"), "no-store");
+});
+
 test("static preview honors route overrides, branded errors, HEAD, and containment", async (t) => {
   const output = await fs.mkdtemp(path.join(os.tmpdir(), "riftri-preview-test-"));
   t.after(() => fs.rm(output, { recursive: true, force: true }));

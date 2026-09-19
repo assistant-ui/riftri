@@ -16,6 +16,10 @@ export async function createStaticPreview(output = fileURLToPath(new URL("../.ve
   const routes = config.routes || [];
   const errorIndex = routes.findIndex((route) => route.handle === "error");
   const errorRoutes = errorIndex < 0 ? [] : routes.slice(errorIndex + 1);
+  const docsRoute = routes.find((route) => route.dest === "/__nitro");
+  const docsHandler = docsRoute
+    ? (await import(pathToFileURL(path.join(output, "functions/__nitro.func/index.mjs")).href)).default
+    : undefined;
 
   async function resolveFile(pathname) {
     const file = await realpath(path.join(root, aliases.get(pathname) ?? (pathname === "/" ? "index.html" : pathname)));
@@ -39,6 +43,22 @@ export async function createStaticPreview(output = fileURLToPath(new URL("../.ve
         result = await resolveFile(pathname);
       } catch (error) {
         if (!["ENOENT", "ENOTDIR", "EISDIR"].includes(error.code)) throw error;
+        // Match Vercel's filesystem-first routing: agent.md companions are
+        // static assets, while the public guides and search use the adapter.
+        if (docsHandler && new RegExp(docsRoute.src).test(pathname)) {
+          const rendered = await docsHandler.fetch(new Request(new URL(request.url, `http://${request.headers.host}`), { method: request.method, headers: request.headers }));
+          const headers = new Headers(rendered.headers);
+          if (rendered.ok) for (const route of routes) {
+            if (route.handle) break;
+            if (route.src && route.headers && new RegExp(route.src).test(pathname)) {
+              for (const [name, value] of Object.entries(route.headers)) headers.set(name, value);
+            }
+          }
+          for (const [name, value] of Object.entries(docsRoute.headers || {})) headers.set(name, value);
+          response.writeHead(rendered.status, Object.fromEntries(headers));
+          response.end(request.method === "HEAD" ? undefined : Buffer.from(await rendered.arrayBuffer()));
+          return;
+        }
         const route = errorRoutes.find((entry) => entry.status === 404 && entry.src && entry.dest && new RegExp(entry.src).test(pathname));
         if (!route) throw error;
         result = await resolveFile(route.dest);

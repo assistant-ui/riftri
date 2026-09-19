@@ -1,5 +1,8 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const port = process.env.RIFTRI_PREVIEW_PORT || "4318";
+const baseURL = `http://127.0.0.1:${port}`;
+
 export default defineConfig({
   testDir: "./tests/browser",
   fullyParallel: true,
@@ -9,7 +12,7 @@ export default defineConfig({
   timeout: 30_000,
   reporter: [["list"], ["html", { open: "never" }]],
   use: {
-    baseURL: "http://127.0.0.1:4318",
+    baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     reducedMotion: "reduce",
@@ -21,7 +24,7 @@ export default defineConfig({
   ],
   webServer: {
     command: "node scripts/serve-static.mjs",
-    url: "http://127.0.0.1:4318",
+    url: baseURL,
     reuseExistingServer: false,
     timeout: 15_000,
   },

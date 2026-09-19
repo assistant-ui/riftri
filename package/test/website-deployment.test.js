@@ -18,6 +18,12 @@ async function fixture() {
   files.set("/", { body: '<html><link rel="canonical" href="https://riftri.dev/"/><meta property="og:image" content="https://riftri.dev/og.png"/>WORKTREE EXAMPLE Windows / PowerShell</html>', type: "text/html" });
   files.set("/build-info.json", { body: JSON.stringify({ revision }), type: "application/json" });
   files.set("/__riftri_deployment_check_missing__", { body: "<html>THAT PAGE DOES NOT EXIST_</html>", type: "text/html", status: 404 });
+  for (const route of ["/docs", "/docs/installation"]) files.set(route, { body: '<html><meta name="generator" content="@farming-labs/farmjs"/><div id="farm-docs-root">Docs</div></html>', type: "text/html" });
+  files.set("/api/docs", { body: JSON.stringify([{ content: "OverlayFS", url: "/docs/linux-overlayfs" }]), type: "application/json" });
+  const { pages, agentDocUrl, renderAgentDoc } = await import("../scripts/stage-website-docs.mjs");
+  for (const page of pages) files.set(agentDocUrl(page), {
+    body: renderAgentDoc(page, await fs.readFile(path.join(root, page.source), "utf8")), type: "text/plain",
+  });
   return files;
 }
 
@@ -28,7 +34,7 @@ function fetchFixture(files) {
     if (!file) return new Response("Missing", { status: 404 });
     return new Response(file.body, { status: file.status || 200, headers: {
       "content-type": file.type,
-      ...(route === "/index.md" ? { "content-disposition": file.disposition || 'inline; filename="index.md"' } : {}),
+      ...(route.endsWith(".md") ? { "content-disposition": file.disposition || 'inline' } : {}),
     } });
   };
 }
@@ -36,7 +42,7 @@ function fetchFixture(files) {
 test("deployment check validates the revision and every public entry point", async () => {
   const { verifyWebsite } = await import("../scripts/verify-website.mjs");
   const checked = await verifyWebsite({ revision, fetchImpl: fetchFixture(await fixture()) });
-  assert.equal(checked.length, 9);
+  assert.equal(checked.length, 29);
 });
 
 for (const [name, mutate, error] of [
@@ -45,6 +51,11 @@ for (const [name, mutate, error] of [
   ["downloaded Markdown", (f) => { f.get("/index.md").disposition = "attachment"; }, /inline/],
   ["stale installer", (f) => { f.get("/install.sh").body = "outdated"; }, /install.sh.*differs/],
   ["generic 404", (f) => { f.get("/__riftri_deployment_check_missing__").body = "Not found"; }, /branded 404/],
+  ["missing docs runtime", (f) => f.delete("/docs"), /docs.*404/],
+  ["broken docs search", (f) => { f.get("/api/docs").body = "[]"; }, /search results/],
+  ["missing agent reference", (f) => f.delete("/docs/installation/agent.md"), /agent.md.*404/],
+  ["abridged agent reference", (f) => { f.get("/docs/installation/agent.md").body = "# Short version"; }, /full agent reference differs/],
+  ["downloaded agent reference", (f) => { f.get("/docs/installation/agent.md").disposition = "attachment"; }, /agent Markdown must open inline/],
 ]) test(`deployment check rejects ${name}`, async () => {
   const { verifyWebsite } = await import("../scripts/verify-website.mjs");
   const files = await fixture();

@@ -1,0 +1,25 @@
+[
+  { "label": "01 / Get started", "pages": [
+    { "source": "README.md", "content": "website/content/introduction.md", "slug": "", "title": "Introduction", "icon": "BookOpen" },
+    { "source": "docs/install.md", "content": "website/content/guides/installation.md", "slug": "installation", "title": "Installation", "icon": "Download" },
+    { "source": "docs/cli.md", "content": "website/content/guides/cli.md", "slug": "cli", "title": "CLI reference", "icon": "SquareTerminal" },
+    { "source": "docs/agent-integration.md", "content": "website/content/guides/agents.md", "slug": "agents", "title": "Coding agents", "icon": "Bot" },
+    { "source": "docs/global-activation.md", "content": "website/content/guides/activation.md", "slug": "activation", "title": "Shell activation", "icon": "Power" },
+    { "source": "docs/troubleshooting.md", "content": "website/content/guides/troubleshooting.md", "slug": "troubleshooting", "title": "Troubleshooting", "icon": "Wrench" }
+  ] },
+  { "label": "02 / Storage & platforms", "pages": [
+    { "source": "docs/linux-reflink.md", "content": "website/content/guides/linux-reflink.md", "slug": "linux-reflink", "title": "Linux reflinks", "icon": "Copy" },
+    { "source": "docs/linux-overlayfs.md", "content": "website/content/guides/linux-overlayfs.md", "slug": "linux-overlayfs", "title": "Linux OverlayFS", "icon": "Layers" },
+    { "source": "docs/windows-refs.md", "content": "website/content/guides/windows-refs.md", "slug": "windows-refs", "title": "Windows ReFS", "icon": "HardDrive" },
+    { "source": "docs/git-lfs.md", "content": "website/content/guides/git-lfs.md", "slug": "git-lfs", "title": "Git LFS", "icon": "FileArchive" },
+    { "source": "docs/sparse-checkout.md", "content": "website/content/guides/sparse-checkout.md", "slug": "sparse-checkout", "title": "Sparse checkout", "icon": "FolderSearch" },
+    { "source": "docs/build-caches.md", "content": "website/content/guides/build-caches.md", "slug": "build-caches", "title": "Build & dependency caches", "icon": "Package" }
+  ] },
+  { "label": "03 / Under the hood", "pages": [
+    { "source": "docs/architecture.md", "content": "website/content/guides/architecture.md", "slug": "architecture", "title": "Architecture", "icon": "Network" },
+    { "source": "docs/safety.md", "content": "website/content/guides/safety.md", "slug": "safety", "title": "Safety", "icon": "ShieldCheck" },
+    { "source": "docs/backend-guarantees.md", "content": "website/content/guides/backend-guarantees.md", "slug": "backend-guarantees", "title": "Backend guarantees", "icon": "BadgeCheck" },
+    { "source": "docs/filesystem-compatibility.md", "content": "website/content/guides/filesystem-compatibility.md", "slug": "filesystem-compatibility", "title": "Filesystem compatibility", "icon": "ListChecks" },
+    { "source": "docs/comparison.md", "content": "website/content/guides/comparison.md", "slug": "comparison", "title": "Comparisons", "icon": "GitCompareArrows" }
+  ] }
+]

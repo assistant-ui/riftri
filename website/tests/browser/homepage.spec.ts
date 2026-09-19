@@ -104,12 +104,24 @@ test("FAQ answers toggle with the keyboard and keep focus on the question", asyn
   await expect(first.locator(".faq-answer")).toBeVisible();
   await expect(second.locator(".faq-answer")).toBeHidden();
   const question = first.locator("summary");
+  await expect(question.locator(".faq-prompt")).toHaveText(">");
+  await expect(question.locator(".faq-prompt")).toHaveAttribute("aria-hidden", "true");
+  await expect(question.locator(".faq-prompt")).toHaveCSS("color", "rgb(240, 106, 58)");
+  await expect(question.locator(".faq-toggle")).toHaveAttribute("aria-hidden", "true");
+  await expect(first.locator(".faq-minus")).toHaveText("[−]");
+  await expect(first.locator(".faq-minus")).toBeVisible();
+  await expect(first.locator(".faq-plus")).toBeHidden();
+  await expect(second.locator(".faq-plus")).toHaveText("[+]");
+  await expect(second.locator(".faq-plus")).toBeVisible();
   await question.focus();
   await page.keyboard.press("Enter");
   await expect(first.locator(".faq-answer")).toBeHidden();
+  await expect(first.locator(".faq-plus")).toBeVisible();
+  await expect(first.locator(".faq-minus")).toBeHidden();
   await expect(question).toBeFocused();
   await page.keyboard.press("Space");
   await expect(first.locator(".faq-answer")).toBeVisible();
+  await expect(first.locator(".faq-minus")).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(second.locator("summary")).toBeFocused();
   await page.keyboard.press("Enter");
@@ -141,7 +153,7 @@ test("repeated clipboard successes each retain a full confirmation interval", as
   await page.clock.install();
   await page.goto("/");
   await page.clock.pauseAt(new Date(Date.now() + 60_000));
-  const button = page.locator(".hero-install").getByRole("button");
+  const button = page.locator(".hero-install .command").getByRole("button");
   await button.click();
   await expect(button).toHaveText("COPIED");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(install);
@@ -162,7 +174,7 @@ test("clipboard denial offers manual copy and a usable retry", async ({ page }) 
     } });
   });
   await page.goto("/");
-  const command = page.locator(".hero-install");
+  const command = page.locator(".hero-install .command");
   await command.getByRole("button").click();
   await expect(command.getByRole("status")).toContainText("Select the command");
   await expect(command.getByRole("button")).toHaveAccessibleName(`Retry copying command: ${install}`);
@@ -170,20 +182,24 @@ test("clipboard denial offers manual copy and a usable retry", async ({ page }) 
   await expect(command.getByRole("status")).toHaveText("Command copied.");
 });
 
-test("Markdown link navigates in the same tab without a download", async ({ page, request, context }) => {
+test("Markdown copy control copies the whole guide without navigating", async ({ page, request, context }) => {
   const markdown = await request.get("/index.md");
   expect(markdown.status()).toBe(200);
   expect(markdown.headers()["content-type"]).toContain("text/plain");
   expect(markdown.headers()["content-disposition"]).toContain("inline");
-  // Keep CI independent of production: serve the exact built response at the canonical URL.
-  await page.route("https://riftri.dev/index.md", (route) => route.fulfill({ response: markdown }));
+  const guide = await markdown.text();
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   let downloads = 0;
   page.on("download", () => downloads++);
   await page.goto("/");
   const count = context.pages().length;
-  await page.getByRole("link", { name: "Open Markdown guide" }).click();
-  await expect(page).toHaveURL("https://riftri.dev/index.md");
-  await expect(page.locator("body")).toContainText("# Riftri");
+  const copy = page.getByRole("button", { name: "Copy the full Markdown guide for your agent" });
+  await copy.click();
+  await expect(copy).toHaveText("COPIED");
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toBe(guide);
+  expect(copied).toContain("# Riftri");
+  await expect(page).toHaveURL("/");
   expect(downloads).toBe(0);
   expect(context.pages()).toHaveLength(count);
 });
@@ -195,6 +211,17 @@ test("materialization backend cycles without a progress indicator", async ({ pag
     elements.map((element) => getComputedStyle(element, "::after").content));
   expect(decoration.every((content) => content === "none")).toBe(true);
   await expect(page.locator(".backend-cycle-item").first()).toHaveCSS("animation-name", "backend-cycle");
+});
+
+test("savings keeps the figures and source link without the extra benchmark notes", async ({ page }, testInfo) => {
+  await page.goto("/#savings");
+  const chart = page.locator(".savings-map");
+  await expect(chart.locator("details")).toHaveCount(0);
+  await expect(chart).not.toContainText(/Creation time:|12 Sep 2026|linguist-generated|Backend names show support|Results vary/);
+  await expect(chart).toContainText("APFS reference measurement");
+  await expect(chart).toContainText("87.0");
+  await expect(chart.getByRole("link", { name: "Read full benchmark" })).toHaveAttribute("href", "https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md");
+  await chart.screenshot({ path: testInfo.outputPath(`savings-clean-${testInfo.project.name}.png`) });
 });
 
 test("savings underline follows the width of every animated filesystem name", async ({ page }, testInfo) => {

@@ -1,5 +1,7 @@
 @import "@fontsource-variable/geist/wght.css";
 @import "@fontsource-variable/geist-mono/wght.css";
+@import "@farming-labs/theme/pixel-border/css";
+@import "./docs-theme.css";
 
 :root {
   --canvas: #0a0a0a;
@@ -199,7 +201,7 @@ code, pre { font-family: var(--font-mono); }
 .hero-install p { margin: 0 0 0.65rem; color: var(--ink-muted); font-size: 0.7rem; line-height: 1.5; }
 .hero-install .command { min-width: 0; }
 .hero-install .command code { white-space: normal; overflow-wrap: anywhere; }
-.hero-install .hero-markdown { display: grid; flex-shrink: 0; min-width: 44px; place-items: center; border-left: 1px solid var(--line); font-size: 0.7rem; }
+.hero-install .hero-markdown { display: grid; flex-shrink: 0; min-width: 44px; place-items: center; padding-inline: 0.85rem; border-left: 1px solid var(--line); font-size: 0.7rem; white-space: nowrap; }
 
 .button {
   position: relative;
@@ -598,8 +600,6 @@ code, pre { font-family: var(--font-mono); }
 .savings-result small { max-width: 15rem; margin-top: 0.75rem; color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.75rem; line-height: 1.6; }
 .savings-notes { padding: 1.5rem 2rem; border-top: 1px dashed var(--line); color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.75rem; line-height: 1.7; }
 .savings-notes p { margin: 0 0 0.75rem; }
-.savings-details summary { width: fit-content; min-height: 44px; padding-block: 0.75rem; color: var(--ink); cursor: pointer; }
-.savings-notes code { font-size: 0.7rem; overflow-wrap: anywhere; }
 .savings-notes a { display: inline-block; padding-block: 0.5rem; color: var(--ink); text-decoration: underline; text-underline-offset: 0.2em; }
 
 .start-section {
@@ -711,10 +711,31 @@ code, pre { font-family: var(--font-mono); }
 
 .faq-item summary::-webkit-details-marker { display: none; }
 .faq-item summary > span:first-child { min-width: 0; }
+.faq-question { display: flex; align-items: baseline; gap: 0.75rem; }
+.faq-prompt { flex: 0 0 auto; color: var(--accent); font-family: var(--font-mono); }
 .faq-item summary:active { color: var(--accent); }
-.faq-toggle { flex: 0 0 1rem; color: var(--accent); font-family: var(--font-mono); text-align: center; }
+.faq-toggle { flex: 0 0 3ch; color: var(--accent); font-family: var(--font-mono); text-align: center; }
 .faq-minus, .faq-item[open] .faq-plus { display: none; }
 .faq-item[open] .faq-minus { display: inline; }
+
+/* Keep native details semantics and a working no-JS / older-browser fallback. */
+@supports (interpolate-size: allow-keywords) and selector(details::details-content) {
+  .faq-item { interpolate-size: allow-keywords; }
+  .faq-item::details-content {
+    block-size: 0;
+    opacity: 0;
+    overflow: clip;
+    transition:
+      block-size 180ms ease-out,
+      opacity 120ms ease-out,
+      content-visibility 180ms allow-discrete;
+  }
+  .faq-item[open]::details-content {
+    block-size: auto;
+    opacity: 1;
+    transition-duration: 240ms, 180ms, 240ms;
+  }
+}
 
 .faq-answer {
   padding: 0 2.5rem 1.4rem 0;
@@ -756,7 +777,7 @@ code, pre { font-family: var(--font-mono); }
   .button-primary:hover { border-color: var(--ink); background: var(--ink); }
   .button-secondary:hover { color: var(--ink); }
   .site-footer a:hover { color: var(--accent); }
-  .savings-notes a:hover, .savings-details summary:hover { color: var(--accent); }
+  .savings-notes a:hover { color: var(--accent); }
   .faq-item summary:hover, .faq-answer a:hover { color: var(--accent); }
 }
 
@@ -831,6 +852,7 @@ code, pre { font-family: var(--font-mono); }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
+  .faq-item::details-content, .faq-item[open]::details-content { transition: none; }
   .track-counter { clip-path: none; animation: none !important; }
   .backend-cycle-item { animation: none !important; }
   .backend-cycle-item:first-child { opacity: 1; transform: none; }

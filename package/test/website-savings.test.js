@@ -21,7 +21,7 @@ test("website savings measurements match the recorded assistant-ui experiment", 
   assert.equal(((data.gitBytes - data.riftriBytes) / 2 ** 20).toFixed(2), "673.39");
 });
 
-test("savings section keeps a short scope note and expandable benchmark details", () => {
+test("savings section keeps a short scope note and a direct benchmark link", () => {
   const page = read("website/src/app/page.tsx");
   const chart = read("website/src/components/savings-map.tsx");
   assert.match(page, /id="savings"/);
@@ -30,16 +30,9 @@ test("savings section keeps a short scope note and expandable benchmark details"
   assert.match(chart, /<dl/);
   assert.match(chart, /aria-hidden="true"/);
   assert.match(chart, /<p id="savings-scope">\s*Source files only on APFS\. Dependencies and builds excluded\.\s*<\/p>/);
-  const details = chart.match(/<details className="savings-details">([\s\S]*?)<\/details>/)?.[1];
-  assert.ok(details, "benchmark details are collapsed by default");
-  assert.match(details, /<summary>Benchmark details<\/summary>/);
-  assert.match(details, /data\.reportPath/);
-  assert.match(details, /data\.riftriSeconds\.toFixed\(2\)/);
-  assert.match(details, /data\.gitSeconds\.toFixed\(2\)/);
-  assert.match(details, /<time dateTime=\{data\.date\}/);
-  for (const context of ["adjusted", "linguist-generated", "volume level"]) {
-    assert.ok(details.includes(context), context);
-  }
+  assert.match(chart, /data\.reportPath/);
+  assert.match(chart, /Read full benchmark/);
+  assert.doesNotMatch(chart, /<details|<summary|Creation time:|12 Sep 2026|adjusted assistant-ui|linguist-generated|Backend names show support|Results vary/);
   assert.doesNotMatch(chart, /not a speed claim|Historical experiment/);
 });
 
@@ -50,7 +43,6 @@ test("only backend names animate while the APFS reference figures stay fixed", (
   const page = read("website/src/app/page.tsx");
   for (const backend of ["APFS", "Linux reflink", "ReFS"]) assert.ok(label.includes(`"${backend}"`));
   assert.match(chart, /APFS reference measurement/);
-  assert.match(chart, /not Linux or Windows measurements/);
   assert.match(chart, /<SavingsBackendName\s*\/>/);
   assert.doesNotMatch(chart, /savings-platforms|savings-panel|useState|useEffect|Not measured/);
   // The cycling names are decorative and carry no pause control, so the
