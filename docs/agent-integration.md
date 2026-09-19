@@ -98,9 +98,19 @@ with the exact native encoding named in `native_path_encoding`, and raw Git
 ref bytes beside lossy display strings, so non-UTF-8 paths and refs remain
 representable.
 The `doctor` report includes these path pairs for the destination, Git command,
-repository root, common Git directory, and storage probe paths.
+repository root, common Git directory, and storage probe paths. Its
+`destination_readiness.backend` and `destination_readiness.next_command` are
+always present, explicitly `null` when no backend is selected or no command
+applies, so a blocked destination keeps every key a ready one has.
 The `backends` report includes these path pairs for the requested destination
 and, per probed capability, the volume's requested and probe paths.
+The `worktree list --all-states` report (`schema_version` 2) applies the same
+pairing to its `diagnostic_issues`: each entry's `state_directory` display
+string has a `state_directory_native_hex` sibling, and a registration-level
+issue that no state directory owns carries both keys as explicit `null`.
+The hex sibling and the explicit nulls were added after `schema_version` 2
+first shipped, without a version bump: additive, null-consistent keys do not
+change the schema version.
 On Unix, `native_path_encoding` is `unix-bytes-hex`. On Windows, it is
 `windows-utf16le-hex`.
 

@@ -19,9 +19,15 @@ pub(super) fn run(
     json_errors: bool,
 ) -> Result<i32> {
     if json_errors {
-        bail!(
+        // A refusal of the flag combination itself: nothing was attempted, so
+        // the receipt must report the policy shape (exit 3, no cleanup, no
+        // recovery) rather than an operational failure telling harnesses to
+        // retry and inspect state that was never touched.
+        return Err(riftri_core::WorktreeError::InvalidRequest(
             "setup is interactive and cannot use --json-errors; use riftri worktree add for automation"
-        );
+                .to_owned(),
+        )
+        .into());
     }
     if !std::io::stdin().is_terminal()
         || !std::io::stdout().is_terminal()

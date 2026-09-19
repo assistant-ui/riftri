@@ -42,6 +42,21 @@ fn setup_json_errors_do_not_include_prompts() {
     assert!(output.stdout.is_empty());
     let receipt: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
     assert_eq!(receipt["operation"], "setup");
+    // The flag combination is refused before anything is attempted, so the
+    // receipt reports the policy shape: nothing to retry, no state to
+    // inspect, no cleanup to perform.
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(receipt["code"], "invalid-request");
+    assert_eq!(receipt["category"], "policy");
+    assert_eq!(receipt["cleanup"], "not-needed");
+    assert_eq!(receipt["recovery"], "not-required");
+    assert!(receipt["nextCommand"].is_null());
+    assert!(
+        receipt["message"]
+            .as_str()
+            .expect("message")
+            .contains("cannot use --json-errors")
+    );
 }
 
 #[cfg(unix)]

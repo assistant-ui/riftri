@@ -140,7 +140,16 @@ fn all_states_inventory_reports_missing_and_malformed_registrations() {
             .expect("reason string")
             .contains("not absolute")
     );
+    // Registration-level issues belong to no state directory, so the display
+    // string and its native-hex twin are both present and explicitly null.
     assert!(relative["state_directory"].is_null());
+    assert!(
+        relative
+            .as_object()
+            .expect("diagnostic object")
+            .contains_key("state_directory_native_hex")
+    );
+    assert!(relative["state_directory_native_hex"].is_null());
     let missing = issues
         .iter()
         .find(|issue| issue["path"] == missing_state.display().to_string())
@@ -189,6 +198,86 @@ fn all_states_inventory_reports_symlinked_registrations_without_traversal() {
             .expect("reason string")
             .contains("not a real directory")
     );
+}
+
+/// Every diagnostic entry's `state_directory` display string carries its
+/// `state_directory_native_hex` sibling: the exact native bytes for a
+/// state-level issue, and explicit null beside null for a registration-level
+/// issue. The display string alone is lossy for non-UTF-8 paths, and this was
+/// the only display path in the CLI without a hex partner.
+#[cfg(unix)]
+#[test]
+fn all_states_diagnostic_issues_pair_state_directory_with_its_native_hex() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    init_repository(&repository);
+    // A registered state directory that is real but contains a symlinked
+    // immutable-base parent produces state-level diagnostics.
+    let custom_state = fixture.path().join("custom-state");
+    fs::create_dir(&custom_state).expect("create custom state directory");
+    let outside = fixture.path().join("outside");
+    fs::create_dir(&outside).expect("create outside directory");
+    std::os::unix::fs::symlink(&outside, custom_state.join("bases"))
+        .expect("redirect the immutable-base parent");
+    register_state(&repository, &custom_state);
+    // And one registration-level issue that no state directory owns.
+    register_state(&repository, &PathBuf::from("relative-state"));
+
+    let output = riftri(&repository, &["worktree", "list", "--all-states", "--json"]);
+    let report = parse_report(&output);
+
+    assert_eq!(report["schema_version"], 2, "additive keys keep schema v2");
+    let issues = report["diagnostic_issues"]
+        .as_array()
+        .expect("diagnostic_issues array");
+    let state_level = issues
+        .iter()
+        .find(|issue| issue["state_directory"].is_string())
+        .expect("a state-level diagnostic for the symlinked base parent");
+    let display = state_level["state_directory"]
+        .as_str()
+        .expect("state_directory display string");
+    assert_eq!(display, canonical_display(&custom_state));
+    let hex = state_level["state_directory_native_hex"]
+        .as_str()
+        .expect("state_directory_native_hex sibling");
+    assert_eq!(
+        decode_hex(hex),
+        fs::canonicalize(&custom_state)
+            .expect("canonicalize fixture state")
+            .as_os_str()
+            .as_bytes(),
+        "the hex twin carries the exact native bytes of the same directory"
+    );
+
+    let registration = issues
+        .iter()
+        .find(|issue| issue["path"] == "relative-state")
+        .expect("registration-level diagnostic");
+    assert!(registration["state_directory"].is_null());
+    assert!(registration["state_directory_native_hex"].is_null());
+
+    // Both keys are siblings on every entry: never one without the other.
+    for issue in issues {
+        let issue = issue.as_object().expect("diagnostic object");
+        assert!(issue.contains_key("state_directory"));
+        assert!(issue.contains_key("state_directory_native_hex"));
+        assert_eq!(
+            issue["state_directory"].is_null(),
+            issue["state_directory_native_hex"].is_null(),
+            "display string and hex twin must be null together or set together"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn decode_hex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).expect("hex byte"))
+        .collect()
 }
 
 #[test]
