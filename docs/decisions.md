@@ -548,6 +548,25 @@ adds use a new cache namespace, while older bases remain available to their
 existing views and explicit garbage collection. This detects accidental cache
 corruption; it does not make same-user mutable state a security sandbox.
 
+Marker v2 extends coverage to metadata the native cloners propagate but Git
+cannot reproduce: the full native Unix mode (setuid, setgid, and sticky bits),
+every extended attribute name and value (symlink entries included), and macOS
+ACL presence. On Windows only the read-only attribute is covered, matching
+what the ReFS cloner propagates from a base into a view; other attributes and
+alternate data streams remain out of scope. New bases record v2 markers, and
+the metadata is hashed during the same traversal that reads file contents, so
+a cache hit still performs one walk with one or two extra metadata calls per
+entry. A stored v1 marker is still verified against the frozen v1 content
+digest: a mismatch refuses reuse exactly as before, while a match is treated
+as one deliberate cache miss — the base is rebuilt under the exclusive lock
+and records a v2 marker, because a v1 marker attests nothing about the
+metadata above. Untouched caches therefore migrate with one rebuild per base
+bucket instead of silent mass invalidation or manual cleanup. Cache keys and
+journal formats do not change, and the v1 digest layout stays frozen because
+the persisted compaction and forced-removal snapshot formats compose it. An
+older binary that encounters a v2 marker fails closed: it refuses reuse
+rather than trusting a digest it cannot recompute.
+
 ### Existing-base readers share coordination ownership
 
 Cache-hit integrity verification takes a shared lock on the existing stable
