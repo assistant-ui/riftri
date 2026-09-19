@@ -7,6 +7,17 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri setup` now validates the destination before printing the plan and
+  asking for confirmation. The plan step runs the same destination pre-checks
+  the explicit `riftri worktree add` performs — an existing destination
+  (including a symlink to an existing target) and checkout paths that cannot
+  coexist on the destination filesystem (case or Unicode-normalization
+  collisions) — by calling the add path's own validation, so the diagnostics
+  and the policy exit code are identical to the explicit command's.
+  Previously setup confidently printed the full plan and asked "Create this
+  worktree?" for a destination the creation step was always going to refuse;
+  the refusal itself was already safe, but the guided flow confirmed a plan
+  it had enough information to reject.
 - Termination forwarding now enforces the single-waiter invariant its design
   relies on, and no longer loses a termination signal delivered during its
   own teardown. The forwarding state behind `riftri exec` and the Git shim is

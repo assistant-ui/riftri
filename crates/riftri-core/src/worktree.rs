@@ -435,6 +435,56 @@ pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, Wo
     add_worktree_inner(request, None, true)
 }
 
+/// Refuse a proposed new-worktree destination with exactly the refusals
+/// `add_worktree` applies before any durable mutation: the destination must
+/// not already exist (a symlink to an existing target counts as existing),
+/// must name a new directory under an existing parent, and every checkout
+/// path of the requested revision must be able to coexist on the destination
+/// filesystem (case and Unicode-normalization collisions). Nothing is
+/// created. Interactive flows call this so a doomed plan is refused before
+/// any confirmation prompt, with the same diagnostics the explicit add
+/// prints; it deliberately calls the same validation functions as
+/// `add_worktree_inner` rather than restating their rules.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub fn validate_new_worktree_destination(
+    repository: &Path,
+    destination: &Path,
+    revision: &OsStr,
+) -> Result<(), WorktreeError> {
+    validate_lifecycle_git_environment()?;
+    let git = Git::default();
+    let repository = git.inspect_repository(repository)?;
+    if repository.is_bare {
+        return Err(WorktreeError::Unsupported(
+            "bare repositories are not supported by optimized checkout".to_owned(),
+        ));
+    }
+    let repository_root = repository.root.clone().ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+    })?;
+    let destination = normalize_new_destination(destination)?;
+    let resolved = git.resolve_revision(&repository_root, revision)?;
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &repository_root,
+        &repository.identity.common_git_dir,
+        &resolved,
+        &[],
+    )?;
+    validate_destination_path_semantics(&compatibility.checkout_paths, &destination)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub fn validate_new_worktree_destination(
+    _repository: &Path,
+    _destination: &Path,
+    _revision: &OsStr,
+) -> Result<(), WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "this build has no supported native copy-on-write worktree backend".to_owned(),
+    ))
+}
+
 pub fn remove_worktree(
     request: RemoveWorktreeRequest,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
