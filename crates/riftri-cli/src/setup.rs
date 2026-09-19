@@ -513,13 +513,13 @@ mod tests {
     }
 
     #[test]
-    fn next_steps_quote_paths_for_the_platform_shell() {
+    fn next_steps_quote_paths_with_posix_quoting_on_every_platform() {
+        // Suggested commands use POSIX quoting regardless of build target, so
+        // the guidance runs as shown in the POSIX shells these commands are
+        // used in (including Git Bash and WSL on Windows).
         let mut output = Vec::new();
         print_next_steps(&mut output, Path::new("folder with an'apostrophe")).unwrap();
         let output = String::from_utf8(output).unwrap();
-        #[cfg(windows)]
-        assert!(output.contains("cd 'folder with an''apostrophe'"));
-        #[cfg(not(windows))]
         assert!(output.contains("cd 'folder with an'\"'\"'apostrophe'"));
     }
 
