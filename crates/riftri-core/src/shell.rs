@@ -13,23 +13,28 @@
 
 use std::path::Path;
 
-/// Render `path` as one shell argument for the host platform's shell, or
-/// `None` when it cannot be represented safely.
+/// Render `path` as one POSIX-shell argument, or `None` when it cannot be
+/// represented safely.
 ///
-/// A path is refused when it is not valid Unicode, or when it contains control
-/// characters that a terminal would interpret rather than display. Both cases
-/// must omit the command; there is no lossy rendering that stays correct.
+/// Quoting is POSIX (`sh`/`bash`/`zsh`, and Git Bash / WSL / MSYS on Windows)
+/// regardless of the build target, because the shell that runs a suggested
+/// command is chosen at run time by its consumer, not at compile time. A path
+/// is refused when it is not valid Unicode, or when it contains control
+/// characters a terminal would interpret rather than display; both cases omit
+/// the command, since there is no lossy rendering that stays correct.
 pub fn shell_quoted_path(path: &Path) -> Option<String> {
     let value = path.to_str()?;
     if value.chars().any(char::is_control) {
         return None;
     }
-    // Single quotes suppress every other shell metacharacter, so only the
-    // quote itself needs escaping: POSIX shells end the string and splice in a
-    // literal quote, PowerShell doubles it.
-    #[cfg(windows)]
-    let escaped = value.replace('\'', "''");
-    #[cfg(not(windows))]
+    // POSIX single-quote quoting: single quotes suppress every other shell
+    // metacharacter, and a literal quote is spliced in as `'"'"'`. The dialect
+    // is deliberately fixed rather than chosen by build target — a suggested
+    // command's consuming shell is decided at run time by whoever runs it, not
+    // at compile time, and these recovery commands are run in a POSIX shell
+    // (sh/bash/zsh, and on Windows the Git Bash, WSL, or MSYS environments Git
+    // work happens in). A caller that needs the exact path in another shell
+    // reads it from the accompanying native-path field instead.
     let escaped = value.replace('\'', "'\"'\"'");
     Some(format!("'{escaped}'"))
 }
@@ -75,13 +80,36 @@ mod tests {
     }
 
     #[test]
-    fn single_quotes_are_escaped_for_the_platform_shell() {
+    fn single_quotes_are_escaped_with_posix_quoting_on_every_platform() {
+        // The rendering is POSIX regardless of build target, so a harness that
+        // runs the command in a POSIX shell (including Git Bash / WSL on
+        // Windows) gets the exact path back.
         let quoted =
             shell_quoted_path(Path::new("/tmp/it's here")).expect("a quoted path is representable");
-        #[cfg(windows)]
-        assert_eq!(quoted, "'/tmp/it''s here'");
-        #[cfg(not(windows))]
         assert_eq!(quoted, "'/tmp/it'\"'\"'s here'");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_posix_shell_parses_the_quoted_path_back_to_one_argument() {
+        use std::process::Command;
+
+        // Round-trip through a real POSIX shell: the awkward path with a space,
+        // a single quote, and shell metacharacters must come back verbatim as a
+        // single argument.
+        let path = "/tmp/it's a $HOME; [test] dir";
+        let quoted = shell_quoted_path(Path::new(path)).expect("representable");
+        let script = format!("set -- {quoted}; printf '%s' \"$1\"; [ \"$#\" -eq 1 ]");
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("run sh");
+        assert!(
+            output.status.success(),
+            "path did not parse to one argument"
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), path);
     }
 
     #[test]
