@@ -1365,11 +1365,33 @@ fn plan_enabled_move(
 /// `-n`/`--dry-run` is Git's own "do not remove anything; just report what it
 /// would remove", and the verbosity and help options change nothing either, so
 /// real Git can answer all of them without touching lifecycle metadata.
-fn is_read_only_prune_option(argument: &OsString) -> bool {
-    matches!(
-        argument.to_str(),
-        Some("-n" | "--dry-run" | "-v" | "--verbose" | "-h" | "--help")
-    )
+/// `-v`/`--verbose` is deliberately absent: for `git worktree prune` it is a
+/// verbose *prune*, not a report, so it must never bypass the journaled path.
+fn is_prune_help_option(argument: &OsString) -> bool {
+    matches!(argument.to_str(), Some("-h" | "--help"))
+}
+
+fn is_prune_dry_run_option(argument: &OsString) -> bool {
+    matches!(argument.to_str(), Some("-n" | "--dry-run"))
+}
+
+fn is_prune_verbose_option(argument: &OsString) -> bool {
+    matches!(argument.to_str(), Some("-v" | "--verbose"))
+}
+
+/// Every documented `git worktree prune` option, so a dry run combined only
+/// with recognized options can delegate while anything unknown fails closed.
+fn is_recognized_prune_argument(argument: &OsString) -> bool {
+    if is_prune_help_option(argument)
+        || is_prune_dry_run_option(argument)
+        || is_prune_verbose_option(argument)
+    {
+        return true;
+    }
+    matches!(argument.to_str(), Some("--expire"))
+        || argument
+            .to_str()
+            .is_some_and(|argument| argument.starts_with("--expire="))
 }
 
 fn plan_enabled_prune(
@@ -1378,8 +1400,30 @@ fn plan_enabled_prune(
     arguments: &[OsString],
     global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
-    if !arguments.is_empty() && arguments.iter().all(is_read_only_prune_option) {
+    // Help always delegates: git prints usage and touches nothing.
+    if arguments.iter().any(is_prune_help_option) {
         return Ok(GitProxyPlan::Passthrough);
+    }
+    // A dry run reports without mutating, and in git it wins over `-v` and
+    // `--expire`; delegate only when every other argument is a documented
+    // prune option (an `--expire` value may follow its flag), so an unknown
+    // option still fails closed below.
+    if arguments.iter().any(is_prune_dry_run_option) {
+        let mut expecting_expire_value = false;
+        let recognized = arguments.iter().all(|argument| {
+            if expecting_expire_value {
+                expecting_expire_value = false;
+                return true;
+            }
+            if argument.to_str() == Some("--expire") {
+                expecting_expire_value = true;
+                return true;
+            }
+            is_recognized_prune_argument(argument)
+        });
+        if recognized && !expecting_expire_value {
+            return Ok(GitProxyPlan::Passthrough);
+        }
     }
 
     let mut managed_states = Vec::new();
@@ -1398,8 +1442,10 @@ fn plan_enabled_prune(
     if managed_states.is_empty() {
         return Ok(GitProxyPlan::Passthrough);
     }
-    if arguments.is_empty() {
-        // A checkout-neutral global option cannot change what a prune removes,
+    if arguments.is_empty() || arguments.iter().all(is_prune_verbose_option) {
+        // A verbose bare prune removes exactly what a bare prune removes, so
+        // it takes the same journaled path (without the listing). A
+        // checkout-neutral global option cannot change what a prune removes,
         // so the journaled prune still reproduces the requested invocation.
         if global_options != GlobalOptionScope::Significant {
             return Ok(GitProxyPlan::OptimizedPrune(PruneWorktreesRequest {
@@ -2125,19 +2171,25 @@ mod tests {
     fn enabled_prune_delegates_read_only_options_to_git() {
         let fixture = repository_fixture();
         enable_repository(fixture.path()).expect("enable repository");
-        for option in ["-n", "--dry-run", "-v", "--verbose", "-h", "--help"] {
-            let arguments = [
-                OsString::from("worktree"),
-                OsString::from("prune"),
-                OsString::from(option),
-            ];
+        for options in [
+            &["-n"][..],
+            &["--dry-run"][..],
+            &["-h"][..],
+            &["--help"][..],
+            &["--dry-run", "-v"][..],
+            &["--dry-run", "--expire", "1.day.ago"][..],
+            &["--dry-run", "--expire=1.day.ago"][..],
+            &["--expire", "1.day.ago", "-h"][..],
+        ] {
+            let mut arguments = vec![OsString::from("worktree"), OsString::from("prune")];
+            arguments.extend(options.iter().map(OsString::from));
 
             assert!(
                 matches!(
                     plan_git_command(fixture.path(), &arguments).expect("plan read-only prune"),
                     GitProxyPlan::Passthrough
                 ),
-                "`worktree prune {option}` was not delegated to Git"
+                "`worktree prune {options:?}` was not delegated to Git"
             );
         }
     }

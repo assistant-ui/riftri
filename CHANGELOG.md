@@ -7,6 +7,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Intercepted `git worktree prune -v` no longer bypasses the journaled prune.
+  Git's `-v` is a verbose prune, not a report, so delegating it let ordinary
+  Git remove managed lifecycle metadata outside the Riftri journal; verbose
+  prunes now take the same journaled path as a bare prune. Dry runs remain
+  delegated, including with `--expire`, and a dry run beside an unrecognized
+  option stays refused.
 - Recovery guidance no longer sends callers to the wrong Riftri state. Failure
   receipts and the human-readable messages beside them previously interpolated
   a state directory with `Path::display` and no shell quoting, so a repository
