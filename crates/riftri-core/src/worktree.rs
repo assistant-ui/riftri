@@ -6480,6 +6480,7 @@ fn resume_compaction(
             remove_tree_if_present(&journal.replacement)?;
             remove_tree_if_present(&journal.base_staging)?;
             remove_file_if_present(&journal.temporary_index)?;
+            remove_empty_base_bucket(&journal)?;
             advance_compaction(
                 store,
                 &mut record,
@@ -6633,6 +6634,36 @@ fn resume_compaction(
         )?;
     }
     Ok(())
+}
+
+/// Remove the immutable-base bucket a cancelled compaction created for its
+/// recomputed checkout profile, if nothing was ever materialized into it.
+///
+/// A compaction whose checkout profile differs from the add's creates its new
+/// bucket before recording intent, so a cancellation before the base build
+/// can otherwise strand an empty directory that storage accounting must
+/// forever report as unexplained. Removal is non-recursive: a bucket that
+/// gained any entry — a base tree, its completion marker, a builder's
+/// coordination lock, another operation's staging — makes `remove_dir` fail
+/// and is left exactly as it is. `validate_compaction_paths` already proved
+/// the bucket sits directly under this state directory's `bases/v1`.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn remove_empty_base_bucket(journal: &DecodedCompactJournal) -> Result<(), WorktreeError> {
+    let Some(bucket) = journal.base_path.parent() else {
+        return Ok(());
+    };
+    match fs::remove_dir(bucket) {
+        Ok(()) => sync_parent(bucket),
+        Err(source)
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(source) => Err(io("remove empty immutable-base bucket", bucket, source)),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -7807,7 +7838,19 @@ fn validate_recovery_paths(
         (_, None) => true,
         (_, Some(_)) => false,
     };
-    if base_repository != journal.base_staging.parent()
+    // `base_path` and `base_staging` share a parent bucket in every journal
+    // this Riftri writes: compaction retargets both in one durable write.
+    // Earlier versions retargeted only `base_path` across a checkout-profile
+    // change, so an Active journal may still carry its staging record in the
+    // bucket the add originally built in. Staging no longer exists once a
+    // journal is Active, so — exactly like the scratch-parent check the move
+    // seam relaxed for Active journals below — recovery only needs it
+    // confined to the immutable-base layout; every other phase keeps the
+    // strict shared-bucket invariant.
+    let base_staging_confined = base_repository == journal.base_staging.parent()
+        || (journal.phase == AddWorktreePhase::Active
+            && journal.base_staging.parent().and_then(Path::parent) == Some(bases.as_path()));
+    if !base_staging_confined
         || base_repository.and_then(Path::parent) != Some(bases.as_path())
         || !journal
             .base_staging
@@ -9157,6 +9200,472 @@ mod tests {
         let accounting = storage_accounting(&state).expect("inspect completed compaction");
         assert_eq!(accounting.completed_compactions, 1);
         assert_eq!(accounting.pending_compactions, 0);
+    }
+
+    /// Repository with one managed worktree whose checkout profile changes
+    /// after the add: `core.eol lf` is an accepted value, so compaction still
+    /// runs, but the profile hash — and therefore the immutable-base bucket —
+    /// differs from the one the add staged in.
+    fn bucket_retarget_fixture(
+        root: &Path,
+    ) -> (PathBuf, PathBuf, PathBuf, super::AddWorktreeResult) {
+        let repository = root.join("repository");
+        let destination = root.join("worktree");
+        let state = root.join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/bucket-retarget")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+        git(&repository, &["config", "core.eol", "lf"]);
+        (repository, destination, state, added)
+    }
+
+    fn assert_no_stranded_compaction_quarantine(parent: &Path) {
+        let stranded = fs::read_dir(parent)
+            .expect("scan worktree parent")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".riftri-compact-old-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(stranded.is_empty(), "stranded quarantines: {stranded:?}");
+    }
+
+    #[test]
+    fn compaction_retargets_the_add_journal_across_base_buckets() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state, added) = bucket_retarget_fixture(fixture.path());
+
+        let compacted = compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("compact across base buckets");
+
+        assert_ne!(
+            compacted.base_path.parent(),
+            added.base_path.parent(),
+            "the profile flip must move the immutable base into a new bucket"
+        );
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journals")
+            .pop()
+            .expect("add journal");
+        assert_eq!(journal.base_path, compacted.base_path);
+        assert_eq!(
+            journal.base_staging.parent(),
+            journal.base_path.parent(),
+            "base_path and base_staging must move buckets together"
+        );
+        let accounting = storage_accounting(&state).expect("account retargeted state");
+        assert_eq!(accounting.active_views, 1);
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+
+        // The retargeted journal must stay fully operable: compact, repair,
+        // move, and remove all validate it again.
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("compact the retargeted worktree again");
+        let repair = recover_incomplete_operations(&state).expect("repair retargeted state");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        let moved = fixture.path().join("moved");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: destination,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move the retargeted worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: moved,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the retargeted worktree");
+        let accounting = storage_accounting(&state).expect("account retired state");
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+    }
+
+    #[test]
+    fn compaction_base_bucket_retarget_recovers_from_every_interruption_window() {
+        for phase in [
+            CompactWorktreePhase::IntentRecorded,
+            CompactWorktreePhase::ReplacementReady,
+            CompactWorktreePhase::ReplacementActivated,
+            CompactWorktreePhase::AddJournalUpdated,
+            CompactWorktreePhase::Complete,
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let (repository, destination, state, _added) = bucket_retarget_fixture(fixture.path());
+
+            compact_worktree_inner(
+                CompactWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("inject compaction interruption");
+
+            let first = recover_incomplete_operations(&state).expect("first repair");
+            assert!(first.errors.is_empty(), "{phase:?}: {first:?}");
+            let second = recover_incomplete_operations(&state).expect("second repair");
+            assert!(second.errors.is_empty(), "{phase:?}: {second:?}");
+            assert!(destination.is_dir(), "{phase:?}");
+            assert_no_stranded_compaction_quarantine(fixture.path());
+            let output = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&destination)
+                .output()
+                .expect("inspect recovered worktree");
+            assert!(output.status.success(), "{phase:?}");
+            assert!(output.stdout.is_empty(), "{phase:?}");
+            let journal = JournalStore::open(&state)
+                .load_all()
+                .expect("load add journals")
+                .pop()
+                .expect("add journal");
+            assert_eq!(
+                journal.base_staging.parent(),
+                journal.base_path.parent(),
+                "{phase:?}: no interruption may split the journal across buckets"
+            );
+            let accounting = storage_accounting(&state).expect("account after repair");
+            assert_eq!(accounting.pending_compactions, 0, "{phase:?}");
+            assert!(
+                accounting.diagnostic_issues.is_empty(),
+                "{phase:?}: {:?}",
+                accounting.diagnostic_issues
+            );
+            move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository,
+                    source: destination,
+                    destination: fixture.path().join("moved"),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("move recovered worktree");
+        }
+    }
+
+    #[test]
+    fn compaction_recovers_between_the_base_update_and_the_phase_advance() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state, _added) = bucket_retarget_fixture(fixture.path());
+
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(CompactWorktreePhase::ReplacementActivated),
+        )
+        .expect_err("interrupt after activation");
+        let compaction = super::CompactJournalStore::open(&state)
+            .load_all()
+            .expect("load compaction journals")
+            .pop()
+            .expect("compaction journal");
+        assert_eq!(compaction.phase, CompactWorktreePhase::ReplacementActivated);
+
+        // Simulate the process dying immediately after the add journal's
+        // durable base update but before the compaction journal records
+        // AddJournalUpdated: perform exactly the update resumption performs.
+        let add_store = JournalStore::open(&state);
+        let journal_path = add_store
+            .load_all()
+            .expect("load add journals")
+            .pop()
+            .expect("add journal")
+            .journal_path;
+        add_store
+            .update_active_base(
+                &journal_path,
+                &compaction.destination,
+                &compaction.old_base_path,
+                &compaction.base_path,
+                &compaction.expected_commit,
+            )
+            .expect("durable base update");
+        let journal = add_store
+            .load_all()
+            .expect("reload add journals")
+            .pop()
+            .expect("updated add journal");
+        assert_eq!(journal.base_path, compaction.base_path);
+        assert_eq!(
+            journal.base_staging.parent(),
+            journal.base_path.parent(),
+            "the base update must retarget staging in the same durable write"
+        );
+
+        let repair = recover_incomplete_operations(&state).expect("resume after the base update");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        assert_no_stranded_compaction_quarantine(fixture.path());
+        let accounting = storage_accounting(&state).expect("account resumed state");
+        assert_eq!(accounting.active_views, 1);
+        assert_eq!(accounting.completed_compactions, 1);
+        assert_eq!(accounting.pending_compactions, 0);
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+    }
+
+    #[cfg(unix)]
+    fn rewrite_add_journal_base_staging(journal_path: &Path, base_staging: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path).expect("read add journal"))
+                .expect("parse add journal");
+        record["base_staging"] = serde_json::json!({
+            "encoding": "unix-bytes",
+            "units": base_staging.as_os_str().as_bytes(),
+        });
+        fs::write(
+            journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode add journal"),
+        )
+        .expect("write wedged add journal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_and_lifecycle_recognize_journals_wedged_by_older_compactions() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state, added) = bucket_retarget_fixture(fixture.path());
+
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(CompactWorktreePhase::AddJournalUpdated),
+        )
+        .expect_err("interrupt after the add journal update");
+
+        // Recreate the record an older Riftri persisted at this point: the
+        // base retargeted into the new bucket while the staging record stayed
+        // behind in the bucket the add originally built in.
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journals")
+            .pop()
+            .expect("add journal");
+        let old_bucket = added.base_path.parent().expect("original bucket");
+        rewrite_add_journal_base_staging(
+            &journal.journal_path,
+            &old_bucket.join(format!(".riftri-build-{}", journal.operation_id)),
+        );
+        let wedged = JournalStore::open(&state)
+            .load_all()
+            .expect("reload add journals")
+            .pop()
+            .expect("wedged add journal");
+        assert_ne!(
+            wedged.base_staging.parent(),
+            wedged.base_path.parent(),
+            "the forged journal must reproduce the historical wedge"
+        );
+
+        let repair = recover_incomplete_operations(&state).expect("repair the wedged compaction");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        assert_no_stranded_compaction_quarantine(fixture.path());
+        let accounting = storage_accounting(&state).expect("account the recognized journal");
+        assert_eq!(accounting.active_views, 1);
+        assert_eq!(accounting.pending_compactions, 0);
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+
+        // The next compaction heals the staging record into the base's
+        // bucket, and the ordinary lifecycle keeps working throughout.
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("compact the wedged worktree");
+        let healed = JournalStore::open(&state)
+            .load_all()
+            .expect("load healed journals")
+            .pop()
+            .expect("healed add journal");
+        assert_eq!(healed.base_staging.parent(), healed.base_path.parent());
+        let moved = fixture.path().join("moved");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: destination,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move the healed worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: moved,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the healed worktree");
+    }
+
+    #[test]
+    fn recovery_path_validation_relaxes_only_active_cross_bucket_staging() {
+        let fixture = tempdir().expect("fixture");
+        let root = fixture.path();
+        let state = root.join("state");
+        let bases = state.join("bases/v1");
+        let journal =
+            |phase: AddWorktreePhase, base_staging: PathBuf| crate::journal::DecodedJournal {
+                journal_path: state.join("operations/operation.json"),
+                operation_id: "operation".to_owned(),
+                repository: root.join("repository"),
+                destination: root.join("worktree"),
+                scratch: root.join(".riftri-view-operation"),
+                base_staging,
+                base_path: bases.join("r-new/tree"),
+                temporary_index: state.join("tmp/index-operation"),
+                branch: None,
+                branch_created: false,
+                expected_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                backend: BackendKind::ApfsClone,
+                sparse_directories: Vec::new(),
+                overlayfs: None,
+                phase,
+                last_forward_phase: phase,
+            };
+
+        // The shared-bucket invariant is accepted in every phase.
+        for phase in [AddWorktreePhase::BaseReady, AddWorktreePhase::Active] {
+            assert!(
+                super::validate_recovery_paths(
+                    &state,
+                    &journal(phase, bases.join("r-new/.riftri-build-operation")),
+                )
+                .is_ok(),
+                "{phase:?}"
+            );
+        }
+        // An Active journal wedged by an older cross-bucket compaction stays
+        // recognizable while its staging record remains inside a bucket.
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    bases.join("r-old/.riftri-build-operation"),
+                ),
+            )
+            .is_ok()
+        );
+        // Every other phase keeps the strict shared-bucket requirement.
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::BaseReady,
+                    bases.join("r-old/.riftri-build-operation"),
+                ),
+            )
+            .is_err()
+        );
+        // Even Active journals may not reference staging outside the
+        // immutable-base layout, at the wrong depth, or with a foreign name.
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    root.join("elsewhere/.riftri-build-operation"),
+                ),
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    bases.join("r-old/deeper/.riftri-build-operation"),
+                ),
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    bases.join("r-old/build-operation")
+                ),
+            )
+            .is_err()
+        );
     }
 
     #[test]
