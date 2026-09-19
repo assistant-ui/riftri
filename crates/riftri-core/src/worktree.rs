@@ -531,9 +531,11 @@ pub fn garbage_collect(
 }
 
 /// Internal lifecycle commands address several different Git worktrees. A
-/// caller's repository/index override would take precedence over each command's
-/// working directory, potentially resetting or deleting the wrong Git state.
-/// Refuse before mutation rather than silently changing the caller's context.
+/// caller's repository/index/object-store override would take precedence over
+/// each command's working directory, potentially resetting or deleting the
+/// wrong Git state, and environment-based configuration injection reaches
+/// every internal Git invocation exactly like `-c` options would. Refuse
+/// before mutation rather than silently changing the caller's context.
 /// Ordinary Git passthrough deliberately does not use this guard.
 fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
     for name in [
@@ -541,10 +543,21 @@ fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     ] {
         if std::env::var_os(name).is_some() {
             return Err(WorktreeError::Unsupported(format!(
                 "{name} is set and can redirect internal Git operations; unset {name} before using Riftri lifecycle commands, and select the repository with --repository instead"
+            )));
+        }
+    }
+    // `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` entries only take effect through
+    // `GIT_CONFIG_COUNT`, so refusing the count refuses the whole family.
+    for name in ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"] {
+        if std::env::var_os(name).is_some() {
+            return Err(WorktreeError::Unsupported(format!(
+                "{name} is set and can inject Git configuration into internal Git operations; unset {name} before using Riftri lifecycle commands"
             )));
         }
     }

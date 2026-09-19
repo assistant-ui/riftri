@@ -1051,9 +1051,6 @@ impl Git {
                     command.env_remove(name);
                 }
             }
-            if let Some(alternates) = std::env::var_os("GIT_ALTERNATE_OBJECT_DIRECTORIES") {
-                command.env("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternates);
-            }
             command
                 .args(&prefix)
                 .args(arguments)
