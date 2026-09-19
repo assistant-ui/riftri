@@ -1036,12 +1036,18 @@ fn failure_receipt(
             recovery_for_operation(operation),
         ));
     let next_command = recovery_next_command(recovery, worktree_error, context);
-    // A pending journal's own directory outranks anything the command line
-    // selected: that is where the state needing attention actually lives.
+    // An error that names its own state directory outranks anything the
+    // command line selected: that is where the state needing attention
+    // actually lives.
     let state_directory = match worktree_error {
-        Some(riftri_core::WorktreeError::RecoveryPending {
-            state_directory, ..
-        }) => Some(state_directory.clone()),
+        Some(
+            riftri_core::WorktreeError::RecoveryPending {
+                state_directory, ..
+            }
+            | riftri_core::WorktreeError::SymlinkedBaseParent {
+                state_directory, ..
+            },
+        ) => Some(state_directory.clone()),
         _ => context
             .state_directory
             .as_deref()
@@ -1090,6 +1096,14 @@ fn recovery_next_command(
         // Core's human-readable message names exactly this command, so the
         // two can never disagree.
         return riftri_core::repair_command(state_directory);
+    }
+    if let Some(riftri_core::WorktreeError::SymlinkedBaseParent {
+        state_directory, ..
+    }) = worktree_error
+    {
+        // Same guarantee for the symlinked-base safety stop: its message
+        // names exactly this status command.
+        return riftri_core::status_command(state_directory);
     }
     let subcommand = match recovery {
         "required" => "repair",
@@ -1145,6 +1159,14 @@ fn worktree_failure_fields(
             "not-needed",
             "not-required",
         ),
+        // The safety stop that refuses to follow a symbolic link inside
+        // Riftri's own base storage. Nothing was attempted, so it stays a
+        // policy refusal with no cleanup — but unlike other invalid requests
+        // its message tells the caller to inspect the affected state, so the
+        // receipt must carry the same instruction and the same command.
+        WorktreeError::SymlinkedBaseParent { .. } => {
+            ("invalid-request", "policy", None, "not-needed", "inspect")
+        }
         // An interrupted lifecycle operation left a durable journal behind:
         // nothing was changed by this command, but the caller must run the
         // repair command echoed in `nextCommand` before retrying.
@@ -2005,8 +2027,12 @@ fn print_all_states_worktree_inventory(
             .registration_issues
             .iter()
             .map(|issue| {
+                // A registration-level issue belongs to no usable state
+                // directory, so the display string and its native-hex twin
+                // are both explicitly null rather than absent or unpaired.
                 let mut value = diagnostic_issue_json(issue);
                 value["state_directory"] = serde_json::Value::Null;
+                value["state_directory_native_hex"] = serde_json::Value::Null;
                 value
             })
             .chain(inventory.states.iter().flat_map(|state| {
@@ -2014,6 +2040,8 @@ fn print_all_states_worktree_inventory(
                     let mut value = diagnostic_issue_json(issue);
                     value["state_directory"] =
                         serde_json::Value::from(state.state_directory.display().to_string());
+                    value["state_directory_native_hex"] =
+                        serde_json::Value::from(native_path_hex(&state.state_directory));
                     value
                 })
             }))
@@ -2468,20 +2496,20 @@ fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
         None => serde_json::json!(report.repository),
     };
     let readiness = &report.destination_readiness;
-    let mut destination_readiness = serde_json::json!({
+    // `backend` and `next_command` are always present, explicitly null when
+    // no backend is selected or no command applies, matching every sibling
+    // report; strictly-typed consumers must never lose a key on the blocked
+    // path that the ready path carries.
+    let destination_readiness = serde_json::json!({
         "destination": readiness.destination.display().to_string(),
         "destination_native_hex": native_path_hex(&readiness.destination),
         "status": readiness.status,
+        "backend": readiness.backend,
         "copy_on_write": readiness.copy_on_write,
         "overlayfs_helper": readiness.overlayfs_helper,
         "blockers": readiness.blockers,
+        "next_command": readiness.next_command,
     });
-    if let Some(backend) = readiness.backend {
-        destination_readiness["backend"] = serde_json::json!(backend);
-    }
-    if let Some(command) = &readiness.next_command {
-        destination_readiness["next_command"] = serde_json::json!(command);
-    }
     let storage_capabilities = report
         .storage_capabilities
         .iter()
@@ -2947,6 +2975,51 @@ mod tests {
         }
     }
 
+    /// The symlinked-base safety stop is a policy refusal whose own message
+    /// directs the caller to `riftri status`, so its receipt must say
+    /// `recovery: inspect` with that exact command — not `not-required` with
+    /// a null `nextCommand` contradicting the message.
+    #[test]
+    fn symlinked_base_receipts_inspect_the_state_directory_the_error_names() {
+        let state_directory = riftri_core::command_path(Path::new("My Projects/app/state"));
+        let error = anyhow::Error::new(riftri_core::WorktreeError::SymlinkedBaseParent {
+            message: "cleanup stopped: immutable-base path is a symbolic link".to_owned(),
+            state_directory: state_directory.clone(),
+        });
+        // The caller selected a different state directory; the error's own
+        // directory is where the redirected layout actually lives.
+        let context = context_for(&["riftri", "gc", "--state-dir", "elsewhere/state"]);
+        let receipt = failure_receipt("garbage-collection", &error, &context);
+
+        assert_eq!(receipt["code"], "invalid-request");
+        assert_eq!(receipt["category"], "policy");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "inspect");
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        assert_eq!(
+            next_command,
+            riftri_core::status_command(&state_directory)
+                .expect("the fixture path is representable")
+        );
+        let quoted = next_command
+            .strip_prefix("riftri status --state-dir ")
+            .expect("next command names the state directory");
+        assert_eq!(
+            shell_split(quoted),
+            vec![state_directory.clone()],
+            "{next_command}"
+        );
+        assert_eq!(
+            receipt["stateDirectory"],
+            state_directory.display().to_string()
+        );
+        assert_eq!(
+            receipt["stateDirectoryNativeHex"],
+            native_path_hex(&state_directory)
+        );
+        assert_eq!(super::failure_exit_code(&error), 3);
+    }
+
     /// A path Riftri cannot write as a shell argument must produce no command
     /// at all: a lossy rendering would name a directory that does not exist,
     /// and repair reports an all-clear for any directory it cannot find.
@@ -3103,6 +3176,63 @@ mod tests {
             resolve_state_directory(fixture.path(), Some(present.clone())).expect("resolve"),
             present
         );
+    }
+
+    /// A blocked destination must keep the exact keys a ready destination
+    /// carries: `backend` and `next_command` are explicitly null when absent,
+    /// never dropped, so strictly-typed consumers that parsed a ready report
+    /// do not fail on a blocked one.
+    #[test]
+    fn doctor_json_emits_explicit_nulls_for_a_blocked_destination() {
+        let report = riftri_core::DoctorReport {
+            project_stage: "native-cow-with-repository-activation",
+            operating_system: "test-os",
+            architecture: "test-arch",
+            cow_backend_active: false,
+            repository_enabled: None,
+            git_shim_active: false,
+            git: riftri_core::Diagnostic {
+                available: false,
+                value: None,
+                error: Some("git executable not found".to_owned()),
+            },
+            repository: riftri_core::Diagnostic {
+                available: false,
+                value: None,
+                error: Some("not a Git repository".to_owned()),
+            },
+            repository_compatibility: riftri_core::Diagnostic {
+                available: false,
+                value: None,
+                error: Some("repository inspection did not succeed".to_owned()),
+            },
+            destination_readiness: riftri_core::DestinationReadiness {
+                destination: PathBuf::from("blocked-destination"),
+                status: riftri_core::DestinationReadinessStatus::Blocked,
+                backend: None,
+                copy_on_write: false,
+                overlayfs_helper: riftri_core::OverlayFsHelperReadiness::NotApplicable,
+                blockers: Vec::new(),
+                next_command: None,
+            },
+            storage_capabilities: Vec::new(),
+        };
+
+        let output = super::doctor_json(&report);
+
+        let readiness = output["destination_readiness"]
+            .as_object()
+            .expect("destination_readiness object");
+        assert!(
+            readiness.contains_key("backend"),
+            "backend key must be present even when no backend is selected"
+        );
+        assert!(readiness["backend"].is_null());
+        assert!(
+            readiness.contains_key("next_command"),
+            "next_command key must be present even when no command applies"
+        );
+        assert!(readiness["next_command"].is_null());
     }
 
     #[test]

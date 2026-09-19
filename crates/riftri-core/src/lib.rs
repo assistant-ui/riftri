@@ -41,7 +41,7 @@ pub use activation::{
     stripped_shim_scope_detected,
 };
 pub use riftri_git::REAL_GIT_ENV;
-pub use shell::{command_path, repair_command, shell_quoted_path};
+pub use shell::{command_path, repair_command, shell_quoted_path, status_command};
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
     CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,

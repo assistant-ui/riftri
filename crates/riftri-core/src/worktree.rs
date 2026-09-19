@@ -394,6 +394,16 @@ pub enum WorktreeError {
         state_directory: PathBuf,
     },
 
+    /// A parent directory of the immutable-base storage is a symbolic link,
+    /// so the operation stopped before following it. Nothing was modified
+    /// and nothing needs repair; the caller should inspect `state_directory`
+    /// with the `riftri status` command echoed in the message.
+    #[error("{message}")]
+    SymlinkedBaseParent {
+        message: String,
+        state_directory: PathBuf,
+    },
+
     /// Another live process holds the operation lock right now. Nothing needs
     /// repair; the caller should wait for the concurrent operation to finish
     /// and retry.
@@ -5453,15 +5463,17 @@ enum UnsafeBaseInventory {
 fn symlinked_base_parent_error(state_directory: &Path, directory: &Path) -> WorktreeError {
     // Name the affected state directory inside the command when it can be
     // written as a shell argument; otherwise keep the placeholder rather than
-    // print a path the caller's shell would split or mangle.
+    // print a path the caller's shell would split or mangle. The command comes
+    // from the same helper the failure receipt's `nextCommand` uses, so the
+    // two can never disagree.
     let state_directory = crate::command_path(state_directory);
-    let next = match crate::shell_quoted_path(&state_directory) {
-        Some(quoted) => format!("run `riftri status --state-dir {quoted}`"),
+    let next = match crate::status_command(&state_directory) {
+        Some(command) => format!("run `{command}`"),
         None => "run `riftri status --state-dir <STATE_DIR>`, replacing <STATE_DIR> with the \
                  exact state directory below"
             .to_owned(),
     };
-    WorktreeError::InvalidRequest(format!(
+    let message = format!(
         "cleanup stopped: immutable-base path {} is a symbolic link, not a real directory.\n\
          Following it could access data outside Riftri's expected storage layout. \
          Riftri did not follow this link or delete data through it.\n\
@@ -5471,7 +5483,11 @@ fn symlinked_base_parent_error(state_directory: &Path, directory: &Path) -> Work
          with a real directory; this does not repair an existing redirected layout.",
         directory.display(),
         state_directory.display(),
-    ))
+    );
+    WorktreeError::SymlinkedBaseParent {
+        message,
+        state_directory,
+    }
 }
 
 fn retained_base_paths(

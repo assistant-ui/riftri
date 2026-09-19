@@ -44,6 +44,16 @@ pub fn repair_command(state_directory: &Path) -> Option<String> {
     shell_quoted_path(state_directory).map(|quoted| format!("riftri repair --state-dir {quoted}"))
 }
 
+/// Render the `riftri status` invocation that inspects `state_directory`, or
+/// `None` when the path cannot be represented as a shell argument.
+///
+/// Human-readable messages and machine-readable receipts both call this, so
+/// the command a harness executes is character-for-character the command the
+/// message shows.
+pub fn status_command(state_directory: &Path) -> Option<String> {
+    shell_quoted_path(state_directory).map(|quoted| format!("riftri status --state-dir {quoted}"))
+}
+
 /// Absolute form of a caller-supplied path, so a suggested command targets the
 /// same directory regardless of where the caller runs it.
 ///
@@ -78,6 +88,7 @@ mod tests {
     fn control_characters_produce_no_command() {
         assert!(shell_quoted_path(Path::new("/tmp/new\nline")).is_none());
         assert!(repair_command(Path::new("/tmp/new\nline")).is_none());
+        assert!(status_command(Path::new("/tmp/new\nline")).is_none());
     }
 
     #[cfg(unix)]
@@ -97,6 +108,14 @@ mod tests {
         assert_eq!(
             repair_command(Path::new("/tmp/riftri-state")).expect("representable"),
             "riftri repair --state-dir '/tmp/riftri-state'"
+        );
+    }
+
+    #[test]
+    fn the_status_command_names_the_state_directory() {
+        assert_eq!(
+            status_command(Path::new("/tmp/riftri-state")).expect("representable"),
+            "riftri status --state-dir '/tmp/riftri-state'"
         );
     }
 

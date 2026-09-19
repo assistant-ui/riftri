@@ -261,6 +261,11 @@ The suggested command uses POSIX shell quoting on Unix and PowerShell quoting on
 Windows. If the destination is not valid Unicode, doctor omits the suggested
 command rather than substitute characters in the path.
 
+With `--json`, `destination_readiness.backend` and
+`destination_readiness.next_command` are always present, explicitly `null`
+when no backend is selected or no command applies: a blocked destination
+keeps every key a ready one has.
+
 ### `riftri backends [OPTIONS] [PATH]`
 
 Probe storage backends for a concrete destination volume. `PATH` is an
@@ -357,7 +362,11 @@ The `--all-states --json` report uses `schema_version` 2 with
 `"scope": "all-registered-states"`: it adds a `state_directories` array
 (each entry's `source` is `default` or `registered`), each worktree carries its
 owning `state_directory`, and each diagnostic entry carries the
-`state_directory` it was found in (`null` for registration-level issues).
+`state_directory` it was found in beside its `state_directory_native_hex`
+twin (both explicitly `null` for registration-level issues that no state
+directory owns). The hex twin and the explicit nulls were added later without
+a `schema_version` bump: additive, null-consistent keys do not change the
+version.
 
 ### `riftri worktree add [OPTIONS] <PATH> [REVISION]`
 

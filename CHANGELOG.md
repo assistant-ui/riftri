@@ -7,6 +7,28 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Four machine-contract defects found by a contract audit of the CLI's JSON
+  reports and failure receipts. `worktree list --all-states --json` now emits
+  a `state_directory_native_hex` sibling beside each diagnostic entry's
+  `state_directory` display string — previously the only display path in the
+  CLI without a hex partner — and the registration-level branch that reports
+  `state_directory: null` emits the hex key as explicit `null` too, instead
+  of omitting it. `riftri setup --json-errors` now reports the refusal of
+  that flag combination as the policy shape (`category: policy`, exit code 3,
+  `cleanup: not-needed`, `recovery: not-required`) instead of an operational
+  failure inviting harnesses to retry and inspect state that was never
+  touched. The symlinked-base safety stop's receipt now agrees with its own
+  message: it reports `recovery: inspect` with the exact
+  `riftri status --state-dir …` command the message names — built by the
+  same helper, so the two cannot diverge — and its `stateDirectory` names
+  the affected state directory (a new narrow `SymlinkedBaseParent` error
+  variant carries it; the code stays `invalid-request` and the exit code
+  stays 3). `doctor --json` now always emits
+  `destination_readiness.backend` and `destination_readiness.next_command`,
+  explicitly `null` when absent, instead of dropping the keys on a blocked
+  destination. None of these additive, null-consistent changes bump any
+  `schema_version`.
+
 - Termination forwarding now enforces the single-waiter invariant its design
   relies on, and no longer loses a termination signal delivered during its
   own teardown. The forwarding state behind `riftri exec` and the Git shim is
