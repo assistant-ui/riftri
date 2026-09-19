@@ -485,6 +485,87 @@ fn refuses_reuse_of_a_base_with_an_injected_ignored_file() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn refuses_reuse_of_a_base_with_tampered_special_bits_or_xattrs() {
+    #[cfg(target_os = "macos")]
+    const ATTRIBUTE: &str = "com.riftri.base-tamper-test";
+    #[cfg(not(target_os = "macos"))]
+    const ATTRIBUTE: &str = "user.riftri.base-tamper-test";
+
+    for change in ["setuid", "sticky", "xattr"] {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        fs::create_dir(&repository).expect("repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let state = fixture.path().join("state");
+        let request = |name: &str| AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: fixture.path().join(name),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
+        };
+        let first = add_worktree(request("first")).expect("first view");
+        let file = first.base_path.join("tracked.txt");
+        let original = fs::symlink_metadata(&file)
+            .expect("base file metadata")
+            .permissions();
+        // Each tamper leaves every mode & 0o777 bit exactly as materialized,
+        // so only the new metadata coverage can detect it. The owner may
+        // chmod and label read-only cache entries without any special
+        // privilege; the temporary write bit for the xattr is restored.
+        match change {
+            "setuid" => fs::set_permissions(
+                &file,
+                fs::Permissions::from_mode((original.mode() & 0o777) | 0o4000),
+            )
+            .expect("set setuid bit"),
+            "sticky" => {
+                let directory_mode = fs::symlink_metadata(&first.base_path)
+                    .expect("base directory metadata")
+                    .permissions()
+                    .mode();
+                fs::set_permissions(
+                    &first.base_path,
+                    fs::Permissions::from_mode((directory_mode & 0o777) | 0o1000),
+                )
+                .expect("set sticky bit");
+            }
+            _ => {
+                fs::set_permissions(&file, fs::Permissions::from_mode(original.mode() | 0o200))
+                    .expect("make base file writable");
+                rustix::fs::setxattr(
+                    &file,
+                    ATTRIBUTE,
+                    b"injected",
+                    rustix::fs::XattrFlags::empty(),
+                )
+                .expect("set xattr");
+                fs::set_permissions(&file, original.clone()).expect("restore base file mode");
+            }
+        }
+        let error = add_worktree(request("second")).expect_err("tampered base must not be reused");
+        assert!(error.to_string().contains("integrity"), "{change}: {error}");
+        assert!(!fixture.path().join("second").exists(), "{change}");
+        assert_eq!(fs::read(&file).expect("preserve evidence"), b"base\n");
+        assert!(
+            git(&first.destination, &["status", "--porcelain=v1"]).is_empty(),
+            "{change}"
+        );
+    }
+}
+
 #[test]
 fn creates_a_clean_worktree_with_deterministic_in_tree_attributes() {
     let fixture = tempdir().expect("fixture directory");

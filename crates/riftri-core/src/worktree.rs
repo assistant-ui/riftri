@@ -2857,14 +2857,36 @@ fn verify_existing_base(base_path: &Path, complete_path: &Path) -> Result<bool, 
                     source,
                 )
             })?;
-        if stored
-            != crate::base_integrity::marker(base_path)
-                .map_err(|source| io("verify immutable-base integrity", base_path, source))?
-        {
-            return Err(WorktreeError::InvalidRequest(format!(
+        let mismatch = || {
+            Err(WorktreeError::InvalidRequest(format!(
                 "immutable-base integrity check failed for {}; the base was preserved and cannot be reused",
                 base_path.display()
-            )));
+            )))
+        };
+        if stored.starts_with(crate::base_integrity::MARKER_V2_PREFIX) {
+            if stored
+                != crate::base_integrity::marker_v2(base_path)
+                    .map_err(|source| io("verify immutable-base integrity", base_path, source))?
+            {
+                return mismatch();
+            }
+        } else if stored.starts_with(crate::base_integrity::MARKER_V1_PREFIX) {
+            if stored
+                != crate::base_integrity::marker(base_path)
+                    .map_err(|source| io("verify immutable-base integrity", base_path, source))?
+            {
+                return mismatch();
+            }
+            // The content matches, but a v1 marker attests nothing about
+            // special permission bits, extended attributes, or macOS ACLs —
+            // exactly the metadata the native cloners propagate into views.
+            // Report a cache miss so this base is rebuilt once under the
+            // exclusive lock and records a v2 marker, instead of trusting
+            // metadata no marker ever covered. Legacy content tampering
+            // still refuses above; existing views are never disturbed.
+            return Ok(false);
+        } else {
+            return mismatch();
         }
         return Ok(true);
     }
@@ -3108,7 +3130,7 @@ fn prepare_base(
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
     NativeCowCloner::make_tree_read_only(base_path)?;
-    let integrity = crate::base_integrity::marker(base_path)
+    let integrity = crate::base_integrity::marker_v2(base_path)
         .map_err(|source| io("record immutable-base integrity", base_path, source))?;
     let mut marker = OpenOptions::new()
         .create_new(true)
@@ -6988,9 +7010,10 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
 
 /// Hash metadata Git does not reproduce from its tree: the full native mode
 /// (including setuid, setgid, and sticky bits) and, on Unix, every extended
-/// attribute name and value. The base-integrity content hash deliberately
-/// ignores these, so the forced-removal snapshot composes them separately;
-/// metadata-only edits after force intent must stop deletion.
+/// attribute name and value. The persisted snapshot composes the v1 content
+/// digest, which deliberately ignores these, so the forced-removal snapshot
+/// adds them separately; metadata-only edits after force intent must stop
+/// deletion. This layout stays frozen — journals recorded it durably.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     let metadata = fs::symlink_metadata(path)
@@ -11987,6 +12010,88 @@ mod tests {
                     .mode();
                 assert_eq!(mode & 0o7777, 0o1755, "{mode:o}");
             }
+        }
+    }
+
+    #[test]
+    fn legacy_v1_marker_base_upgrades_with_one_rebuild() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let request = |name: &str| AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: fixture.path().join(name),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
+        };
+        let first = add_worktree_inner(request("first"), None, true).expect("first view");
+        let marker_path = first.base_path.with_extension("complete");
+        assert!(
+            fs::read(&marker_path)
+                .expect("fresh marker")
+                .starts_with(crate::base_integrity::MARKER_V2_PREFIX)
+        );
+
+        // Rewrite the completion marker exactly as a pre-v2 binary recorded
+        // it: the v1 content digest of the same base.
+        fs::write(
+            &marker_path,
+            crate::base_integrity::marker(&first.base_path).expect("v1 digest"),
+        )
+        .expect("write legacy marker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Metadata tampering is invisible to a v1 marker. The migration
+            // rebuild must discard it rather than clone it into views.
+            let file = first.base_path.join("tracked.txt");
+            let mode = fs::symlink_metadata(&file)
+                .expect("base file metadata")
+                .permissions()
+                .mode();
+            fs::set_permissions(&file, fs::Permissions::from_mode((mode & 0o777) | 0o4000))
+                .expect("set setuid bit");
+        }
+
+        let second = add_worktree_inner(request("second"), None, true).expect("migrating view");
+        assert!(!second.reused_base, "a v1 marker must trigger one rebuild");
+        let upgraded = fs::read(&marker_path).expect("upgraded marker");
+        assert!(upgraded.starts_with(crate::base_integrity::MARKER_V2_PREFIX));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            for path in [
+                first.base_path.join("tracked.txt"),
+                second.destination.join("tracked.txt"),
+            ] {
+                let mode = fs::symlink_metadata(&path)
+                    .expect("rebuilt metadata")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o7000, 0, "{}: {mode:o}", path.display());
+            }
+        }
+
+        let third = add_worktree_inner(request("third"), None, true).expect("cached view");
+        assert!(third.reused_base, "the upgraded marker must be reusable");
+        assert_eq!(fs::read(&marker_path).expect("stable marker"), upgraded);
+        for destination in [&first.destination, &second.destination, &third.destination] {
+            git(destination, &["status", "--porcelain=v1"]);
         }
     }
 
