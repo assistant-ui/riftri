@@ -17,15 +17,86 @@ fn exec_propagates_normal_exit_status() {
 
 #[cfg(unix)]
 mod unix {
+    use std::ffi::{OsStr, OsString};
     use std::fs::File;
     use std::io::{BufRead, BufReader};
+    use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::FromRawFd;
     use std::os::unix::process::CommandExt;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
+
+    /// Install `SIG_IGN` for `signals` in a forked child before it execs,
+    /// reproducing what `nohup` does for SIGHUP and what a shell without job
+    /// control does to SIGINT and SIGQUIT before starting an asynchronous
+    /// command. An ignored disposition survives exec, so the spawned `riftri`
+    /// really does inherit it.
+    ///
+    /// # Safety
+    ///
+    /// The returned closure runs between fork and exec and calls only the
+    /// async-signal-safe `signal(2)`.
+    unsafe fn ignore_before_exec<'command>(
+        command: &'command mut Command,
+        signals: &'static [libc::c_int],
+    ) -> &'command mut Command {
+        if signals.is_empty() {
+            return command;
+        }
+        // SAFETY: delegated to this function's own safety contract.
+        unsafe {
+            command.pre_exec(move || {
+                for &signal in signals {
+                    if libc::signal(signal, libc::SIG_IGN) == libc::SIG_ERR {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// A file the scoped command polls for, so a test can hold the command
+    /// alive across the signals under test and release it only afterwards. The
+    /// command's exit status then reports whether it survived: 7 if it did,
+    /// `128 + signal` if it did not.
+    struct ReleaseFlag {
+        directory: TempDir,
+    }
+
+    impl ReleaseFlag {
+        const SURVIVED: i32 = 7;
+
+        fn new() -> Self {
+            ReleaseFlag {
+                directory: tempfile::tempdir().expect("create release-flag directory"),
+            }
+        }
+
+        fn path(&self) -> PathBuf {
+            self.directory.path().join("release")
+        }
+
+        /// Shell script that prints its PID, waits for the flag, then exits
+        /// with [`ReleaseFlag::SURVIVED`].
+        fn script(&self) -> String {
+            let path = self.path();
+            let path = path.display();
+            format!(
+                "echo \"$$\"\n\
+                 while [ ! -f '{path}' ]; do /bin/sleep 0.05; done\n\
+                 exit {}\n",
+                Self::SURVIVED
+            )
+        }
+
+        fn release(&self) {
+            std::fs::write(self.path(), b"").expect("release the scoped command");
+        }
+    }
 
     /// A spawned `riftri exec` process with no terminal on any standard
     /// descriptor, matching supervised (non-interactive) usage, plus a private
@@ -37,13 +108,23 @@ mod unix {
 
     impl SupervisedExec {
         fn spawn(script: &str) -> Self {
+            Self::spawn_ignoring(script, &[])
+        }
+
+        /// Spawn `riftri exec` from a parent that ignores `ignored`, so riftri
+        /// inherits those dispositions exactly as it would under `nohup` or as
+        /// an asynchronous command of a shell without job control.
+        fn spawn_ignoring(script: &str, ignored: &'static [libc::c_int]) -> Self {
             let shim_root = tempfile::tempdir().expect("create private TMPDIR");
-            let riftri = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            let mut command = Command::new(env!("CARGO_BIN_EXE_riftri"));
+            command
                 .args(["exec", "--", "/bin/sh", "-c", script])
                 .env("TMPDIR", shim_root.path())
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
+                .stderr(Stdio::piped());
+            // SAFETY: the installed closure calls only async-signal-safe code.
+            let riftri = unsafe { ignore_before_exec(&mut command, ignored) }
                 .spawn()
                 .expect("start riftri exec");
             SupervisedExec { riftri, shim_root }
@@ -198,12 +279,27 @@ mod unix {
 
     impl InteractiveExec {
         fn spawn(script: &str) -> Self {
+            Self::spawn_with(script, &[], &[])
+        }
+
+        /// Spawn `riftri exec` from a parent that ignores `ignored`, matching
+        /// `nohup riftri exec …` from a terminal.
+        fn spawn_ignoring(script: &str, ignored: &'static [libc::c_int]) -> Self {
+            Self::spawn_with(script, ignored, &[])
+        }
+
+        fn spawn_with(
+            script: &str,
+            ignored: &'static [libc::c_int],
+            environment: &[(&str, &OsStr)],
+        ) -> Self {
             let shim_root = tempfile::tempdir().expect("create private TMPDIR");
             let (master, slave) = open_pty();
             let mut command = Command::new(env!("CARGO_BIN_EXE_riftri"));
             command
                 .args(["exec", "--", "/bin/sh", "-c", script])
                 .env("TMPDIR", shim_root.path())
+                .envs(environment.iter().copied())
                 .stdin(Stdio::from(slave.try_clone().expect("duplicate pty slave")))
                 .stdout(Stdio::from(slave.try_clone().expect("duplicate pty slave")))
                 .stderr(Stdio::from(slave));
@@ -223,7 +319,10 @@ mod unix {
                     Ok(())
                 });
             }
-            let riftri = command.spawn().expect("start riftri exec on a pty");
+            // SAFETY: the installed closure calls only async-signal-safe code.
+            let riftri = unsafe { ignore_before_exec(&mut command, ignored) }
+                .spawn()
+                .expect("start riftri exec on a pty");
             InteractiveExec {
                 riftri,
                 output: BufReader::new(master),
@@ -243,6 +342,18 @@ mod unix {
                 assert!(read > 0, "pty closed before {marker:?} appeared");
                 if line.trim() == marker {
                     return;
+                }
+            }
+        }
+
+        /// Read pty output lines until one is a PID.
+        fn read_pid(&mut self) -> i32 {
+            loop {
+                let mut line = String::new();
+                let read = self.output.read_line(&mut line).expect("read pty output");
+                assert!(read > 0, "pty closed before a PID appeared");
+                if let Ok(pid) = line.trim().parse() {
+                    return pid;
                 }
             }
         }
@@ -293,6 +404,128 @@ mod unix {
         exec.await_marker("READY");
         signal(-exec.pid(), libc::SIGINT);
         assert_eq!(exec.wait_exit_code(), 128 + libc::SIGINT);
+    }
+
+    /// `nohup riftri exec -- …`: SIGHUP and SIGTERM are forwarded signals, but
+    /// riftri inherited SIG_IGN for both, and an ignore survives exec. The
+    /// scoped command must therefore start immune to them, exactly as it would
+    /// under a bare `nohup`, instead of being handed SIG_DFL by the forwarding
+    /// setup.
+    #[test]
+    fn inherited_ignore_of_forwarded_signals_survives_into_scoped_command() {
+        let flag = ReleaseFlag::new();
+        let mut exec =
+            SupervisedExec::spawn_ignoring(&flag.script(), &[libc::SIGHUP, libc::SIGTERM]);
+        let pids = exec.read_pids(1);
+        let riftri_pid = i32::try_from(exec.riftri.id()).expect("riftri PID fits i32");
+        signal(riftri_pid, libc::SIGHUP);
+        signal(riftri_pid, libc::SIGTERM);
+        flag.release();
+        assert_eq!(
+            exec.wait_exit_code(),
+            ReleaseFlag::SURVIVED,
+            "the scoped command must keep the SIG_IGN riftri inherited"
+        );
+        assert_terminates(pids[0], "scoped command");
+    }
+
+    /// The same contract on a terminal: the kernel hangs a terminal up by
+    /// signalling the whole foreground process group, and a `nohup`-style
+    /// inherited SIG_IGN has to carry through riftri into the scoped command.
+    #[test]
+    fn interactive_inherited_sighup_ignore_survives_into_scoped_command() {
+        let flag = ReleaseFlag::new();
+        let mut exec = InteractiveExec::spawn_ignoring(&flag.script(), &[libc::SIGHUP]);
+        let scoped_pid = exec.read_pid();
+        // The session leader's PID doubles as the foreground process group ID,
+        // so this is exactly the delivery the kernel performs on hangup.
+        signal(-exec.pid(), libc::SIGHUP);
+        flag.release();
+        assert_eq!(
+            exec.wait_exit_code(),
+            ReleaseFlag::SURVIVED,
+            "a hangup must not kill a scoped command started under nohup"
+        );
+        assert_terminates(scoped_pid, "scoped command");
+    }
+
+    /// `sh -c 'riftri exec -- … & wait'`: a shell without job control must
+    /// start an asynchronous command with SIGINT and SIGQUIT ignored, so
+    /// Ctrl-C cannot reach a background job. Supervised mode forwards SIGINT,
+    /// which must not turn that inherited immunity into SIG_DFL.
+    #[test]
+    fn inherited_ignore_keeps_background_scoped_command_immune_to_sigint() {
+        let flag = ReleaseFlag::new();
+        let mut exec =
+            SupervisedExec::spawn_ignoring(&flag.script(), &[libc::SIGINT, libc::SIGQUIT]);
+        let pids = exec.read_pids(1);
+        let riftri_pid = i32::try_from(exec.riftri.id()).expect("riftri PID fits i32");
+        signal(riftri_pid, libc::SIGINT);
+        flag.release();
+        assert_eq!(
+            exec.wait_exit_code(),
+            ReleaseFlag::SURVIVED,
+            "a background job must keep the POSIX SIGINT immunity it was started with"
+        );
+        assert_terminates(pids[0], "scoped command");
+    }
+
+    /// A stand-in for the real Git executable: it reports its PID and then
+    /// stays alive, modelling a long `git clone`. `riftri exec` resolves the
+    /// real Git as the first `git` on `PATH`, so putting this directory first
+    /// makes the process-scoped shim delegate to it.
+    struct RealGitStandIn {
+        directory: TempDir,
+    }
+
+    impl RealGitStandIn {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().expect("create real-Git stand-in directory");
+            let executable = directory.path().join("git");
+            // SIGHUP is ignored because the pty fixture makes riftri itself the
+            // session leader, so riftri's exit hangs up the foreground process
+            // group. Without the ignore this stand-in could die from that
+            // artifact rather than from the SIGTERM forwarding under test.
+            std::fs::write(
+                &executable,
+                "#!/bin/sh\ntrap '' HUP\necho \"$$\"\nexec /bin/sleep 300\n",
+            )
+            .expect("write real-Git stand-in");
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+                .expect("make the real-Git stand-in executable");
+            RealGitStandIn { directory }
+        }
+
+        /// `PATH` with the stand-in's directory first.
+        fn path(&self) -> OsString {
+            let inherited = std::env::var_os("PATH").unwrap_or_default();
+            std::env::join_paths(
+                std::iter::once(self.directory.path().to_path_buf())
+                    .chain(std::env::split_paths(&inherited)),
+            )
+            .expect("build a PATH with the real-Git stand-in first")
+        }
+    }
+
+    /// Terminating riftri while the scoped command is `git` must reach the
+    /// real Git. The scoped `git` is riftri's own shim, so a PID-directed
+    /// SIGTERM stops at the shim unless the shim forwards it on; before that
+    /// forwarding existed the real Git survived, orphaned, still writing.
+    #[test]
+    fn interactive_sigterm_reaches_the_real_git_behind_the_shim() {
+        let real_git = RealGitStandIn::new();
+        let mut exec = InteractiveExec::spawn_with(
+            "echo \"$$\"\nexec git hold\n",
+            &[],
+            &[("PATH", real_git.path().as_os_str())],
+        );
+        let shim_pid = exec.read_pid();
+        let real_git_pid = exec.read_pid();
+        assert_ne!(shim_pid, real_git_pid, "the shim must run the real Git");
+        signal(exec.pid(), libc::SIGTERM);
+        assert_eq!(exec.wait_exit_code(), 128 + libc::SIGTERM);
+        assert_terminates(real_git_pid, "real Git behind the process-scoped shim");
+        assert_terminates(shim_pid, "process-scoped Git shim");
     }
 }
 

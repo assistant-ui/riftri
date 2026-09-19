@@ -122,6 +122,23 @@ edits private; the agent does not need a Riftri-specific prompt, plugin, or skil
 to preserve that isolation. Explicit `riftri worktree add` does not require
 `riftri enable` or a shell hook.
 
+The pattern that works well is one worktree per task: create a worktree named
+for the task, open one agent session inside it, and remove the worktree when
+the task's branch is merged or abandoned.
+
+```sh
+riftri worktree add ../app-auth -b feature/auth HEAD
+riftri exec --worktree ../app-auth -- claude
+# later, after the branch is merged or abandoned:
+riftri worktree remove ../app-auth
+```
+
+Several agents can work in parallel this way, each in its own worktree, while
+unchanged files share storage through the same immutable base. `riftri worktree
+list` shows every managed worktree with its branch and storage use, and
+`riftri status` explains any state that needs attention. Removal refuses a
+worktree with uncommitted changes, so a busy agent's work is not silently lost.
+
 ### Let an agent create additional worktrees
 
 From your existing repository, explicitly enable Riftri and launch the agent
@@ -165,6 +182,40 @@ enable the repository by itself. No special agent instructions are required for
 Riftri's storage safety. See the
 [agent integration guide](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md)
 for harness and automation details.
+
+### Give the agent this guide
+
+Agents follow these commands well when the guide is in their context. The
+**Copy .md** button on [riftri.dev](https://riftri.dev) copies this entire
+document to the clipboard; paste it into your agent's conversation or drop it
+into the repository (for example as part of `CLAUDE.md` or `AGENTS.md`) so the
+agent knows how to create, use, and clean up Riftri worktrees without guessing.
+The raw document also stays available at
+[riftri.dev/index.md](https://riftri.dev/index.md) for fetching from scripts or
+agent instructions.
+
+A minimal instruction that works with the guide in context:
+
+```text
+Use one Riftri worktree per task. Create it with
+`riftri worktree add <dir> -b <branch> HEAD`, do all work inside that
+directory, and when the task is done and merged, run
+`riftri worktree remove <dir>`.
+```
+
+### Harnesses and automation
+
+Agent harnesses that drive Riftri directly get machine-readable contracts:
+`--json` on reporting commands emits one versioned JSON document on stdout, and
+`--json-errors` turns any failure into a single structured receipt on stderr
+with a `nextCommand` that targets the exact repository and state directory of
+the failing invocation. Progress lines go to stderr and are suppressed under
+`--json-errors`, so streams stay parseable. Interactive `riftri exec` sessions
+survive Ctrl-C — the wrapped agent alone decides whether an interrupt ends it —
+and terminating `riftri exec` forwards the signal to the whole scoped process
+tree. See the
+[agent integration guide](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md)
+for receipt schemas and exit codes.
 
 ### Activate the current shell instead
 

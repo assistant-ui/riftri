@@ -13,6 +13,7 @@ mod activation;
 mod base_integrity;
 mod journal;
 pub mod progress;
+mod shell;
 #[cfg(test)]
 mod test_hooks;
 #[cfg(all(
@@ -31,23 +32,27 @@ mod worktree;
 
 pub use activation::{
     ActivationError, BYPASS_ENV, CACHE_DIR_ENV, GitProxyOutcome, GitProxyPlan,
-    RepositoryActivation, SHIM_ACTIVE_ENV, ShellActivationStatus, disable_repository,
+    PROCESS_SHIM_DIR_ENV, PROCESS_SHIM_DIR_PREFIX, RepositoryActivation, SHIM_ACTIVE_ENV,
+    ShellActivationStatus, delegate_stripped_shim_invocation, disable_repository,
     enable_repository, execute_scoped_command, execute_scoped_command_in_worktree,
     install_overlayfs_helper, plan_git_command, prepare_posix_shell_deactivation,
     prepare_posix_shell_hook, prepare_powershell_deactivation, prepare_powershell_hook,
-    proxy_git_command, repository_activation, shell_activation_status,
+    proxy_git_command, repository_activation, shell_activation_status, shim_environment_complete,
+    stripped_shim_scope_detected,
 };
 pub use riftri_git::REAL_GIT_ENV;
+pub use shell::{command_path, repair_command, shell_quoted_path, status_command};
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
     CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,
-    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PruneWorktreesRequest,
-    PruneWorktreesResult, RecoveryReport, RemoveWorktreeRequest, RemoveWorktreeResult,
-    StateDiagnosticIssue, StateDirectorySource, StateWorktreeInventory, StorageAccountingReport,
-    ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree, compact_worktree,
-    force_remove_worktree, forget_missing_state_directory, garbage_collect, is_managed_worktree,
-    move_worktree, prune_worktrees, recover_incomplete_operations, remove_worktree,
-    storage_accounting, worktree_inventory_across_states,
+    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, ProtectedBase,
+    PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
+    RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue, StateDirectorySource,
+    StateWorktreeInventory, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
+    WorktreeMode, add_worktree, compact_worktree, force_remove_worktree,
+    forget_missing_state_directory, garbage_collect, is_managed_worktree, move_worktree,
+    prune_worktrees, recover_incomplete_operations, recovery_pending_error, remove_worktree,
+    storage_accounting, validate_new_worktree_destination, worktree_inventory_across_states,
 };
 
 /// A diagnostic check and its optional failure explanation.
@@ -613,14 +618,8 @@ fn destination_readiness(
         Ok(_) | Err(_) => OverlayFsHelperReadiness::NotApplicable,
     };
     let next_command = match status {
-        DestinationReadinessStatus::Ready => destination.to_str().map(|path| {
-            let escaped = if cfg!(windows) {
-                path.replace('\'', "''")
-            } else {
-                path.replace('\'', "'\"'\"'")
-            };
-            format!("riftri worktree add '{escaped}' --detach HEAD")
-        }),
+        DestinationReadinessStatus::Ready => shell::shell_quoted_path(destination)
+            .map(|quoted| format!("riftri worktree add {quoted} --detach HEAD")),
         DestinationReadinessStatus::NeedsActivation => Some("riftri enable".to_owned()),
         DestinationReadinessStatus::Blocked
             if overlayfs_helper == OverlayFsHelperReadiness::Unavailable =>

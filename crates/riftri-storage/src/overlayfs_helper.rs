@@ -4,7 +4,10 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::{OverlayFsLayout, OverlayFsMountIdentity, OverlayFsMountProfile, OverlayFsMounter};
+use crate::{
+    OverlayFsLayout, OverlayFsMountContext, OverlayFsMountIdentity, OverlayFsMountProfile,
+    OverlayFsMounter,
+};
 
 pub(crate) fn probe(destination: &Path) -> Result<Option<()>, String> {
     let Some(helper) = configured_helper()? else {
@@ -54,10 +57,13 @@ pub(crate) fn reset_work(
     layout_root: &Path,
     lower: &Path,
     merged: &Path,
+    context: &OverlayFsMountContext,
 ) -> Result<Option<()>, String> {
     let Some(helper) = configured_helper()? else {
         return Ok(None);
     };
+    let context = serde_json::to_string(context)
+        .map_err(|error| format!("encode journaled mount context: {error}"))?;
     invoke(
         &helper,
         [
@@ -65,6 +71,7 @@ pub(crate) fn reset_work(
             layout_root.as_os_str(),
             lower.as_os_str(),
             merged.as_os_str(),
+            context.as_ref(),
         ],
     )?;
     Ok(Some(()))

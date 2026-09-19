@@ -5,6 +5,314 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Suggested recovery commands in messages and JSON receipts now use POSIX
+  shell quoting on every platform instead of choosing the dialect at build
+  time. A Windows build previously emitted PowerShell quoting that a POSIX
+  shell such as Git Bash or WSL — where Git work commonly happens on Windows —
+  parses as a different path. The exact path stays in each receipt's
+  native-path field for any other shell.
+- Four machine-contract defects found by a contract audit of the CLI's JSON
+  reports and failure receipts. `worktree list --all-states --json` now emits
+  a `state_directory_native_hex` sibling beside each diagnostic entry's
+  `state_directory` display string — previously the only display path in the
+  CLI without a hex partner — and the registration-level branch that reports
+  `state_directory: null` emits the hex key as explicit `null` too, instead
+  of omitting it. `riftri setup --json-errors` now reports the refusal of
+  that flag combination as the policy shape (`category: policy`, exit code 3,
+  `cleanup: not-needed`, `recovery: not-required`) instead of an operational
+  failure inviting harnesses to retry and inspect state that was never
+  touched. The symlinked-base safety stop's receipt now agrees with its own
+  message: it reports `recovery: inspect` with the exact
+  `riftri status --state-dir …` command the message names — built by the
+  same helper, so the two cannot diverge — and its `stateDirectory` names
+  the affected state directory (a new narrow `SymlinkedBaseParent` error
+  variant carries it; the code stays `invalid-request` and the exit code
+  stays 3). `doctor --json` now always emits
+  `destination_readiness.backend` and `destination_readiness.next_command`,
+  explicitly `null` when absent, instead of dropping the keys on a blocked
+  destination. None of these additive, null-consistent changes bump any
+  `schema_version`.
+
+- Lifecycle commands now refuse the remaining inherited Git environment
+  overrides that could redirect their internal Git operations:
+  `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES`, plus
+  environment-based configuration injection via `GIT_CONFIG_COUNT` (the
+  `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` family) and
+  `GIT_CONFIG_PARAMETERS`, exactly as `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_COMMON_DIR`, and `GIT_INDEX_FILE` were already refused before any
+  mutation. Ordinary Git passthrough through the shim and `riftri exec` is
+  unchanged and still delegates these variables to the user's own Git
+  commands. Separately, the isolated base materialization no longer re-injects
+  a caller-set `GIT_ALTERNATE_OBJECT_DIRECTORIES` into its private checkout
+  environment; its comment always said every inherited override is removed,
+  and now the behavior matches, so a foreign object store can no longer
+  satisfy a materialization with objects absent from the source repository.
+- `riftri setup` now validates the destination before printing the plan and
+  asking for confirmation. The plan step runs the same destination pre-checks
+  the explicit `riftri worktree add` performs — an existing destination
+  (including a symlink to an existing target) and checkout paths that cannot
+  coexist on the destination filesystem (case or Unicode-normalization
+  collisions) — by calling the add path's own validation, so the diagnostics
+  and the policy exit code are identical to the explicit command's.
+  Previously setup confidently printed the full plan and asked "Create this
+  worktree?" for a destination the creation step was always going to refuse;
+  the refusal itself was already safe, but the guided flow confirmed a plan
+  it had enough information to reject.
+- Termination forwarding now enforces the single-waiter invariant its design
+  relies on, and no longer loses a termination signal delivered during its
+  own teardown. The forwarding state behind `riftri exec` and the Git shim is
+  process-global, so two overlapping waits would each capture the other's
+  handler as "previous" and restore it, leaving a handler forwarding to a
+  dead PID while the single target slot signalled the wrong child; a second
+  overlapping call is now refused with a clear error instead (Riftri performs
+  one such wait per process lifetime, so nothing supported changes).
+  Separately, a SIGTERM or SIGHUP that landed after the child was reaped but
+  before the original dispositions were restored used to be recorded and then
+  silently discarded; it was aimed at Riftri itself, so it is now re-raised
+  once restoration completes and takes effect under the restored disposition
+  — the waiter dies with the conventional `128 + signal` status exactly as a
+  shell does after its foreground child, while a `nohup`-style inherited
+  ignore still discards it.
+- Garbage collection that cancels after removing a base's `.complete` marker —
+  because a new reference raced in between the marker removal and the
+  protected re-check — now restores the completion marker in the same
+  journaled step as the cancellation. The marker is recomputed from the base
+  on disk with the current versioned digest — the same content-and-metadata
+  hash reuse verification checks, never replayed from remembered bytes, so it
+  cannot vouch for a base modified behind Riftri's back — and staged next to
+  the base before an atomic rename, so no interruption window can leave a
+  truncated marker.
+  Previously the cancellation dropped the marker on the floor; if the racing
+  add then rolled back before rebuilding the base, the fully materialized tree
+  became invisible to marker-driven enumeration forever — `gc` could never
+  propose it again and `status` never accounted for it. Recovery of an
+  interruption anywhere around the restore is idempotent: it settles on either
+  the completed collection or the restored marker, and a base leaked by the
+  old behavior is at least surfaced by `status` as an unexplained
+  immutable-base artifact diagnostic.
+
+- The Windows ReFS block cloner now verifies the length of the sub-cluster
+  tail copy that follows aligned extent cloning. The tail was written with
+  `std::io::copy` over a `take` adaptor and the returned byte count discarded,
+  so a source that yielded fewer bytes than the recorded file size — a base
+  file truncated concurrently, or a stale size — left the clone's tail
+  zero-filled (the destination had already been extended with `set_len`) while
+  the clone reported success. A short read now fails the clone with an
+  explicit error naming the source and destination files and the expected
+  versus copied byte counts, mirroring the read-length check the base
+  integrity hash already performs.
+
+- Linux OverlayFS recovery no longer resets the private work directory of a
+  mount that may still be live in another mount namespace. When a crash left a
+  mount without a journaled identity, the no-identity recovery branch ran the
+  destructive remount loader — which cannot see mounts in other namespaces and
+  `remove_dir_all`s the work directory — before the boot/namespace/liveness
+  determination, so "recovery preserved it" could report a worktree whose
+  overlay was already damaged (copy-up failing with ESTALE/EIO in its original
+  namespace). Both recovery branches now load non-destructively, decide
+  boot/namespace/liveness first, and reset disposable work state only after
+  that determination proves the mount absent; the same guard now protects the
+  elevated helper's work-directory reset, which receives the journaled mount
+  context and refuses a reset the journaled namespace cannot rule out.
+
+- Linux OverlayFS hygiene around live mounts: the recovery marker is no longer
+  unlinked directly from the upper layer while the overlay is mounted —
+  modifying an underlying layer of a live overlay is undefined per kernel
+  OverlayFS rules and could leave a stale marker entry in the merged root that
+  failed the add's clean check. The marker is now cleared through the merged
+  view (and only when that view provably exposes this journal's marker; a
+  mount that does not is reported and the marker preserved), with the direct
+  upper unlink reserved for unmounted layouts. Abandoned probe mounts — the
+  `.riftri-overlay-probe-*` directories deliberately leaked next to worktrees
+  when a probe unmount fails — are also no longer invisible and unbounded:
+  `riftri status` names each one in its diagnostics, and `riftri repair`
+  removes one only when the kernel mount inventory proves nothing is mounted
+  at or below it, preserving and reporting any probe root a mount still
+  covers.
+- Reusing a cached immutable base no longer trusts metadata its completion
+  marker never covered. The v1 marker hashed contents, tree shape, symlink
+  targets, and `mode & 0o777`, while the native cloners faithfully propagate
+  more than that: the Linux reflink backend restores the full `st_mode`
+  (setuid, setgid, and sticky bits land) and APFS `clonefile` copies mode,
+  extended attributes, and ACLs verbatim. Anything that modified a cached
+  base under `bases/v1` could therefore inject special permission bits or
+  xattrs into every later worktree cloned from it, with Git reporting the
+  new worktree clean. Completion markers now use a versioned v2 digest that
+  also covers the full native Unix mode, every extended attribute name and
+  value, and macOS ACL presence — hashed in the same traversal that already
+  reads file contents — and a mismatch refuses reuse and preserves the base,
+  exactly like content corruption. Windows continues to cover only the
+  read-only attribute, matching what the ReFS cloner propagates. An existing
+  base with an intact v1 marker migrates predictably: its content digest is
+  still verified, then the base is rebuilt once and re-marked with v2
+  instead of being trusted or silently mass-invalidated; cache keys, journal
+  formats, and the persisted compaction and forced-removal snapshot digests
+  are unchanged.
+- Git failures now report how the process ended. A Git killed by a signal —
+  an OOM kill during `checkout-index` on a big tree, a SIGSEGV — usually
+  wrote nothing to stderr, so the error rendered as
+  `Git command failed (checkout-index …): ` with nothing after the colon.
+  The message now appends the exit disposition: the exit code when the
+  process exited (`fatal: … (exit code 128)`), or on Unix the terminating
+  signal (`killed by signal 9 (SIGKILL)`). Optional-result probes were also
+  audited so a signal death is never misread as "absent": a killed
+  `rev-parse` now surfaces as a real error instead of an unborn HEAD.
+- `doctor` and repository inspection no longer report a corrupt object store
+  as an unborn HEAD. `git rev-parse --verify --quiet HEAD^{commit}` exits 1
+  both for a genuinely unborn repository and for a HEAD whose commit object
+  is missing or unreadable; a cheap follow-up probe of the unpeeled `HEAD`
+  now distinguishes them. A broken repository reports "could not peel
+  HEAD^{commit}: HEAD resolves to `<object>`, but that object is unreadable;
+  the repository object store may be corrupt (try `git fsck`)" in both human
+  and JSON reports, while a real unborn repository keeps its friendly
+  "repository HEAD is unborn; commit a tree first" guidance.
+
+- Compacting a worktree after a checkout-profile input changed — a Git
+  upgrade, a checked config flip such as `core.autocrlf` or `core.eol`, or a
+  different Git LFS object set — no longer wedges the worktree's add journal.
+  Compaction used to rewrite the journal's `base_path` into the newly keyed
+  immutable-base bucket while `base_staging` stayed in the old one, so
+  recovery validation rejected the journal forever afterwards: remove, move,
+  compact, and repair all refused with "journal … contains paths outside its
+  operation scope", storage accounting dropped the view, and an interruption
+  between the base update and completion stranded the original tree in
+  `.riftri-compact-old-<id>`. The base update now retargets `base_path` and
+  `base_staging` in the same durable journal write, recovery validation
+  accepts the cross-bucket staging record an older Riftri left behind in an
+  Active journal (staging is confined to the immutable-base layout either
+  way), repair resumes previously stuck compactions, and the next compaction
+  heals the stale staging record in place. A compaction cancelled before its
+  base build also removes the empty bucket it created for the new profile
+  instead of leaving it as permanently unexplained state.
+
+- One worktree whose HEAD file cannot be resolved (empty, garbage, or an empty
+  symref target — classic crash and power-loss shapes) no longer makes every
+  Riftri command in the repository fail with "invalid Git output". Git lists
+  such a worktree with a null `HEAD` and none of `branch`, `detached`, or
+  `bare`; the porcelain parser now represents that state instead of rejecting
+  it, while still rejecting records that claim more than one of the three.
+  Unrelated operations — add, remove, move, prune, gc, status, list, and the
+  intercepted shim path — keep working; `status`, `worktree list`, and
+  `repair` name the corrupt worktree in a diagnostic that points at
+  `git worktree repair`; and removing, moving, or shell-binding the corrupt
+  worktree itself fails closed with the same guidance instead of risking work
+  in a worktree whose cleanliness cannot be verified.
+- The npm launcher now mirrors the termination contract of native `riftri
+  exec`. A native process killed by a signal Node ignores or reserves
+  (SIGUSR1, SIGPIPE, ...) previously made the launcher exit 0 — a killed run
+  reported success — because the death was re-raised through `process.kill`,
+  which is a silent no-op for those signals; the launcher now computes
+  `128 + signal` numerically for every signal death. While the native process
+  runs, the launcher also stays alive through Ctrl-C (SIGINT) and Ctrl-\
+  (SIGQUIT), which the terminal delivers to the whole foreground process
+  group, so a command that catches the interrupt keeps its wrapper instead of
+  outliving a dead launcher on the terminal; PID-directed SIGTERM and SIGHUP
+  are forwarded to the native process, and the child's exit code propagates
+  unchanged.
+- Intercepted `git worktree prune -v` no longer bypasses the journaled prune.
+  Git's `-v` is a verbose prune, not a report, so delegating it let ordinary
+  Git remove managed lifecycle metadata outside the Riftri journal; verbose
+  prunes now take the same journaled path as a bare prune. Dry runs remain
+  delegated, including with `--expire`, and a dry run beside an unrecognized
+  option stays refused.
+- Recovery guidance no longer sends callers to the wrong Riftri state. Failure
+  receipts and the human-readable messages beside them previously interpolated
+  a state directory with `Path::display` and no shell quoting, so a repository
+  under a path containing a space split into two shell arguments; `riftri
+  repair` then inspected a directory that did not exist and reported "No
+  journaled operation needs manual attention" while the real pending journal
+  sat untouched. Suggested commands now quote every path for the platform
+  shell, and a path that cannot be written as a shell argument — non-Unicode,
+  or containing control characters — produces no command at all rather than a
+  broken one.
+
+- Failure receipts carry the repository and state directory the failing
+  invocation actually selected, so `nextCommand` targets that state instead of
+  whatever the caller's working directory would resolve to. Receipts also gain
+  `repository`, `stateDirectory`, their `*NativeHex` twins, and
+  `nativePathEncoding`, so automation can act on the exact native path without
+  parsing a shell string. `schemaVersion` stays `1`; the fields are additive.
+
+- `riftri repair`, `status`, `gc`, and `worktree list` now refuse an explicitly
+  named `--state-dir` that does not exist, with a diagnostic and exit code 3,
+  instead of treating the missing directory as empty and reporting an
+  all-clear. A repository that has simply never created Riftri state is
+  unaffected and still reports an all-clear with exit code 0.
+
+- `riftri status` and `riftri gc` name the state directory they are reporting
+  on in their `riftri repair` and `riftri gc --apply` hints, and `riftri
+  doctor` and `riftri setup` share one quoting helper with these paths.
+- `riftri exec` no longer strips a scoped command of the signal dispositions it
+  should have inherited. The command now starts from the disposition Riftri
+  itself inherited for every signal Riftri touches, not just the ones Riftri
+  ignores, so `nohup riftri exec -- <command>` survives a hangup exactly like
+  bare `nohup <command>`, and `riftri exec` started asynchronously by a shell
+  without job control keeps the ignored SIGINT and SIGQUIT that POSIX requires
+  for a background job. Commands launched from an ordinary foreground shell are
+  unaffected and still see Ctrl-C.
+- Terminating `riftri exec -- git …` no longer orphans the real Git. The scoped
+  `git` is Riftri's own shim, which previously died instantly on a forwarded
+  SIGTERM or SIGHUP and left a `clone` or `fetch` running and still writing.
+  The shim now applies the same termination contract to its delegation, so the
+  signal reaches the real Git process, and it still propagates Git's exit
+  status under the `128 + signal` rule.
+- Intercepted `git worktree prune` no longer refuses ordinary invocations in an
+  enabled repository that holds managed Riftri state. `--no-optional-locks`,
+  which VS Code and most IDE Git integrations pass unconditionally, now reaches
+  the journaled prune, and the read-only `-n`/`--dry-run`, `-v`/`--verbose`, and
+  `-h`/`--help` forms delegate to real Git because they change nothing. Options
+  that could remove lifecycle metadata outside the journal are still refused,
+  now quoting the arguments actually passed and naming `RIFTRI_BYPASS=1`.
+- `git worktree add --help` and `git worktree add -h` print Git's usage instead
+  of being refused as unsupported options, matching `worktree remove -h` and
+  `worktree list -h`. An add carrying only checkout-neutral global options
+  (`--no-optional-locks`, `--no-advice`, `--literal-pathspecs`) delegates to
+  ordinary Git rather than failing.
+- `git worktree add <path> <commit-ish>` now refuses a tag, a raw commit, a
+  remote-tracking ref, or `HEAD` before running any Git process, explaining that
+  the optimized path checks out an existing local branch and pointing at
+  `--detach`, `-b <new-branch>`, and `RIFTRI_BYPASS=1`. It previously failed
+  part-way through with a misleading "existing local branch does not exist".
+- `riftri repair` now reconciles active add journals against Git's own worktree
+  registry. A journal whose worktree Git no longer registers and whose
+  directory is gone is retired by a journaled completion, so a worktree deleted
+  by hand no longer leaves a path claimed forever. `riftri worktree add`
+  reclaims such a journal instead of creating a second active claim on one
+  path, which previously left `riftri worktree remove` and `riftri repair`
+  failing permanently with "multiple active Riftri journals reference". Nothing
+  is retired while its directory still exists or still has content.
+- `riftri repair` reports a managed worktree that Git registers under a
+  different path — the result of `mv` plus `git worktree repair` — instead of
+  silently dropping it from `riftri status` and `riftri worktree list`. The
+  journal is preserved and the live worktree is never touched.
+- `riftri repair` can now retire the journal of an add that lost a race for a
+  destination another active operation owns. Those journals were stuck in
+  `rollback-pending` and made every later repair exit non-zero while
+  `riftri status` reported no issue. The winner's worktree, branch and
+  immutable base are untouched.
+- `riftri gc` now accounts for retained bases it refuses to collect, naming the
+  base, the journal that claims it and why, in both the human and JSON reports.
+  `riftri status` reports the same explanation for a base no active worktree
+  references, so the two commands no longer disagree about unreclaimable
+  storage.
+- `riftri repair` removes the temporary files an interrupted journal write
+  leaves in Riftri's own state directory, and `riftri status` no longer reports
+  Riftri's own temporaries and coordination locks as unrecognized foreign
+  files. One crash no longer breaks an automation gate on
+  `diagnostic_issues == []` permanently.
+- The PowerShell installer's HTTPS-downgrade check now actually runs for the
+  `SHA256SUMS` and archive downloads. `Invoke-WebRequest -OutFile` returns
+  nothing to the pipeline, so the assertion always received `$null` and
+  returned without inspecting anything; downloads now pass `-PassThru`
+  (supported alongside `-OutFile` on Windows PowerShell 5.1 and PowerShell 7+),
+  and the check fails closed when no final URI is observable instead of
+  silently skipping. The installer test mock now matches the real cmdlet's
+  contract — no pipeline output with `-OutFile` unless `-PassThru` — and a
+  regression test proves the installer refuses a download whose final URI is
+  not HTTPS.
+
 ## [0.3.1] - 2026-09-18
 
 ### Added
@@ -73,6 +381,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- APFS worktree creation and compaction restore writable clone permissions
+  during the existing clone traversal, avoiding a second directory scan without
+  skipping base-integrity, index, clean-state, or recovery checks. Linux and
+  ReFS behavior is unchanged.
+
 - The standalone `Website deployment check` workflow is removed. It duplicated
   the post-deploy verification that the `Website deploy` workflow already runs
   against https://riftri.dev, and its `deployment_status` trigger produced a
@@ -92,6 +405,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Evaluating `riftri shell deactivate <shell>` inside a `riftri exec` session
+  no longer breaks normal Git commands. The emitted code now removes the
+  process-scoped exec shim entries from `PATH` (including nested scopes) and
+  unsets `RIFTRI_PROCESS_SHIM_DIR` alongside the other shim variables, so
+  `git --version` reports the real Git and non-worktree commands such as
+  `git log` keep working for the rest of the session. Independently, every
+  Git shim now records the captured real Git path at creation and fails safe:
+  a shim whose environment was stripped delegates invocations to the real Git
+  unchanged instead of answering as the Riftri CLI.
 - npm publication now waits for every native platform package to be visible
   before publishing the launcher, preventing a propagation delay or incomplete
   platform release from producing an unusable first-time install.

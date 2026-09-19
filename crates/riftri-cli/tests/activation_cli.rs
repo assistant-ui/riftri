@@ -741,6 +741,101 @@ fn exec_delegates_normal_git_to_the_real_executable() {
     assert_eq!(scoped_failure.stderr, direct_failure.stderr);
 }
 
+/// Regression test: evaluating shell deactivation inside a `riftri exec`
+/// session used to leave the process-scoped shim first on `PATH` with its
+/// delegation environment stripped, so `git --version` answered as Riftri and
+/// ordinary commands like `git log` failed. Deactivation must remove the
+/// process-scoped shim entry too, restoring the real Git for the rest of the
+/// session.
+#[cfg(unix)]
+#[test]
+fn deactivation_inside_exec_restores_real_git_for_the_rest_of_the_session() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell shim cache");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            "eval \"$(\"$RIFTRI_TEST_BIN\" shell deactivate sh)\"\n\
+             git --version\n\
+             git log -1 --format=%s\n\
+             printf 'scope=%s\\n' \"${RIFTRI_PROCESS_SHIM_DIR-unset}\"\n\
+             case :$PATH: in *riftri-git-shim-*) printf 'shim=retained\\n' ;; *) printf 'shim=removed\\n' ;; esac",
+        ])
+        .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+        .env("RIFTRI_CACHE_DIR", cache.path())
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("deactivate inside riftri exec");
+
+    assert!(
+        output.status.success(),
+        "deactivated exec session failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 session output");
+    assert!(
+        stdout.contains("git version"),
+        "git --version did not reach the real Git: {stdout}"
+    );
+    assert!(
+        !stdout.contains("riftri "),
+        "the Riftri CLI answered a Git command: {stdout}"
+    );
+    assert!(
+        stdout.contains("initial"),
+        "git log did not reach the real Git: {stdout}"
+    );
+    assert!(stdout.contains("scope=unset"), "{stdout}");
+    assert!(stdout.contains("shim=removed"), "{stdout}");
+}
+
+/// Fail-safe guard: even when the shim's environment is stripped without a
+/// proper deactivation — so the shim stays first on `PATH` — a `git`-named
+/// invocation must delegate to the real Git instead of answering as Riftri.
+#[cfg(unix)]
+#[test]
+fn exec_shim_delegates_to_real_git_when_its_environment_is_stripped() {
+    let fixture = RepositoryFixture::new();
+    for stripped in [
+        "RIFTRI_SHIM_ACTIVE RIFTRI_REAL_GIT",
+        "RIFTRI_SHIM_ACTIVE RIFTRI_REAL_GIT RIFTRI_PROCESS_SHIM_DIR",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args([
+                "exec",
+                "--",
+                "sh",
+                "-c",
+                &format!(
+                    "unset {stripped}\n\
+                     git --version\n\
+                     git log -1 --format=%s"
+                ),
+            ])
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("run stripped-environment shim");
+
+        assert!(
+            output.status.success(),
+            "stripped shim failed ({stripped}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 session output");
+        assert!(
+            stdout.contains("git version"),
+            "stripped shim answered as Riftri ({stripped}): {stdout}"
+        );
+        assert!(
+            stdout.contains("initial"),
+            "stripped shim broke git log ({stripped}): {stdout}"
+        );
+    }
+}
+
 #[test]
 fn exec_binds_any_command_to_an_exact_git_worktree() {
     let fixture = RepositoryFixture::new();
@@ -2169,4 +2264,261 @@ fn shell_hook_routes_normal_git_adds_in_enabled_repositories_through_apfs() {
             .is_empty()
     );
     assert!(fixture.repository.join(".git/riftri/operations").is_dir());
+}
+
+/// Editors and IDE Git integrations run `git worktree add -h` to discover the
+/// options they may pass, so the one subcommand Riftri intercepts eagerly must
+/// still be able to answer for itself.
+#[test]
+fn enabled_add_help_reaches_real_git() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for help in ["--help", "-h"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", "worktree", "add", help])
+            .current_dir(&fixture.repository)
+            // Keep any Git installation that would page its help from blocking
+            // on a terminal this test does not have.
+            .env("GIT_PAGER", "cat")
+            .env("PAGER", "cat")
+            .output()
+            .expect("ask Git for worktree add usage");
+
+        let rendered = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            rendered.contains("git worktree add"),
+            "`worktree add {help}` printed no usage: {rendered}"
+        );
+        assert!(
+            !rendered.contains("is not supported by the optimized add path"),
+            "`worktree add {help}` was refused: {rendered}"
+        );
+    }
+}
+
+/// `git worktree add <path> <commit-ish>` only checks out a branch when
+/// `<commit-ish>` is an existing local branch. A tag, a raw commit, a
+/// remote-tracking ref, or `HEAD` must be refused up front, with the real
+/// limitation and the bypass escape hatch, instead of failing part-way through
+/// as a branch that does not exist.
+#[test]
+fn enabled_add_refuses_a_non_branch_revision_before_mutating_anything() {
+    let fixture = RepositoryFixture::new();
+    assert!(
+        git(&fixture.repository, &["tag", "v1.0.0"])
+            .status
+            .success()
+    );
+    let head = git(&fixture.repository, &["rev-parse", "HEAD"]);
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).expect("UTF-8 commit id");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for revision in ["v1.0.0", head.trim(), "origin/main", "HEAD"] {
+        let destination = fixture.directory.path().join("non-branch-view");
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", "worktree", "add"])
+            .arg(&destination)
+            .arg(revision)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("add a worktree at a non-branch revision");
+
+        assert!(!output.status.success(), "{revision} was not refused");
+        let message = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            message.contains(revision) && message.contains("is not one"),
+            "{revision}: {message}"
+        );
+        assert!(message.contains("--detach"), "{revision}: {message}");
+        assert!(message.contains("RIFTRI_BYPASS=1"), "{revision}: {message}");
+        assert!(
+            !message.contains("existing local branch does not exist"),
+            "{revision}: {message}"
+        );
+        assert!(!destination.exists(), "{revision} left a partial worktree");
+    }
+}
+
+/// `git worktree prune` must keep working for ordinary callers once managed
+/// Riftri state exists: IDEs pass `--no-optional-locks` unconditionally, and
+/// `--dry-run` only reports. Options that could remove metadata outside the
+/// journal stay refused, now naming what was actually passed.
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_prune_delegates_neutral_and_read_only_invocations() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("prune-neutral-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/prune-neutral",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    for arguments in [
+        &["worktree", "prune", "--dry-run"][..],
+        &["worktree", "prune", "-n"][..],
+        &["worktree", "prune", "-v"][..],
+        &["--no-optional-locks", "worktree", "prune"][..],
+        &["--no-advice", "worktree", "prune"][..],
+        &["worktree", "prune"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("prune through the intercepted shim");
+
+        assert!(
+            output.status.success(),
+            "git {arguments:?} was refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Every form above leaves the live managed view in place.
+        assert!(
+            destination.is_dir(),
+            "git {arguments:?} removed a live view"
+        );
+    }
+
+    let expired = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "prune", "--expire"])
+        .arg("1.day.ago")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("prune with an expiry window");
+    assert!(!expired.status.success());
+    let message = String::from_utf8_lossy(&expired.stderr);
+    assert!(
+        message.contains("`git worktree prune --expire 1.day.ago`"),
+        "refusal did not describe the actual input: {message}"
+    );
+    assert!(message.contains("RIFTRI_BYPASS=1"), "{message}");
+}
+
+/// `git worktree prune -v` is a verbose *prune*: with a hand-deleted managed
+/// worktree it must hit the same journaled-path refusal as a bare prune, and
+/// real Git must never remove the managed lifecycle metadata behind the
+/// journal. A dry run stays delegated and removes nothing even with an
+/// expiry window, while a dry run with an unknown option stays fail-closed.
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_prune_verbose_never_bypasses_the_journal() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("prune-verbose-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/prune-verbose",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    // Hand-delete the managed view so real Git would consider it prunable.
+    fs::remove_dir_all(&destination).expect("delete managed view by hand");
+    let metadata = fixture.repository.join(".git/worktrees/prune-verbose-view");
+    assert!(metadata.is_dir(), "expected linked-worktree metadata");
+
+    for arguments in [
+        &["worktree", "prune", "-v"][..],
+        &["worktree", "prune", "--verbose"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("verbose prune through the intercepted shim");
+
+        // The journaled path refuses while the managed view is missing, and
+        // real Git must not have pruned the metadata behind the journal.
+        assert!(
+            !output.status.success(),
+            "git {arguments:?} succeeded against a missing managed view"
+        );
+        assert!(
+            metadata.is_dir(),
+            "git {arguments:?} removed managed lifecycle metadata"
+        );
+    }
+
+    // A dry run only reports: delegated, successful, metadata intact.
+    for arguments in [
+        &["worktree", "prune", "--dry-run"][..],
+        &["worktree", "prune", "--dry-run", "-v"][..],
+        &["worktree", "prune", "--dry-run", "--expire", "1.day.ago"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("dry-run prune through the intercepted shim");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} was refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            metadata.is_dir(),
+            "git {arguments:?} removed metadata despite --dry-run"
+        );
+    }
+
+    // Unknown options stay fail-closed even beside a dry run.
+    let refused = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "prune",
+            "--dry-run",
+            "--unknown-option",
+        ])
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("unknown prune option through the intercepted shim");
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("RIFTRI_BYPASS=1"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
 }

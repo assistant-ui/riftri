@@ -68,6 +68,11 @@ fn repair_emits_a_stable_json_report_for_an_empty_state_directory() {
     assert_eq!(report["scanned"], 0);
     assert_eq!(report["busy_adds"], 0);
     assert_eq!(report["recovered_adds"], 0);
+    assert_eq!(report["retired_adds"], 0);
+    assert_eq!(report["relocated_worktrees"], serde_json::json!([]));
+    assert_eq!(report["reaped_artifacts"], serde_json::json!([]));
+    assert_eq!(report["reaped_probe_roots"], serde_json::json!([]));
+    assert_eq!(report["preserved_probe_mounts"], serde_json::json!([]));
     assert_eq!(report["errors"], serde_json::json!([]));
 }
 
@@ -91,8 +96,43 @@ fn gc_plan_emits_a_stable_json_report_for_an_empty_state_directory() {
     assert_eq!(report["candidates"], serde_json::json!([]));
     assert_eq!(report["collected"], serde_json::json!([]));
     assert_eq!(report["skipped_in_use"], serde_json::json!([]));
+    assert_eq!(report["skipped_protected"], serde_json::json!([]));
     assert_eq!(report["removed_logical_bytes"], 0);
     assert_eq!(report["removed_allocated_bytes"], 0);
+}
+
+/// `doctor --json` keeps the same `destination_readiness` keys on a blocked
+/// destination that it carries on a ready one: `backend` and `next_command`
+/// are explicitly null when absent, never dropped.
+#[test]
+fn doctor_json_always_carries_backend_and_next_command_keys() {
+    let fixture = tempdir().expect("fixture directory");
+
+    // A directory that is not a Git repository blocks the destination, which
+    // is exactly the shape that used to lose keys.
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--json"])
+        .current_dir(fixture.path())
+        .output()
+        .expect("run riftri doctor");
+    assert!(
+        output.status.success(),
+        "riftri doctor failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("parse doctor JSON");
+    assert_eq!(report["schema_version"], 1);
+    let readiness = report["destination_readiness"]
+        .as_object()
+        .expect("destination_readiness object");
+    assert_eq!(readiness["status"], "blocked");
+    for key in ["backend", "next_command"] {
+        assert!(
+            readiness.contains_key(key),
+            "destination_readiness must carry {key} explicitly, null when absent"
+        );
+    }
 }
 
 fn decode_hex(hex: &str) -> Vec<u8> {

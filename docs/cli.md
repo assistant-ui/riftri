@@ -222,6 +222,29 @@ orphans the command. On Windows, the console already delivers Ctrl-C and
 Ctrl-Break events to the command, and a hard `TerminateProcess` cannot be
 intercepted, so no forwarding layer exists.
 
+The forwarding and ignoring above describe what `riftri exec` does *while it
+waits*; they never change what the command itself starts with. On Unix, every
+signal whose disposition `riftri exec` replaces — SIGTERM, SIGHUP, and SIGINT,
+plus SIGQUIT in interactive mode — is reset in the command before it execs to
+the disposition `riftri exec` itself inherited: `SIG_IGN` stays `SIG_IGN`, and
+anything else becomes `SIG_DFL`, because a caught handler cannot survive an
+exec while an ignore can. So `nohup riftri exec -- <command>` leaves the
+command as immune to a hangup as bare `nohup <command>` would, and
+`riftri exec` started asynchronously by a shell without job control passes on
+the ignored SIGINT and SIGQUIT that POSIX requires for a background job. A
+command launched from an ordinary foreground shell is unaffected: nothing was
+ignored there, so it starts at `SIG_DFL` and Ctrl-C reaches it normally.
+
+Forwarding also survives the Git shim. When the scoped command runs `git`, the
+`git` it resolves is Riftri's own shim, which delegates to the real Git; the
+shim applies this same termination contract to that delegation. A SIGTERM or
+SIGHUP forwarded to the shim is therefore forwarded on to the real Git process
+instead of killing the shim and leaving a `clone` or `fetch` running, orphaned
+and still writing. The shim waits for the real Git, restores its own signal
+dispositions, and exits with Git's status under the same `128 + signal` rule,
+so a terminated `riftri exec -- git …` still reports 143 for SIGTERM and 130
+for a fatal SIGINT.
+
 ### `riftri shell <SUBCOMMAND>`
 
 Configure shell-scoped interception for normal Git commands.
@@ -229,7 +252,10 @@ Configure shell-scoped interception for normal Git commands.
 - **`riftri shell hook <SHELL>`** — print initialization code to evaluate in a
   shell. Shells: `sh`, `bash`, `zsh`, `powershell`.
 - **`riftri shell deactivate <SHELL>`** — print code to evaluate to deactivate
-  Riftri in the current shell. Same shell choices.
+  Riftri in the current shell. Same shell choices. The code removes both the
+  durable shell-hook shim and any process-scoped `riftri exec` shim entries
+  from `PATH`; evaluated inside a `riftri exec` session it ends Git
+  interception for the rest of that session.
 - **`riftri shell status [REPOSITORY]`** — show shell interception and
   repository opt-in status. `REPOSITORY` defaults to `.`.
 
@@ -265,9 +291,17 @@ Inspect Git and show the planned storage path without changing anything.
 | `--destination <DESTINATION>` | Proposed worktree destination whose volume should be probed |
 | `--json` | Emit machine-readable JSON |
 
-The suggested command uses POSIX shell quoting on Unix and PowerShell quoting on
-Windows. If the destination is not valid Unicode, doctor omits the suggested
-command rather than substitute characters in the path.
+The suggested command uses POSIX shell quoting on every platform, so it runs as
+shown in `sh`, `bash`, and `zsh` — including the Git Bash, WSL, and MSYS
+environments common on Windows. If the destination is not valid Unicode or
+holds control characters, doctor omits the suggested command rather than
+substitute characters in the path; the exact path stays in the machine-readable
+native-path fields.
+
+With `--json`, `destination_readiness.backend` and
+`destination_readiness.next_command` are always present, explicitly `null`
+when no backend is selected or no command applies: a blocked destination
+keeps every key a ready one has.
 
 ### `riftri backends [OPTIONS] [PATH]`
 
@@ -288,9 +322,35 @@ always safe: complete journals are resumed, incomplete ones are rolled back,
 and a healthy state directory is left unchanged. Supports `--state-dir` and
 `--json`.
 
+Repair also reconciles active journals against Git's own worktree registry:
+
+- A journal whose worktree Git no longer registers and whose directory is gone
+  — for example after `rm -rf` plus `git worktree prune` — is retired by a
+  journaled completion, releasing its immutable base. Reported as
+  `Retired add operations` (`retired_adds`).
+- A journal whose worktree Git registers under a *different* path is reported,
+  not adopted, under `Relocated worktrees Riftri no longer tracks`
+  (`relocated_worktrees`). The live worktree and its contents are untouched.
+- Temporary files left by an interrupted journal write are removed, reported as
+  `Reaped interrupted journal writes` (`reaped_artifacts`).
+- On Linux, an OverlayFS probe directory abandoned next to a worktree after a
+  failed probe unmount (named `.riftri-overlay-probe-*`, also flagged by
+  `riftri status`) is removed only when the kernel's mount inventory proves
+  nothing is mounted at or below it, reported as `Reaped abandoned OverlayFS
+  probes` (`reaped_probe_roots`). A probe root any mount still covers is
+  preserved and reported (`preserved_probe_mounts`) instead of being touched.
+
+Nothing is retired while its directory still exists or still has content.
+
 ### `riftri gc [OPTIONS] [REPOSITORY]`
 
 Plan or apply collection of immutable bases with no journaled references.
+
+A base that an unfinished journal still claims is never collected, and is now
+reported rather than dropped silently: `Skipped because a journaled operation
+still claims them` (`skipped_protected`) names each base, the operation that
+claims it, and why. `riftri repair` retires those operations when it safely
+can, after which the base becomes collectible.
 
 | Flag | Effect |
 | --- | --- |
@@ -339,7 +399,11 @@ The `--all-states --json` report uses `schema_version` 2 with
 `"scope": "all-registered-states"`: it adds a `state_directories` array
 (each entry's `source` is `default` or `registered`), each worktree carries its
 owning `state_directory`, and each diagnostic entry carries the
-`state_directory` it was found in (`null` for registration-level issues).
+`state_directory` it was found in beside its `state_directory_native_hex`
+twin (both explicitly `null` for registration-level issues that no state
+directory owns). The hex twin and the explicit nulls were added later without
+a `schema_version` bump: additive, null-consistent keys do not change the
+version.
 
 ### `riftri worktree add [OPTIONS] <PATH> [REVISION]`
 

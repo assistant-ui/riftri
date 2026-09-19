@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 
 const [before, after, source, revision, outputArgument] = process.argv.slice(2);
 assert.ok(before && after && source && revision && outputArgument, 'Expected BEFORE AFTER SOURCE COMMIT NEW_OUTPUT_DIR');
@@ -37,10 +38,11 @@ const commit = exec('git', ['rev-parse', `${revision}^{commit}`], path.resolve(s
 const tree = exec('git', ['rev-parse', `${commit}^{tree}`], path.resolve(source)).toString().trim();
 exec('tar', ['-xf', '-', '-C', repository], output, exec('git', ['archive', commit], path.resolve(source)));
 exec('git', ['init', '--quiet']);
-for (const [key, value] of [['user.name', 'Riftri Benchmark'], ['user.email', 'benchmark@example.invalid'], ['core.autocrlf', 'false'], ['core.hooksPath', '/dev/null'], ['commit.gpgSign', 'false']]) exec('git', ['config', key, value]);
+for (const [key, value] of [['user.name', 'Riftri Benchmark'], ['user.email', 'benchmark@example.invalid'], ['core.autocrlf', 'false'], ['commit.gpgSign', 'false']]) exec('git', ['config', key, value]);
 exec('git', ['add', '--all']);
 exec('git', ['commit', '--quiet', '-m', 'test: exact-tree benchmark fixture']);
-assert.equal(exec('git', ['rev-parse', 'HEAD^{tree}']).toString().trim(), tree);
+const fixtureTree = exec('git', ['rev-parse', 'HEAD^{tree}']).toString().trim();
+assert.equal(fixtureTree, tree);
 exec(binaries.before, ['enable', repository]);
 
 const namesBuffer = exec('git', ['ls-files', '-z']);
@@ -54,7 +56,7 @@ function fingerprint(directory, name) {
   return { name, symlink, executable: stat.mode & 0o111, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
 }
 const manifest = names.map(name => fingerprint(repository, name));
-const result = { commit, tree, files: names.length, logicalBytes: manifest.reduce((sum, file) => sum + file.size, 0), binaries, singleRounds, batchRounds, workers, startedAt: new Date().toISOString(), git: exec('git', ['--version']).toString().trim(), cases: [], batches: [] };
+const result = { commit, tree, fixtureTree, hardware: { platform: process.platform, arch: process.arch, os: os.release(), cpu: os.cpus()[0].model, memory: os.totalmem() }, files: names.length, logicalBytes: manifest.reduce((sum, file) => sum + file.size, 0), binaries, singleRounds, batchRounds, workers, startedAt: new Date().toISOString(), git: exec('git', ['--version']).toString().trim(), cases: [], batches: [] };
 function save() { fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2)); }
 function verify(directory) {
   assert.equal(exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], directory).length, 0);
@@ -70,13 +72,24 @@ async function create(version, mode, label, warm = true) {
   const started = process.hrtime.bigint();
   const child = spawn(binaries[version], args, { cwd: repository, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: 60000 });
   let stdout = '', stderr = '';
+  let partial = '';
+  const phases = [];
   child.stdout.on('data', data => { stdout += data; });
-  child.stderr.on('data', data => { stderr += data; });
+  child.stderr.on('data', data => {
+    stderr += data;
+    partial += data;
+    const lines = partial.split('\n');
+    partial = lines.pop();
+    for (const line of lines) {
+      if (line.startsWith('riftri: ')) phases.push({ line, seconds: Number(process.hrtime.bigint() - started) / 1e9 });
+    }
+  });
   const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
   fs.writeFileSync(path.join(output, `${label}.log`), stdout + stderr);
   assert.equal(code, 0, stderr);
   if (warm) assert.match(stdout + stderr, mode === 'explicit' ? /^Base: reused$/m : /\(reused base\)/);
+  else assert.match(stdout + stderr, /^Base: created$/m);
   // The shim deliberately emits only a short stderr message. Read its durable
   // record instead of assuming it shares the explicit command's output format.
   const operations = path.join(repository, '.git/riftri/operations');
@@ -91,7 +104,7 @@ async function create(version, mode, label, warm = true) {
   assert.equal(matches.length, 1);
   const base = decodePath(matches[0].base_path);
   const starts = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === 'start');
-  const record = { version, mode, label, seconds, destination, base, gitStarts: starts.length, configGets: starts.filter(event => event.argv.includes('config') && event.argv.includes('--get')).length, configBatches: starts.filter(event => event.argv.includes('--get-regexp')).length };
+  const record = { version, mode, label, seconds, destination, base, backend: matches[0].backend, phases, gitStarts: starts.length, configGets: starts.filter(event => event.argv.includes('config') && event.argv.includes('--get')).length, configBatches: starts.filter(event => event.argv.includes('--get-regexp')).length };
   result.cases.push(record); save();
   return record;
 }
@@ -102,6 +115,12 @@ function remove(record) {
   record.verifiedAndRemoved = true; save();
 }
 
+// Cold creation samples use an empty base cache, separate from cached timings.
+for (const version of ['before', 'after']) {
+  const cold = await create(version, 'explicit', `cold-${version}`, false);
+  remove(cold);
+  exec(binaries[version], ['gc', repository, '--apply']);
+}
 // Keep a baseline-created anchor alive: both versions must reuse its exact base.
 const anchor = await create('before', 'explicit', 'anchor', false);
 verify(anchor.destination);
@@ -116,11 +135,17 @@ for (let round = 0; round < singleRounds; round++) {
   }
 }
 for (let round = 0; round < batchRounds; round++) {
+  for (const mode of ['explicit', 'shim']) {
   for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
+    exec('sync', [], output);
+    const freeBefore = fs.statfsSync(output);
     const started = process.hrtime.bigint();
-    const records = await Promise.all(Array.from({ length: workers }, (_, worker) => create(version, 'shim', `parallel-${round}-${version}-${worker}`)));
+    const records = await Promise.all(Array.from({ length: workers }, (_, worker) => create(version, mode, `parallel-${round}-${mode}-${version}-${worker}`)));
     const seconds = Number(process.hrtime.bigint() - started) / 1e9;
-    result.batches.push({ round, version, workers, seconds }); save();
+    exec('sync', [], output);
+    const freeAfter = fs.statfsSync(output);
+    const volumeDeltaBytes = (freeBefore.bfree * freeBefore.bsize) - (freeAfter.bfree * freeAfter.bsize);
+    result.batches.push({ round, version, mode, workers, seconds, volumeDeltaBytes }); save();
     for (const record of records) assert.equal(record.base, anchor.base);
     // Private-write test is outside the timed region. Verify all peers and base.
     const file = manifest.find(entry => !entry.symlink && entry.size > 0).name;
@@ -132,7 +157,8 @@ for (let round = 0; round < batchRounds; round++) {
     for (const expected of manifest) assert.deepEqual(fingerprint(anchor.base, expected.name), expected);
     fs.writeFileSync(target, original);
     for (const record of records) remove(record);
-    console.log(`parallel-${round}-${version}: ${seconds.toFixed(3)}s`);
+    console.log(`parallel-${round}-${mode}-${version}: ${seconds.toFixed(3)}s`);
+  }
   }
 }
 remove(anchor);

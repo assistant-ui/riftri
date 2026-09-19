@@ -34,10 +34,31 @@ fn symlinked_base_parents_have_actionable_human_and_json_errors() {
                 let message = if json_errors {
                     let receipt: serde_json::Value =
                         serde_json::from_slice(&output.stderr).expect("one JSON receipt");
-                    receipt["message"]
+                    // The receipt must agree with its own message: the safety
+                    // stop directs the caller to `riftri status`, so it is an
+                    // inspection, not a refusal with nothing to do next.
+                    assert_eq!(receipt["code"], "invalid-request");
+                    assert_eq!(receipt["category"], "policy");
+                    assert_eq!(receipt["cleanup"], "not-needed");
+                    assert_eq!(receipt["recovery"], "inspect");
+                    let next_command = receipt["nextCommand"].as_str().expect("next command");
+                    assert_eq!(
+                        next_command,
+                        riftri_core::status_command(&state)
+                            .expect("the fixture path is representable")
+                    );
+                    // And the receipt names the affected state directory the
+                    // command targets, not merely the caller's selection.
+                    assert_eq!(receipt["stateDirectory"], state.display().to_string());
+                    let message = receipt["message"]
                         .as_str()
                         .expect("error message")
-                        .to_owned()
+                        .to_owned();
+                    assert!(
+                        message.contains(next_command),
+                        "human guidance must name the same command as nextCommand: {message}"
+                    );
+                    message
                 } else {
                     String::from_utf8(output.stderr).expect("human error")
                 };
@@ -50,8 +71,14 @@ fn symlinked_base_parents_have_actionable_human_and_json_errors() {
                     message.contains("outside Riftri's expected storage layout"),
                     "{message}"
                 );
+                // The affected state directory contains a space, so the
+                // suggested command must quote it as one shell argument.
                 assert!(
-                    message.contains("riftri status --state-dir <STATE_DIR>"),
+                    message.contains(&format!(
+                        "riftri status --state-dir {}",
+                        riftri_core::shell_quoted_path(&state)
+                            .expect("the fixture path is representable")
+                    )),
                     "{message}"
                 );
                 assert!(message.contains(&state.display().to_string()), "{message}");

@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
@@ -253,12 +253,26 @@ pub struct GarbageCollectionCandidate {
     pub allocated_bytes: u64,
 }
 
+/// A retained immutable base that garbage collection refused to consider
+/// because a durable journal still claims it, and which journal claims it.
+///
+/// Without this record `gc` reported "Eligible bases: 0 / Skipped: 0" for a
+/// base that `status` simultaneously reported as unreferenced, leaving the
+/// user no way to learn which operation pins the storage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectedBase {
+    pub base_path: PathBuf,
+    pub operation_id: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GarbageCollectionReport {
     pub applied: bool,
     pub candidates: Vec<GarbageCollectionCandidate>,
     pub collected: Vec<PathBuf>,
     pub skipped_in_use: Vec<PathBuf>,
+    pub skipped_protected: Vec<ProtectedBase>,
     pub resumed_collections: usize,
     pub removed_logical_bytes: u64,
     pub removed_allocated_bytes: u64,
@@ -288,6 +302,19 @@ pub struct StorageAccountingReport {
     pub total_allocated_bytes: u64,
 }
 
+/// A journaled worktree that Git no longer registers at the journal's
+/// destination but does register somewhere else.
+///
+/// Riftri reports this instead of acting: the live worktree still holds user
+/// data, and Git's registry alone cannot prove that the worktree at the new
+/// path is the journal's worktree rather than an unrelated one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelocatedWorktree {
+    pub operation_id: String,
+    pub journal_destination: PathBuf,
+    pub registered_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RecoveryReport {
     pub scanned: usize,
@@ -305,6 +332,23 @@ pub struct RecoveryReport {
     pub recovered_prunes: usize,
     pub completed_collections: usize,
     pub recovered_collections: usize,
+    /// Add journals whose worktree Git no longer registers and whose
+    /// destination is absent, retired by a journaled completion.
+    pub retired_adds: usize,
+    /// Journaled worktrees Git registers under a different path.
+    pub relocations: Vec<RelocatedWorktree>,
+    /// Worktrees Git lists without a resolvable HEAD (corrupt or empty HEAD
+    /// file). Repair reports them instead of touching them; `git worktree
+    /// repair` or removing the worktree clears the state.
+    pub unresolvable_worktrees: Vec<PathBuf>,
+    /// Riftri's own interrupted atomic-write temporaries removed this pass.
+    pub reaped_artifacts: Vec<PathBuf>,
+    /// Abandoned OverlayFS probe roots removed this pass after the kernel
+    /// mount inventory proved nothing was mounted at or below them.
+    pub reaped_probe_roots: Vec<PathBuf>,
+    /// Abandoned OverlayFS probe roots preserved because a mount still covers
+    /// them; repair never touches a probe root that may be live.
+    pub preserved_probe_mounts: Vec<PathBuf>,
     pub errors: Vec<String>,
 }
 
@@ -350,6 +394,16 @@ pub enum WorktreeError {
         state_directory: PathBuf,
     },
 
+    /// A parent directory of the immutable-base storage is a symbolic link,
+    /// so the operation stopped before following it. Nothing was modified
+    /// and nothing needs repair; the caller should inspect `state_directory`
+    /// with the `riftri status` command echoed in the message.
+    #[error("{message}")]
+    SymlinkedBaseParent {
+        message: String,
+        state_directory: PathBuf,
+    },
+
     /// Another live process holds the operation lock right now. Nothing needs
     /// repair; the caller should wait for the concurrent operation to finish
     /// and retry.
@@ -389,6 +443,56 @@ pub enum WorktreeError {
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
     validate_lifecycle_git_environment()?;
     add_worktree_inner(request, None, true)
+}
+
+/// Refuse a proposed new-worktree destination with exactly the refusals
+/// `add_worktree` applies before any durable mutation: the destination must
+/// not already exist (a symlink to an existing target counts as existing),
+/// must name a new directory under an existing parent, and every checkout
+/// path of the requested revision must be able to coexist on the destination
+/// filesystem (case and Unicode-normalization collisions). Nothing is
+/// created. Interactive flows call this so a doomed plan is refused before
+/// any confirmation prompt, with the same diagnostics the explicit add
+/// prints; it deliberately calls the same validation functions as
+/// `add_worktree_inner` rather than restating their rules.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub fn validate_new_worktree_destination(
+    repository: &Path,
+    destination: &Path,
+    revision: &OsStr,
+) -> Result<(), WorktreeError> {
+    validate_lifecycle_git_environment()?;
+    let git = Git::default();
+    let repository = git.inspect_repository(repository)?;
+    if repository.is_bare {
+        return Err(WorktreeError::Unsupported(
+            "bare repositories are not supported by optimized checkout".to_owned(),
+        ));
+    }
+    let repository_root = repository.root.clone().ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+    })?;
+    let destination = normalize_new_destination(destination)?;
+    let resolved = git.resolve_revision(&repository_root, revision)?;
+    let compatibility = validate_resolved_compatibility(
+        &git,
+        &repository_root,
+        &repository.identity.common_git_dir,
+        &resolved,
+        &[],
+    )?;
+    validate_destination_path_semantics(&compatibility.checkout_paths, &destination)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub fn validate_new_worktree_destination(
+    _repository: &Path,
+    _destination: &Path,
+    _revision: &OsStr,
+) -> Result<(), WorktreeError> {
+    Err(WorktreeError::Unsupported(
+        "this build has no supported native copy-on-write worktree backend".to_owned(),
+    ))
 }
 
 pub fn remove_worktree(
@@ -437,9 +541,11 @@ pub fn garbage_collect(
 }
 
 /// Internal lifecycle commands address several different Git worktrees. A
-/// caller's repository/index override would take precedence over each command's
-/// working directory, potentially resetting or deleting the wrong Git state.
-/// Refuse before mutation rather than silently changing the caller's context.
+/// caller's repository/index/object-store override would take precedence over
+/// each command's working directory, potentially resetting or deleting the
+/// wrong Git state, and environment-based configuration injection reaches
+/// every internal Git invocation exactly like `-c` options would. Refuse
+/// before mutation rather than silently changing the caller's context.
 /// Ordinary Git passthrough deliberately does not use this guard.
 fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
     for name in [
@@ -447,10 +553,21 @@ fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     ] {
         if std::env::var_os(name).is_some() {
             return Err(WorktreeError::Unsupported(format!(
                 "{name} is set and can redirect internal Git operations; unset {name} before using Riftri lifecycle commands, and select the repository with --repository instead"
+            )));
+        }
+    }
+    // `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` entries only take effect through
+    // `GIT_CONFIG_COUNT`, so refusing the count refuses the whole family.
+    for name in ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"] {
+        if std::env::var_os(name).is_some() {
+            return Err(WorktreeError::Unsupported(format!(
+                "{name} is set and can inject Git configuration into internal Git operations; unset {name} before using Riftri lifecycle commands"
             )));
         }
     }
@@ -1001,6 +1118,31 @@ pub fn storage_accounting(
         .map(|journal| journal.source_add_operation_id.clone())
         .collect::<HashSet<_>>();
     let git = Git::default();
+    // Name every worktree Git itself lists without a resolvable HEAD, managed
+    // or not: it needs `git worktree repair` (or removal), and nothing else in
+    // this report may treat it as clean. Listing failures are not reported
+    // here; the per-journal validation below already surfaces them.
+    let mut unresolvable_worktree_issues = Vec::new();
+    let mut inspected_repositories = HashSet::new();
+    for journal in &loaded_add_journals {
+        if !inspected_repositories.insert(journal.repository.clone()) {
+            continue;
+        }
+        let Ok(registered) = git.list_worktrees(&journal.repository) else {
+            continue;
+        };
+        for worktree in registered {
+            if worktree.head_unresolvable {
+                unresolvable_worktree_issues.push(StateDiagnosticIssue {
+                    path: worktree.path,
+                    reason: "Git cannot resolve this worktree's HEAD; Riftri left it \
+                             alone. `git worktree repair` or removing the worktree \
+                             clears this"
+                        .to_owned(),
+                });
+            }
+        }
+    }
     let mut add_journals = Vec::with_capacity(loaded_add_journals.len());
     let mut registered_worktrees = BTreeMap::new();
     let mut invalid_add_journals = Vec::new();
@@ -1136,6 +1278,7 @@ pub fn storage_accounting(
     state_diagnosis.issues.extend(invalid_add_journals);
     state_diagnosis.issues.extend(invalid_removal_journals);
     state_diagnosis.issues.extend(invalid_compact_journals);
+    state_diagnosis.issues.extend(unresolvable_worktree_issues);
     state_diagnosis
         .issues
         .sort_unstable_by(|left, right| left.path.cmp(&right.path));
@@ -1239,6 +1382,13 @@ fn validate_status_add_journal(
                 journal.repository.display()
             ))
         })?;
+    if registered.head_unresolvable {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "Git cannot resolve the worktree HEAD of active destination {}; \
+             `git worktree repair` or removing the worktree clears this",
+            journal.destination.display()
+        )));
+    }
     if registered.head.is_none() {
         return Err(WorktreeError::InvalidRequest(format!(
             "active destination {} has no Git HEAD commit",
@@ -1278,13 +1428,14 @@ fn garbage_collect_inner(
     } else {
         0
     };
-    let candidates = garbage_collection_candidates(&state_directory)?;
+    let (candidates, skipped_protected) = garbage_collection_candidates(&state_directory)?;
     progress::emit(ProgressEvent::GcPlanned {
         candidates: candidates.len(),
     });
     let mut report = GarbageCollectionReport {
         applied: apply,
         candidates: candidates.clone(),
+        skipped_protected,
         resumed_collections,
         ..GarbageCollectionReport::default()
     };
@@ -1341,8 +1492,12 @@ fn current_timestamp() -> Result<u128, WorktreeError> {
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn garbage_collection_candidates(
     state_directory: &Path,
-) -> Result<Vec<GarbageCollectionCandidate>, WorktreeError> {
-    let protected = protected_base_paths(state_directory)?;
+) -> Result<(Vec<GarbageCollectionCandidate>, Vec<ProtectedBase>), WorktreeError> {
+    let protections = protected_bases(state_directory)?;
+    let protected = protections
+        .iter()
+        .map(|protection| protection.base_path.clone())
+        .collect::<HashSet<_>>();
     let pending = CollectionJournalStore::open(state_directory)
         .load_all()?
         .into_iter()
@@ -1352,11 +1507,34 @@ fn garbage_collection_candidates(
                 GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
             )
         })
-        .map(|journal| journal.base_path)
+        .map(|journal| (journal.base_path, journal.operation_id))
+        .collect::<Vec<_>>();
+    let pending_paths = pending
+        .iter()
+        .map(|(base_path, _)| base_path.clone())
         .collect::<HashSet<_>>();
     let mut candidates = Vec::new();
+    // A base skipped here is storage the user cannot reclaim, so name every
+    // skip and the journal responsible for it instead of silently dropping it.
+    let mut skipped = Vec::new();
     for base_path in retained_base_paths(state_directory, UnsafeBaseInventory::Reject)? {
-        if protected.contains(&base_path) || pending.contains(&base_path) {
+        if protected.contains(&base_path) || pending_paths.contains(&base_path) {
+            skipped.extend(
+                protections
+                    .iter()
+                    .filter(|protection| protection.base_path == base_path)
+                    .cloned(),
+            );
+            skipped.extend(pending.iter().filter(|(path, _)| path == &base_path).map(
+                |(path, operation_id)| {
+                    ProtectedBase {
+                        base_path: path.clone(),
+                        operation_id: operation_id.clone(),
+                        reason: "an unfinished garbage-collection journal already claims this base"
+                            .to_owned(),
+                    }
+                },
+            ));
             continue;
         }
         let (logical_bytes, allocated_bytes) = if base_path.is_dir() {
@@ -1370,22 +1548,50 @@ fn garbage_collection_candidates(
             allocated_bytes,
         });
     }
-    Ok(candidates)
+    skipped.sort_unstable_by(|left, right| {
+        (&left.base_path, &left.operation_id).cmp(&(&right.base_path, &right.operation_id))
+    });
+    skipped.dedup();
+    Ok((candidates, skipped))
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, WorktreeError> {
+    Ok(protected_bases(state_directory)?
+        .into_iter()
+        .map(|protection| protection.base_path)
+        .collect())
+}
+
+/// Every retained base a durable journal still claims, paired with the journal
+/// that claims it. `gc` must never collect these, but it must be able to say
+/// why, so this returns the reasons rather than only the path set.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn protected_bases(state_directory: &Path) -> Result<Vec<ProtectedBase>, WorktreeError> {
     let adds = JournalStore::open(state_directory).load_all()?;
     let removals = RemovalJournalStore::open(state_directory).load_all()?;
     let completed = validated_completed_removal_ids(state_directory, &adds, &removals)?;
-    let mut protected = adds
-        .into_iter()
-        .filter(|journal| {
-            journal.phase != AddWorktreePhase::RolledBack
-                && !completed.contains(&journal.operation_id)
-        })
-        .map(|journal| journal.base_path)
-        .collect::<HashSet<_>>();
+    let mut protected = Vec::new();
+    for journal in adds {
+        if journal.phase == AddWorktreePhase::RolledBack
+            || completed.contains(&journal.operation_id)
+        {
+            continue;
+        }
+        let reason = if journal.phase == AddWorktreePhase::Active {
+            "an active add journal references this base".to_owned()
+        } else {
+            format!(
+                "an add journal stopped in phase {:?} still references this base",
+                journal.phase
+            )
+        };
+        protected.push(ProtectedBase {
+            base_path: journal.base_path,
+            operation_id: journal.operation_id,
+            reason,
+        });
+    }
     for journal in CompactJournalStore::open(state_directory)
         .load_all()?
         .into_iter()
@@ -1396,8 +1602,13 @@ fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, Work
             )
         })
     {
-        protected.insert(journal.old_base_path);
-        protected.insert(journal.base_path);
+        for base_path in [journal.old_base_path, journal.base_path] {
+            protected.push(ProtectedBase {
+                base_path,
+                operation_id: journal.operation_id.clone(),
+                reason: "an unfinished compaction journal still references this base".to_owned(),
+            });
+        }
     }
     Ok(protected)
 }
@@ -1489,6 +1700,15 @@ fn resume_collection(
         } else if protected_base_paths(state_directory)?.contains(&journal.base_path)
             || journal.marker_path.exists()
         {
+            // A new reference appeared after this journal removed the
+            // completion marker. `retained_base_paths` enumerates only via
+            // markers, so cancelling without restoring it would leave a fully
+            // materialized base that no later `gc` or `status` inventory can
+            // ever see again. Rebuild the marker from the base content in the
+            // same journaled step as the cancellation; on failure the journal
+            // stays at `MarkerRemoved`, which keeps the base explained and
+            // makes recovery retry the restore.
+            restore_completion_marker(journal)?;
             advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
             return Ok(false);
         } else {
@@ -1518,6 +1738,10 @@ fn resume_collection(
 
     if record.phase == GarbageCollectionPhase::BaseQuarantined {
         remove_tree_if_present(&journal.quarantine_path)?;
+        // An interrupted marker restore may have staged a marker before the
+        // protecting reference disappeared again; the collection is finishing
+        // now, so retire that leftover instead of reporting it forever.
+        remove_file_if_present(&restored_marker_staging_path(journal)?)?;
         sync_parent(&journal.quarantine_path)?;
         advance_collection(store, record, GarbageCollectionPhase::Complete, fail_after)?;
     }
@@ -1634,6 +1858,96 @@ fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), 
             ));
         }
     }
+    Ok(())
+}
+
+/// Deterministic staging path for a marker rebuilt by a cancelling
+/// collection. A fixed name lets an interrupted restore retry over its own
+/// leftover instead of accumulating temporaries.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn restored_marker_staging_path(
+    journal: &DecodedCollectionJournal,
+) -> Result<PathBuf, WorktreeError> {
+    Ok(journal
+        .marker_path
+        .expect_parent()?
+        .join(format!(".riftri-gc-{}.marker", journal.operation_id)))
+}
+
+/// Rebuild the completion marker for a base whose collection is cancelling
+/// after `MarkerRemoved`. The caller holds the exclusive base coordination
+/// lock, so the base is stable while it is re-hashed; recomputing the current
+/// (v2) integrity marker from the tree on disk (instead of replaying
+/// remembered bytes) means the restored marker never vouches for anything
+/// except what reuse verification will re-hash later, so it can never bless a
+/// base that was modified behind Riftri's back. The marker is staged and
+/// renamed into place so no interruption window can leave a truncated marker.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn restore_completion_marker(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
+    match fs::symlink_metadata(&journal.marker_path) {
+        // A prior restore (or a concurrent rebuild between resume attempts)
+        // already produced a real marker; the base is enumerable again.
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            return Ok(());
+        }
+        Ok(_) => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "collectible base marker {} is not a real file",
+                journal.marker_path.display()
+            )));
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(io(
+                "inspect collectible base marker",
+                &journal.marker_path,
+                source,
+            ));
+        }
+    }
+    match fs::symlink_metadata(&journal.base_path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "collectible base {} is not a real directory",
+                journal.base_path.display()
+            )));
+        }
+        // Nothing is materialized, so there is no storage to make enumerable
+        // again; the referencing operation builds base and marker together.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io("inspect collectible base", &journal.base_path, source)),
+    }
+    let integrity = crate::base_integrity::marker_v2(&journal.base_path).map_err(|source| {
+        io(
+            "recompute immutable-base integrity",
+            &journal.base_path,
+            source,
+        )
+    })?;
+    let staging = restored_marker_staging_path(journal)?;
+    remove_file_if_present(&staging)?;
+    let mut staged = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&staging)
+        .map_err(|source| io("stage restored immutable-base marker", &staging, source))?;
+    use std::io::Write;
+    staged
+        .write_all(&integrity)
+        .map_err(|source| io("write restored immutable-base marker", &staging, source))?;
+    staged
+        .sync_all()
+        .map_err(|source| io("sync restored immutable-base marker", &staging, source))?;
+    drop(staged);
+    fs::rename(&staging, &journal.marker_path).map_err(|source| {
+        io(
+            "activate restored immutable-base marker",
+            &journal.marker_path,
+            source,
+        )
+    })?;
+    sync_parent(&journal.marker_path)?;
     Ok(())
 }
 
@@ -1762,13 +2076,23 @@ fn remove_worktree_with_mode(
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
-    if !git
+    let registered = git
         .list_worktrees(&repository_root)?
         .into_iter()
-        .any(|worktree| paths_match(&worktree.path, &destination))
-    {
+        .find(|worktree| paths_match(&worktree.path, &destination))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "{} is not registered as a Git linked worktree",
+                destination.display()
+            ))
+        })?;
+    if registered.head_unresolvable {
+        // Fail closed: without a resolvable HEAD neither cleanliness nor the
+        // recorded branch state can be verified, so a journaled removal could
+        // destroy unsaved work.
         return Err(WorktreeError::InvalidRequest(format!(
-            "{} is not registered as a Git linked worktree",
+            "Git cannot resolve the worktree HEAD of {}; run `git worktree repair` \
+             before removing it",
             destination.display()
         )));
     }
@@ -1900,12 +2224,21 @@ fn move_worktree_inner(
         ));
     }
     let inventory = git.list_worktrees(&repository_root)?;
-    if !inventory
+    let registered = inventory
         .iter()
-        .any(|worktree| paths_match(&worktree.path, &source))
-    {
+        .find(|worktree| paths_match(&worktree.path, &source))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "{} is not registered as a Git linked worktree",
+                source.display()
+            ))
+        })?;
+    if registered.head_unresolvable {
+        // Fail closed: a move re-registers the worktree with Git, and a
+        // worktree whose HEAD cannot be resolved must be repaired first.
         return Err(WorktreeError::InvalidRequest(format!(
-            "{} is not registered as a Git linked worktree",
+            "Git cannot resolve the worktree HEAD of {}; run `git worktree repair` \
+             before moving it",
             source.display()
         )));
     }
@@ -2102,8 +2435,7 @@ fn compact_worktree_inner(
         &compatibility.lfs_objects,
         &[],
     )?;
-    NativeCowCloner::clone_tree(&base_path, &replacement)?;
-    NativeCowCloner::make_tree_owner_writable(&replacement)?;
+    NativeCowCloner::clone_tree_owner_writable(&base_path, &replacement)?;
     copy_git_pointer(&destination, &replacement)?;
     verify_snapshot(&replacement, &journal.expected_snapshot)?;
     sync_parent(&replacement)?;
@@ -2263,6 +2595,27 @@ fn add_worktree_inner(
     let state_directory = resolve_real_state_directory(&state_directory)?;
     register_state_directory(&git, &repository, &state_directory)?;
     let store = JournalStore::create(&state_directory)?;
+    // A journal left active by a worktree the user deleted by hand still
+    // claims this path. Reclaim it, then refuse if anything still claims the
+    // destination: a second active journal for one path wedges every later
+    // `remove` and `repair` with "multiple active Riftri journals reference".
+    //
+    // The reclaim itself is opportunistic — `riftri repair` is the
+    // authoritative reconciliation pass — so a concurrent operation racing
+    // this scan must never fail this add. The claim check that follows stays
+    // fail-closed on anything unreadable, which is what actually prevents a
+    // duplicate journal.
+    let _ = reconcile_active_add_journals(&git, &state_directory, Some(&destination));
+    if let Some(claimant) = active_add_journals_for_destination(&state_directory, &destination)?
+        .into_iter()
+        .next()
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} is already claimed by active Riftri journal {}; remove that worktree with `riftri worktree remove`, or run `riftri repair` if it no longer exists",
+            destination.display(),
+            claimant.operation_id
+        )));
+    }
     let base_directory = state_directory.join("bases/v1").join(repository_cache_id(
         &repository.identity.common_git_dir,
         &compatibility.checkout_profile,
@@ -2476,8 +2829,7 @@ fn perform_add(
             "OverlayFS worktree execution requires Linux".to_owned(),
         ));
     } else {
-        NativeCowCloner::clone_tree(base_path, scratch)?;
-        NativeCowCloner::make_tree_owner_writable(scratch)?;
+        NativeCowCloner::clone_tree_owner_writable(base_path, scratch)?;
         advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
 
         let git_pointer = destination.join(".git");
@@ -2685,14 +3037,36 @@ fn verify_existing_base(base_path: &Path, complete_path: &Path) -> Result<bool, 
                     source,
                 )
             })?;
-        if stored
-            != crate::base_integrity::marker(base_path)
-                .map_err(|source| io("verify immutable-base integrity", base_path, source))?
-        {
-            return Err(WorktreeError::InvalidRequest(format!(
+        let mismatch = || {
+            Err(WorktreeError::InvalidRequest(format!(
                 "immutable-base integrity check failed for {}; the base was preserved and cannot be reused",
                 base_path.display()
-            )));
+            )))
+        };
+        if stored.starts_with(crate::base_integrity::MARKER_V2_PREFIX) {
+            if stored
+                != crate::base_integrity::marker_v2(base_path)
+                    .map_err(|source| io("verify immutable-base integrity", base_path, source))?
+            {
+                return mismatch();
+            }
+        } else if stored.starts_with(crate::base_integrity::MARKER_V1_PREFIX) {
+            if stored
+                != crate::base_integrity::marker(base_path)
+                    .map_err(|source| io("verify immutable-base integrity", base_path, source))?
+            {
+                return mismatch();
+            }
+            // The content matches, but a v1 marker attests nothing about
+            // special permission bits, extended attributes, or macOS ACLs —
+            // exactly the metadata the native cloners propagate into views.
+            // Report a cache miss so this base is rebuilt once under the
+            // exclusive lock and records a v2 marker, instead of trusting
+            // metadata no marker ever covered. Legacy content tampering
+            // still refuses above; existing views are never disturbed.
+            return Ok(false);
+        } else {
+            return mismatch();
         }
         return Ok(true);
     }
@@ -2936,7 +3310,7 @@ fn prepare_base(
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
     NativeCowCloner::make_tree_read_only(base_path)?;
-    let integrity = crate::base_integrity::marker(base_path)
+    let integrity = crate::base_integrity::marker_v2(base_path)
         .map_err(|source| io("record immutable-base integrity", base_path, source))?;
     let mut marker = OpenOptions::new()
         .create_new(true)
@@ -4326,13 +4700,35 @@ fn pending_lifecycle_error(
     subject: &Path,
     state_directory: &Path,
 ) -> WorktreeError {
-    WorktreeError::RecoveryPending {
-        message: format!(
-            "a {operation} of {} is already pending; run `riftri repair --state-dir {}`",
-            subject.display(),
+    recovery_pending_error(
+        format!("a {operation} of {} is already pending", subject.display()),
+        state_directory,
+    )
+}
+
+/// Build a pending-recovery error whose prose names exactly the command the
+/// caller can run against the state directory that holds the journal.
+///
+/// The directory is made absolute first, because the caller may act on this
+/// guidance from a different working directory and the machine-readable
+/// receipt repeats this value verbatim. The command is omitted entirely when
+/// the path cannot be written as a shell argument: an unquoted or lossy
+/// rendering names a *different* directory, and repair reports a confident
+/// all-clear for any state directory it does not find.
+pub fn recovery_pending_error(situation: String, state_directory: &Path) -> WorktreeError {
+    let state_directory = crate::command_path(state_directory);
+    let message = match crate::repair_command(&state_directory) {
+        Some(command) => format!("{situation}; run `{command}`"),
+        None => format!(
+            "{situation}; run riftri repair against the state directory {} \
+             (its exact native path is in the JSON receipt, because it cannot \
+             be written as a shell argument)",
             state_directory.display()
         ),
-        state_directory: state_directory.to_path_buf(),
+    };
+    WorktreeError::RecoveryPending {
+        message,
+        state_directory,
     }
 }
 
@@ -4608,12 +5004,133 @@ fn diagnose_state_paths(
         }
     }
 
+    // `gc` refuses to collect a base any unfinished journal still claims, but
+    // `status` counts only active journals as references. Without this, a base
+    // reported as unreferenced silently stays on disk with nothing explaining
+    // why. Report the pinning operation so both commands tell the same story.
+    let active_base_references = add_journals
+        .iter()
+        .filter(|journal| {
+            journal.phase == AddWorktreePhase::Active
+                && !completed_removals.contains(journal.operation_id.as_str())
+        })
+        .map(|journal| journal.base_path.as_path())
+        .collect::<HashSet<_>>();
+    let retained_bases = retained_base_paths(state_directory, UnsafeBaseInventory::Ignore)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    for (base_path, operation_id) in pending_adds
+        .iter()
+        .map(|journal| (&journal.base_path, &journal.operation_id))
+        .chain(
+            pending_compactions
+                .iter()
+                .map(|journal| (&journal.base_path, &journal.operation_id)),
+        )
+    {
+        if active_base_references.contains(base_path.as_path())
+            || !retained_bases.contains(base_path)
+        {
+            continue;
+        }
+        add_state_issue(
+            &mut issues,
+            base_path.clone(),
+            format!(
+                "no active worktree references this immutable base, but unfinished operation {operation_id} still claims it; `riftri gc` skips it until `riftri repair` retires that operation"
+            ),
+        );
+    }
+
+    // Two active journals for one path make `remove` and `repair` refuse
+    // forever. `add` now reconciles before creating a journal, but say so for
+    // any state that already reached this shape.
+    let mut claims = BTreeMap::<&Path, Vec<&str>>::new();
+    for journal in add_journals.iter().filter(|journal| {
+        journal.phase == AddWorktreePhase::Active
+            && !completed_removals.contains(journal.operation_id.as_str())
+    }) {
+        claims
+            .entry(journal.destination.as_path())
+            .or_default()
+            .push(journal.operation_id.as_str());
+    }
+    for (destination, operations) in claims {
+        if operations.len() > 1 {
+            add_state_issue(
+                &mut issues,
+                destination.to_path_buf(),
+                format!(
+                    "several active add journals claim this worktree ({}); retire the stale ones with `riftri repair`",
+                    operations.join(", ")
+                ),
+            );
+        }
+    }
+
+    // A probe unmount that failed through every retry deliberately abandons
+    // its mount and layer directories next to the user's worktrees instead of
+    // deleting under a possibly live mount. Name each leftover so the leak
+    // stops being invisible; only `riftri repair` removes one, and only when
+    // the kernel mount inventory proves it unmounted.
+    for directory in probe_scan_directories(add_journals) {
+        for path in abandoned_probe_roots(&directory) {
+            add_state_issue(
+                &mut issues,
+                path,
+                "an abandoned OverlayFS probe mount was preserved here after a failed \
+                 unmount; `riftri repair` removes it only when the kernel reports it \
+                 unmounted",
+            );
+        }
+    }
+
     issues.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     issues.dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
     Ok(StatePathDiagnosis {
         issues,
         coordination_locks,
     })
+}
+
+/// Directories a Riftri capability probe may have run in: each journaled
+/// destination and its parent, because probing resolves to the nearest
+/// existing ancestor of the requested destination.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn probe_scan_directories(add_journals: &[DecodedJournal]) -> BTreeSet<PathBuf> {
+    let mut directories = BTreeSet::new();
+    for journal in add_journals {
+        if let Some(parent) = journal.destination.parent() {
+            directories.insert(parent.to_path_buf());
+        }
+        directories.insert(journal.destination.clone());
+    }
+    directories
+}
+
+/// Riftri OverlayFS probe roots present in `directory`, best effort: these
+/// live in user-owned directories, so an unreadable entry is skipped rather
+/// than failing the whole diagnosis.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn abandoned_probe_roots(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for entry in entries.flatten() {
+        if !riftri_storage::OverlayFsMounter::is_abandoned_probe_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        if matches!(
+            fs::symlink_metadata(&path),
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
+        ) {
+            roots.push(path);
+        }
+    }
+    roots.sort_unstable();
+    roots
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -4633,6 +5150,45 @@ fn diagnose_state_paths(
     })
 }
 
+/// Riftri writes every journal update to `.{operation-id}.{random}.tmp` beside
+/// the journal and renames it into place; a crash between the two steps leaves
+/// the temporary behind. Recognize exactly that shape — a leading dot, a
+/// `.tmp` suffix and two identifier-like components — and nothing else, so a
+/// file that could be a user's is never claimed as Riftri's own.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn interrupted_journal_temporary_owner(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    let (operation_id, random) = name
+        .strip_prefix('.')?
+        .strip_suffix(".tmp")?
+        .rsplit_once('.')?;
+    (journal_identifier_like(operation_id) && journal_identifier_like(random))
+        .then(|| operation_id.to_owned())
+}
+
+/// Whether `name` looks like a Riftri operation ID or a `tempfile` suffix.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn journal_identifier_like(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Whether `path` is one of Riftri's own add-operation coordination locks.
+///
+/// These are deliberately never unlinked (another opener may already hold the
+/// same inode), so they outlive their journal and must not be reported as
+/// foreign files.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn is_operation_coordination_lock(path: &Path) -> bool {
+    path.extension() == Some(OsStr::new("lock"))
+        && path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .is_some_and(journal_identifier_like)
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn diagnose_journal_directory(
     directory: &Path,
@@ -4644,7 +5200,19 @@ fn diagnose_journal_directory(
     }
     for path in child_paths(directory, "read Riftri journal directory")? {
         if !expected.contains(&path) {
-            if !issues.iter().any(|issue| issue.path == path) {
+            if issues.iter().any(|issue| issue.path == path) {
+                continue;
+            }
+            // Riftri's own artifacts are not foreign files: an interrupted
+            // atomic write is reapable by `riftri repair`, and a coordination
+            // lock outliving its journal is expected by design.
+            if interrupted_journal_temporary_owner(&path).is_some() {
+                add_state_issue(
+                    issues,
+                    path,
+                    "an interrupted Riftri journal write left this temporary file; `riftri repair` removes it",
+                );
+            } else if !is_operation_coordination_lock(&path) {
                 add_state_issue(
                     issues,
                     path,
@@ -4954,18 +5522,33 @@ enum UnsafeBaseInventory {
 }
 
 fn symlinked_base_parent_error(state_directory: &Path, directory: &Path) -> WorktreeError {
-    WorktreeError::InvalidRequest(format!(
+    // Name the affected state directory inside the command when it can be
+    // written as a shell argument; otherwise keep the placeholder rather than
+    // print a path the caller's shell would split or mangle. The command comes
+    // from the same helper the failure receipt's `nextCommand` uses, so the
+    // two can never disagree.
+    let state_directory = crate::command_path(state_directory);
+    let next = match crate::status_command(&state_directory) {
+        Some(command) => format!("run `{command}`"),
+        None => "run `riftri status --state-dir <STATE_DIR>`, replacing <STATE_DIR> with the \
+                 exact state directory below"
+            .to_owned(),
+    };
+    let message = format!(
         "cleanup stopped: immutable-base path {} is a symbolic link, not a real directory.\n\
          Following it could access data outside Riftri's expected storage layout. \
          Riftri did not follow this link or delete data through it.\n\
-         Next: run `riftri status --state-dir <STATE_DIR>` to inspect the affected state, \
-         replacing <STATE_DIR> with your state directory (quote paths in your shell).\n\
+         Next: {next} to inspect the affected state.\n\
          State directory: {}\n\
          Do not delete or move the linked data manually. For new worktrees, use --state-dir \
          with a real directory; this does not repair an existing redirected layout.",
         directory.display(),
         state_directory.display(),
-    ))
+    );
+    WorktreeError::SymlinkedBaseParent {
+        message,
+        state_directory,
+    }
 }
 
 fn retained_base_paths(
@@ -5094,6 +5677,488 @@ fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, Worktre
     Ok(metadata.len())
 }
 
+/// What Git's worktree registry says about an active add journal's
+/// destination. Repair and `add` both reconcile against this before deciding
+/// whether a journal still describes a live worktree.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActiveDestinationState {
+    /// Git still registers the journal's destination: the journal is live.
+    Registered,
+    /// Git does not register the destination, but something is still on disk
+    /// there. Never retire and never delete: the content could be user data.
+    Present,
+    /// Git registers a worktree that this journal plausibly owns under a
+    /// different path. Report; do not act.
+    Relocated(PathBuf),
+    /// Git does not register the destination and nothing is on disk there.
+    /// The journal describes a worktree that no longer exists.
+    Vanished,
+}
+
+/// Classify one active add journal against Git's worktree registry.
+///
+/// `claimed` holds every destination some add journal already accounts for, so
+/// an unrelated managed worktree is never mistaken for a relocation.
+///
+/// Fail-closed ordering matters here: registration is checked first, then
+/// on-disk presence, and only a destination that is both unregistered and
+/// entirely absent can ever be classified `Vanished`. The relocation check
+/// runs before `Vanished` so that a worktree Git moved out from under the
+/// journal blocks retirement rather than losing a live view.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn classify_active_destination(
+    registered: &[riftri_git::WorktreeInfo],
+    claimed: &HashSet<PathBuf>,
+    journal: &DecodedJournal,
+) -> Result<ActiveDestinationState, WorktreeError> {
+    if registered
+        .iter()
+        .any(|worktree| paths_match(&worktree.path, &journal.destination))
+    {
+        return Ok(ActiveDestinationState::Registered);
+    }
+    // `symlink_metadata` so a dangling symlink still counts as present.
+    match fs::symlink_metadata(&journal.destination) {
+        Ok(_) => return Ok(ActiveDestinationState::Present),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(io(
+                "inspect journaled worktree destination",
+                &journal.destination,
+                source,
+            ));
+        }
+    }
+    let expected_branch = journal.branch.as_ref().map(|branch| {
+        let mut reference = b"refs/heads/".to_vec();
+        reference.extend_from_slice(branch.as_encoded_bytes());
+        reference
+    });
+    for worktree in registered {
+        // Git reports its registry in its own spelling (forward slashes, no
+        // verbatim prefix on Windows), so comparisons against journal paths
+        // must go through `paths_match`, never raw equality: a missed match
+        // here would let a worktree another journal owns pass as this
+        // journal's relocation.
+        if worktree.bare
+            || claimed
+                .iter()
+                .any(|destination| paths_match(destination, &worktree.path))
+        {
+            continue;
+        }
+        let plausible = match &expected_branch {
+            // Git refuses to check one branch out in two worktrees, so a
+            // worktree holding this journal's branch is the only worktree that
+            // can be this journal's relocated view.
+            Some(expected) => worktree.branch.as_ref() == Some(expected),
+            // A detached journal has no such unique key. Match conservatively
+            // on the recorded commit: over-matching only blocks retirement.
+            None => {
+                worktree.detached
+                    && worktree
+                        .head
+                        .as_ref()
+                        .is_some_and(|head| head.as_str() == journal.expected_commit)
+            }
+        };
+        if plausible {
+            // Report the location in the same canonical filesystem form that
+            // journal destinations (and therefore `worktree list`) use, not
+            // Git's slash-normalized spelling — on Windows those differ
+            // (`R:/...` versus `\\?\R:\...`). The worktree exists, so
+            // canonicalization normally succeeds; if it does not, the raw
+            // registry spelling is still a truthful report.
+            let registered_path =
+                fs::canonicalize(&worktree.path).unwrap_or_else(|_| worktree.path.clone());
+            return Ok(ActiveDestinationState::Relocated(registered_path));
+        }
+    }
+    Ok(ActiveDestinationState::Vanished)
+}
+
+/// Active add journals that still claim `destination` and that no completed
+/// removal has retired.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn active_add_journals_for_destination(
+    state_directory: &Path,
+    destination: &Path,
+) -> Result<Vec<DecodedJournal>, WorktreeError> {
+    let load = JournalStore::open(state_directory).load_all_reconciling()?;
+    // Fail closed on anything this scan could not judge. A journal that
+    // stayed unreadable after retries is an active claim of unknown shape —
+    // it might name this destination — so refusing the add is the only answer
+    // that cannot create a duplicate claim. An invalid journal likewise
+    // refuses, exactly as the previous whole-inventory load did.
+    if let Some(blocked) = load.unreadable.first() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "another process is updating Riftri journal {}; retry this command ({})",
+            blocked.path.display(),
+            blocked.reason
+        )));
+    }
+    if let Some(issue) = load.issues.first() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "unsafe durable add journal {}: {}",
+            issue.path.display(),
+            issue.reason
+        )));
+    }
+    // An unreadable removal journal is treated as not completed: the add
+    // journal then still counts as claiming its destination, which can only
+    // refuse an add, never permit a duplicate.
+    let completed = RemovalJournalStore::open(state_directory)
+        .load_all_for_status()?
+        .journals
+        .into_iter()
+        .filter(|removal| removal.phase == RemoveWorktreePhase::Complete)
+        .map(|removal| removal.source_add_operation_id)
+        .collect::<HashSet<_>>();
+    Ok(load
+        .journals
+        .into_iter()
+        .filter(|journal| {
+            journal.phase == AddWorktreePhase::Active
+                && paths_match(&journal.destination, destination)
+                && !completed.contains(journal.operation_id.as_str())
+        })
+        .collect())
+}
+
+/// Destinations already accounted for by an add journal that has not been
+/// rolled back, used to keep relocation detection from claiming a worktree
+/// that another journal owns.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn claimed_destinations(journals: &[DecodedJournal]) -> HashSet<PathBuf> {
+    journals
+        .iter()
+        .filter(|journal| journal.phase != AddWorktreePhase::RolledBack)
+        .map(|journal| journal.destination.clone())
+        .collect()
+}
+
+/// Retire an add journal whose worktree Git no longer registers and whose
+/// destination is gone, by journaling the completion that the interrupted
+/// cleanup never recorded.
+///
+/// Safety: the whole decision and the durable record are taken under the
+/// repository's Git worktree-metadata lock, and the destination is re-checked
+/// while that lock is held. The only file removed is this operation's own
+/// staged Git pointer, exactly as a normal removal does once the worktree is
+/// gone. The branch is deliberately left alone: the worktree is already gone,
+/// and the user may still want its commits.
+///
+/// This records a removal journal rather than rolling the add back so that the
+/// existing `Active` invariant (an active journal is never rolled back in
+/// place) stays intact, and so that every consumer that already understands a
+/// completed removal — base protection, `status`, `find_managed_add_journal` —
+/// sees the retirement without new special cases.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn retire_vanished_add_journal(
+    git: &Git,
+    state_directory: &Path,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    validate_recovery_paths(state_directory, journal)?;
+    let metadata_lock =
+        acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
+    let registered = git.list_worktrees(&journal.repository)?;
+    if registered
+        .iter()
+        .any(|worktree| paths_match(&worktree.path, &journal.destination))
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "destination {} became registered again; Riftri preserved its journal",
+            journal.destination.display()
+        )));
+    }
+    if fs::symlink_metadata(&journal.destination).is_ok() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "destination {} reappeared on disk; Riftri preserved it and its journal",
+            journal.destination.display()
+        )));
+    }
+
+    let store = RemovalJournalStore::create(state_directory)?;
+    let operation_id = allocate_removal_operation_id(&store)?;
+    let mut record = RemovalJournalRecord::new(
+        operation_id,
+        RemovalJournalPaths {
+            repository: &journal.repository,
+            destination: &journal.destination,
+            base_path: &journal.base_path,
+        },
+        journal.operation_id.clone(),
+    );
+    // Reject a record the normal removal path would also reject *before* it
+    // reaches disk. A persisted journal that validation rejects would make
+    // every later repair fail, which is the class of wedge this change ends.
+    let decoded = record
+        .clone()
+        .decode(store.path_for(&record.operation_id))?;
+    validate_removal_against_add_journals(
+        state_directory,
+        &decoded,
+        std::slice::from_ref(journal),
+    )?;
+    store.persist(&record)?;
+    advance_removal(
+        &store,
+        &mut record,
+        RemoveWorktreePhase::CleanVerified,
+        None,
+    )?;
+    // Nothing to unlink: the destination is unregistered and absent, verified
+    // above under the same metadata lock that is still held here.
+    advance_removal(
+        &store,
+        &mut record,
+        RemoveWorktreePhase::WorktreeRemoved,
+        None,
+    )?;
+    drop(metadata_lock);
+    remove_file_if_present(&pointer_staging_path(journal))?;
+    advance_removal(&store, &mut record, RemoveWorktreePhase::BaseReleased, None)?;
+    advance_removal(&store, &mut record, RemoveWorktreePhase::Complete, None)?;
+    Ok(())
+}
+
+/// Reconcile every active add journal in `state_directory` against Git's
+/// worktree registry, retiring the journals whose worktree no longer exists.
+///
+/// Returns the retirement count and the relocations that were only reported.
+/// Each journal is reconciled under its own add-operation lock; a busy journal
+/// is left untouched.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn reconcile_active_add_journals(
+    git: &Git,
+    state_directory: &Path,
+    only_destination: Option<&Path>,
+) -> Result<(usize, Vec<RelocatedWorktree>, Vec<String>), WorktreeError> {
+    let store = JournalStore::open(state_directory);
+    // A journal another process is replacing right now, or one that is
+    // invalid, is skipped: this pass only ever acts on journals it can read
+    // and validate, and taking no action is always safe. `status` owns the
+    // reporting of invalid journals.
+    let journals = store.load_all_reconciling()?.journals;
+    let claimed = claimed_destinations(&journals);
+    let removal_load = RemovalJournalStore::open(state_directory).load_all_for_status()?;
+    if !removal_load.issues.is_empty() {
+        // With any removal journal unreadable, no add journal's "already
+        // removed / removal pending" standing can be trusted. Do nothing this
+        // pass rather than risk retiring on stale knowledge.
+        return Ok((0, Vec::new(), Vec::new()));
+    }
+    let removals = removal_load.journals;
+    let completed = removals
+        .iter()
+        .filter(|removal| removal.phase == RemoveWorktreePhase::Complete)
+        .map(|removal| removal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
+    let pending_removals = removals
+        .iter()
+        .filter(|removal| removal.phase != RemoveWorktreePhase::Complete)
+        .map(|removal| removal.source_add_operation_id.as_str())
+        .collect::<HashSet<_>>();
+    let mut retired = 0;
+    let mut relocations = Vec::new();
+    let mut errors = Vec::new();
+    for journal in &journals {
+        if journal.phase != AddWorktreePhase::Active
+            || completed.contains(journal.operation_id.as_str())
+            // A pending removal already owns this add journal's fate.
+            || pending_removals.contains(journal.operation_id.as_str())
+            || only_destination.is_some_and(|destination| !paths_match(&journal.destination, destination))
+        {
+            continue;
+        }
+        let _operation_lock = match try_lock_add_operation(&journal.journal_path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => continue,
+            Err(error) => {
+                errors.push(format!("operation {}: {error}", journal.operation_id));
+                continue;
+            }
+        };
+        // Reload under the lock: the inventory may predate the owner's writes.
+        let journal = match store.load_operation(&journal.operation_id) {
+            Ok(journal) => journal,
+            Err(error) if crate::journal::journal_error_is_in_flight(&error) => {
+                // The owner replaced the journal between our inventory and
+                // this reload. In flight means untouched, not broken.
+                continue;
+            }
+            Err(error) => {
+                errors.push(format!("operation {}: {error}", journal.operation_id));
+                continue;
+            }
+        };
+        if journal.phase != AddWorktreePhase::Active {
+            continue;
+        }
+        let registered = match git.list_worktrees(&journal.repository) {
+            Ok(registered) => registered,
+            Err(error) => {
+                errors.push(format!("operation {}: {error}", journal.operation_id));
+                continue;
+            }
+        };
+        match classify_active_destination(&registered, &claimed, &journal) {
+            Ok(ActiveDestinationState::Registered | ActiveDestinationState::Present) => {}
+            Ok(ActiveDestinationState::Relocated(path)) => relocations.push(RelocatedWorktree {
+                operation_id: journal.operation_id.clone(),
+                journal_destination: journal.destination.clone(),
+                registered_path: path,
+            }),
+            Ok(ActiveDestinationState::Vanished) => {
+                match retire_vanished_add_journal(git, state_directory, &journal) {
+                    Ok(()) => retired += 1,
+                    Err(error) => {
+                        errors.push(format!("operation {}: {error}", journal.operation_id));
+                    }
+                }
+            }
+            Err(error) => errors.push(format!("operation {}: {error}", journal.operation_id)),
+        }
+    }
+    relocations.sort_unstable_by(|left, right| left.operation_id.cmp(&right.operation_id));
+    Ok((retired, relocations, errors))
+}
+
+/// The active add journal that owns `destination`, if a different operation
+/// already holds it. Used to retire a journal whose rollback must not touch a
+/// worktree that belongs to someone else.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn superseding_add_journal(
+    git: &Git,
+    state_directory: &Path,
+    journal: &DecodedJournal,
+) -> Result<Option<DecodedJournal>, WorktreeError> {
+    // A journal that cannot be read right now cannot prove ownership, and an
+    // in-flight read must not surface as a repair error; both simply mean "no
+    // supersession found this pass", which retires nothing.
+    let owner = JournalStore::open(state_directory)
+        .load_all_reconciling()?
+        .journals
+        .into_iter()
+        .find(|candidate| {
+            candidate.operation_id != journal.operation_id
+                && candidate.phase == AddWorktreePhase::Active
+                && paths_match(&candidate.destination, &journal.destination)
+                && paths_match(&candidate.repository, &journal.repository)
+        });
+    let Some(owner) = owner else {
+        return Ok(None);
+    };
+    // Only trust an owner Riftri would itself accept, and only while Git
+    // actually registers the contested destination for it.
+    validate_recovery_paths(state_directory, &owner)?;
+    let registered = git
+        .list_worktrees(&owner.repository)?
+        .into_iter()
+        .find(|worktree| paths_match(&worktree.path, &owner.destination));
+    match registered {
+        Some(worktree) if worktree.head.is_some() => Ok(Some(owner)),
+        _ => Ok(None),
+    }
+}
+
+/// Retire a losing add journal whose destination is owned by a different,
+/// still-active add operation.
+///
+/// Safety: this deletes nothing at the destination and touches no Git
+/// metadata. It removes only artifacts whose names embed this operation's own
+/// ID — the scratch view, the base staging directory and the temporary index —
+/// so the winner's worktree, the shared immutable base and the winner's
+/// journal are all untouched. It refuses outright if this journal still holds
+/// the destination's staged `.git` pointer, because then the destination's
+/// state depends on this journal and only a real rollback may proceed.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn retire_superseded_add_journal(
+    store: &JournalStore,
+    state_directory: &Path,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    validate_recovery_paths(state_directory, journal)?;
+    let staged_pointer = pointer_staging_path(journal);
+    if staged_pointer.exists() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "operation {} still holds the staged Git pointer for {}; Riftri preserved both",
+            journal.operation_id,
+            journal.destination.display()
+        )));
+    }
+    let pending = if journal.phase == AddWorktreePhase::RollbackPending {
+        journal.clone()
+    } else {
+        store.update_phase(journal, AddWorktreePhase::RollbackPending)?
+    };
+    remove_tree_if_present(&journal.scratch)?;
+    remove_tree_if_present(&journal.base_staging)?;
+    remove_file_if_present(&journal.temporary_index)?;
+    store.update_phase(&pending, AddWorktreePhase::RolledBack)?;
+    Ok(())
+}
+
+/// Remove the `.{operation-id}.{random}.tmp` files an interrupted journal
+/// write leaves in `operations/`.
+///
+/// Safety: only names matching Riftri's own atomic-write shape are considered,
+/// only regular files are removed, and each removal happens while this process
+/// exclusively holds that operation's coordination lock. `add` takes that lock
+/// before its first journal write and holds it for the whole operation, so
+/// holding it proves no live writer can be mid-rename for that operation ID. A
+/// busy operation is skipped, never forced.
+///
+/// Scope is deliberately limited to `operations/`: it is the only journal
+/// directory with a per-operation lock that makes the reap provably safe, and
+/// it is where an interrupted `worktree add` leaves these files.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn reap_interrupted_journal_temporaries(
+    state_directory: &Path,
+) -> Result<Vec<PathBuf>, WorktreeError> {
+    let directory = state_directory.join("operations");
+    if !is_real_directory_if_present(&directory)? {
+        return Ok(Vec::new());
+    }
+    let mut reaped = Vec::new();
+    for path in child_paths(&directory, "read Riftri journal directory")? {
+        let Some(operation_id) = interrupted_journal_temporary_owner(&path) else {
+            continue;
+        };
+        if !is_regular_file(&path)? {
+            continue;
+        }
+        let journal_path = directory.join(format!("{operation_id}.json"));
+        // An add takes its coordination lock before its first journal write and
+        // never unlinks it, so a missing lock file proves no operation with
+        // this ID is running and the temporary is definitively orphaned.
+        // Taking the lock in that case would only litter a new lock file.
+        let _operation_lock = if journal_path.with_extension("lock").exists() {
+            match try_lock_add_operation(&journal_path)? {
+                Some(lock) => Some(lock),
+                None => continue,
+            }
+        } else {
+            None
+        };
+        // Re-check under the lock: the owner may have renamed it into place.
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(io("inspect interrupted journal write", &path, source)),
+        }
+        remove_file_if_present(&path)?;
+        reaped.push(path);
+    }
+    if let Some(path) = reaped.last() {
+        sync_parent(path)?;
+    }
+    Ok(reaped)
+}
+
 pub fn recover_incomplete_operations(
     state_directory: &Path,
 ) -> Result<RecoveryReport, WorktreeError> {
@@ -5101,6 +6166,12 @@ pub fn recover_incomplete_operations(
     let state_directory = absolute_path(state_directory)?;
     let state_directory =
         resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
+    // Reconcile active journals against Git's registry first: an add journal
+    // whose worktree no longer exists must stop referencing its destination
+    // and its base before anything else inspects either. Doing this before the
+    // inventory is loaded also means the rest of the pass sees the retirement.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let reconciliation = reconcile_active_add_journals(&Git::default(), &state_directory, None);
     let store = JournalStore::open(&state_directory);
     let journals = store.load_all()?;
     let removal_store = RemovalJournalStore::open(&state_directory);
@@ -5131,6 +6202,8 @@ pub fn recover_incomplete_operations(
         .iter()
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    #[cfg(target_os = "linux")]
+    let probe_directories = probe_scan_directories(&journals);
     let mut report = RecoveryReport {
         scanned: journals
             .len()
@@ -5146,6 +6219,40 @@ pub fn recover_incomplete_operations(
         operations: report.scanned,
     });
     let git = Git::default();
+
+    // Report every worktree Git itself lists without a resolvable HEAD, so a
+    // repair pass names the corruption it cannot fix instead of silently
+    // working around it. Listing failures are surfaced by the per-journal
+    // recovery below, not here.
+    let mut inspected_repositories = HashSet::new();
+    for journal in &journals {
+        if !inspected_repositories.insert(journal.repository.clone()) {
+            continue;
+        }
+        let Ok(registered) = git.list_worktrees(&journal.repository) else {
+            continue;
+        };
+        report.unresolvable_worktrees.extend(
+            registered
+                .into_iter()
+                .filter(|worktree| worktree.head_unresolvable)
+                .map(|worktree| worktree.path),
+        );
+    }
+    report.unresolvable_worktrees.sort_unstable();
+    report.unresolvable_worktrees.dedup();
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    match reconciliation {
+        Ok((retired, relocations, errors)) => {
+            report.retired_adds = retired;
+            report.relocations = relocations;
+            report.errors.extend(errors);
+        }
+        Err(error) => report
+            .errors
+            .push(format!("active add-journal reconciliation: {error}")),
+    }
 
     for (operation_id, error) in invalid_removal_journals {
         report
@@ -5205,6 +6312,30 @@ pub fn recover_incomplete_operations(
                     kind: "add",
                     operation_id: journal.operation_id.clone(),
                 });
+                // A losing racer never owned the destination it names: another
+                // still-active operation does. Rolling it back would refuse
+                // forever ("worktree HEAD changed after creation"), leaving a
+                // journal nothing could retire. Retire it without touching the
+                // winner's worktree instead.
+                #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+                match superseding_add_journal(&git, &state_directory, &journal) {
+                    Ok(Some(_)) => {
+                        match retire_superseded_add_journal(&store, &state_directory, &journal) {
+                            Ok(()) => report.recovered += 1,
+                            Err(error) => report
+                                .errors
+                                .push(format!("operation {}: {error}", journal.operation_id)),
+                        }
+                        continue;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        report
+                            .errors
+                            .push(format!("operation {}: {error}", journal.operation_id));
+                        continue;
+                    }
+                }
                 if let Err(error) = validate_recovery_paths(&state_directory, &journal)
                     .and_then(|()| adopt_overlayfs_mount_identity(&store, journal.clone()))
                     .and_then(|journal| {
@@ -5366,6 +6497,36 @@ pub fn recover_incomplete_operations(
                         journal.operation_id
                     )),
                 }
+            }
+        }
+    }
+
+    // Last, once no journal in this pass is still being written: clear the
+    // atomic-write leftovers an interrupted operation left in Riftri's own
+    // state directory, so they stop being reported forever.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    match reap_interrupted_journal_temporaries(&state_directory) {
+        Ok(reaped) => report.reaped_artifacts = reaped,
+        Err(error) => report
+            .errors
+            .push(format!("interrupted journal writes: {error}")),
+    }
+
+    // A failed probe unmount deliberately abandons its mount and layers next
+    // to the user's worktrees; the leak is unbounded because probing reruns on
+    // every add. Remove each leftover only when the kernel mount inventory
+    // proves nothing is mounted at or below it, and preserve — but report —
+    // any root a mount still covers.
+    #[cfg(target_os = "linux")]
+    for directory in probe_directories {
+        for root in abandoned_probe_roots(&directory) {
+            match OverlayFsMounter::remove_abandoned_probe_root(&root) {
+                Ok(true) => report.reaped_probe_roots.push(root),
+                Ok(false) => report.preserved_probe_mounts.push(root),
+                Err(error) => report.errors.push(format!(
+                    "abandoned OverlayFS probe {}: {error}",
+                    root.display()
+                )),
             }
         }
     }
@@ -5683,6 +6844,7 @@ fn resume_compaction(
             remove_tree_if_present(&journal.replacement)?;
             remove_tree_if_present(&journal.base_staging)?;
             remove_file_if_present(&journal.temporary_index)?;
+            remove_empty_base_bucket(&journal)?;
             advance_compaction(
                 store,
                 &mut record,
@@ -5836,6 +6998,36 @@ fn resume_compaction(
         )?;
     }
     Ok(())
+}
+
+/// Remove the immutable-base bucket a cancelled compaction created for its
+/// recomputed checkout profile, if nothing was ever materialized into it.
+///
+/// A compaction whose checkout profile differs from the add's creates its new
+/// bucket before recording intent, so a cancellation before the base build
+/// can otherwise strand an empty directory that storage accounting must
+/// forever report as unexplained. Removal is non-recursive: a bucket that
+/// gained any entry — a base tree, its completion marker, a builder's
+/// coordination lock, another operation's staging — makes `remove_dir` fail
+/// and is left exactly as it is. `validate_compaction_paths` already proved
+/// the bucket sits directly under this state directory's `bases/v1`.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn remove_empty_base_bucket(journal: &DecodedCompactJournal) -> Result<(), WorktreeError> {
+    let Some(bucket) = journal.base_path.parent() else {
+        return Ok(());
+    };
+    match fs::remove_dir(bucket) {
+        Ok(()) => sync_parent(bucket),
+        Err(source)
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(source) => Err(io("remove empty immutable-base bucket", bucket, source)),
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -6082,9 +7274,10 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
 
 /// Hash metadata Git does not reproduce from its tree: the full native mode
 /// (including setuid, setgid, and sticky bits) and, on Unix, every extended
-/// attribute name and value. The base-integrity content hash deliberately
-/// ignores these, so the forced-removal snapshot composes them separately;
-/// metadata-only edits after force intent must stop deletion.
+/// attribute name and value. The persisted snapshot composes the v1 content
+/// digest, which deliberately ignores these, so the forced-removal snapshot
+/// adds them separately; metadata-only edits after force intent must stop
+/// deletion. This layout stays frozen — journals recorded it durably.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     let metadata = fs::symlink_metadata(path)
@@ -6479,13 +7672,10 @@ fn verify_prune_safe(
                     && Some(journal.operation_id.as_str()) != current_prune
             })
     {
-        return Err(WorktreeError::RecoveryPending {
-            message: format!(
-                "another Riftri lifecycle operation is pending; run `riftri repair --state-dir {}` first",
-                state_directory.display()
-            ),
-            state_directory: state_directory.to_path_buf(),
-        });
+        return Err(recovery_pending_error(
+            "another Riftri lifecycle operation is pending".to_owned(),
+            state_directory,
+        ));
     }
     let inventory = git.list_worktrees(repository)?;
     for journal in adds.iter().filter(|journal| {
@@ -7013,7 +8203,19 @@ fn validate_recovery_paths(
         (_, None) => true,
         (_, Some(_)) => false,
     };
-    if base_repository != journal.base_staging.parent()
+    // `base_path` and `base_staging` share a parent bucket in every journal
+    // this Riftri writes: compaction retargets both in one durable write.
+    // Earlier versions retargeted only `base_path` across a checkout-profile
+    // change, so an Active journal may still carry its staging record in the
+    // bucket the add originally built in. Staging no longer exists once a
+    // journal is Active, so — exactly like the scratch-parent check the move
+    // seam relaxed for Active journals below — recovery only needs it
+    // confined to the immutable-base layout; every other phase keeps the
+    // strict shared-bucket invariant.
+    let base_staging_confined = base_repository == journal.base_staging.parent()
+        || (journal.phase == AddWorktreePhase::Active
+            && journal.base_staging.parent().and_then(Path::parent) == Some(bases.as_path()));
+    if !base_staging_confined
         || base_repository.and_then(Path::parent) != Some(bases.as_path())
         || !journal
             .base_staging
@@ -7340,6 +8542,13 @@ fn recover_active_overlayfs_mount(
             journal.journal_path.display()
         ))
     })?;
+    // Both branches load non-destructively: the boot/namespace/liveness
+    // determination below (`mount_state` or `recover_mount`) must run before
+    // any destructive reset, because a mount created in another namespace of
+    // this boot is invisible here and `load_for_remount` would wipe the work
+    // directory of that still-live overlay. The disposable work directory is
+    // reset only on the remount path, after the guards preserved-and-reported
+    // every live-elsewhere shape.
     let layout = if overlayfs.mount_identity.is_some() {
         OverlayFsMounter::load(
             &overlayfs.layout_root,
@@ -7347,7 +8556,7 @@ fn recover_active_overlayfs_mount(
             &journal.destination,
         )?
     } else {
-        OverlayFsMounter::load_for_remount(
+        OverlayFsMounter::load_for_recovery(
             &overlayfs.layout_root,
             &journal.base_path,
             &journal.destination,
@@ -7434,6 +8643,7 @@ fn recover_active_overlayfs_mount(
         &remount.layout_root,
         &remount_journal.base_path,
         &remount_journal.destination,
+        context,
     )?;
     match OverlayFsMounter::recover_mount(&remount_layout, context, &remount.recovery_token)? {
         OverlayFsRecoveryState::Mounted(identity) => {
@@ -8365,6 +9575,472 @@ mod tests {
         assert_eq!(accounting.pending_compactions, 0);
     }
 
+    /// Repository with one managed worktree whose checkout profile changes
+    /// after the add: `core.eol lf` is an accepted value, so compaction still
+    /// runs, but the profile hash — and therefore the immutable-base bucket —
+    /// differs from the one the add staged in.
+    fn bucket_retarget_fixture(
+        root: &Path,
+    ) -> (PathBuf, PathBuf, PathBuf, super::AddWorktreeResult) {
+        let repository = root.join("repository");
+        let destination = root.join("worktree");
+        let state = root.join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/bucket-retarget")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+        git(&repository, &["config", "core.eol", "lf"]);
+        (repository, destination, state, added)
+    }
+
+    fn assert_no_stranded_compaction_quarantine(parent: &Path) {
+        let stranded = fs::read_dir(parent)
+            .expect("scan worktree parent")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".riftri-compact-old-")
+            })
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(stranded.is_empty(), "stranded quarantines: {stranded:?}");
+    }
+
+    #[test]
+    fn compaction_retargets_the_add_journal_across_base_buckets() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state, added) = bucket_retarget_fixture(fixture.path());
+
+        let compacted = compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("compact across base buckets");
+
+        assert_ne!(
+            compacted.base_path.parent(),
+            added.base_path.parent(),
+            "the profile flip must move the immutable base into a new bucket"
+        );
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journals")
+            .pop()
+            .expect("add journal");
+        assert_eq!(journal.base_path, compacted.base_path);
+        assert_eq!(
+            journal.base_staging.parent(),
+            journal.base_path.parent(),
+            "base_path and base_staging must move buckets together"
+        );
+        let accounting = storage_accounting(&state).expect("account retargeted state");
+        assert_eq!(accounting.active_views, 1);
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+
+        // The retargeted journal must stay fully operable: compact, repair,
+        // move, and remove all validate it again.
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("compact the retargeted worktree again");
+        let repair = recover_incomplete_operations(&state).expect("repair retargeted state");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        let moved = fixture.path().join("moved");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: destination,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move the retargeted worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: moved,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the retargeted worktree");
+        let accounting = storage_accounting(&state).expect("account retired state");
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+    }
+
+    #[test]
+    fn compaction_base_bucket_retarget_recovers_from_every_interruption_window() {
+        for phase in [
+            CompactWorktreePhase::IntentRecorded,
+            CompactWorktreePhase::ReplacementReady,
+            CompactWorktreePhase::ReplacementActivated,
+            CompactWorktreePhase::AddJournalUpdated,
+            CompactWorktreePhase::Complete,
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let (repository, destination, state, _added) = bucket_retarget_fixture(fixture.path());
+
+            compact_worktree_inner(
+                CompactWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("inject compaction interruption");
+
+            let first = recover_incomplete_operations(&state).expect("first repair");
+            assert!(first.errors.is_empty(), "{phase:?}: {first:?}");
+            let second = recover_incomplete_operations(&state).expect("second repair");
+            assert!(second.errors.is_empty(), "{phase:?}: {second:?}");
+            assert!(destination.is_dir(), "{phase:?}");
+            assert_no_stranded_compaction_quarantine(fixture.path());
+            let output = Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&destination)
+                .output()
+                .expect("inspect recovered worktree");
+            assert!(output.status.success(), "{phase:?}");
+            assert!(output.stdout.is_empty(), "{phase:?}");
+            let journal = JournalStore::open(&state)
+                .load_all()
+                .expect("load add journals")
+                .pop()
+                .expect("add journal");
+            assert_eq!(
+                journal.base_staging.parent(),
+                journal.base_path.parent(),
+                "{phase:?}: no interruption may split the journal across buckets"
+            );
+            let accounting = storage_accounting(&state).expect("account after repair");
+            assert_eq!(accounting.pending_compactions, 0, "{phase:?}");
+            assert!(
+                accounting.diagnostic_issues.is_empty(),
+                "{phase:?}: {:?}",
+                accounting.diagnostic_issues
+            );
+            move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository,
+                    source: destination,
+                    destination: fixture.path().join("moved"),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("move recovered worktree");
+        }
+    }
+
+    #[test]
+    fn compaction_recovers_between_the_base_update_and_the_phase_advance() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state, _added) = bucket_retarget_fixture(fixture.path());
+
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(CompactWorktreePhase::ReplacementActivated),
+        )
+        .expect_err("interrupt after activation");
+        let compaction = super::CompactJournalStore::open(&state)
+            .load_all()
+            .expect("load compaction journals")
+            .pop()
+            .expect("compaction journal");
+        assert_eq!(compaction.phase, CompactWorktreePhase::ReplacementActivated);
+
+        // Simulate the process dying immediately after the add journal's
+        // durable base update but before the compaction journal records
+        // AddJournalUpdated: perform exactly the update resumption performs.
+        let add_store = JournalStore::open(&state);
+        let journal_path = add_store
+            .load_all()
+            .expect("load add journals")
+            .pop()
+            .expect("add journal")
+            .journal_path;
+        add_store
+            .update_active_base(
+                &journal_path,
+                &compaction.destination,
+                &compaction.old_base_path,
+                &compaction.base_path,
+                &compaction.expected_commit,
+            )
+            .expect("durable base update");
+        let journal = add_store
+            .load_all()
+            .expect("reload add journals")
+            .pop()
+            .expect("updated add journal");
+        assert_eq!(journal.base_path, compaction.base_path);
+        assert_eq!(
+            journal.base_staging.parent(),
+            journal.base_path.parent(),
+            "the base update must retarget staging in the same durable write"
+        );
+
+        let repair = recover_incomplete_operations(&state).expect("resume after the base update");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        assert_no_stranded_compaction_quarantine(fixture.path());
+        let accounting = storage_accounting(&state).expect("account resumed state");
+        assert_eq!(accounting.active_views, 1);
+        assert_eq!(accounting.completed_compactions, 1);
+        assert_eq!(accounting.pending_compactions, 0);
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+    }
+
+    #[cfg(unix)]
+    fn rewrite_add_journal_base_staging(journal_path: &Path, base_staging: &Path) {
+        use std::os::unix::ffi::OsStrExt;
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(journal_path).expect("read add journal"))
+                .expect("parse add journal");
+        record["base_staging"] = serde_json::json!({
+            "encoding": "unix-bytes",
+            "units": base_staging.as_os_str().as_bytes(),
+        });
+        fs::write(
+            journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode add journal"),
+        )
+        .expect("write wedged add journal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_and_lifecycle_recognize_journals_wedged_by_older_compactions() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state, added) = bucket_retarget_fixture(fixture.path());
+
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(CompactWorktreePhase::AddJournalUpdated),
+        )
+        .expect_err("interrupt after the add journal update");
+
+        // Recreate the record an older Riftri persisted at this point: the
+        // base retargeted into the new bucket while the staging record stayed
+        // behind in the bucket the add originally built in.
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journals")
+            .pop()
+            .expect("add journal");
+        let old_bucket = added.base_path.parent().expect("original bucket");
+        rewrite_add_journal_base_staging(
+            &journal.journal_path,
+            &old_bucket.join(format!(".riftri-build-{}", journal.operation_id)),
+        );
+        let wedged = JournalStore::open(&state)
+            .load_all()
+            .expect("reload add journals")
+            .pop()
+            .expect("wedged add journal");
+        assert_ne!(
+            wedged.base_staging.parent(),
+            wedged.base_path.parent(),
+            "the forged journal must reproduce the historical wedge"
+        );
+
+        let repair = recover_incomplete_operations(&state).expect("repair the wedged compaction");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        assert_no_stranded_compaction_quarantine(fixture.path());
+        let accounting = storage_accounting(&state).expect("account the recognized journal");
+        assert_eq!(accounting.active_views, 1);
+        assert_eq!(accounting.pending_compactions, 0);
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "{:?}",
+            accounting.diagnostic_issues
+        );
+
+        // The next compaction heals the staging record into the base's
+        // bucket, and the ordinary lifecycle keeps working throughout.
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("compact the wedged worktree");
+        let healed = JournalStore::open(&state)
+            .load_all()
+            .expect("load healed journals")
+            .pop()
+            .expect("healed add journal");
+        assert_eq!(healed.base_staging.parent(), healed.base_path.parent());
+        let moved = fixture.path().join("moved");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: destination,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move the healed worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: moved,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the healed worktree");
+    }
+
+    #[test]
+    fn recovery_path_validation_relaxes_only_active_cross_bucket_staging() {
+        let fixture = tempdir().expect("fixture");
+        let root = fixture.path();
+        let state = root.join("state");
+        let bases = state.join("bases/v1");
+        let journal =
+            |phase: AddWorktreePhase, base_staging: PathBuf| crate::journal::DecodedJournal {
+                journal_path: state.join("operations/operation.json"),
+                operation_id: "operation".to_owned(),
+                repository: root.join("repository"),
+                destination: root.join("worktree"),
+                scratch: root.join(".riftri-view-operation"),
+                base_staging,
+                base_path: bases.join("r-new/tree"),
+                temporary_index: state.join("tmp/index-operation"),
+                branch: None,
+                branch_created: false,
+                expected_commit: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                backend: BackendKind::ApfsClone,
+                sparse_directories: Vec::new(),
+                overlayfs: None,
+                phase,
+                last_forward_phase: phase,
+            };
+
+        // The shared-bucket invariant is accepted in every phase.
+        for phase in [AddWorktreePhase::BaseReady, AddWorktreePhase::Active] {
+            assert!(
+                super::validate_recovery_paths(
+                    &state,
+                    &journal(phase, bases.join("r-new/.riftri-build-operation")),
+                )
+                .is_ok(),
+                "{phase:?}"
+            );
+        }
+        // An Active journal wedged by an older cross-bucket compaction stays
+        // recognizable while its staging record remains inside a bucket.
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    bases.join("r-old/.riftri-build-operation"),
+                ),
+            )
+            .is_ok()
+        );
+        // Every other phase keeps the strict shared-bucket requirement.
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::BaseReady,
+                    bases.join("r-old/.riftri-build-operation"),
+                ),
+            )
+            .is_err()
+        );
+        // Even Active journals may not reference staging outside the
+        // immutable-base layout, at the wrong depth, or with a foreign name.
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    root.join("elsewhere/.riftri-build-operation"),
+                ),
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    bases.join("r-old/deeper/.riftri-build-operation"),
+                ),
+            )
+            .is_err()
+        );
+        assert!(
+            super::validate_recovery_paths(
+                &state,
+                &journal(
+                    AddWorktreePhase::Active,
+                    bases.join("r-old/build-operation")
+                ),
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn empty_directory_cleanup_preserves_a_file_created_at_the_remove_boundary() {
         let fixture = tempdir().expect("cleanup race fixture");
@@ -8900,7 +10576,10 @@ mod tests {
                     "{error}"
                 );
                 assert!(
-                    error.contains("riftri status --state-dir <STATE_DIR>"),
+                    error.contains(&format!(
+                        "riftri status --state-dir {}",
+                        crate::shell_quoted_path(&state).expect("representable state directory")
+                    )),
                     "{error}"
                 );
                 assert!(error.contains(&state.display().to_string()), "{error}");
@@ -8918,7 +10597,10 @@ mod tests {
                 assert_eq!(recovery.recovered_collections, 0);
                 assert_eq!(recovery.errors.len(), 1);
                 assert!(recovery.errors[0].contains("is a symbolic link"));
-                assert!(recovery.errors[0].contains("riftri status --state-dir <STATE_DIR>"));
+                assert!(recovery.errors[0].contains(&format!(
+                    "riftri status --state-dir {}",
+                    crate::shell_quoted_path(&state).expect("representable state directory")
+                )));
             }
             let outside_base = outside
                 .join("v1/repository")
@@ -9135,6 +10817,246 @@ mod tests {
             false,
         )
         .expect("the helper exits from the post-mount test hook");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlayfs_recovery_preserves_a_workdir_the_journaled_namespace_cannot_rule_out() {
+        use riftri_storage::{OverlayFsMounter, OverlayFsRecoveryState};
+
+        let fixture = tempdir().expect("fixture");
+        if !require_overlayfs_test_namespace(fixture.path()) {
+            return;
+        }
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        create_overlayfs_repository(&repository);
+
+        // Reproduce the crash window: exit after the mount syscall succeeds
+        // but before the mount identity reaches the journal.
+        let status = Command::new(std::env::current_exe().expect("unit test executable"))
+            .arg("--exact")
+            .arg("worktree::tests::overlayfs_mount_gap_helper")
+            .arg("--nocapture")
+            .env("RIFTRI_OVERLAYFS_CORE_HELPER", "1")
+            .env("RIFTRI_TEST_EXIT_AFTER_OVERLAYFS_MOUNT", "1")
+            .env("RIFTRI_OVERLAYFS_CORE_REPOSITORY", &repository)
+            .env("RIFTRI_OVERLAYFS_CORE_DESTINATION", &destination)
+            .env("RIFTRI_OVERLAYFS_CORE_STATE", &state)
+            .status()
+            .expect("run mount-gap helper");
+        assert_eq!(status.code(), Some(86));
+
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load interrupted journal")
+            .pop()
+            .expect("one interrupted journal");
+        let overlayfs = journal.overlayfs.clone().expect("OverlayFS intent");
+        assert!(overlayfs.mount_identity.is_none(), "crash window closed");
+        let context = overlayfs.mount_context.clone().expect("mount context");
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )
+        .expect("load interrupted layout");
+        let identity =
+            match OverlayFsMounter::recover_mount(&layout, &context, &overlayfs.recovery_token)
+                .expect("adopt interrupted mount")
+            {
+                OverlayFsRecoveryState::Mounted(identity) => identity,
+                state => panic!("expected mounted recovery state, got {state:?}"),
+            };
+        // Make the mount invisible to this namespace, exactly what recovery
+        // sees when the mount lives on in a namespace it cannot inspect.
+        OverlayFsMounter::unmount(&layout, &identity).expect("hide interrupted mount");
+
+        // Give the journal the interrupted-remount shape (active, identity
+        // never journaled) and a mount context recorded in a different
+        // namespace of this boot: from here, the mount may still be live.
+        let mut record: serde_json::Value = serde_json::from_slice(
+            &fs::read(&journal.journal_path).expect("read interrupted journal"),
+        )
+        .expect("decode interrupted journal");
+        record["phase"] = "active".into();
+        record["last_forward_phase"] = "active".into();
+        let recorded_inode = record["overlayfs"]["mount_context"]["mount_namespace_inode"]
+            .as_u64()
+            .expect("journaled namespace inode");
+        record["overlayfs"]["mount_context"]["mount_namespace_inode"] = (recorded_inode + 1).into();
+        fs::write(
+            &journal.journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode foreign-namespace journal"),
+        )
+        .expect("persist foreign-namespace journal");
+        let sentinel = layout.work().join("live-mount-sentinel");
+        fs::write(&sentinel, b"must survive").expect("plant work-directory sentinel");
+
+        let preserved =
+            recover_incomplete_operations(&state).expect("repair with a possibly live mount");
+        assert_eq!(preserved.recovered_mounts, 0);
+        assert_eq!(preserved.errors.len(), 1, "{:?}", preserved.errors);
+        assert!(
+            preserved.errors[0].contains("different mount namespace"),
+            "{:?}",
+            preserved.errors
+        );
+        assert!(
+            sentinel.exists(),
+            "a destructive work-directory reset ran before the namespace guard"
+        );
+        assert!(layout.upper().join(".git").exists());
+
+        // Back in the journaled namespace the absence of the mount is
+        // provable, so recovery may reset the disposable work state and
+        // remount the view.
+        record["overlayfs"]["mount_context"]["mount_namespace_inode"] = recorded_inode.into();
+        fs::write(
+            &journal.journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode restored journal"),
+        )
+        .expect("persist restored journal");
+        let repaired =
+            recover_incomplete_operations(&state).expect("repair in the journaled namespace");
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        assert_eq!(repaired.recovered_mounts, 1);
+        assert!(
+            Command::new("mountpoint")
+                .arg("--quiet")
+                .arg(&destination)
+                .status()
+                .expect("inspect remounted view")
+                .success()
+        );
+        let marker_name = format!(".riftri-overlayfs-recovery-{}", overlayfs.recovery_token);
+        assert!(
+            !destination.join(&marker_name).exists(),
+            "recovery marker still visible in the merged view"
+        );
+
+        let remounted = JournalStore::open(&state)
+            .load_all()
+            .expect("reload remounted journal")
+            .pop()
+            .expect("one remounted journal");
+        let remounted_overlayfs = remounted.overlayfs.expect("remounted OverlayFS intent");
+        let identity = remounted_overlayfs
+            .mount_identity
+            .expect("remounted identity");
+        let layout = OverlayFsMounter::load(
+            &remounted_overlayfs.layout_root,
+            &remounted.base_path,
+            &remounted.destination,
+        )
+        .expect("reload remounted layout");
+        OverlayFsMounter::unmount(&layout, &identity).expect("unmount remounted view");
+    }
+
+    #[test]
+    fn abandoned_probe_scan_names_only_real_probe_directories() {
+        let fixture = tempdir().expect("fixture");
+        let probe = fixture.path().join(".riftri-overlay-probe-42-1-0");
+        fs::create_dir(&probe).expect("create probe directory");
+        fs::write(probe.join("leftover"), b"layer").expect("write probe leftover");
+        fs::write(
+            fixture.path().join(".riftri-overlay-probe-42-1-1"),
+            b"not a directory",
+        )
+        .expect("write probe-named file");
+        fs::create_dir(fixture.path().join("user-directory")).expect("create user directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&probe, fixture.path().join(".riftri-overlay-probe-42-1-2"))
+            .expect("create probe-named symlink");
+
+        assert_eq!(super::abandoned_probe_roots(fixture.path()), vec![probe]);
+        assert!(super::abandoned_probe_roots(&fixture.path().join("absent")).is_empty());
+    }
+
+    #[test]
+    fn status_names_an_abandoned_overlayfs_probe_next_to_a_worktree() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/probe-diagnostic")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+
+        // A failed probe unmount abandons its directory beside the worktree.
+        // Diagnostics scan the journaled destination's canonical parent, so
+        // compare against the canonical probe path.
+        let probe = fixture.path().join(".riftri-overlay-probe-4242-7-0");
+        fs::create_dir(&probe).expect("create abandoned probe");
+        fs::write(probe.join("leftover"), b"layer").expect("write abandoned layer");
+        let probe = probe.canonicalize().expect("resolve abandoned probe");
+
+        let status = storage_accounting(&state).expect("account with abandoned probe");
+        assert!(
+            status.diagnostic_issues.iter().any(|issue| {
+                issue.path == probe && issue.reason.contains("abandoned OverlayFS probe")
+            }),
+            "abandoned probe not named: {:?}",
+            status.diagnostic_issues
+        );
+
+        let repaired = recover_incomplete_operations(&state).expect("repair with abandoned probe");
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(repaired.reaped_probe_roots, vec![probe.clone()]);
+            assert!(repaired.preserved_probe_mounts.is_empty());
+            assert!(!probe.exists(), "unmounted probe leftover not reaped");
+            let clean = storage_accounting(&state).expect("account after probe reap");
+            assert!(
+                !clean
+                    .diagnostic_issues
+                    .iter()
+                    .any(|issue| issue.reason.contains("abandoned OverlayFS probe")),
+                "{:?}",
+                clean.diagnostic_issues
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Only the Linux mount inventory can prove the probe unmounted,
+            // so other platforms report it and leave it alone.
+            assert!(repaired.reaped_probe_roots.is_empty());
+            assert!(probe.is_dir(), "probe removed without a liveness proof");
+        }
+
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state),
+            },
+            None,
+        )
+        .expect("remove probe-diagnostic worktree");
+        assert!(!destination.exists());
     }
 
     #[cfg(target_os = "linux")]
@@ -10604,6 +12526,88 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_marker_base_upgrades_with_one_rebuild() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let request = |name: &str| AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: fixture.path().join(name),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
+        };
+        let first = add_worktree_inner(request("first"), None, true).expect("first view");
+        let marker_path = first.base_path.with_extension("complete");
+        assert!(
+            fs::read(&marker_path)
+                .expect("fresh marker")
+                .starts_with(crate::base_integrity::MARKER_V2_PREFIX)
+        );
+
+        // Rewrite the completion marker exactly as a pre-v2 binary recorded
+        // it: the v1 content digest of the same base.
+        fs::write(
+            &marker_path,
+            crate::base_integrity::marker(&first.base_path).expect("v1 digest"),
+        )
+        .expect("write legacy marker");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Metadata tampering is invisible to a v1 marker. The migration
+            // rebuild must discard it rather than clone it into views.
+            let file = first.base_path.join("tracked.txt");
+            let mode = fs::symlink_metadata(&file)
+                .expect("base file metadata")
+                .permissions()
+                .mode();
+            fs::set_permissions(&file, fs::Permissions::from_mode((mode & 0o777) | 0o4000))
+                .expect("set setuid bit");
+        }
+
+        let second = add_worktree_inner(request("second"), None, true).expect("migrating view");
+        assert!(!second.reused_base, "a v1 marker must trigger one rebuild");
+        let upgraded = fs::read(&marker_path).expect("upgraded marker");
+        assert!(upgraded.starts_with(crate::base_integrity::MARKER_V2_PREFIX));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            for path in [
+                first.base_path.join("tracked.txt"),
+                second.destination.join("tracked.txt"),
+            ] {
+                let mode = fs::symlink_metadata(&path)
+                    .expect("rebuilt metadata")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o7000, 0, "{}: {mode:o}", path.display());
+            }
+        }
+
+        let third = add_worktree_inner(request("third"), None, true).expect("cached view");
+        assert!(third.reused_base, "the upgraded marker must be reusable");
+        assert_eq!(fs::read(&marker_path).expect("stable marker"), upgraded);
+        for destination in [&first.destination, &second.destination, &third.destination] {
+            git(destination, &["status", "--porcelain=v1"]);
+        }
+    }
+
+    #[test]
     fn forced_removal_recovers_an_unchanged_dirty_view_after_intent() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
@@ -11004,6 +13008,265 @@ mod tests {
         }
     }
 
+    /// Build a repository, add one managed worktree, and remove it again so
+    /// its immutable base stays on disk with no referencing journal — the
+    /// starting state for every collection-cancellation test.
+    fn unreferenced_base_fixture(root: &Path, branch: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let repository = root.join("repository");
+        let destination = root.join("worktree");
+        let state = root.join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from(branch)),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove worktree");
+        (repository, state, added.base_path)
+    }
+
+    /// Record an add journal for the same base and fail it before
+    /// `prepare_base` runs — the racing reference from the issue: it protects
+    /// the base while it exists and later rolls back without rebuilding
+    /// anything.
+    fn race_reference_before_prepare_base(repository: &Path, state: &Path, destination: &Path) {
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.to_path_buf(),
+                destination: destination.to_path_buf(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/gc-racing-reference")),
+                state_dir: Some(state.to_path_buf()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::IntentRecorded),
+            false,
+        )
+        .expect_err("record a racing reference before prepare_base");
+    }
+
+    #[test]
+    fn gc_cancellation_after_marker_removed_restores_the_completion_marker() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-race-restore");
+        let marker = base_path.with_extension("complete");
+
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        assert!(!marker.exists());
+        assert!(base_path.is_dir());
+
+        race_reference_before_prepare_base(&repository, &state, &fixture.path().join("second"));
+
+        let resumed = garbage_collect_inner(&state, true, None).expect("cancel collection");
+        assert_eq!(resumed.resumed_collections, 1);
+        assert!(resumed.collected.is_empty());
+        assert_eq!(
+            fs::read(&marker).expect("read restored marker"),
+            crate::base_integrity::marker_v2(&base_path).expect("hash restored base"),
+        );
+
+        let accounting = storage_accounting(&state).expect("account cancelled collection");
+        assert_eq!(accounting.cancelled_collections, 1);
+        assert_eq!(accounting.pending_collections, 0);
+        assert_eq!(accounting.bases.len(), 1);
+        assert_eq!(accounting.bases[0].path, base_path);
+
+        // The racing add rolls back and releases its claim; the restored
+        // marker must leave the base enumerable and collectable by a later gc.
+        let recovery = recover_incomplete_operations(&state).expect("roll back racing add");
+        assert!(recovery.errors.is_empty(), "{recovery:?}");
+        let collected = garbage_collect_inner(&state, true, None).expect("collect restored base");
+        assert_eq!(collected.collected, vec![base_path.clone()]);
+        assert!(!base_path.exists());
+        assert!(!marker.exists());
+        let accounting = storage_accounting(&state).expect("account final collection");
+        assert!(accounting.bases.is_empty());
+        assert_eq!(accounting.completed_collections, 1);
+    }
+
+    #[test]
+    fn marker_restore_recovers_on_either_side_of_the_cancellation_step() {
+        // Interruption immediately after the journaled cancellation: the
+        // marker was already restored in the same step, so recovery is a
+        // no-op and the base stays enumerable.
+        let fixture = tempdir().expect("fixture");
+        let (repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-cancel-window");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        race_reference_before_prepare_base(&repository, &state, &fixture.path().join("second"));
+        let store = crate::journal::CollectionJournalStore::open(&state);
+        let journal = store
+            .load_all()
+            .expect("load collection journals")
+            .into_iter()
+            .find(|journal| journal.base_path == base_path)
+            .expect("collection journal for the base");
+        let resolved_state =
+            super::resolve_real_state_directory(&super::absolute_path(&state).expect("state"))
+                .expect("resolve state directory");
+        let error = super::resume_decoded_collection(
+            &resolved_state,
+            &store,
+            &journal,
+            Some(GarbageCollectionPhase::Cancelled),
+        )
+        .expect_err("interrupt right after the journaled cancellation");
+        assert!(
+            error
+                .to_string()
+                .contains("injected garbage-collection failure"),
+            "unexpected error: {error}"
+        );
+        assert!(marker.is_file());
+        for pass in 0..2 {
+            let recovered = recover_incomplete_operations(&state).expect("recover");
+            assert!(recovered.errors.is_empty(), "pass {pass}: {recovered:?}");
+            assert_eq!(recovered.recovered_collections, 0, "pass {pass}");
+            assert!(marker.is_file(), "pass {pass}");
+        }
+        let accounting = storage_accounting(&state).expect("account cancelled collection");
+        assert_eq!(accounting.cancelled_collections, 1);
+        assert_eq!(accounting.bases.len(), 1);
+
+        // Interruption between the marker restore and the journaled
+        // cancellation: the journal is still MarkerRemoved but the marker is
+        // back, so recovery must settle on the restored marker.
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-restore-window");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        let content = crate::base_integrity::marker_v2(&base_path).expect("hash base");
+        fs::write(&marker, &content).expect("simulate a restore interrupted before cancellation");
+        let recovered = recover_incomplete_operations(&state).expect("recover restored marker");
+        assert!(recovered.errors.is_empty(), "{recovered:?}");
+        assert_eq!(fs::read(&marker).expect("read marker"), content);
+        let accounting = storage_accounting(&state).expect("account recovered cancellation");
+        assert_eq!(accounting.cancelled_collections, 1);
+        assert_eq!(accounting.pending_collections, 0);
+        assert_eq!(accounting.bases.len(), 1);
+        let collected = garbage_collect_inner(&state, true, None).expect("collect restored base");
+        assert_eq!(collected.collected, vec![base_path.clone()]);
+        assert!(!base_path.exists());
+    }
+
+    #[test]
+    fn interrupted_marker_restore_staging_is_reused_and_reaped() {
+        // A crash in the middle of staging the restored marker leaves the
+        // deterministic staging file behind. A retried cancellation must
+        // replace it and still produce a verified marker.
+        let fixture = tempdir().expect("fixture");
+        let (repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-staging-retry");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        race_reference_before_prepare_base(&repository, &state, &fixture.path().join("second"));
+        let store = crate::journal::CollectionJournalStore::open(&state);
+        let journal = store
+            .load_all()
+            .expect("load collection journals")
+            .into_iter()
+            .find(|journal| journal.base_path == base_path)
+            .expect("collection journal for the base");
+        let staging = super::restored_marker_staging_path(&journal).expect("staging path");
+        fs::write(&staging, b"stale partial marker").expect("simulate interrupted staging");
+        let resumed = garbage_collect_inner(&state, true, None).expect("cancel collection");
+        assert_eq!(resumed.resumed_collections, 1);
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read(&marker).expect("read restored marker"),
+            crate::base_integrity::marker_v2(&base_path).expect("hash restored base"),
+        );
+
+        // If the racing reference disappears before the retry, the collection
+        // finishes instead, and the staging leftover is reaped with it: a
+        // genuinely collected base leaves nothing behind.
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-staging-reap");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        let store = crate::journal::CollectionJournalStore::open(&state);
+        let journal = store
+            .load_all()
+            .expect("load collection journals")
+            .into_iter()
+            .find(|journal| journal.base_path == base_path)
+            .expect("collection journal for the base");
+        let staging = super::restored_marker_staging_path(&journal).expect("staging path");
+        fs::write(&staging, b"stale partial marker").expect("simulate interrupted staging");
+        let resumed = garbage_collect_inner(&state, true, None).expect("finish collection");
+        assert_eq!(resumed.resumed_collections, 1);
+        assert!(!base_path.exists());
+        assert!(!marker.exists());
+        assert!(!staging.exists());
+        let accounting = storage_accounting(&state).expect("account finished collection");
+        assert!(accounting.bases.is_empty());
+        assert_eq!(accounting.completed_collections, 1);
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    #[test]
+    fn status_diagnoses_a_base_directory_without_a_completion_marker() {
+        // The historical leak: a materialized base whose marker vanished with
+        // no journal explaining it. Marker-driven enumeration cannot list it,
+        // but status must at least surface it as a diagnostic.
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-orphan");
+        let marker = base_path.with_extension("complete");
+        fs::remove_file(&marker).expect("simulate the historical marker leak");
+
+        let plan = garbage_collect_inner(&state, false, None).expect("plan collection");
+        assert!(plan.candidates.is_empty());
+        let accounting = storage_accounting(&state).expect("account orphan base");
+        assert!(accounting.bases.is_empty());
+        let issue = accounting
+            .diagnostic_issues
+            .iter()
+            .find(|issue| issue.path == base_path)
+            .expect("orphan base directory is surfaced as a diagnostic");
+        assert!(
+            issue
+                .reason
+                .contains("not explained by a completion marker or journal"),
+            "unexpected diagnostic: {issue:?}"
+        );
+    }
+
     #[test]
     fn garbage_collection_preserves_a_base_referenced_by_an_incomplete_add() {
         let fixture = tempdir().expect("fixture");
@@ -11304,5 +13567,170 @@ mod tests {
             assert_eq!(repeated.recovered_prunes, 0, "phase {phase:?}");
             assert_eq!(repeated.completed_prunes, 1, "phase {phase:?}");
         }
+    }
+
+    /// One fixture: a repository with one managed worktree, one plain linked
+    /// worktree whose HEAD file is overwritten with garbage, and the Riftri
+    /// state directory.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    fn corrupt_head_fixture() -> (
+        crate::test_support::WritableTempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let fixture = tempdir().expect("fixture");
+        let root = fixture
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let repository = root.join("repository");
+        let managed = root.join("managed");
+        let corrupt = root.join("corrupt");
+        let state = root.join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: managed.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/corrupt-head-managed")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+        // Plain `git` cannot create directories from a Windows verbatim
+        // (\\?\) spelling, so hand it the drive-letter form the CLI would.
+        let corrupt_text = corrupt.to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let corrupt_text = corrupt_text
+            .strip_prefix("\\\\?\\")
+            .map(str::to_owned)
+            .unwrap_or(corrupt_text);
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "corrupt",
+                corrupt_text.as_str(),
+            ],
+        );
+        fs::write(repository.join(".git/worktrees/corrupt/HEAD"), "garbage\n")
+            .expect("corrupt linked worktree HEAD");
+        (fixture, repository, managed, corrupt, state)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn tolerates_an_unrelated_worktree_without_resolvable_head() {
+        let (_fixture, repository, managed, corrupt, state) = corrupt_head_fixture();
+
+        // Status keeps working, keeps the managed view, and names the corrupt
+        // worktree as a diagnostic instead of failing repo-wide.
+        let accounting = storage_accounting(&state).expect("storage accounting");
+        assert_eq!(accounting.active_views, 1);
+        assert_eq!(accounting.views[0].destination, managed);
+        assert!(
+            accounting.diagnostic_issues.iter().any(|issue| {
+                super::paths_match(&issue.path, &corrupt) && issue.reason.contains("cannot resolve")
+            }),
+            "diagnostics must name the corrupt worktree: {:?}",
+            accounting.diagnostic_issues
+        );
+
+        // Repair keeps working and names the corruption it cannot fix.
+        let recovered = recover_incomplete_operations(&state).expect("repair");
+        assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+        assert_eq!(recovered.unresolvable_worktrees.len(), 1);
+        assert!(super::paths_match(
+            &recovered.unresolvable_worktrees[0],
+            &corrupt
+        ));
+
+        // Unrelated lifecycle operations keep working: prune, then removal of
+        // the healthy managed worktree.
+        prune_worktrees_inner(
+            PruneWorktreesRequest {
+                repository: repository.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("prune despite corrupt worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: managed.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove healthy managed worktree despite corrupt worktree");
+        assert!(!managed.exists());
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn refuses_lifecycle_operations_on_the_worktree_whose_head_is_unresolvable() {
+        let (fixture, repository, managed, _corrupt, state) = corrupt_head_fixture();
+        // Corrupt the managed worktree's own HEAD: operations on THE corrupt
+        // worktree must fail closed with an actionable error.
+        fs::write(repository.join(".git/worktrees/managed/HEAD"), "garbage\n")
+            .expect("corrupt managed worktree HEAD");
+
+        let error = remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: managed.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect_err("removal of a corrupt worktree must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve the worktree HEAD"),
+            "unexpected removal error: {error}"
+        );
+        assert!(
+            managed.is_dir(),
+            "failed removal must preserve the worktree"
+        );
+
+        let error = move_worktree_inner(
+            MoveWorktreeRequest {
+                repository,
+                source: managed.clone(),
+                destination: fixture.path().join("moved"),
+                state_dir: Some(state),
+            },
+            None,
+        )
+        .expect_err("move of a corrupt worktree must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot resolve the worktree HEAD"),
+            "unexpected move error: {error}"
+        );
+        assert!(managed.is_dir(), "failed move must preserve the worktree");
     }
 }

@@ -51,7 +51,8 @@ test("website stages the canonical installer without maintaining another copy", 
   assert.deepEqual(fs.readFileSync(path.join(destination, "install.sh")), fs.readFileSync(path.join(root, "package/install.sh")));
   assert.deepEqual(fs.readFileSync(path.join(destination, "install.ps1")), fs.readFileSync(path.join(root, "package/install.ps1")));
   const { scripts } = JSON.parse(fs.readFileSync(path.join(root, "website/package.json"), "utf8"));
-  for (const name of ["dev", "build"]) assert.match(scripts[name], /stage-website-installer\.mjs && farm/);
+  assert.match(scripts.stage, /stage-website-installer\.mjs/);
+  for (const name of ["dev", "build"]) assert.match(scripts[name], /^pnpm stage && farm/);
 });
 
 test("hero and quick start reuse one install command and the same quick-start column styling", () => {
@@ -63,4 +64,12 @@ test("hero and quick start reuse one install command and the same quick-start co
   assert.match(hero, /<CopyCommand command=\{installCommand\}/);
   assert.match(steps, /command: installCommand/);
   assert.doesNotMatch(css, /\.start-list li:first-child \.command/);
+});
+
+test("command blocks keep the original left accent without an outer border", () => {
+  const css = fs.readFileSync(path.join(root, "website/src/app/globals.css"), "utf8");
+  const command = css.match(/^\.command\s*\{([^}]+)\}/m)?.[1];
+  assert.ok(command);
+  assert.match(command, /border-left:\s*2px solid var\(--accent\)/);
+  assert.doesNotMatch(command, /\bborder(?:-top|-right|-bottom|-block|-inline)?:/);
 });

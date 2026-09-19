@@ -1,8 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://riftri.dev/</loc>
-    <changefreq>weekly</changefreq>
-    <priority>1.0</priority>
-  </url>
+  <url><loc>https://riftri.dev/</loc></url>
+  <url><loc>https://riftri.dev/docs</loc></url>
+  <url><loc>https://riftri.dev/docs/installation</loc></url>
+  <url><loc>https://riftri.dev/docs/cli</loc></url>
+  <url><loc>https://riftri.dev/docs/agents</loc></url>
+  <url><loc>https://riftri.dev/docs/activation</loc></url>
+  <url><loc>https://riftri.dev/docs/troubleshooting</loc></url>
+  <url><loc>https://riftri.dev/docs/linux-reflink</loc></url>
+  <url><loc>https://riftri.dev/docs/linux-overlayfs</loc></url>
+  <url><loc>https://riftri.dev/docs/windows-refs</loc></url>
+  <url><loc>https://riftri.dev/docs/git-lfs</loc></url>
+  <url><loc>https://riftri.dev/docs/sparse-checkout</loc></url>
+  <url><loc>https://riftri.dev/docs/build-caches</loc></url>
+  <url><loc>https://riftri.dev/docs/architecture</loc></url>
+  <url><loc>https://riftri.dev/docs/safety</loc></url>
+  <url><loc>https://riftri.dev/docs/backend-guarantees</loc></url>
+  <url><loc>https://riftri.dev/docs/filesystem-compatibility</loc></url>
+  <url><loc>https://riftri.dev/docs/comparison</loc></url>
 </urlset>

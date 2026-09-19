@@ -1,5 +1,6 @@
 import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
+import { CopyMarkdown } from "../components/copy-markdown";
 import { Faq } from "../components/faq";
 import { MaterializationMap } from "../components/materialization-map";
 import { SavingsMap } from "../components/savings-map";
@@ -64,15 +65,34 @@ function GraphLabel({
   );
 }
 
+function Header() {
+  return (
+    <header className="site-header">
+      <SectionLink className="site-brand" href="#top" aria-label="Riftri home">
+        <img src="/favicon.svg" width="28" height="28" alt="" />
+        Riftri
+      </SectionLink>
+      <nav aria-label="Main navigation">
+        <SectionLink href="#overview">How it works</SectionLink>
+        <SectionLink href="#savings">Savings</SectionLink>
+        <SectionLink href="#faq">FAQ</SectionLink>
+        <a href="/docs">Docs <ArrowUpRightIcon /></a>
+      </nav>
+      <a className="header-github" href={githubUrl} aria-label="Riftri on GitHub">
+        <GitHubIcon /> <span>GitHub</span> <ArrowUpRightIcon />
+      </a>
+    </header>
+  );
+}
+
 function Hero() {
   return (
-    <section className="hero" id="top">
+    <section className="hero" id="top" tabIndex={-1} aria-labelledby="top-title">
       <div className="hero-copy">
         <GraphLabel index="00" icon={<GitHubIcon />}>
-          OPEN SOURCE / BUILT FOR PARALLEL WORK
+          OPEN SOURCE / NATIVE COPY-ON-WRITE
         </GraphLabel>
-        <h1>Riftri</h1>
-        <p className="hero-kicker">LIGHTWEIGHT GIT WORKSPACES FOR PARALLEL DEVELOPMENT_</p>
+        <h1 id="top-title">Git worktrees.<br /><span>Shared <mark className="hero-highlight">storage.</mark></span></h1>
         <p className="hero-lede">
           Real, isolated Git worktrees that share the unchanged parts of your project.
           Keep using normal files, normal Git, and the tools you already have.
@@ -87,21 +107,28 @@ function Hero() {
         </div>
         <div className="hero-install">
           <CopyCommand command={installCommand} compact />
-          <a
-            className="copy-button hero-markdown"
-            href="https://riftri.dev/index.md"
-            type="text/plain"
-            aria-label="Open Markdown guide"
-            title="Open Markdown guide"
-          >
-            .md
-          </a>
+          <CopyMarkdown source="/index.md" className="hero-markdown" />
         </div>
       </div>
       <div className="hero-graph">
+        <p className="hero-graph-label"><span>STORAGE LAYOUT</span><span aria-hidden="true">FIG. 01</span></p>
         <StorageMap />
+        <p className="hero-graph-caption">One base. Independent worktrees. Only edits diverge.</p>
       </div>
     </section>
+  );
+}
+
+function StorageBackends() {
+  return (
+    <div className="storage-backends">
+      <p>Native storage <span>on supported volumes</span></p>
+      <ul aria-label="Storage backends by platform">
+        <li><span>macOS</span> APFS</li>
+        <li><span>Linux</span> reflink / OverlayFS</li>
+        <li><span>Windows</span> ReFS</li>
+      </ul>
+    </div>
   );
 }
 
@@ -125,10 +152,10 @@ const essentials = [
 
 function Overview() {
   return (
-    <section className="content-section" id="overview">
+    <section className="content-section" id="overview" tabIndex={-1} aria-labelledby="overview-title">
       <div className="section-heading">
         <GraphLabel index="01">STORAGE MODEL</GraphLabel>
-        <h2>How Riftri stores linked worktrees</h2>
+        <h2 id="overview-title">How Riftri stores linked worktrees</h2>
         <p>
           Riftri changes how worktree files are created and stored. It does not replace Git,
           manage branches, or sit between your tools and the filesystem.
@@ -150,7 +177,7 @@ function Overview() {
 
 function Savings() {
   return (
-    <section className="content-section" id="savings" aria-labelledby="savings-title">
+    <section className="content-section" id="savings" tabIndex={-1} aria-labelledby="savings-title">
       <div className="section-heading split-heading">
         <div>
           <GraphLabel index="02">MEASURED SAVINGS</GraphLabel>
@@ -265,13 +292,16 @@ function Footer() {
 export default function HomePage() {
   return (
     <div className="site-shell">
+      <SectionLink className="skip-link" href="#main-content">Skip to content</SectionLink>
       <div className="page-frame">
-        <main>
+        <Header />
+        <main id="main-content" tabIndex={-1}>
           <Hero />
+          <StorageBackends />
           <Overview />
           <Savings />
           <GetStarted />
-          <section className="content-section faq-section" id="faq" aria-labelledby="faq-title">
+          <section className="content-section faq-section" id="faq" tabIndex={-1} aria-labelledby="faq-title">
             <div className="section-heading">
               <GraphLabel index="04">FAQ</GraphLabel>
               <h2 id="faq-title">Common questions</h2>

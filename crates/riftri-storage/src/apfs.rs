@@ -7,6 +7,21 @@ use std::path::Path;
 use crate::StorageError;
 
 pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
+    clone_tree_with_permissions(source, destination, false)
+}
+
+pub(crate) fn clone_tree_owner_writable(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), StorageError> {
+    clone_tree_with_permissions(source, destination, true)
+}
+
+fn clone_tree_with_permissions(
+    source: &Path,
+    destination: &Path,
+    owner_writable: bool,
+) -> Result<(), StorageError> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|source_error| io("inspect clone source", source, source_error))?;
     if !metadata.is_dir() {
@@ -19,7 +34,12 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Storag
         return Err(StorageError::DestinationExists(destination.to_path_buf()));
     }
 
-    let result = clone_directory(source, destination, metadata.permissions().mode());
+    let result = clone_directory(
+        source,
+        destination,
+        metadata.permissions().mode(),
+        owner_writable,
+    );
     if result.is_err() && destination.exists() {
         let _ = make_tree_owner_writable(destination);
         let _ = fs::remove_dir_all(destination);
@@ -27,7 +47,12 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Storag
     result
 }
 
-fn clone_directory(source: &Path, destination: &Path, final_mode: u32) -> Result<(), StorageError> {
+fn clone_directory(
+    source: &Path,
+    destination: &Path,
+    final_mode: u32,
+    owner_writable: bool,
+) -> Result<(), StorageError> {
     fs::create_dir(destination)
         .map_err(|source_error| io("create clone directory", destination, source_error))?;
     fs::set_permissions(destination, fs::Permissions::from_mode(final_mode | 0o700))
@@ -49,9 +74,17 @@ fn clone_directory(source: &Path, destination: &Path, final_mode: u32) -> Result
                 &source_path,
                 &destination_path,
                 metadata.permissions().mode(),
+                owner_writable,
             )?;
         } else if file_type.is_file() {
             clone_file(&source_path, &destination_path)?;
+            if owner_writable {
+                // Read the clone's actual mode, just like the former second
+                // pass: clonefile/umask/inherited ACL semantics remain intact.
+                let cloned = fs::symlink_metadata(&destination_path)
+                    .map_err(|error| io("inspect cloned permissions", &destination_path, error))?;
+                set_mode(&destination_path, cloned.permissions().mode() | 0o200)?;
+            }
         } else if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
                 .map_err(|source_error| io("read source symlink", &source_path, source_error))?;
@@ -63,6 +96,11 @@ fn clone_directory(source: &Path, destination: &Path, final_mode: u32) -> Result
         }
     }
 
+    let final_mode = if owner_writable {
+        final_mode | 0o700
+    } else {
+        final_mode
+    };
     fs::set_permissions(destination, fs::Permissions::from_mode(final_mode))
         .map_err(|source_error| io("restore clone directory mode", destination, source_error))?;
     Ok(())
@@ -192,6 +230,56 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{clone_tree, clone_tree_bulk_for_evaluation};
+
+    #[test]
+    fn writable_clone_matches_the_two_pass_path_and_preserves_the_base() {
+        let fixture = tempdir().expect("writable clone fixture");
+        let source = fixture.path().join("source");
+        let old = fixture.path().join("old");
+        let fused = fixture.path().join("fused");
+        write_fixture(&source, 2, 3, 1024);
+        let file = "directory-00/file-0000.bin";
+        set_xattr(&source.join(file), "com.riftri.clone-test", b"keep");
+        super::make_tree_read_only(&source).expect("protect base");
+        clone_tree(&source, &old).expect("old clone");
+        super::make_tree_owner_writable(&old).expect("old permission pass");
+        super::clone_tree_owner_writable(&source, &fused).expect("fused clone");
+        assert_tree_matches(&old, &fused);
+        assert_eq!(
+            get_xattr(&fused.join(file), "com.riftri.clone-test"),
+            Some(b"keep".to_vec())
+        );
+        fs::write(fused.join(file), b"private").expect("write private clone");
+        assert_eq!(
+            fs::read(source.join(file)).unwrap(),
+            fs::read(old.join(file)).unwrap()
+        );
+        assert_eq!(
+            fs::metadata(source.join(file))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o222,
+            0
+        );
+        super::make_tree_owner_writable(&source).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn writable_clone_cleans_up_after_an_unsupported_entry() {
+        let fixture = tempdir().expect("unsupported clone fixture");
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("destination");
+        write_fixture(&source, 1, 1, 128);
+        let socket = std::os::unix::net::UnixListener::bind(source.join("socket")).unwrap();
+        assert!(matches!(
+            super::clone_tree_owner_writable(&source, &destination),
+            Err(crate::StorageError::UnsupportedEntry(_))
+        ));
+        assert!(!destination.exists());
+        assert!(source.join("socket").exists());
+        drop(socket);
+    }
 
     #[derive(Serialize)]
     struct BulkCloneEvaluation {

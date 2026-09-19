@@ -98,9 +98,19 @@ with the exact native encoding named in `native_path_encoding`, and raw Git
 ref bytes beside lossy display strings, so non-UTF-8 paths and refs remain
 representable.
 The `doctor` report includes these path pairs for the destination, Git command,
-repository root, common Git directory, and storage probe paths.
+repository root, common Git directory, and storage probe paths. Its
+`destination_readiness.backend` and `destination_readiness.next_command` are
+always present, explicitly `null` when no backend is selected or no command
+applies, so a blocked destination keeps every key a ready one has.
 The `backends` report includes these path pairs for the requested destination
 and, per probed capability, the volume's requested and probe paths.
+The `worktree list --all-states` report (`schema_version` 2) applies the same
+pairing to its `diagnostic_issues`: each entry's `state_directory` display
+string has a `state_directory_native_hex` sibling, and a registration-level
+issue that no state directory owns carries both keys as explicit `null`.
+The hex sibling and the explicit nulls were added after `schema_version` 2
+first shipped, without a version bump: additive, null-consistent keys do not
+change the schema version.
 On Unix, `native_path_encoding` is `unix-bytes-hex`. On Windows, it is
 `windows-utf16le-hex`.
 
@@ -110,6 +120,25 @@ policy refusals from operational failures, the durable `phase` reached, a
 `cleanup` disposition, and recovery guidance including the exact
 `nextCommand`. A harness should treat a non-zero exit with a
 `"category": "policy"` receipt as a configuration to report, not retry.
+
+Receipts also carry the context the failing invocation used: `repository` and
+`stateDirectory` display strings, their `repositoryNativeHex` and
+`stateDirectoryNativeHex` twins, and `nativePathEncoding`. `nextCommand`
+targets that same context rather than the caller's working directory, so
+running it inspects or repairs the state that actually failed.
+
+`nextCommand` is a **shell string**, with every path quoted for the platform
+shell: run it through a shell rather than splitting it on whitespace. It is
+`null` when no command applies and also when a path cannot be written as a
+shell argument — a non-Unicode path, or one containing control characters.
+Riftri never emits a lossy or unquoted command, because one would silently
+address a different directory. Automation that needs the exact path should
+read the `*NativeHex` fields, which are faithful in every case.
+
+An explicitly passed `--state-dir` that does not exist is refused with
+`"code": "invalid-request"` and exit code 3, rather than scanned as empty: a
+directory Riftri never found cannot support an all-clear. A repository that
+has simply never created Riftri state still reports an all-clear and exits 0.
 
 `--json-errors` also suppresses the human-readable lifecycle progress lines
 that `worktree add`, `repair`, and `gc` otherwise print on stderr, so stderr

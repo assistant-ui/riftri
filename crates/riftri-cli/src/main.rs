@@ -311,6 +311,134 @@ impl Command {
             },
         }
     }
+
+    /// The repository and state directory this invocation selected.
+    ///
+    /// `riftri repair` and `riftri status` resolve their state directory from
+    /// the current directory unless told otherwise, so a receipt suggesting a
+    /// bare command can send the caller to unrelated state. Receipts repeat
+    /// the selection made here instead.
+    fn invocation_context(&self) -> InvocationContext {
+        let repository_and_state =
+            |repository: &PathBuf, state_dir: &Option<PathBuf>| InvocationContext {
+                repository: Some(repository.clone()),
+                state_directory: state_dir.clone(),
+            };
+        match self {
+            Self::Setup { repository, .. } => InvocationContext::for_repository(repository),
+            Self::Enable { path, repository } | Self::Disable { path, repository } => {
+                InvocationContext::for_repository(repository.as_deref().unwrap_or(path))
+            }
+            Self::Doctor {
+                path, repository, ..
+            } => InvocationContext::for_repository(repository.as_deref().unwrap_or(path)),
+            Self::Status {
+                repository,
+                repository_option,
+                state_dir,
+                ..
+            }
+            | Self::Repair {
+                repository,
+                repository_option,
+                state_dir,
+                ..
+            }
+            | Self::Gc {
+                repository,
+                repository_option,
+                state_dir,
+                ..
+            } => repository_and_state(repository_option.as_ref().unwrap_or(repository), state_dir),
+            Self::State { command } => match command {
+                StateCommand::Unregister { repository, .. } => {
+                    InvocationContext::for_repository(repository)
+                }
+            },
+            Self::Worktree { command } => match command {
+                WorktreeCommand::List {
+                    repository,
+                    state_dir,
+                    ..
+                }
+                | WorktreeCommand::Add {
+                    repository,
+                    state_dir,
+                    ..
+                }
+                | WorktreeCommand::Remove {
+                    repository,
+                    state_dir,
+                    ..
+                }
+                | WorktreeCommand::Move {
+                    repository,
+                    state_dir,
+                    ..
+                }
+                | WorktreeCommand::Compact {
+                    repository,
+                    state_dir,
+                    ..
+                }
+                | WorktreeCommand::Prune {
+                    repository,
+                    state_dir,
+                    ..
+                } => repository_and_state(repository, state_dir),
+            },
+            // These commands address no repository and no state directory, so
+            // there is nothing to carry into a receipt.
+            Self::Exec { .. }
+            | Self::Overlayfs { .. }
+            | Self::Shell { .. }
+            | Self::Completions { .. }
+            | Self::Man { .. }
+            | Self::Backends { .. } => InvocationContext::default(),
+        }
+    }
+}
+
+/// The repository and state directory a failing invocation actually used.
+///
+/// Paths are kept exactly as the caller wrote them and made absolute only when
+/// rendered into a suggested command, so that command targets the same
+/// directory wherever it is run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct InvocationContext {
+    repository: Option<PathBuf>,
+    state_directory: Option<PathBuf>,
+}
+
+/// What a recovery or inspection command should be pointed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ContextTarget {
+    /// An explicit state directory fully determines the target.
+    StateDirectory(PathBuf),
+    /// Without one, the repository still resolves the same default state
+    /// directory the failing command used.
+    Repository(PathBuf),
+}
+
+impl InvocationContext {
+    fn for_repository(repository: &Path) -> Self {
+        Self {
+            repository: Some(repository.to_path_buf()),
+            state_directory: None,
+        }
+    }
+
+    /// The most specific selection this invocation made, made absolute.
+    fn target(&self) -> Option<ContextTarget> {
+        if let Some(state_directory) = &self.state_directory {
+            return Some(ContextTarget::StateDirectory(riftri_core::command_path(
+                state_directory,
+            )));
+        }
+        self.repository
+            .as_deref()
+            .map(|repository| ContextTarget::Repository(riftri_core::command_path(repository)))
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -537,6 +665,9 @@ fn main() -> Result<()> {
         cli.plain || json_errors || cli.command.machine_output(),
         cli.no_animation || cli.no_progress,
     );
+    // Captured before `run` consumes the command, so a failure receipt can
+    // name the repository and state directory this invocation selected.
+    let context = cli.command.invocation_context();
 
     // Progress lines share stderr with the `--json-errors` receipt, so that
     // flag suppresses them automatically: callers expecting one machine-
@@ -552,7 +683,7 @@ fn main() -> Result<()> {
             if json_errors {
                 eprintln!(
                     "{}",
-                    serde_json::to_string(&failure_receipt(operation, &error))?
+                    serde_json::to_string(&failure_receipt(operation, &error, &context))?
                 );
             } else {
                 ui::print_error(&format!("Error: {error:?}"));
@@ -949,7 +1080,11 @@ fn report_progress(event: &riftri_core::progress::ProgressEvent) {
     ui::progress(line);
 }
 
-fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {
+fn failure_receipt(
+    operation: &'static str,
+    error: &anyhow::Error,
+    context: &InvocationContext,
+) -> serde_json::Value {
     let worktree_error = error.downcast_ref::<riftri_core::WorktreeError>();
     let (code, category, phase, cleanup, recovery) =
         worktree_error.map(worktree_failure_fields).unwrap_or((
@@ -959,19 +1094,25 @@ fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json
             "unknown",
             recovery_for_operation(operation),
         ));
-    let next_command = match worktree_error {
-        Some(riftri_core::WorktreeError::RecoveryPending {
-            state_directory, ..
-        }) => Some(format!(
-            "riftri repair --state-dir {}",
-            state_directory.display()
-        )),
-        _ => match recovery {
-            "required" => Some("riftri repair".to_owned()),
-            "inspect" => Some("riftri status".to_owned()),
-            _ => None,
-        },
+    let next_command = recovery_next_command(recovery, worktree_error, context);
+    // An error that names its own state directory outranks anything the
+    // command line selected: that is where the state needing attention
+    // actually lives.
+    let state_directory = match worktree_error {
+        Some(
+            riftri_core::WorktreeError::RecoveryPending {
+                state_directory, ..
+            }
+            | riftri_core::WorktreeError::SymlinkedBaseParent {
+                state_directory, ..
+            },
+        ) => Some(state_directory.clone()),
+        _ => context
+            .state_directory
+            .as_deref()
+            .map(riftri_core::command_path),
     };
+    let repository = context.repository.as_deref().map(riftri_core::command_path);
 
     serde_json::json!({
         "schemaVersion": 1,
@@ -984,7 +1125,57 @@ fn failure_receipt(operation: &'static str, error: &anyhow::Error) -> serde_json
         "cleanup": cleanup,
         "recovery": recovery,
         "nextCommand": next_command,
+        // Exact context for automation. `nextCommand` is a shell string and is
+        // omitted entirely when a path cannot be written as a shell argument;
+        // these fields stay faithful in every case.
+        "repository": repository.as_ref().map(|path| path.display().to_string()),
+        "repositoryNativeHex": repository.as_deref().map(native_path_hex),
+        "stateDirectory": state_directory.as_ref().map(|path| path.display().to_string()),
+        "stateDirectoryNativeHex": state_directory.as_deref().map(native_path_hex),
+        "nativePathEncoding": native_path_encoding(),
     })
+}
+
+/// The recovery or inspection command a caller should run next, targeted at
+/// the state the failing command actually used.
+///
+/// Returns `None` when no command applies, and also when the path involved
+/// cannot be written as a shell argument: a command that silently addresses
+/// the wrong directory is worse than no command, because `riftri repair`
+/// reports an all-clear for any state directory it does not find.
+fn recovery_next_command(
+    recovery: &str,
+    worktree_error: Option<&riftri_core::WorktreeError>,
+    context: &InvocationContext,
+) -> Option<String> {
+    if let Some(riftri_core::WorktreeError::RecoveryPending {
+        state_directory, ..
+    }) = worktree_error
+    {
+        // Core's human-readable message names exactly this command, so the
+        // two can never disagree.
+        return riftri_core::repair_command(state_directory);
+    }
+    if let Some(riftri_core::WorktreeError::SymlinkedBaseParent {
+        state_directory, ..
+    }) = worktree_error
+    {
+        // Same guarantee for the symlinked-base safety stop: its message
+        // names exactly this status command.
+        return riftri_core::status_command(state_directory);
+    }
+    let subcommand = match recovery {
+        "required" => "repair",
+        "inspect" => "status",
+        _ => return None,
+    };
+    match context.target() {
+        Some(ContextTarget::StateDirectory(path)) => riftri_core::shell_quoted_path(&path)
+            .map(|quoted| format!("riftri {subcommand} --state-dir {quoted}")),
+        Some(ContextTarget::Repository(path)) => riftri_core::shell_quoted_path(&path)
+            .map(|quoted| format!("riftri {subcommand} --repository {quoted}")),
+        None => Some(format!("riftri {subcommand}")),
+    }
 }
 
 fn worktree_failure_fields(
@@ -1027,6 +1218,14 @@ fn worktree_failure_fields(
             "not-needed",
             "not-required",
         ),
+        // The safety stop that refuses to follow a symbolic link inside
+        // Riftri's own base storage. Nothing was attempted, so it stays a
+        // policy refusal with no cleanup — but unlike other invalid requests
+        // its message tells the caller to inspect the affected state, so the
+        // receipt must carry the same instruction and the same command.
+        WorktreeError::SymlinkedBaseParent { .. } => {
+            ("invalid-request", "policy", None, "not-needed", "inspect")
+        }
         // An interrupted lifecycle operation left a durable journal behind:
         // nothing was changed by this command, but the caller must run the
         // repair command echoed in `nextCommand` before retrying.
@@ -1225,13 +1424,19 @@ fn run_overlayfs_helper() -> Result<()> {
             )?;
             outputln!("{unmounted}");
         }
-        ("reset-work", [layout_root, lower, merged]) => {
+        ("reset-work", [layout_root, lower, merged, context]) => {
+            let context = context
+                .to_str()
+                .context("internal mount context is not UTF-8")?;
+            let context =
+                serde_json::from_str(context).context("decode internal OverlayFS mount context")?;
             riftri_storage::OverlayFsMounter::helper_reset_work(
                 Path::new(layout_root),
                 Path::new(lower),
                 Path::new(merged),
                 requester_uid,
                 requester_gid,
+                &context,
             )?;
         }
         _ => anyhow::bail!("invalid internal OverlayFS helper request"),
@@ -1239,9 +1444,40 @@ fn run_overlayfs_helper() -> Result<()> {
     Ok(())
 }
 
+/// Resolve the state directory an inspection or recovery command should read.
+///
+/// The two cases are deliberately different. A repository that has never
+/// created Riftri state is a normal, healthy situation: the default directory
+/// is simply absent, every count is zero, and an all-clear is correct. An
+/// explicitly named `--state-dir` that does not exist is not: the caller
+/// asserted that state lives there. Treating it as empty — which is how the
+/// journal scanner treats any missing directory — would answer "nothing needs
+/// attention" about a directory Riftri never looked in, and a mistyped or
+/// shell-split path is exactly how callers arrive here.
 fn resolve_state_directory(repository: &Path, state_directory: Option<PathBuf>) -> Result<PathBuf> {
     match state_directory {
-        Some(state_directory) => Ok(state_directory),
+        Some(state_directory) => {
+            match std::fs::symlink_metadata(&state_directory) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(anyhow::Error::new(
+                        riftri_core::WorktreeError::InvalidRequest(format!(
+                            "state directory {} does not exist.\n\
+                             Nothing was inspected, so this is not an all-clear. Check the path \
+                             — a path containing spaces must be quoted in your shell — or omit \
+                             --state-dir to use the repository default.",
+                            state_directory.display()
+                        )),
+                    ));
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error)).with_context(|| {
+                        format!("inspect state directory {}", state_directory.display())
+                    });
+                }
+            }
+            Ok(state_directory)
+        }
         None => {
             let activation = riftri_core::repository_activation(repository)?;
             Ok(activation.common_git_dir.join("riftri"))
@@ -1304,6 +1540,22 @@ fn print_shell_status(repository: &Path) -> Result<()> {
     Ok(())
 }
 
+fn relocated_worktrees_json(report: &riftri_core::RecoveryReport) -> Vec<serde_json::Value> {
+    report
+        .relocations
+        .iter()
+        .map(|relocation| {
+            serde_json::json!({
+                "operation_id": relocation.operation_id,
+                "journal_destination": relocation.journal_destination.display().to_string(),
+                "journal_destination_native_hex": native_path_hex(&relocation.journal_destination),
+                "registered_path": relocation.registered_path.display().to_string(),
+                "registered_path_native_hex": native_path_hex(&relocation.registered_path),
+            })
+        })
+        .collect()
+}
+
 fn print_recovery_report(
     state_directory: &Path,
     report: &riftri_core::RecoveryReport,
@@ -1330,6 +1582,48 @@ fn print_recovery_report(
             "recovered_prunes": report.recovered_prunes,
             "completed_collections": report.completed_collections,
             "recovered_collections": report.recovered_collections,
+            "retired_adds": report.retired_adds,
+            "relocated_worktrees": relocated_worktrees_json(report),
+            "unresolvable_worktrees": report
+                .unresolvable_worktrees
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "reaped_artifacts": report
+                .reaped_artifacts
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "reaped_probe_roots": report
+                .reaped_probe_roots
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "preserved_probe_mounts": report
+                .preserved_probe_mounts
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
             "errors": report.errors,
         });
         println!(
@@ -1362,6 +1656,50 @@ fn print_recovery_report(
     outputln!("Recovered prunes: {}", report.recovered_prunes);
     outputln!("Completed collections: {}", report.completed_collections);
     outputln!("Recovered collections: {}", report.recovered_collections);
+    outputln!("Retired add operations: {}", report.retired_adds);
+    outputln!(
+        "Reaped interrupted journal writes: {}",
+        report.reaped_artifacts.len()
+    );
+    for path in &report.reaped_artifacts {
+        outputln!("- {}", path.display());
+    }
+    outputln!(
+        "Reaped abandoned OverlayFS probes: {}",
+        report.reaped_probe_roots.len()
+    );
+    for path in &report.reaped_probe_roots {
+        outputln!("- {}", path.display());
+    }
+    if !report.preserved_probe_mounts.is_empty() {
+        outputln!("Abandoned OverlayFS probes still covered by a mount (preserved):");
+        for path in &report.preserved_probe_mounts {
+            outputln!(
+                "- {}: unmount it, then rerun `riftri repair`",
+                path.display()
+            );
+        }
+    }
+    if !report.relocations.is_empty() {
+        outputln!("Relocated worktrees Riftri no longer tracks:");
+        for relocation in &report.relocations {
+            outputln!(
+                "- operation {}: journaled {} is now registered by Git at {}; Riftri did not adopt the new path",
+                relocation.operation_id,
+                relocation.journal_destination.display(),
+                relocation.registered_path.display()
+            );
+        }
+    }
+    if !report.unresolvable_worktrees.is_empty() {
+        outputln!("Worktrees Git lists without a resolvable HEAD:");
+        for path in &report.unresolvable_worktrees {
+            outputln!(
+                "- {}: run `git worktree repair` or remove the worktree",
+                path.display()
+            );
+        }
+    }
     if !report.errors.is_empty() {
         outputln!("Operations needing attention:");
         for error in &report.errors {
@@ -1377,12 +1715,17 @@ fn print_recovery_report(
 }
 
 fn invoked_as_git_shim() -> bool {
-    env::var_os(riftri_core::SHIM_ACTIVE_ENV).is_some()
-        && env::args_os()
-            .next()
-            .as_deref()
-            .and_then(|argument| Path::new(argument).file_name())
-            .is_some_and(|name| name == OsStr::new("git") || name == OsStr::new("git.exe"))
+    let named_git = env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|argument| Path::new(argument).file_name())
+        .is_some_and(|name| name == OsStr::new("git") || name == OsStr::new("git.exe"));
+    // A `git`-named invocation without the activation marker is still a shim
+    // when a Riftri shim scope is otherwise recognizable: answering as the
+    // Riftri CLI would shadow normal Git behavior, so fail toward delegation.
+    named_git
+        && (env::var_os(riftri_core::SHIM_ACTIVE_ENV).is_some()
+            || riftri_core::stripped_shim_scope_detected())
 }
 
 #[cfg(unix)]
@@ -1399,10 +1742,13 @@ fn detected_posix_shell() -> &'static str {
 }
 
 fn run_git_shim() -> Result<i32> {
-    env::var_os(riftri_core::REAL_GIT_ENV)
-        .filter(|path| !path.is_empty())
-        .context("Riftri Git shim is missing the real Git executable path")?;
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if !riftri_core::shim_environment_complete() {
+        // Fail safe: a shim whose environment was stripped — for example by
+        // shell deactivation evaluated inside a `riftri exec` session — must
+        // behave exactly like the real Git instead of answering as Riftri.
+        return Ok(riftri_core::delegate_stripped_shim_invocation(&arguments)?);
+    }
     let current_directory = env::current_dir().context("resolve Git working directory")?;
 
     match riftri_core::proxy_git_command(&current_directory, &arguments)? {
@@ -1740,8 +2086,12 @@ fn print_all_states_worktree_inventory(
             .registration_issues
             .iter()
             .map(|issue| {
+                // A registration-level issue belongs to no usable state
+                // directory, so the display string and its native-hex twin
+                // are both explicitly null rather than absent or unpaired.
                 let mut value = diagnostic_issue_json(issue);
                 value["state_directory"] = serde_json::Value::Null;
+                value["state_directory_native_hex"] = serde_json::Value::Null;
                 value
             })
             .chain(inventory.states.iter().flat_map(|state| {
@@ -1749,6 +2099,8 @@ fn print_all_states_worktree_inventory(
                     let mut value = diagnostic_issue_json(issue);
                     value["state_directory"] =
                         serde_json::Value::from(state.state_directory.display().to_string());
+                    value["state_directory_native_hex"] =
+                        serde_json::Value::from(native_path_hex(&state.state_directory));
                     value
                 })
             }))
@@ -1942,39 +2294,43 @@ fn print_storage_accounting(
         return Ok(());
     }
 
+    // `riftri repair` defaults to the state directory of the current
+    // repository, which is not necessarily the one reported here, so name
+    // this one in every hint.
+    let repair = repair_hint(state_directory);
     outputln!("Riftri storage status");
     outputln!("State: {}", state_directory.display());
     outputln!("Active views: {}", report.active_views);
     outputln!("Pending adds: {}", report.pending_adds);
     if report.pending_adds > 0 {
-        outputln!("Attention: run `riftri repair` to roll back pending adds");
+        outputln!("Attention: {repair} to roll back pending adds");
     }
     outputln!("Completed removals: {}", report.completed_removals);
     outputln!("Pending removals: {}", report.pending_removals);
     if report.pending_removals > 0 {
-        outputln!("Attention: run `riftri repair` to resume pending removals");
+        outputln!("Attention: {repair} to resume pending removals");
     }
     outputln!("Completed moves: {}", report.completed_moves);
     outputln!("Pending moves: {}", report.pending_moves);
     if report.pending_moves > 0 {
-        outputln!("Attention: run `riftri repair` to resume pending moves");
+        outputln!("Attention: {repair} to resume pending moves");
     }
     outputln!("Completed compactions: {}", report.completed_compactions);
     outputln!("Cancelled compactions: {}", report.cancelled_compactions);
     outputln!("Pending compactions: {}", report.pending_compactions);
     if report.pending_compactions > 0 {
-        outputln!("Attention: run `riftri repair` to resume pending compactions");
+        outputln!("Attention: {repair} to resume pending compactions");
     }
     outputln!("Completed prunes: {}", report.completed_prunes);
     outputln!("Pending prunes: {}", report.pending_prunes);
     if report.pending_prunes > 0 {
-        outputln!("Attention: run `riftri repair` to resume pending prunes");
+        outputln!("Attention: {repair} to resume pending prunes");
     }
     outputln!("Completed collections: {}", report.completed_collections);
     outputln!("Cancelled collections: {}", report.cancelled_collections);
     outputln!("Pending collections: {}", report.pending_collections);
     if report.pending_collections > 0 {
-        outputln!("Attention: run `riftri repair` to resume pending collections");
+        outputln!("Attention: {repair} to resume pending collections");
     }
     outputln!(
         "Coordination locks: {} (safe persistent metadata)",
@@ -2075,6 +2431,18 @@ fn print_garbage_collection_report(
             "candidates": candidates,
             "collected": collected,
             "skipped_in_use": skipped_in_use,
+            "skipped_protected": report
+                .skipped_protected
+                .iter()
+                .map(|protection| {
+                    serde_json::json!({
+                        "base_path": protection.base_path.display().to_string(),
+                        "base_path_native_hex": native_path_hex(&protection.base_path),
+                        "operation_id": protection.operation_id,
+                        "reason": protection.reason,
+                    })
+                })
+                .collect::<Vec<_>>(),
             "resumed_collections": report.resumed_collections,
             "removed_logical_bytes": report.removed_logical_bytes,
             "removed_allocated_bytes": report.removed_allocated_bytes,
@@ -2112,6 +2480,18 @@ fn print_garbage_collection_report(
         report.skipped_in_use.len()
     );
     outputln!(
+        "Skipped because a journaled operation still claims them: {}",
+        report.skipped_protected.len()
+    );
+    for protection in &report.skipped_protected {
+        outputln!(
+            "- {}: {} (operation {})",
+            protection.base_path.display(),
+            protection.reason,
+            protection.operation_id
+        );
+    }
+    outputln!(
         "Removed logical: {}",
         display_byte_count(report.removed_logical_bytes)
     );
@@ -2121,9 +2501,22 @@ fn print_garbage_collection_report(
     );
     print_allocation_note();
     if !report.applied && !report.candidates.is_empty() {
-        outputln!("Nothing was deleted; rerun with `riftri gc --apply` to collect this plan");
+        let apply = match riftri_core::shell_quoted_path(state_directory) {
+            Some(quoted) => format!("`riftri gc --apply --state-dir {quoted}`"),
+            None => "riftri gc --apply against the state directory shown above".to_owned(),
+        };
+        outputln!("Nothing was deleted; rerun with {apply} to collect this plan");
     }
     Ok(())
+}
+
+/// Phrase naming the `riftri repair` invocation for one state directory, for
+/// use inside a human-readable sentence.
+fn repair_hint(state_directory: &Path) -> String {
+    match riftri_core::repair_command(state_directory) {
+        Some(command) => format!("run `{command}`"),
+        None => "run riftri repair against the state directory shown above".to_owned(),
+    }
 }
 
 fn print_allocation_note() {
@@ -2164,20 +2557,20 @@ fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
         None => serde_json::json!(report.repository),
     };
     let readiness = &report.destination_readiness;
-    let mut destination_readiness = serde_json::json!({
+    // `backend` and `next_command` are always present, explicitly null when
+    // no backend is selected or no command applies, matching every sibling
+    // report; strictly-typed consumers must never lose a key on the blocked
+    // path that the ready path carries.
+    let destination_readiness = serde_json::json!({
         "destination": readiness.destination.display().to_string(),
         "destination_native_hex": native_path_hex(&readiness.destination),
         "status": readiness.status,
+        "backend": readiness.backend,
         "copy_on_write": readiness.copy_on_write,
         "overlayfs_helper": readiness.overlayfs_helper,
         "blockers": readiness.blockers,
+        "next_command": readiness.next_command,
     });
-    if let Some(backend) = readiness.backend {
-        destination_readiness["backend"] = serde_json::json!(backend);
-    }
-    if let Some(command) = &readiness.next_command {
-        destination_readiness["next_command"] = serde_json::json!(command);
-    }
     let storage_capabilities = report
         .storage_capabilities
         .iter()
@@ -2394,10 +2787,24 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        Cli, Command, OverlayFsCommand, ShellCommand, ShellKind, WorktreeCommand, failure_receipt,
+        Cli, Command, InvocationContext, OverlayFsCommand, ShellCommand, ShellKind,
+        WorktreeCommand, failure_receipt,
     };
-    #[cfg(unix)]
-    use super::{native_path_encoding, native_path_hex};
+    use super::{PathBuf, native_path_encoding, native_path_hex};
+
+    /// Receipt for an invocation that selected no repository and no state
+    /// directory, matching the historical two-argument helper.
+    fn receipt(operation: &'static str, error: &anyhow::Error) -> serde_json::Value {
+        failure_receipt(operation, error, &InvocationContext::default())
+    }
+
+    /// The context clap would produce for the given command line.
+    fn context_for(arguments: &[&str]) -> InvocationContext {
+        Cli::try_parse_from(arguments)
+            .expect("parse command line")
+            .command
+            .invocation_context()
+    }
 
     #[test]
     fn help_uses_the_public_product_description() {
@@ -2563,7 +2970,7 @@ mod tests {
         let error = anyhow::Error::new(riftri_core::WorktreeError::InvalidRequest(
             "destination already exists".to_owned(),
         ));
-        let receipt = failure_receipt("worktree-add", &error);
+        let receipt = receipt("worktree-add", &error);
 
         assert_eq!(receipt["schemaVersion"], 1);
         assert_eq!(receipt["outcome"], "failed");
@@ -2574,36 +2981,320 @@ mod tests {
         assert_eq!(receipt["recovery"], "not-required");
         assert!(receipt["phase"].is_null());
         assert!(receipt["nextCommand"].is_null());
+        assert_eq!(receipt["nativePathEncoding"], native_path_encoding());
     }
 
+    /// The repair command a receipt advertises is a shell string. It must be
+    /// quoted, or a state directory whose path contains a space becomes two
+    /// arguments and repair silently inspects a different directory.
     #[test]
-    fn pending_recovery_receipts_require_repair_with_the_state_directory() {
-        let state_directory = std::path::PathBuf::from("/tmp/riftri-state");
-        let error = anyhow::Error::new(riftri_core::WorktreeError::RecoveryPending {
-            message: format!(
-                "a move of /tmp/view is already pending; run `riftri repair --state-dir {}`",
-                state_directory.display()
-            ),
+    fn pending_recovery_receipts_require_repair_with_the_quoted_state_directory() {
+        for relative in [
+            "riftri-state",
+            "My Projects/app/.git/riftri",
+            "it's a state/riftri",
+            "quotes 'and' spaces/riftri",
+        ] {
+            let state_directory = riftri_core::command_path(Path::new(relative));
+            let error = anyhow::Error::new(riftri_core::recovery_pending_error(
+                "a move of /tmp/view is already pending".to_owned(),
+                &state_directory,
+            ));
+            let receipt = receipt("worktree-move", &error);
+
+            assert_eq!(receipt["code"], "recovery-pending");
+            assert_eq!(receipt["category"], "operational");
+            assert_eq!(receipt["cleanup"], "not-needed");
+            assert_eq!(receipt["recovery"], "required");
+            let next_command = receipt["nextCommand"].as_str().expect("next command");
+            assert!(
+                receipt["message"]
+                    .as_str()
+                    .expect("message")
+                    .contains(next_command),
+                "human guidance and nextCommand must agree"
+            );
+            // The exact directory stays available to automation that should
+            // not have to parse a shell string at all.
+            assert_eq!(
+                receipt["stateDirectory"],
+                state_directory.display().to_string()
+            );
+            assert_eq!(
+                receipt["stateDirectoryNativeHex"],
+                native_path_hex(&state_directory)
+            );
+
+            // The command carries the whole path as one shell word.
+            let quoted = next_command
+                .strip_prefix("riftri repair --state-dir ")
+                .expect("next command names the state directory");
+            assert_eq!(
+                shell_split(quoted),
+                vec![state_directory.clone()],
+                "{next_command}"
+            );
+        }
+    }
+
+    /// The symlinked-base safety stop is a policy refusal whose own message
+    /// directs the caller to `riftri status`, so its receipt must say
+    /// `recovery: inspect` with that exact command — not `not-required` with
+    /// a null `nextCommand` contradicting the message.
+    #[test]
+    fn symlinked_base_receipts_inspect_the_state_directory_the_error_names() {
+        let state_directory = riftri_core::command_path(Path::new("My Projects/app/state"));
+        let error = anyhow::Error::new(riftri_core::WorktreeError::SymlinkedBaseParent {
+            message: "cleanup stopped: immutable-base path is a symbolic link".to_owned(),
             state_directory: state_directory.clone(),
         });
-        let receipt = failure_receipt("worktree-move", &error);
+        // The caller selected a different state directory; the error's own
+        // directory is where the redirected layout actually lives.
+        let context = context_for(&["riftri", "gc", "--state-dir", "elsewhere/state"]);
+        let receipt = failure_receipt("garbage-collection", &error, &context);
 
-        assert_eq!(receipt["code"], "recovery-pending");
-        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["code"], "invalid-request");
+        assert_eq!(receipt["category"], "policy");
         assert_eq!(receipt["cleanup"], "not-needed");
-        assert_eq!(receipt["recovery"], "required");
+        assert_eq!(receipt["recovery"], "inspect");
         let next_command = receipt["nextCommand"].as_str().expect("next command");
         assert_eq!(
             next_command,
-            format!("riftri repair --state-dir {}", state_directory.display())
+            riftri_core::status_command(&state_directory)
+                .expect("the fixture path is representable")
+        );
+        let quoted = next_command
+            .strip_prefix("riftri status --state-dir ")
+            .expect("next command names the state directory");
+        assert_eq!(
+            shell_split(quoted),
+            vec![state_directory.clone()],
+            "{next_command}"
+        );
+        assert_eq!(
+            receipt["stateDirectory"],
+            state_directory.display().to_string()
+        );
+        assert_eq!(
+            receipt["stateDirectoryNativeHex"],
+            native_path_hex(&state_directory)
+        );
+        assert_eq!(super::failure_exit_code(&error), 3);
+    }
+
+    /// A path Riftri cannot write as a shell argument must produce no command
+    /// at all: a lossy rendering would name a directory that does not exist,
+    /// and repair reports an all-clear for any directory it cannot find.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_state_directories_produce_no_command_but_keep_exact_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let state_directory =
+            std::path::PathBuf::from(OsString::from_vec(b"/tmp/riftri-state-\xff".to_vec()));
+        let error = anyhow::Error::new(riftri_core::recovery_pending_error(
+            "a move of /tmp/view is already pending".to_owned(),
+            &state_directory,
+        ));
+        let receipt = receipt("worktree-move", &error);
+
+        assert_eq!(receipt["recovery"], "required");
+        assert!(
+            receipt["nextCommand"].is_null(),
+            "a non-UTF-8 path must never produce a runnable-looking command"
+        );
+        assert_eq!(
+            receipt["stateDirectoryNativeHex"],
+            native_path_hex(&state_directory)
+        );
+        assert_eq!(receipt["nativePathEncoding"], native_path_encoding());
+        let message = receipt["message"].as_str().expect("message");
+        assert!(message.contains("riftri repair"), "{message}");
+        assert!(!message.contains("--state-dir '"), "{message}");
+    }
+
+    /// Without a pending journal to name a directory, the receipt still has to
+    /// repeat whatever the failing invocation selected, or the suggestion
+    /// inspects the caller's default state instead.
+    #[test]
+    fn generic_receipts_repeat_the_selected_state_directory() {
+        let selected = "My Projects/app/state";
+        let expected = riftri_core::command_path(Path::new(selected));
+        let context = context_for(&["riftri", "repair", "--state-dir", selected]);
+        let error = anyhow::Error::new(riftri_core::WorktreeError::JournalTransition(
+            riftri_core::JournalTransitionError {
+                current: riftri_core::AddWorktreePhase::IntentRecorded,
+                requested: riftri_core::AddWorktreePhase::Active,
+            },
+        ));
+        let receipt = failure_receipt("repair", &error, &context);
+
+        assert_eq!(receipt["recovery"], "required");
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        let quoted = next_command
+            .strip_prefix("riftri repair --state-dir ")
+            .expect("next command names the selected state directory");
+        assert_eq!(
+            shell_split(quoted),
+            vec![expected.clone()],
+            "{next_command}"
+        );
+        assert_eq!(receipt["stateDirectory"], expected.display().to_string());
+    }
+
+    /// A repository chosen with `--repository` resolves a different default
+    /// state directory than the caller's working directory does, so the
+    /// receipt has to name it.
+    #[test]
+    fn generic_receipts_repeat_an_explicit_repository() {
+        let selected = "repos/other app";
+        let expected = riftri_core::command_path(Path::new(selected));
+        let context = context_for(&[
+            "riftri",
+            "worktree",
+            "add",
+            "../view",
+            "--detach",
+            "HEAD",
+            "--repository",
+            selected,
+        ]);
+        let error = anyhow::anyhow!("git failed");
+        let receipt = failure_receipt("worktree-add", &error, &context);
+
+        assert_eq!(receipt["recovery"], "inspect");
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        let quoted = next_command
+            .strip_prefix("riftri status --repository ")
+            .expect("next command names the selected repository");
+        assert_eq!(
+            shell_split(quoted),
+            vec![expected.clone()],
+            "{next_command}"
+        );
+        assert_eq!(receipt["repository"], expected.display().to_string());
+        assert!(receipt["stateDirectory"].is_null());
+    }
+
+    /// Relative selections are made absolute so the suggested command targets
+    /// the same directory wherever the caller runs it.
+    #[test]
+    fn suggested_commands_name_absolute_paths() {
+        let context = context_for(&["riftri", "repair", "--state-dir", "relative-state"]);
+        let error = anyhow::anyhow!("something operational");
+        let receipt = failure_receipt("repair", &error, &context);
+
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        let quoted = next_command
+            .strip_prefix("riftri status --state-dir ")
+            .expect("next command names the state directory");
+        assert_eq!(
+            shell_split(quoted),
+            vec![riftri_core::command_path(Path::new("relative-state"))]
         );
         assert!(
-            receipt["message"]
-                .as_str()
-                .expect("message")
-                .contains(next_command),
-            "human guidance and nextCommand must agree"
+            Path::new(receipt["stateDirectory"].as_str().expect("state directory")).is_absolute()
         );
+    }
+
+    /// An invocation that named neither a repository nor a state directory
+    /// keeps the historical bare suggestion.
+    #[test]
+    fn receipts_without_context_keep_the_bare_command() {
+        let error = anyhow::anyhow!("something operational");
+        let receipt = receipt("worktree-add", &error);
+
+        assert_eq!(receipt["nextCommand"], "riftri status");
+        assert!(receipt["repository"].is_null());
+        assert!(receipt["stateDirectory"].is_null());
+    }
+
+    /// A `--state-dir` the caller named explicitly must exist. Reporting an
+    /// all-clear for a directory Riftri never found is how a mistyped or
+    /// shell-split path turns into a lost pending journal.
+    #[test]
+    fn an_explicitly_named_missing_state_directory_is_refused() {
+        use super::resolve_state_directory;
+
+        let fixture = tempfile::tempdir().expect("fixture directory");
+        let missing = fixture.path().join("absent-state");
+        let error = resolve_state_directory(fixture.path(), Some(missing.clone()))
+            .expect_err("a missing explicit state directory is refused");
+
+        assert_eq!(super::failure_exit_code(&error), 3);
+        let message = error.to_string();
+        assert!(
+            message.contains(&missing.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(message.contains("not an all-clear"), "{message}");
+
+        // An existing directory still resolves to itself, untouched.
+        let present = fixture.path().join("present-state");
+        std::fs::create_dir(&present).expect("create state directory");
+        assert_eq!(
+            resolve_state_directory(fixture.path(), Some(present.clone())).expect("resolve"),
+            present
+        );
+    }
+
+    /// A blocked destination must keep the exact keys a ready destination
+    /// carries: `backend` and `next_command` are explicitly null when absent,
+    /// never dropped, so strictly-typed consumers that parsed a ready report
+    /// do not fail on a blocked one.
+    #[test]
+    fn doctor_json_emits_explicit_nulls_for_a_blocked_destination() {
+        let report = riftri_core::DoctorReport {
+            project_stage: "native-cow-with-repository-activation",
+            operating_system: "test-os",
+            architecture: "test-arch",
+            cow_backend_active: false,
+            repository_enabled: None,
+            git_shim_active: false,
+            git: riftri_core::Diagnostic {
+                available: false,
+                value: None,
+                error: Some("git executable not found".to_owned()),
+            },
+            repository: riftri_core::Diagnostic {
+                available: false,
+                value: None,
+                error: Some("not a Git repository".to_owned()),
+            },
+            repository_compatibility: riftri_core::Diagnostic {
+                available: false,
+                value: None,
+                error: Some("repository inspection did not succeed".to_owned()),
+            },
+            destination_readiness: riftri_core::DestinationReadiness {
+                destination: PathBuf::from("blocked-destination"),
+                status: riftri_core::DestinationReadinessStatus::Blocked,
+                backend: None,
+                copy_on_write: false,
+                overlayfs_helper: riftri_core::OverlayFsHelperReadiness::NotApplicable,
+                blockers: Vec::new(),
+                next_command: None,
+            },
+            storage_capabilities: Vec::new(),
+        };
+
+        let output = super::doctor_json(&report);
+
+        let readiness = output["destination_readiness"]
+            .as_object()
+            .expect("destination_readiness object");
+        assert!(
+            readiness.contains_key("backend"),
+            "backend key must be present even when no backend is selected"
+        );
+        assert!(readiness["backend"].is_null());
+        assert!(
+            readiness.contains_key("next_command"),
+            "next_command key must be present even when no command applies"
+        );
+        assert!(readiness["next_command"].is_null());
     }
 
     #[test]
@@ -2611,13 +3302,60 @@ mod tests {
         let error = anyhow::Error::new(riftri_core::WorktreeError::Busy {
             message: "worktree /tmp/view is busy with another Riftri operation; wait for it to finish and retry".to_owned(),
         });
-        let receipt = failure_receipt("worktree-compact", &error);
+        let receipt = receipt("worktree-compact", &error);
 
         assert_eq!(receipt["code"], "worktree-busy");
         assert_eq!(receipt["category"], "operational");
         assert_eq!(receipt["cleanup"], "not-needed");
         assert_eq!(receipt["recovery"], "retry");
         assert!(receipt["nextCommand"].is_null());
+    }
+
+    /// Minimal quote-aware argument reader for the host platform's shell,
+    /// enough to prove that one quoted path survives as exactly one argument.
+    ///
+    /// POSIX shells splice a literal quote in as `'"'"'`; PowerShell doubles
+    /// the quote inside the string. Both forms are read here.
+    fn shell_split(command: &str) -> Vec<PathBuf> {
+        let mut arguments = Vec::new();
+        let mut current = String::new();
+        let mut started = false;
+        let mut single = false;
+        let mut double = false;
+        let mut characters = command.chars().peekable();
+        while let Some(character) = characters.next() {
+            match character {
+                '\'' if double => current.push('\''),
+                '\'' if single && cfg!(windows) && characters.peek() == Some(&'\'') => {
+                    characters.next();
+                    current.push('\'');
+                }
+                '\'' => {
+                    single = !single;
+                    started = true;
+                }
+                '"' if single => current.push('"'),
+                '"' => {
+                    double = !double;
+                    started = true;
+                }
+                ' ' if !single && !double => {
+                    if started {
+                        arguments.push(PathBuf::from(std::mem::take(&mut current)));
+                        started = false;
+                    }
+                }
+                other => {
+                    current.push(other);
+                    started = true;
+                }
+            }
+        }
+        assert!(!single && !double, "unterminated quote in {command}");
+        if started {
+            arguments.push(PathBuf::from(current));
+        }
+        arguments
     }
 
     #[test]

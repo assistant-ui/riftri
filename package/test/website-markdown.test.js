@@ -60,13 +60,15 @@ test("homepage makes its Markdown guide discoverable", () => {
   assert.match(page, /<a[^>]*href="https:\/\/riftri\.dev\/index\.md"[^>]*rel="alternate"[^>]*type="text\/plain"[^>]*>\s*READ MARKDOWN\s*<\/a>/);
 });
 
-test("hero opens Markdown in the same tab beside the command copy control", () => {
+test("hero copies the Markdown guide beside the command copy control", () => {
   const page = read("website/src/app/page.tsx");
   const hero = page.slice(page.indexOf("function Hero"), page.indexOf("const essentials"));
-  assert.match(hero, /<div className="hero-install">\s*<CopyCommand[^>]+\/>\s*<a[^>]*className="copy-button hero-markdown"[^>]*href="https:\/\/riftri\.dev\/index\.md"[^>]*aria-label="Open Markdown guide"[^>]*>\s*\.md\s*<\/a>/);
-  const markdownLink = hero.match(/<a\b[^>]*className="copy-button hero-markdown"[^>]*>/)?.[0];
-  assert.ok(markdownLink);
-  assert.doesNotMatch(markdownLink, /\b(?:download|target)\s*(?:=|\s|>)/);
+  assert.match(hero, /<div className="hero-install">\s*<CopyCommand[^>]+\/>\s*<CopyMarkdown source="\/index\.md" className="hero-markdown" \/>/);
+  const component = read("website/src/components/copy-markdown.tsx");
+  // The copy control fetches the same-origin guide and copies its full text.
+  assert.match(component, /fetch\(source/);
+  assert.match(component, /navigator\.clipboard\.writeText\(markdown\)/);
+  assert.match(component, /Copy \.md/);
   assert.doesNotMatch(hero, />\s*(?:Read|Download) Markdown\s*</);
   assert.doesNotMatch(page, /MarkdownGuide|markdown-callout|id="markdown"/);
 });

@@ -1,11 +1,74 @@
 # Riftri website
 
-The Riftri product site is a single-page Farm.js application. The page at `/`
+The Riftri product site is a Farm.js application. The page at `/`
 has a hero with the copyable installer command, a storage-model overview, a
 worktree disk-usage comparison, a three-step get-started section, and a compact
 FAQ about manual COW copies, Git behavior, storage, activation, and recovery; deeper
-concepts, safety, lifecycle, and compatibility material stays in the
-repository documentation and the Markdown overview described below.
+concepts, safety, lifecycle, and compatibility material is available at `/docs`
+and in the repository documentation and Markdown overview described below.
+
+## Documentation site
+
+`/docs` uses `@farming-labs/docs`, the official `@farming-labs/farmjs` adapter,
+and its pixel-border theme. `docs.config.ts` owns the grouped sidebar, search,
+table of contents, copy actions, and dark theme. `src/app/docs-theme.css`
+adapts those components to the homepage's Geist typography, orange accents,
+square controls, and dashed borders. AI chat, telemetry, and MCP are disabled;
+reading and searching docs need no API key.
+
+There are two reading paths for every topic:
+
+- Public guides live in `content/guides/`, with the introduction in
+  `content/introduction.md`. Keep them short: the task, useful commands,
+  essential limits, and a next step. A test caps each source at 450 words.
+- Full technical references remain in `../docs/` (the overview uses `../README.md`).
+  Each is published in full at `/docs/<topic>/agent.md`; the introduction uses
+  `/docs/agent.md`, which also links to every topic's full reference.
+
+`content/docs.json` pairs each public `content` file with its full `source`.
+`pnpm stage` generates the public pages in ignored `src/app/docs/` and the
+agent companions in ignored `public/docs/**/agent.md`. It rewrites links,
+adds right-aligned `View .md` and `Agent .md` actions, and links public edits to
+the concise source file. Agent references link to the canonical technical
+source, with cross-references pointing to other full references. Do not edit
+generated files. When product behavior changes, update both authored sources.
+
+Only public guides enter the sidebar, search index, and sitemap. Full references
+are static plain text, served inline with `nosniff` and `X-Robots-Tag: noindex`.
+Benchmark reports, allocation evidence, and design-decision logs remain linked
+on GitHub rather than becoming extra public pages.
+The pinned adapter currently imports all project Markdown eagerly. A narrow
+Vite transform in `farm.config.ts` restricts its module map to `src/app/docs`
+so source copies and full agent references never enter browser JavaScript.
+Revisit that guarded workaround when upgrading the adapter; browser tests
+check that reference-only content is absent from the shipped scripts.
+Each sidebar entry also names a Lucide icon in `content/docs.json`.
+Staging regenerates `content/docs-icons.json` as SVG strings for the adapter;
+it also generates small action-icon masks in `public/docs-icons/`. The icon
+library and SVG renderer run at build time, not in the browser.
+Use `node scripts/stage-doc-icons.mjs --check` to check the generated registry.
+After editing a canonical Markdown file during development, rerun `pnpm stage`.
+After changing `docs.config.ts`, restart the dev server.
+
+The build keeps the adapter's Vercel function for public `/docs` pages, their
+Markdown mirrors, and `/api/docs` search. Static agent companions resolve before
+that runtime. All other routes retain the existing static handling.
+Docs responses are not CDN-cached because HTML and client navigation payloads
+share URLs. `pnpm preview:static` now previews both parts of this finalized
+output; it imports the built function, not the source dev server.
+`RIFTRI_PREVIEW_PORT` overrides the default preview/browser-test port.
+
+`pnpm stage && pnpm generate` refreshes Farm's route types when the page map
+changes. Browser tests exercise every generated page, Markdown mirrors,
+search, copying, sidebar navigation, and responsive layout.
+
+The visual system keeps Riftri's dark canvas and orange accent, with a shared
+page frame, fine stacked section rules, and a plain dark surface behind the storage
+example. Self-hosted Geist Sans carries the headings and body; Geist Mono is
+reserved for navigation, commands, diagrams, and metadata. The compact header
+wraps onto two rows on phones without hiding links behind a menu. Its section
+links and the skip link transfer keyboard focus to named destinations; keep
+those destinations out of the normal tab order with `tabIndex={-1}`.
 
 The FAQ at `/#faq` uses native `details` disclosures so answers remain usable
 without JavaScript. The first answer is open initially; readers can open several
@@ -58,8 +121,8 @@ The `/#savings` section visualizes the historical assistant-ui experiment in
 `../docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md`. Its raw allocation
 measurements live in `src/data/space-savings.json`; the chart derives MiB,
 saved bytes, and bar proportions from those values. Keep the benchmark version,
-APFS scope, and dependency exclusions visible. The expandable benchmark details
-retain the timing comparison, adjusted-fixture caveat, methodology, and source link.
+APFS scope, and dependency exclusions visible. A direct benchmark link keeps
+the full timing comparison, fixture details, and methodology accessible.
 `node --test package/test/website-savings.test.js` from the repository root
 checks the displayed dataset against the source report. This is not a live
 benchmark or a claim about the latest release's performance.
@@ -83,10 +146,10 @@ Windows setup, sharing metadata, and inline Markdown navigation. Its Markdown
 navigation test routes the canonical URL to the local build's exact response,
 so CI does not depend on the public deployment. Screenshots and failure traces
 are retained in `test-results/` and uploaded by CI. Run `pnpm preview:static`
-to inspect that same build at `http://127.0.0.1:4318` without a dev runtime.
+to inspect that same build at `http://127.0.0.1:4318` without a dev server.
 The preview honors the finalized static-file overrides and error-phase 404
 route, including its status, HTML body, and HEAD behavior. It is a preview of
-this site's static output, not a general Vercel routing emulator.
+this site's hybrid output, not a general Vercel routing emulator.
 
 ## Automatic deployment
 

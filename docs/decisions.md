@@ -130,14 +130,28 @@ receive the same behavior as interactive PowerShell commands. Riftri never
 evaluates the hook or edits a shell profile itself. In either scope, the shim delegates
 commands outside enabled repositories and non-worktree Git commands unchanged.
 Unsupported optimized add forms fail visibly; `RIFTRI_BYPASS=1` is the explicit
-ordinary-Git escape hatch.
+ordinary-Git escape hatch. Interception never hides Git from the caller:
+`git worktree add -h` and `--help` print Git's own usage, and an add carrying
+only global options that cannot change a checkout — `--no-optional-locks`,
+`--no-advice`, `--literal-pathspecs` — runs as ordinary Git instead of failing,
+because editors pass those on every invocation. Without `-b` or `--detach`, a
+second positional is optimized only when it names an existing local branch;
+a tag, a raw commit, a remote-tracking ref, or `HEAD` would make ordinary Git
+detach or create a tracking branch, so Riftri refuses before any Git process
+runs and names `--detach`, `-b <new-branch>`, and the bypass.
 
 Shell activation and repository consent remain deliberately independent.
 Status reports both. Deactivation is emitted as shell code because a child
 process cannot modify its parent environment; Riftri never claims that running
 the command without `eval` changes the current shell. If a user added the hook
 to a profile for global per-user activation, only that user removes the profile
-line.
+line. Deactivation removes every recognizable shim scope — the durable cached
+shim and process-scoped `riftri exec` entries alike — because removing only one
+would leave a `git`-named shim on `PATH` without its delegation environment.
+Independently, every shim directory records the captured real Git path at
+creation, and a shim whose environment is missing or inconsistent delegates to
+that real Git unchanged: a degraded scope must fall back to ordinary Git
+behavior, never shadow it.
 
 ### D018: removal moves forward and accounting is journal-derived
 
@@ -182,7 +196,11 @@ their storage semantics are not an atomic same-volume rename. Before `worktree p
 requires every active managed view to exist and remain in Git's structured
 inventory and refuses to proceed while another lifecycle journal is pending.
 Prune can then be repeated safely during recovery. Unsupported configured or
-forced forms fail closed for managed state.
+forced forms fail closed for managed state, quoting the arguments actually
+passed. A prune that only reports — `-n`/`--dry-run`, `-v`/`--verbose`,
+`-h`/`--help` — removes nothing and is delegated to real Git unchanged, and a
+plain prune still takes the journaled path under global options that cannot
+change what a prune would remove.
 
 ### D022: deterministic in-tree attributes and canonical local Git LFS are resolved safely
 
@@ -470,6 +488,29 @@ and garbage collection treats both journaled bases as protected while the
 operation is pending. OverlayFS is excluded until private-upper reset can use
 the same mount-identity and recovery guarantees.
 
+### D038: suggested commands are quoted, contextual, or absent
+
+Every command Riftri suggests — in a `--json-errors` receipt's `nextCommand`,
+in the human-readable message beside it, in `doctor`, and in `setup` — is a
+shell string produced by one shared helper. Paths are quoted for the platform
+shell, and a path that cannot be written as a shell argument, because it is
+not valid Unicode or contains control characters, produces no command at all.
+There is no lossy rendering that stays correct: an unquoted or
+`U+FFFD`-substituted path names a *different* directory, and Riftri would then
+answer questions about state it never inspected. Receipts keep the exact
+native path in `*NativeHex` fields so automation never has to parse the shell
+string.
+
+Suggested recovery and inspection commands also carry context. `repair` and
+`status` resolve their state directory from the current directory unless told
+otherwise, so a receipt repeats the `--state-dir` the failing invocation
+selected, or the `--repository` that resolves the same default; a pending
+journal's own directory outranks both. For the same reason, an explicitly
+named `--state-dir` that does not exist is refused rather than scanned as
+empty. A missing default state directory still means "this repository has no
+Riftri state yet" and reports an all-clear; a missing directory the caller
+named means "Riftri did not find what you pointed at" and must not.
+
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 
 Pointer-only worktree cleanup stages the real `.git` pointer at a journal-derived
@@ -506,6 +547,25 @@ allocating another checkout. An empty marker cannot establish integrity: new
 adds use a new cache namespace, while older bases remain available to their
 existing views and explicit garbage collection. This detects accidental cache
 corruption; it does not make same-user mutable state a security sandbox.
+
+Marker v2 extends coverage to metadata the native cloners propagate but Git
+cannot reproduce: the full native Unix mode (setuid, setgid, and sticky bits),
+every extended attribute name and value (symlink entries included), and macOS
+ACL presence. On Windows only the read-only attribute is covered, matching
+what the ReFS cloner propagates from a base into a view; other attributes and
+alternate data streams remain out of scope. New bases record v2 markers, and
+the metadata is hashed during the same traversal that reads file contents, so
+a cache hit still performs one walk with one or two extra metadata calls per
+entry. A stored v1 marker is still verified against the frozen v1 content
+digest: a mismatch refuses reuse exactly as before, while a match is treated
+as one deliberate cache miss — the base is rebuilt under the exclusive lock
+and records a v2 marker, because a v1 marker attests nothing about the
+metadata above. Untouched caches therefore migrate with one rebuild per base
+bucket instead of silent mass invalidation or manual cleanup. Cache keys and
+journal formats do not change, and the v1 digest layout stays frozen because
+the persisted compaction and forced-removal snapshot formats compose it. An
+older binary that encounters a v2 marker fails closed: it refuses reuse
+rather than trusting a digest it cannot recompute.
 
 ### Existing-base readers share coordination ownership
 

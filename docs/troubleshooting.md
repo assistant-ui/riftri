@@ -9,11 +9,17 @@ decision.
 ## Git repository or index environment overrides
 
 Riftri lifecycle operations refuse a set `GIT_DIR`, `GIT_WORK_TREE`,
-`GIT_COMMON_DIR`, or `GIT_INDEX_FILE`, including an empty value. These overrides
+`GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, or
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, including an empty value. These overrides
 can redirect an internal Git command away from the linked worktree being
-created or recovered, risking another worktree's index. Unset them in the
-calling process and select the repository with `--repository` where supported,
-or run from that repository. Doctor reports the same compatibility blocker.
+created or recovered, risking another worktree's index or reading objects
+from another repository's store. Environment-based configuration injection is
+refused the same way: `GIT_CONFIG_COUNT` (which activates the
+`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` family) and `GIT_CONFIG_PARAMETERS`
+reach every internal Git command exactly like `-c` options would. Unset them
+in the calling process and select the repository with `--repository` where
+supported, or run from that repository. Doctor reports the same compatibility
+blocker.
 Ordinary Git commands inside `riftri exec` still receive the original
 environment unchanged; this restriction applies to Riftri lifecycle work.
 
@@ -106,6 +112,34 @@ activation.
 Run `riftri repair`. It is always safe: complete journals are resumed,
 incomplete ones are rolled back, and a healthy state directory is left
 unchanged. Repeated repair is a no-op.
+
+### A managed worktree was deleted by hand
+
+After `rm -rf <worktree>` and `git worktree prune`, Riftri's journal still
+claims the path. Run `riftri repair`: it retires the journal, releases the
+immutable base for `riftri gc`, and frees the path for a new
+`riftri worktree add`. The branch is left alone. Creating a new worktree at the
+same path reclaims the stale journal on its own, so the path never ends up
+claimed twice.
+
+### A managed worktree was moved with `mv` and `git worktree repair`
+
+Riftri tracks the journaled path, so `riftri status` and `riftri worktree list`
+stop showing the worktree and `riftri worktree remove` refuses. The worktree
+itself keeps working and its contents are safe. `riftri repair` reports the new
+location under `Relocated worktrees Riftri no longer tracks` but deliberately
+does not adopt it: Git's registry alone cannot prove the worktree at the new
+path is the journal's. To restore tracking, move the directory back to the
+journaled path and run `git worktree repair` there, or remove it with Git and
+create a new managed worktree at the location you want. Use
+`riftri worktree move` for future moves so the journal is updated atomically.
+
+### `riftri gc` collects nothing while `riftri status` reports an unused base
+
+An unfinished journal still claims that base. `riftri gc` names the responsible
+operation under `Skipped because a journaled operation still claims them`, and
+`riftri status` reports the same base with the same explanation. Run
+`riftri repair` to retire the operation, then collect again.
 
 ### A Linux OverlayFS worktree is empty or missing after a reboot
 

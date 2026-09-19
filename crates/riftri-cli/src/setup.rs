@@ -78,9 +78,15 @@ pub(super) fn run(
     json_errors: bool,
 ) -> Result<i32> {
     if json_errors {
-        bail!(
+        // A refusal of the flag combination itself: nothing was attempted, so
+        // the receipt must report the policy shape (exit 3, no cleanup, no
+        // recovery) rather than an operational failure telling harnesses to
+        // retry and inspect state that was never touched.
+        return Err(riftri_core::WorktreeError::InvalidRequest(
             "setup is interactive and cannot use --json-errors; use riftri worktree add for automation"
-        );
+                .to_owned(),
+        )
+        .into());
     }
     if !std::io::stdin().is_terminal()
         || !std::io::stdout().is_terminal()
@@ -183,6 +189,20 @@ fn prepare(
     let backend = readiness
         .backend
         .context("doctor did not select a COW backend")?;
+    // Refuse a destination the explicit add would refuse — existence, a
+    // symlink to an existing target, or checkout paths that collide on the
+    // destination filesystem — before showing a plan and asking for
+    // confirmation. The core call reuses the add path's own checks, so the
+    // diagnostic wording and the policy exit code match `riftri worktree add`
+    // exactly; setup adds only the Blocked framing the doctor gate above uses.
+    if let Err(error) = riftri_core::validate_new_worktree_destination(
+        &repository,
+        &destination,
+        OsStr::new("HEAD"),
+    ) {
+        writeln!(output, "Blocked: {error}")?;
+        return Err(error).context("setup stopped before creation; choose a destination that riftri worktree add can create");
+    }
     writeln!(
         output,
         "\nDestination: {}\nNew branch: {}\nStart at: HEAD\nBackend: {}",
@@ -296,15 +316,10 @@ fn display(value: &OsStr) -> String {
 }
 
 fn print_next_steps(output: &mut impl Write, destination: &Path) -> Result<()> {
-    if let Some(path) = destination
-        .to_str()
-        .filter(|path| !path.chars().any(char::is_control))
-    {
-        #[cfg(windows)]
-        let quoted = path.replace('\'', "''");
-        #[cfg(not(windows))]
-        let quoted = path.replace('\'', "'\"'\"'");
-        writeln!(output, "Start working:\n  cd '{quoted}'\n  git status")?;
+    // One shared quoting rule across doctor, setup, and failure receipts: a
+    // path that cannot be written as a shell argument prints no command.
+    if let Some(quoted) = riftri_core::shell_quoted_path(destination) {
+        writeln!(output, "Start working:\n  cd {quoted}\n  git status")?;
     } else {
         writeln!(
             output,
@@ -589,13 +604,13 @@ mod tests {
     }
 
     #[test]
-    fn next_steps_quote_paths_for_the_platform_shell() {
+    fn next_steps_quote_paths_with_posix_quoting_on_every_platform() {
+        // Suggested commands use POSIX quoting regardless of build target, so
+        // the guidance runs as shown in the POSIX shells these commands are
+        // used in (including Git Bash and WSL on Windows).
         let mut output = Vec::new();
         print_next_steps(&mut output, Path::new("folder with an'apostrophe")).unwrap();
         let output = String::from_utf8(output).unwrap();
-        #[cfg(windows)]
-        assert!(output.contains("cd 'folder with an''apostrophe'"));
-        #[cfg(not(windows))]
         assert!(output.contains("cd 'folder with an'\"'\"'apostrophe'"));
     }
 

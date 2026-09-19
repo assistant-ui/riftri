@@ -338,6 +338,107 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
 }
 
 #[test]
+fn doctor_names_a_corrupt_object_store_instead_of_calling_head_unborn() {
+    let fixture = RepositoryFixture::new();
+    let head = git(&fixture.repository, &["rev-parse", "HEAD"]);
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout)
+        .expect("UTF-8 object ID")
+        .trim()
+        .to_owned();
+    let object = fixture
+        .repository
+        .join(".git/objects")
+        .join(&head[..2])
+        .join(&head[2..]);
+    let mut permissions = fs::metadata(&object)
+        .expect("loose object metadata")
+        .permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&object, permissions).expect("make loose object writable");
+    fs::remove_file(&object).expect("delete loose object");
+
+    let doctor = riftri(&fixture.repository, &["doctor", "--json"]);
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr),
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    assert_eq!(report["repository"]["available"], false);
+    let error = report["repository"]["error"]
+        .as_str()
+        .expect("repository error");
+    assert!(error.contains("unreadable"), "{error}");
+    assert!(error.contains("corrupt"), "{error}");
+    assert!(error.contains(&head), "{error}");
+    assert!(!error.contains("unborn"), "{error}");
+    let blockers = report["destination_readiness"]["blockers"]
+        .as_array()
+        .expect("readiness blockers");
+    assert!(
+        blockers.iter().any(|blocker| {
+            blocker["kind"] == "repository"
+                && blocker["explanation"]
+                    .as_str()
+                    .is_some_and(|explanation| explanation.contains("corrupt"))
+        }),
+        "{blockers:?}"
+    );
+
+    let human = riftri(&fixture.repository, &["doctor"]);
+    assert!(human.status.success());
+    let stdout = String::from_utf8(human.stdout).expect("UTF-8 doctor output");
+    assert!(stdout.contains("Repository: unavailable ("), "{stdout}");
+    assert!(stdout.contains("unreadable"), "{stdout}");
+    assert!(stdout.contains("corrupt"), "{stdout}");
+    assert!(!stdout.contains("unborn"), "{stdout}");
+}
+
+#[test]
+fn doctor_keeps_the_friendly_message_for_a_genuinely_unborn_head() {
+    let directory = tempdir().expect("fixture directory");
+    let repository = directory.path().join("repository");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+    ] {
+        assert_git_success(&repository, arguments);
+    }
+
+    let doctor = riftri(&repository, &["doctor", "--json"]);
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr),
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    assert_eq!(report["repository"]["available"], true);
+    assert_eq!(
+        report["repository"]["value"]["head_commit"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        report["repository_compatibility"]["error"],
+        "repository HEAD is unborn; commit a tree first"
+    );
+
+    let human = riftri(&repository, &["doctor"]);
+    assert!(human.status.success());
+    let stdout = String::from_utf8(human.stdout).expect("UTF-8 doctor output");
+    assert!(stdout.contains("HEAD: unborn"), "{stdout}");
+    assert!(
+        stdout.contains("repository HEAD is unborn; commit a tree first"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn unsafe_checkout_inputs_are_diagnosed_and_rejected_without_mutation() {
     for case in UnsafeCheckoutCase::ALL {
         let fixture = RepositoryFixture::new();

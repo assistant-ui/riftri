@@ -146,6 +146,14 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
     {
         use std::os::windows::fs::OpenOptionsExt;
         options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT);
+        // Full sharing, spelled out rather than relying on the standard
+        // library's default: a journal read must never block its owner from
+        // replacing, writing, or deleting the journal in another process.
+        options.share_mode(
+            windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_DELETE,
+        );
     }
     let file = options
         .open(path)
@@ -177,6 +185,71 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
     Ok(file)
 }
 
+/// Read a validated journal into memory and close the handle before parsing.
+///
+/// On Windows a rename-replace of an open destination fails with
+/// `ERROR_ACCESS_DENIED` regardless of sharing, so a reader that keeps the
+/// journal open while deserializing can make the owner's phase persist fail.
+/// Holding the handle only for one buffered read shrinks that window from a
+/// parse to a syscall.
+fn read_real_journal(path: &Path, operation: &'static str) -> Result<Vec<u8>, JournalError> {
+    use std::io::Read;
+
+    let mut file = open_real_journal(path, operation)?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)
+        .map_err(|source| io(operation, path, source))?;
+    drop(file);
+    Ok(contents)
+}
+
+/// Whether a journal read failed only because the journal is being replaced
+/// or created right now by its owner.
+///
+/// Riftri's journal replacement is a rename over the destination. On Windows
+/// (`MoveFileExW` without POSIX semantics) that can transiently surface to a
+/// concurrent reader as `NotFound` (destination momentarily absent) or
+/// `PermissionDenied` (destination in a delete-pending state). Neither says
+/// anything about the journal's content, so scans must treat the operation as
+/// in flight — never as an error to propagate, and never as evidence the
+/// journal can be retired.
+pub(crate) fn journal_error_is_in_flight(error: &JournalError) -> bool {
+    let JournalError::Io { source, .. } = error else {
+        return false;
+    };
+    source.kind() == std::io::ErrorKind::NotFound
+        || (cfg!(windows) && source.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+/// One journal that a reconciling scan could not read because its owner was
+/// mid-replacement, even after retries.
+#[derive(Debug)]
+pub(crate) struct InFlightJournal {
+    pub path: PathBuf,
+    pub reason: String,
+}
+
+/// A journal inventory for reconciliation: everything readable, plus the
+/// journals whose owners were actively replacing them.
+#[derive(Debug)]
+pub(crate) struct ReconcileJournalLoad {
+    pub journals: Vec<DecodedJournal>,
+    /// Journals still unreadable after retries for a transient-looking reason
+    /// other than NotFound. Fail-closed callers must treat these as active
+    /// claims of unknown shape; a path whose journal stays NotFound holds no
+    /// claim, so persistent NotFound entries are simply skipped.
+    pub unreadable: Vec<InFlightJournal>,
+    /// Journals that exist but are invalid. Reconciliation must skip them;
+    /// `status` reports them.
+    pub issues: Vec<JournalLoadIssue>,
+}
+
+/// Retry budget for reading a journal that races its owner's atomic replace.
+/// The unreadable window is one rename, so a handful of short waits settles
+/// it; the cap keeps a genuinely broken state from stalling the caller.
+const IN_FLIGHT_READ_ATTEMPTS: u32 = 20;
+const IN_FLIGHT_READ_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
 fn reload_snapshot<R: serde::de::DeserializeOwned + Clone, D: PartialEq>(
     directory: &Path,
     path: &Path,
@@ -185,11 +258,12 @@ fn reload_snapshot<R: serde::de::DeserializeOwned + Clone, D: PartialEq>(
     decode: impl FnOnce(R, PathBuf) -> Result<D, JournalError>,
 ) -> Result<R, JournalError> {
     validate_operation_identity(directory, operation_id, path)?;
-    let file = open_real_journal(path, "reopen operation journal")?;
-    let record: R = serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let contents = read_real_journal(path, "reopen operation journal")?;
+    let record: R =
+        serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
+            path: path.to_path_buf(),
+            source,
+        })?;
     if decode(record.clone(), path.to_path_buf())? != *expected {
         return Err(JournalError::InvalidRecord {
             path: path.to_path_buf(),
@@ -1206,10 +1280,64 @@ impl JournalStore {
         ))
     }
 
+    /// Inventory every journal for a reconciling scan that runs concurrently
+    /// with other processes' journal writes.
+    ///
+    /// A read that races its owner's atomic replace is retried briefly. What
+    /// still cannot be read afterwards is separated by what it proves: a path
+    /// that stays `NotFound` holds no journal and therefore no claim, while
+    /// anything else lands in `unreadable` so a fail-closed caller can refuse
+    /// to act. Nothing here is ever surfaced as a hard error for a journal
+    /// that merely could not be read.
+    pub(crate) fn load_all_reconciling(&self) -> Result<ReconcileJournalLoad, JournalError> {
+        let mut journals = Vec::new();
+        let mut unreadable = Vec::new();
+        let mut issues = Vec::new();
+        for path in journal_paths(&self.directory)? {
+            let mut result = self.load_path(path.clone());
+            for _ in 0..IN_FLIGHT_READ_ATTEMPTS {
+                match &result {
+                    Err(error) if journal_error_is_in_flight(error) => {
+                        std::thread::sleep(IN_FLIGHT_READ_DELAY);
+                        result = self.load_path(path.clone());
+                    }
+                    _ => break,
+                }
+            }
+            match result {
+                Ok(journal) => journals.push(journal),
+                Err(error) if journal_error_is_in_flight(&error) => {
+                    // Persistently absent means no journal exists at this
+                    // path any more; everything else stays a blocking claim.
+                    let vanished = matches!(
+                        &error,
+                        JournalError::Io { source, .. }
+                            if source.kind() == std::io::ErrorKind::NotFound
+                    );
+                    if !vanished {
+                        unreadable.push(InFlightJournal {
+                            path,
+                            reason: error.to_string(),
+                        });
+                    }
+                }
+                Err(error) => issues.push(JournalLoadIssue {
+                    path,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+        Ok(ReconcileJournalLoad {
+            journals,
+            unreadable,
+            issues,
+        })
+    }
+
     fn load_path(&self, path: PathBuf) -> Result<DecodedJournal, JournalError> {
-        let file = open_real_journal(&path, "open operation journal")?;
+        let contents = read_real_journal(&path, "open operation journal")?;
         let record: JournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: path.clone(),
                 source,
             })?;
@@ -1285,9 +1413,9 @@ impl JournalStore {
         expected_source: &Path,
         destination: &Path,
     ) -> Result<(), JournalError> {
-        let file = open_real_journal(journal_path, "open operation journal")?;
+        let contents = read_real_journal(journal_path, "open operation journal")?;
         let mut record: JournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: journal_path.to_path_buf(),
                 source,
             })?;
@@ -1326,9 +1454,9 @@ impl JournalStore {
         base_path: &Path,
         expected_commit: &str,
     ) -> Result<(), JournalError> {
-        let file = open_real_journal(journal_path, "open operation journal")?;
+        let contents = read_real_journal(journal_path, "open operation journal")?;
         let mut record: JournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: journal_path.to_path_buf(),
                 source,
             })?;
@@ -1341,7 +1469,42 @@ impl JournalStore {
                 detail: "only the expected active add journal can be compacted".to_owned(),
             });
         }
+        // Compaction recomputes the checkout profile, so `base_path` may move
+        // into a different immutable-base bucket than the one the add staged
+        // in. Recovery validation requires `base_path` and `base_staging` to
+        // share a parent bucket, so the staging record — a path that no
+        // longer exists once the journal is Active — is re-parented onto the
+        // new bucket in the same durable write that retargets the base. The
+        // file name keeps embedding this add operation's own ID.
+        let bucket = base_path
+            .parent()
+            .ok_or_else(|| JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: format!(
+                    "compacted base {} has no parent bucket",
+                    base_path.display()
+                ),
+            })?;
+        let staging_name =
+            decoded
+                .base_staging
+                .file_name()
+                .ok_or_else(|| JournalError::InvalidRecord {
+                    path: journal_path.to_path_buf(),
+                    detail: format!(
+                        "base staging {} has no file name",
+                        decoded.base_staging.display()
+                    ),
+                })?;
+        let base_staging = bucket.join(staging_name);
         if decoded.base_path == base_path && decoded.expected_commit == expected_commit {
+            if decoded.base_staging != base_staging {
+                // An earlier Riftri retargeted `base_path` without moving
+                // `base_staging`, leaving the journal failing recovery
+                // validation. Re-running the same compaction step heals it.
+                record.base_staging = NativeOsString::encode(base_staging.as_os_str());
+                self.persist(&record)?;
+            }
             return Ok(());
         }
         if decoded.base_path != expected_old_base {
@@ -1355,6 +1518,7 @@ impl JournalStore {
             });
         }
         record.base_path = NativeOsString::encode(base_path.as_os_str());
+        record.base_staging = NativeOsString::encode(base_staging.as_os_str());
         record.expected_commit = expected_commit.to_owned();
         self.persist(&record)?;
         Ok(())
@@ -1444,9 +1608,9 @@ impl RemovalJournalStore {
     }
 
     fn load_path(&self, path: PathBuf) -> Result<DecodedRemovalJournal, JournalError> {
-        let file = open_real_journal(&path, "open removal journal")?;
+        let contents = read_real_journal(&path, "open removal journal")?;
         let record: RemovalJournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: path.clone(),
                 source,
             })?;
@@ -1537,9 +1701,9 @@ impl MoveJournalStore {
     }
 
     fn load_path(&self, path: PathBuf) -> Result<DecodedMoveJournal, JournalError> {
-        let file = open_real_journal(&path, "open move journal")?;
+        let contents = read_real_journal(&path, "open move journal")?;
         let record: MoveJournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: path.clone(),
                 source,
             })?;
@@ -1633,9 +1797,9 @@ impl CompactJournalStore {
     }
 
     fn load_path(&self, path: PathBuf) -> Result<DecodedCompactJournal, JournalError> {
-        let file = open_real_journal(&path, "open compaction journal")?;
+        let contents = read_real_journal(&path, "open compaction journal")?;
         let record: CompactJournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: path.clone(),
                 source,
             })?;
@@ -1729,9 +1893,9 @@ impl PruneJournalStore {
     }
 
     fn load_path(&self, path: PathBuf) -> Result<DecodedPruneJournal, JournalError> {
-        let file = open_real_journal(&path, "open prune journal")?;
+        let contents = read_real_journal(&path, "open prune journal")?;
         let record: PruneJournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: path.clone(),
                 source,
             })?;
@@ -1825,9 +1989,9 @@ impl CollectionJournalStore {
     }
 
     fn load_path(&self, path: PathBuf) -> Result<DecodedCollectionJournal, JournalError> {
-        let file = open_real_journal(&path, "open collection journal")?;
+        let contents = read_real_journal(&path, "open collection journal")?;
         let record: CollectionJournalRecord =
-            serde_json::from_reader(file).map_err(|source| JournalError::Deserialize {
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
                 path: path.clone(),
                 source,
             })?;
@@ -1846,6 +2010,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), JournalError>
 fn atomic_replace(source: &Path, destination: &Path) -> Result<(), JournalError> {
     use std::os::windows::ffi::OsStrExt;
 
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
@@ -1854,24 +2019,41 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), JournalError>
     source_wide.push(0);
     let mut destination_wide = destination.as_os_str().encode_wide().collect::<Vec<_>>();
     destination_wide.push(0);
-    // SAFETY: both paths are NUL-terminated UTF-16 buffers. REPLACE_EXISTING
-    // gives journal updates Windows' replacement semantics, while WRITE_THROUGH
-    // waits for the move to reach the filesystem before returning.
-    let succeeded = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            destination_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if succeeded == 0 {
-        return Err(io(
-            "replace operation journal",
-            destination,
-            std::io::Error::last_os_error(),
-        ));
+    // MOVEFILE_REPLACE_EXISTING fails with ERROR_ACCESS_DENIED while any other
+    // handle is open on the destination, no matter what sharing that handle
+    // was opened with. Riftri's own scans (status, repair, reconciliation in
+    // a concurrent add) read journals for only a syscall-sized window, so a
+    // short bounded retry outlasts every legitimate reader without changing
+    // semantics: on success the replacement is exactly as atomic as before,
+    // and a persistent denial still surfaces as the same error.
+    let attempts = 50_u32;
+    for attempt in 0.. {
+        // SAFETY: both paths are NUL-terminated UTF-16 buffers.
+        // REPLACE_EXISTING gives journal updates Windows' replacement
+        // semantics, while WRITE_THROUGH waits for the move to reach the
+        // filesystem before returning.
+        let succeeded = unsafe {
+            MoveFileExW(
+                source_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if succeeded != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        let transient = matches!(
+            error.raw_os_error(),
+            Some(code) if code == ERROR_ACCESS_DENIED as i32
+                || code == ERROR_SHARING_VIOLATION as i32
+        );
+        if !transient || attempt >= attempts {
+            return Err(io("replace operation journal", destination, error));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    Ok(())
+    unreachable!("the replace loop always returns");
 }
 
 #[cfg(unix)]
@@ -2859,5 +3041,110 @@ mod tests {
             std::fs::read_to_string(protected).expect("read protected file"),
             "must remain unchanged\n"
         );
+    }
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+mod reconcile_read_tests {
+    use std::path::Path;
+
+    use tempfile::tempdir;
+
+    use super::{JournalPaths, JournalRecord, JournalStore};
+
+    fn sample_record(operation_id: &str) -> JournalRecord {
+        JournalRecord::new(
+            operation_id.to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+                branch_created: false,
+                sparse_directories: &[],
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            riftri_storage::BackendKind::ApfsClone,
+        )
+    }
+
+    /// A journal file that disappears between the directory listing and the
+    /// open — the reader-visible window of a non-POSIX rename replacement —
+    /// must be treated as in flight and skipped, never surfaced as an error
+    /// and never mistaken for a retirable journal.
+    #[test]
+    fn a_journal_vanishing_mid_scan_is_in_flight_not_an_error() {
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let record = sample_record("vanishing-mid-scan");
+        let journal_path = store.persist(&record).expect("persist journal");
+
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::JournalOpen,
+            move |path: &Path| {
+                std::fs::remove_file(path).expect("simulate the replacement window");
+            },
+        );
+
+        let load = store.load_all_reconciling().expect("reconciling load");
+        assert!(load.journals.is_empty(), "{:?}", load.journals);
+        assert!(load.unreadable.is_empty(), "{:?}", load.unreadable);
+        assert!(load.issues.is_empty(), "{:?}", load.issues);
+        assert!(!journal_path.exists());
+    }
+
+    /// A concurrent reader holding a journal open without delete sharing must
+    /// not make the owner's phase persist fail: the replacement retries until
+    /// the reader's handle closes. This is the exact shape of the regression
+    /// seen with parallel adds on ReFS.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn persisting_retries_past_a_reader_without_delete_sharing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let mut record = sample_record("contended-persist");
+        let journal_path = store.persist(&record).expect("persist journal");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let holder = std::thread::spawn({
+            let barrier = Arc::clone(&barrier);
+            let journal_path = journal_path.clone();
+            move || {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ)
+                    .open(&journal_path)
+                    .expect("hold the journal open without delete sharing");
+                barrier.wait();
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                drop(file);
+            }
+        });
+
+        barrier.wait();
+        record
+            .transition(crate::AddWorktreePhase::GitMetadataCreated)
+            .expect("advance the journal in memory");
+        store
+            .persist(&record)
+            .expect("journal replacement must outlast a transient reader");
+        holder.join().expect("reader thread");
+
+        let reloaded = store
+            .load_operation("contended-persist")
+            .expect("reload the replaced journal");
+        assert_eq!(reloaded.phase, crate::AddWorktreePhase::GitMetadataCreated);
     }
 }

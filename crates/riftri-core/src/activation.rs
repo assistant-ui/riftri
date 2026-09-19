@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs::File, io};
 
 pub use riftri_git::SHIM_ACTIVE_ENV;
+use riftri_git::termination::TerminationError;
 use riftri_git::{Git, GitError};
 use serde::Serialize;
 use thiserror::Error;
@@ -26,8 +27,17 @@ use crate::{
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
 pub const CACHE_DIR_ENV: &str = "RIFTRI_CACHE_DIR";
+/// Environment variable naming the ephemeral `riftri exec` shim directory.
+pub const PROCESS_SHIM_DIR_ENV: &str = "RIFTRI_PROCESS_SHIM_DIR";
+/// Name prefix shared by every ephemeral `riftri exec` shim directory.
+pub const PROCESS_SHIM_DIR_PREFIX: &str = "riftri-git-shim-";
+/// Marker file inside every Riftri shim directory recording the real Git path
+/// captured when the shim was created, so a shim whose environment was
+/// stripped can still identify itself and delegate to the real Git.
+const REAL_GIT_MARKER_FILE: &str = "riftri-real-git";
+/// Environment variable recording the durable shell-hook shim directory,
+/// so status and deactivation keep working after the shell changes directory.
 const SHELL_SHIM_DIR_ENV: &str = "RIFTRI_SHELL_SHIM_DIR";
-const PROCESS_SHIM_DIR_ENV: &str = "RIFTRI_PROCESS_SHIM_DIR";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepositoryActivation {
@@ -155,30 +165,26 @@ pub fn plan_git_command(
         return Ok(GitProxyPlan::Passthrough);
     };
     match subcommand.to_string_lossy().as_ref() {
-        "add" => {
-            if !context.optimization_compatible {
-                return Err(unsupported(format!(
-                    "Git invocation-level configuration is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
-                )));
-            }
-            parse_enabled_add(&repository, &arguments[context.command_index + 2..])
-                .map(|(request, quiet)| GitProxyPlan::OptimizedAdd { request, quiet })
-        }
+        "add" => plan_enabled_add(
+            &repository,
+            &arguments[context.command_index + 2..],
+            context.global_options,
+        ),
         "remove" => plan_enabled_remove(
             &repository,
             &arguments[context.command_index + 2..],
-            context.optimization_compatible,
+            context.global_options.optimization_compatible(),
         ),
         "move" => plan_enabled_move(
             &repository,
             &arguments[context.command_index + 2..],
-            context.optimization_compatible,
+            context.global_options.optimization_compatible(),
         ),
         "prune" => plan_enabled_prune(
             &repository,
             &activation,
             &arguments[context.command_index + 2..],
-            context.optimization_compatible,
+            context.global_options,
         ),
         _ => Ok(GitProxyPlan::Passthrough),
     }
@@ -387,10 +393,11 @@ fn execute_scoped_command_from(
     let current_executable = env::current_exe()
         .map_err(|error| process_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = tempfile::Builder::new()
-        .prefix("riftri-git-shim-")
+        .prefix(PROCESS_SHIM_DIR_PREFIX)
         .tempdir()
         .map_err(|error| process_error(format!("create temporary Git shim directory: {error}")))?;
     install_git_shim(shim_directory.path(), &current_executable)?;
+    record_real_git_marker(shim_directory.path(), &real_git)?;
 
     let existing_path = env::var_os("PATH").unwrap_or_default();
     let scoped_path = env::join_paths(
@@ -413,257 +420,28 @@ fn execute_scoped_command_from(
 }
 
 /// Run the scoped command to completion while honoring the termination
-/// contract: termination signals delivered to Riftri are forwarded to the
-/// scoped command or left for the command to decide, Riftri keeps waiting so
-/// the temporary Git shim is removed, and the command's exit status is
-/// propagated unchanged.
-///
-/// Supervised invocations — no controlling terminal owned in the foreground —
-/// run the command in its own process group and forward signals to that whole
-/// group, stopping the command's descendants without touching unrelated
-/// processes. Interactive foreground invocations keep the command in Riftri's
-/// process group so terminal job control and keyboard signal delivery are
-/// unchanged; SIGTERM and SIGHUP are then forwarded to the command itself,
-/// while SIGINT and SIGQUIT are ignored by Riftri for the duration of the
-/// wait, exactly like a shell waiting on a foreground job: the terminal
-/// already delivers both to the whole foreground process group, so the
-/// command alone decides whether the interrupt is fatal, and a command that
-/// catches Ctrl-C keeps running under an intact wrapper whose shim cleanup
-/// and exit-status propagation still happen. All dispositions are restored
-/// after the command is reaped.
-#[cfg(unix)]
+/// contract implemented by [`riftri_git::termination`]: termination signals
+/// delivered to Riftri are forwarded to the scoped command or left for the
+/// command to decide, the command starts from the signal dispositions Riftri
+/// itself inherited, Riftri keeps waiting so the temporary Git shim is
+/// removed, and the command's exit status is propagated unchanged.
 fn wait_for_scoped_child(
     command: &mut Command,
     program: &OsStr,
 ) -> Result<ExitStatus, ActivationError> {
-    use std::os::unix::process::CommandExt;
-
-    let interactive = scoped_child_shares_foreground_terminal();
-    if !interactive {
-        command.process_group(0);
-    }
-    // SIGQUIT gets the same treatment as SIGINT in interactive mode because it
-    // is the other keyboard-generated termination signal (Ctrl-\) that the
-    // terminal delivers to the whole foreground process group: a command that
-    // catches or ignores it must not lose its wrapper either. In supervised
-    // mode SIGQUIT keeps its default disposition, unchanged from the original
-    // forwarding contract.
-    let (forwarded, ignored): (&[libc::c_int], &[libc::c_int]) = if interactive {
-        // The terminal already delivers keyboard-generated SIGINT and SIGQUIT
-        // to the whole foreground process group, which includes the command;
-        // forwarding either would deliver the same interrupt twice, and dying
-        // from either would orphan a command that chose to survive it.
-        (
-            &[libc::SIGTERM, libc::SIGHUP],
-            &[libc::SIGINT, libc::SIGQUIT],
-        )
-    } else {
-        (&[libc::SIGTERM, libc::SIGINT, libc::SIGHUP], &[])
-    };
-    let guard = scoped_child_signals::ForwardingGuard::install(forwarded, ignored)?;
-    // An ignored disposition — unlike a caught handler — survives exec, so
-    // without correction the command would inherit SIG_IGN and never see
-    // Ctrl-C at all. Restore the dispositions Riftri itself inherited in the
-    // child: SIG_IGN stays SIG_IGN, anything else becomes SIG_DFL (a caught
-    // handler cannot cross exec anyway).
-    let inherited = guard.inherited_dispositions(ignored);
-    if !inherited.is_empty() {
-        // SAFETY: the closure runs in the forked child before exec and calls
-        // only the async-signal-safe signal(2).
-        unsafe {
-            command.pre_exec(move || {
-                for &(signal, handler) in &inherited {
-                    if libc::signal(signal, handler) == libc::SIG_ERR {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
+    riftri_git::termination::run_forwarding_terminations(command).map_err(|error| match error {
+        TerminationError::Disposition { .. } | TerminationError::AlreadyWaiting => {
+            process_error(error.to_string())
         }
-    }
-    let mut child = command.spawn().map_err(|error| {
-        process_error(format!(
-            "start process-scoped command {}: {error}",
+        TerminationError::Spawn(source) => process_error(format!(
+            "start process-scoped command {}: {source}",
             Path::new(program).display()
-        ))
-    })?;
-    let child_pid = i32::try_from(child.id())
-        .map_err(|_| process_error("process-scoped command PID does not fit a signal target"))?;
-    guard.arm(if interactive { child_pid } else { -child_pid });
-    let status = child.wait();
-    guard.disarm();
-    status.map_err(|error| {
-        process_error(format!(
-            "wait for process-scoped command {}: {error}",
+        )),
+        TerminationError::Wait(source) => process_error(format!(
+            "wait for process-scoped command {}: {source}",
             Path::new(program).display()
-        ))
+        )),
     })
-}
-
-/// Windows has no POSIX signal forwarding to preserve here: the console
-/// already delivers Ctrl-C and Ctrl-Break events to every process attached to
-/// it, including the scoped command, and a hard `TerminateProcess` of Riftri
-/// cannot be intercepted, so no additional termination handling is possible.
-#[cfg(not(unix))]
-fn wait_for_scoped_child(
-    command: &mut Command,
-    program: &OsStr,
-) -> Result<ExitStatus, ActivationError> {
-    command.status().map_err(|error| {
-        process_error(format!(
-            "start process-scoped command {}: {error}",
-            Path::new(program).display()
-        ))
-    })
-}
-
-/// Report whether Riftri owns a controlling terminal in the foreground, which
-/// is when creating a new process group for the scoped command would steal
-/// terminal job-control semantics from the command.
-#[cfg(unix)]
-fn scoped_child_shares_foreground_terminal() -> bool {
-    // SAFETY: getpgrp, isatty, and tcgetpgrp only read process and descriptor
-    // state for the current process.
-    let process_group = unsafe { libc::getpgrp() };
-    [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO]
-        .into_iter()
-        .any(|descriptor| unsafe {
-            libc::isatty(descriptor) == 1 && libc::tcgetpgrp(descriptor) == process_group
-        })
-}
-
-#[cfg(unix)]
-mod scoped_child_signals {
-    use std::sync::atomic::{AtomicI32, Ordering};
-
-    use super::{ActivationError, process_error};
-
-    /// Signal-forwarding target: `0` before the scoped command exists, its PID
-    /// in shared-process-group (interactive) mode, or its negated
-    /// process-group ID in own-group (supervised) mode. Process-global, like
-    /// the signal dispositions it backs; `riftri exec` runs one scoped
-    /// command per process.
-    static FORWARD_TARGET: AtomicI32 = AtomicI32::new(0);
-    /// Most recent signal received before the scoped command's PID was known.
-    static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
-
-    extern "C" fn forward_signal(signal: libc::c_int) {
-        let target = FORWARD_TARGET.load(Ordering::SeqCst);
-        if target == 0 {
-            PENDING_SIGNAL.store(signal, Ordering::SeqCst);
-        } else {
-            // SAFETY: kill(2) is async-signal-safe, and the target names the
-            // scoped command or its dedicated process group.
-            unsafe {
-                libc::kill(target, signal);
-            }
-        }
-    }
-
-    /// Installs forwarding handlers for the `forwarded` signals, ignores the
-    /// `ignored` signals, and restores the previous dispositions when
-    /// dropped.
-    pub(super) struct ForwardingGuard {
-        previous: Vec<(libc::c_int, libc::sigaction)>,
-    }
-
-    impl ForwardingGuard {
-        pub(super) fn install(
-            forwarded: &[libc::c_int],
-            ignored: &[libc::c_int],
-        ) -> Result<Self, ActivationError> {
-            let mut guard = ForwardingGuard {
-                previous: Vec::with_capacity(forwarded.len() + ignored.len()),
-            };
-            for &signal in forwarded {
-                guard.replace_disposition(signal, forward_signal as *const () as usize)?;
-            }
-            for &signal in ignored {
-                guard.replace_disposition(signal, libc::SIG_IGN)?;
-            }
-            Ok(guard)
-        }
-
-        fn replace_disposition(
-            &mut self,
-            signal: libc::c_int,
-            handler: libc::sighandler_t,
-        ) -> Result<(), ActivationError> {
-            // SAFETY: the action structures are zero-initialized before every
-            // field sigaction reads is assigned, and the handler is either
-            // SIG_IGN or an async-signal-safe function.
-            unsafe {
-                let mut action: libc::sigaction = std::mem::zeroed();
-                action.sa_sigaction = handler;
-                action.sa_flags = libc::SA_RESTART;
-                libc::sigemptyset(&mut action.sa_mask);
-                let mut previous: libc::sigaction = std::mem::zeroed();
-                if libc::sigaction(signal, &action, &mut previous) != 0 {
-                    return Err(process_error(format!(
-                        "install termination handling for signal {signal}: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                self.previous.push((signal, previous));
-            }
-            Ok(())
-        }
-
-        /// For each requested signal, the disposition a child spawned now
-        /// should start from: the disposition Riftri itself inherited if that
-        /// was SIG_IGN, and SIG_DFL otherwise, because a caught handler never
-        /// survives exec while an ignore does.
-        pub(super) fn inherited_dispositions(
-            &self,
-            signals: &[libc::c_int],
-        ) -> Vec<(libc::c_int, libc::sighandler_t)> {
-            self.previous
-                .iter()
-                .filter(|(signal, _)| signals.contains(signal))
-                .map(|&(signal, previous)| {
-                    let handler = if previous.sa_sigaction == libc::SIG_IGN {
-                        libc::SIG_IGN
-                    } else {
-                        libc::SIG_DFL
-                    };
-                    (signal, handler)
-                })
-                .collect()
-        }
-
-        /// Publish the forwarding target and deliver any signal that arrived
-        /// before the scoped command's PID was known.
-        pub(super) fn arm(&self, target: i32) {
-            FORWARD_TARGET.store(target, Ordering::SeqCst);
-            let pending = PENDING_SIGNAL.swap(0, Ordering::SeqCst);
-            if pending != 0 {
-                // SAFETY: the target names the just-spawned scoped command or
-                // its dedicated process group.
-                unsafe {
-                    libc::kill(target, pending);
-                }
-            }
-        }
-
-        /// Stop forwarding immediately once the scoped command is reaped so a
-        /// late signal cannot reach a recycled PID.
-        pub(super) fn disarm(&self) {
-            FORWARD_TARGET.store(0, Ordering::SeqCst);
-        }
-    }
-
-    impl Drop for ForwardingGuard {
-        fn drop(&mut self) {
-            FORWARD_TARGET.store(0, Ordering::SeqCst);
-            PENDING_SIGNAL.store(0, Ordering::SeqCst);
-            for (signal, previous) in self.previous.drain(..) {
-                // SAFETY: `previous` was returned by sigaction for `signal`.
-                unsafe {
-                    libc::sigaction(signal, &previous, std::ptr::null_mut());
-                }
-            }
-        }
-    }
 }
 
 fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError> {
@@ -701,12 +479,18 @@ fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError
         )));
     }
 
-    let registered = git.list_worktrees(&root)?.into_iter().any(|worktree| {
+    let registered = git.list_worktrees(&root)?.into_iter().find(|worktree| {
         !worktree.bare && fs::canonicalize(&worktree.path).is_ok_and(|path| path == canonical)
     });
-    if !registered {
+    let Some(registered) = registered else {
         return Err(worktree_binding_error(format!(
             "{} is not a live entry in Git's worktree inventory",
+            canonical.display()
+        )));
+    };
+    if registered.head_unresolvable {
+        return Err(worktree_binding_error(format!(
+            "Git cannot resolve the worktree HEAD of {}; run `git worktree repair` first",
             canonical.display()
         )));
     }
@@ -751,6 +535,7 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     ensure_real_shell_shim_directory(&shim_directory)?;
     set_private_directory_permissions(&shim_directory)?;
     install_durable_git_shim(&shim_directory, &current_executable)?;
+    record_real_git_marker(&shim_directory, &real_git)?;
 
     let shim_directory = posix_quote_path(&shim_directory)?;
     let real_git = posix_quote_path(&real_git)?;
@@ -773,10 +558,12 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = posix_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "_riftri_shim={shim_directory}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  if [ \"$_riftri_entry\" != \"$_riftri_shim\" ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env} {shell_shim_dir_env}\nunset _riftri_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more\n",
+        "_riftri_shim={shim_directory}\n_riftri_process_shim=${{{process_shim_env}-}}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  _riftri_keep=1\n  [ \"$_riftri_entry\" = \"$_riftri_shim\" ] && _riftri_keep=0\n  [ -n \"$_riftri_process_shim\" ] && [ \"$_riftri_entry\" = \"$_riftri_process_shim\" ] && _riftri_keep=0\n  case \"$_riftri_entry\" in *{process_shim_prefix}*) _riftri_keep=0 ;; esac\n  if [ \"$_riftri_keep\" = 1 ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env} {shell_shim_dir_env} {process_shim_env}\nunset _riftri_shim _riftri_process_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more _riftri_keep\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
         shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
+        process_shim_env = PROCESS_SHIM_DIR_ENV,
+        process_shim_prefix = PROCESS_SHIM_DIR_PREFIX,
     ))
 }
 
@@ -796,6 +583,7 @@ fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
     ensure_real_shell_shim_directory(&shim_directory)?;
     set_private_directory_permissions(&shim_directory)?;
     install_durable_git_shim(&shim_directory, &current_executable)?;
+    record_real_git_marker(&shim_directory, &real_git)?;
 
     let shim_directory = powershell_quote_path(&shim_directory)?;
     let real_git = powershell_quote_path(&real_git)?;
@@ -818,10 +606,12 @@ fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_powershell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = powershell_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shell_shim_dir_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
+        "$_riftriShim = {shim_directory}\n$_riftriProcessShim = $env:{process_shim_env}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim -and (-not $_riftriProcessShim -or $_ -ne $_riftriProcessShim) -and $_ -notlike '*{process_shim_prefix}*' }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shell_shim_dir_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{process_shim_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriProcessShim, _riftriPath -ErrorAction SilentlyContinue\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
         shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
+        process_shim_env = PROCESS_SHIM_DIR_ENV,
+        process_shim_prefix = PROCESS_SHIM_DIR_PREFIX,
     ))
 }
 
@@ -1215,18 +1005,46 @@ fn activation_for_proxy(path: &Path) -> Result<Option<RepositoryActivation>, Act
     }))
 }
 
+/// How the global Git options in front of `worktree` constrain optimization.
+///
+/// Riftri separates options that can change what Git would produce from
+/// options that only affect reporting or locking, because the first class must
+/// be refused while the second only has to keep Riftri from claiming that an
+/// optimized result reproduces the requested invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GlobalOptionScope {
+    /// No invocation-level option that Riftri has to account for.
+    None,
+    /// Only options that cannot change the content of a created worktree.
+    CheckoutNeutral,
+    /// At least one option that can change what Git would produce.
+    Significant,
+}
+
+impl GlobalOptionScope {
+    fn observe(&mut self, scope: Self) {
+        if scope == Self::Significant || *self == Self::None {
+            *self = scope;
+        }
+    }
+
+    fn optimization_compatible(self) -> bool {
+        self == Self::None
+    }
+}
+
 struct CommandContext {
     repository: PathBuf,
     git_directory: Option<PathBuf>,
     command_index: usize,
-    optimization_compatible: bool,
+    global_options: GlobalOptionScope,
 }
 
 fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
     let mut repository = current_directory.to_path_buf();
     let mut work_tree = None;
     let mut git_directory = None;
-    let mut optimization_compatible = true;
+    let mut global_options = GlobalOptionScope::None;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "-C" {
@@ -1245,15 +1063,15 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             } else {
                 git_directory = Some(value.clone());
             }
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if let Some(value) = option_value(argument, "--git-dir=") {
             git_directory = Some(value);
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if let Some(value) = option_value(argument, "--work-tree=") {
             work_tree = Some(value);
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument == "--no-pager"
             || argument == "--paginate"
@@ -1263,28 +1081,36 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             index += 1;
         } else if argument == "-c" {
             arguments.get(index + 1)?;
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if argument.to_string_lossy().starts_with("--config-env=") {
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument == "--namespace" {
             arguments.get(index + 1)?;
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 2;
+        } else if argument == "--no-optional-locks"
+            || argument == "--no-advice"
+            || argument == "--literal-pathspecs"
+        {
+            // Advice suppression and optional-lock avoidance never change what
+            // a checkout contains, and `git worktree` takes no pathspec, so
+            // literal pathspec matching cannot change it either. IDEs pass
+            // `--no-optional-locks` on every Git call, so refusing these would
+            // break ordinary editor integration.
+            global_options.observe(GlobalOptionScope::CheckoutNeutral);
+            index += 1;
         } else if argument.to_string_lossy().starts_with("--namespace=")
             || argument.as_encoded_bytes().starts_with(b"--exec-path=")
             || argument == "--no-replace-objects"
             || argument == "--no-lazy-fetch"
-            || argument == "--no-optional-locks"
-            || argument == "--no-advice"
-            || argument == "--literal-pathspecs"
             || argument == "--glob-pathspecs"
             || argument == "--noglob-pathspecs"
             || argument == "--icase-pathspecs"
             || argument == "--bare"
         {
-            optimization_compatible = false;
+            global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument.to_string_lossy().starts_with('-') {
             return None;
@@ -1296,7 +1122,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
                 repository: work_tree.unwrap_or(repository),
                 git_directory,
                 command_index: index,
-                optimization_compatible,
+                global_options,
             });
         }
     }
@@ -1318,6 +1144,40 @@ fn option_value(argument: &OsStr, prefix: &str) -> Option<OsString> {
     // SAFETY: the split occurs immediately after an ASCII prefix, which is a
     // valid boundary in the platform-independent encoded representation.
     Some(unsafe { OsStr::from_encoded_bytes_unchecked(value) }.to_os_string())
+}
+
+/// `-h` and `--help` ask Git to print usage and exit without touching the
+/// repository, exactly like the `remove` and `list` subcommands Riftri already
+/// delegates. Intercepting them would leave `worktree add` as the one
+/// subcommand whose documentation is unreachable inside an enabled repository.
+fn requests_git_help(arguments: &[OsString]) -> bool {
+    arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .any(|argument| argument == "-h" || argument == "--help")
+}
+
+fn plan_enabled_add(
+    repository: &Path,
+    arguments: &[OsString],
+    global_options: GlobalOptionScope,
+) -> Result<GitProxyPlan, ActivationError> {
+    if requests_git_help(arguments) {
+        return Ok(GitProxyPlan::Passthrough);
+    }
+    match global_options {
+        // An option Riftri cannot reproduce must not be silently dropped, and
+        // an add is not safe to hand to ordinary Git once Riftri would have
+        // optimized it, so this stays a visible refusal.
+        GlobalOptionScope::Significant => Err(unsupported(format!(
+            "Git invocation-level configuration is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+        ))),
+        // Nothing about the request is unreproducible, but Riftri also gains
+        // nothing by claiming the option: ordinary Git honors it exactly.
+        GlobalOptionScope::CheckoutNeutral => Ok(GitProxyPlan::Passthrough),
+        GlobalOptionScope::None => parse_enabled_add(repository, arguments)
+            .map(|(request, quiet)| GitProxyPlan::OptimizedAdd { request, quiet }),
+    }
 }
 
 fn parse_enabled_add(
@@ -1376,7 +1236,25 @@ fn parse_enabled_add(
         .unwrap_or_else(|| OsString::from("HEAD"));
     let mode = match mode {
         Some(mode) => mode,
-        None if positional.len() == 2 => WorktreeMode::ExistingBranch(revision.clone()),
+        // `git worktree add <path> <commit-ish>` without a mode flag only
+        // checks out a branch when `<commit-ish>` names an existing local
+        // branch. For a tag, a raw commit, `HEAD`, or a remote-tracking ref
+        // real Git detaches or creates a DWIM tracking branch instead, neither
+        // of which the optimized path reproduces. Decide that here, from one
+        // ref lookup, rather than letting the request fail deep inside the add
+        // after several Git processes have already run.
+        None if positional.len() == 2 => {
+            if Git::default()
+                .local_branch_target(repository, &revision)?
+                .is_none()
+            {
+                let revision = revision.to_string_lossy().into_owned();
+                return Err(unsupported(format!(
+                    "optimized add checks out an existing local branch, and `{revision}` is not one; ordinary Git would create a detached or remote-tracking worktree instead. Use `--detach` to check out `{revision}` detached, `-b <new-branch>` to create a branch, or set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+                )));
+            }
+            WorktreeMode::ExistingBranch(revision.clone())
+        }
         None => {
             return Err(unsupported(format!(
                 "optimized add requires an existing local branch, `-b <new-branch>`, or `--detach`; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
@@ -1490,12 +1368,72 @@ fn plan_enabled_move(
     Ok(GitProxyPlan::Passthrough)
 }
 
+/// `git worktree prune` options that only report what a prune would do.
+///
+/// `-n`/`--dry-run` is Git's own "do not remove anything; just report what it
+/// would remove", and the verbosity and help options change nothing either, so
+/// real Git can answer all of them without touching lifecycle metadata.
+/// `-v`/`--verbose` is deliberately absent: for `git worktree prune` it is a
+/// verbose *prune*, not a report, so it must never bypass the journaled path.
+fn is_prune_help_option(argument: &OsString) -> bool {
+    matches!(argument.to_str(), Some("-h" | "--help"))
+}
+
+fn is_prune_dry_run_option(argument: &OsString) -> bool {
+    matches!(argument.to_str(), Some("-n" | "--dry-run"))
+}
+
+fn is_prune_verbose_option(argument: &OsString) -> bool {
+    matches!(argument.to_str(), Some("-v" | "--verbose"))
+}
+
+/// Every documented `git worktree prune` option, so a dry run combined only
+/// with recognized options can delegate while anything unknown fails closed.
+fn is_recognized_prune_argument(argument: &OsString) -> bool {
+    if is_prune_help_option(argument)
+        || is_prune_dry_run_option(argument)
+        || is_prune_verbose_option(argument)
+    {
+        return true;
+    }
+    matches!(argument.to_str(), Some("--expire"))
+        || argument
+            .to_str()
+            .is_some_and(|argument| argument.starts_with("--expire="))
+}
+
 fn plan_enabled_prune(
     repository: &Path,
     activation: &RepositoryActivation,
     arguments: &[OsString],
-    optimization_compatible: bool,
+    global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
+    // Help always delegates: git prints usage and touches nothing.
+    if arguments.iter().any(is_prune_help_option) {
+        return Ok(GitProxyPlan::Passthrough);
+    }
+    // A dry run reports without mutating, and in git it wins over `-v` and
+    // `--expire`; delegate only when every other argument is a documented
+    // prune option (an `--expire` value may follow its flag), so an unknown
+    // option still fails closed below.
+    if arguments.iter().any(is_prune_dry_run_option) {
+        let mut expecting_expire_value = false;
+        let recognized = arguments.iter().all(|argument| {
+            if expecting_expire_value {
+                expecting_expire_value = false;
+                return true;
+            }
+            if argument.to_str() == Some("--expire") {
+                expecting_expire_value = true;
+                return true;
+            }
+            is_recognized_prune_argument(argument)
+        });
+        if recognized && !expecting_expire_value {
+            return Ok(GitProxyPlan::Passthrough);
+        }
+    }
+
     let mut managed_states = Vec::new();
     for state_directory in repository_state_directories(&activation.repository)? {
         let status = storage_accounting(&state_directory)?;
@@ -1512,15 +1450,29 @@ fn plan_enabled_prune(
     if managed_states.is_empty() {
         return Ok(GitProxyPlan::Passthrough);
     }
-    if optimization_compatible && arguments.is_empty() {
-        return Ok(GitProxyPlan::OptimizedPrune(PruneWorktreesRequest {
-            repository: repository.to_path_buf(),
-            state_dir: managed_states.into_iter().next(),
-        }));
+    if arguments.is_empty() || arguments.iter().all(is_prune_verbose_option) {
+        // A verbose bare prune removes exactly what a bare prune removes, so
+        // it takes the same journaled path (without the listing). A
+        // checkout-neutral global option cannot change what a prune removes,
+        // so the journaled prune still reproduces the requested invocation.
+        if global_options != GlobalOptionScope::Significant {
+            return Ok(GitProxyPlan::OptimizedPrune(PruneWorktreesRequest {
+                repository: repository.to_path_buf(),
+                state_dir: managed_states.into_iter().next(),
+            }));
+        }
+        return Err(unsupported(format!(
+            "refusing `git worktree prune` under invocation-level Git configuration while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+        )));
     }
-    Err(unsupported(
-        "refusing `git worktree prune` options while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal",
-    ))
+    let options = arguments
+        .iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    Err(unsupported(format!(
+        "refusing `git worktree prune {options}` while managed Riftri state exists because Git could change lifecycle metadata outside the Riftri journal; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+    )))
 }
 
 fn guard_managed_path_lifecycle(
@@ -1580,6 +1532,199 @@ fn environment_truthy(key: &str) -> bool {
         let value = value.to_string_lossy();
         value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
     })
+}
+
+/// Report whether the inherited shim environment is complete enough for
+/// optimized interception: the activation marker must be set and the recorded
+/// real Git executable must still be present.
+pub fn shim_environment_complete() -> bool {
+    env::var_os(SHIM_ACTIVE_ENV).is_some()
+        && env::var_os(riftri_git::REAL_GIT_ENV)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .as_deref()
+            .is_some_and(is_executable_file)
+}
+
+/// Report whether the current `git`-named invocation still looks like a
+/// Riftri shim even though the activation marker is gone: either a process
+/// scope recorded its shim directory, or the first `git` resolved from `PATH`
+/// is a Riftri shim (identified by its real-Git marker or because it resolves
+/// to the currently running executable).
+pub fn stripped_shim_scope_detected() -> bool {
+    if env::var_os(PROCESS_SHIM_DIR_ENV).is_some_and(|path| !path.is_empty()) {
+        return true;
+    }
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    let current_executable = canonical_current_executable();
+    for directory in env::split_paths(&path) {
+        let candidates = git_executable_candidates(&directory);
+        if !candidates.iter().any(|path| is_executable_file(path)) {
+            continue;
+        }
+        if directory.join(REAL_GIT_MARKER_FILE).is_file() {
+            return true;
+        }
+        return candidates.iter().any(|candidate| {
+            current_executable.as_deref().is_some_and(|executable| {
+                fs::canonicalize(candidate).is_ok_and(|candidate| candidate == executable)
+            })
+        });
+    }
+    false
+}
+
+/// Delegate a `git`-named invocation to the real Git executable although the
+/// shim environment is missing or inconsistent. A broken shim must never
+/// answer as Riftri or intercept anything, so this performs a plain
+/// passthrough with inherited standard streams and exit status — and, like
+/// every other shim delegation, under the termination contract, so a signal
+/// aimed at the shim cannot orphan the real Git it started.
+pub fn delegate_stripped_shim_invocation(arguments: &[OsString]) -> Result<i32, ActivationError> {
+    let real_git = resolve_real_git_for_stripped_shim().ok_or_else(|| {
+        process_error(
+            "the Riftri Git shim lost its environment and could not locate the real Git \
+             executable; run `riftri shell deactivate <shell>` in an activated shell or exit \
+             the `riftri exec` session, then retry",
+        )
+    })?;
+    let mut command = Command::new(&real_git);
+    command.args(arguments);
+    let status =
+        riftri_git::termination::run_forwarding_terminations(&mut command).map_err(|error| {
+            process_error(format!(
+                "delegate to the real Git executable {}: {error}",
+                real_git.display()
+            ))
+        })?;
+    Ok(exit_status_code(status))
+}
+
+/// Record the captured real Git path next to a shim so the shim keeps a
+/// delegation target even when its environment is stripped later. The marker
+/// is written atomically because durable shell shim directories are shared by
+/// concurrently activating shells.
+fn record_real_git_marker(directory: &Path, real_git: &Path) -> Result<(), ActivationError> {
+    let Some(contents) = real_git_marker_bytes(real_git) else {
+        // A non-representable path only loses the stripped-environment
+        // fallback; PATH re-resolution still works, so do not fail activation.
+        return Ok(());
+    };
+    let nonce = std::process::id();
+    let temporary = directory.join(format!(".{REAL_GIT_MARKER_FILE}-{nonce}.tmp"));
+    fs::write(&temporary, contents).map_err(|error| {
+        process_error(format!(
+            "record real Git path in {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let destination = directory.join(REAL_GIT_MARKER_FILE);
+    fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        process_error(format!(
+            "activate real Git marker {}: {error}",
+            destination.display()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn real_git_marker_bytes(real_git: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    Some(real_git.as_os_str().as_bytes().to_vec())
+}
+
+#[cfg(not(unix))]
+fn real_git_marker_bytes(real_git: &Path) -> Option<Vec<u8>> {
+    real_git.to_str().map(|path| path.as_bytes().to_vec())
+}
+
+#[cfg(unix)]
+fn read_real_git_marker(directory: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let contents = fs::read(directory.join(REAL_GIT_MARKER_FILE)).ok()?;
+    Some(PathBuf::from(OsString::from_vec(contents)))
+}
+
+#[cfg(not(unix))]
+fn read_real_git_marker(directory: &Path) -> Option<PathBuf> {
+    let contents = fs::read(directory.join(REAL_GIT_MARKER_FILE)).ok()?;
+    Some(PathBuf::from(String::from_utf8(contents).ok()?))
+}
+
+fn canonical_current_executable() -> Option<PathBuf> {
+    env::current_exe().and_then(fs::canonicalize).ok()
+}
+
+/// Locate a real Git executable for a shim whose environment was stripped:
+/// prefer whatever the environment still records, then the path baked into a
+/// shim directory at creation, and finally a `PATH` walk that skips every
+/// Riftri shim directory so the shim can never select itself.
+fn resolve_real_git_for_stripped_shim() -> Option<PathBuf> {
+    resolve_stripped_real_git(
+        env::var_os(riftri_git::REAL_GIT_ENV),
+        env::var_os(PROCESS_SHIM_DIR_ENV).map(PathBuf::from),
+        env::var_os("PATH"),
+        canonical_current_executable(),
+    )
+}
+
+fn resolve_stripped_real_git(
+    recorded_real_git: Option<OsString>,
+    process_shim_directory: Option<PathBuf>,
+    path: Option<OsString>,
+    current_executable: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let not_self = |candidate: &Path| {
+        current_executable.as_deref().is_none_or(|executable| {
+            fs::canonicalize(candidate).is_ok_and(|candidate| candidate != executable)
+        })
+    };
+
+    if let Some(recorded) = recorded_real_git
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| is_executable_file(path) && not_self(path))
+    {
+        return Some(recorded);
+    }
+    if let Some(baked) = process_shim_directory
+        .as_deref()
+        .and_then(read_real_git_marker)
+        .filter(|path| is_executable_file(path) && not_self(path))
+    {
+        return Some(baked);
+    }
+
+    for directory in env::split_paths(path.as_deref()?) {
+        if process_shim_directory
+            .as_deref()
+            .is_some_and(|shim| shim == directory)
+        {
+            continue;
+        }
+        if directory.join(REAL_GIT_MARKER_FILE).is_file() {
+            // Another shim directory: its baked marker names the real Git,
+            // while its own `git` entry must never be executed.
+            if let Some(baked) = read_real_git_marker(&directory)
+                .filter(|path| is_executable_file(path) && not_self(path))
+            {
+                return Some(baked);
+            }
+            continue;
+        }
+        if let Some(candidate) = git_executable_candidates(&directory)
+            .into_iter()
+            .find(|candidate| is_executable_file(candidate) && not_self(candidate))
+        {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn locate_real_git() -> Result<PathBuf, ActivationError> {
@@ -1685,8 +1830,13 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        GitProxyPlan, disable_repository, enable_repository, plan_git_command,
+        BYPASS_ENV, GitProxyPlan, disable_repository, enable_repository, plan_git_command,
         repository_activation,
+    };
+    #[cfg(unix)]
+    use super::{
+        PROCESS_SHIM_DIR_ENV, PROCESS_SHIM_DIR_PREFIX, REAL_GIT_MARKER_FILE, SHELL_SHIM_DIR_ENV,
+        prepare_posix_shell_deactivation_inner, record_real_git_marker, resolve_stripped_real_git,
     };
     use crate::WorktreeMode;
 
@@ -1789,6 +1939,7 @@ mod tests {
     #[test]
     fn enabled_existing_branch_add_is_planned_as_an_optimized_worktree() {
         let fixture = repository_fixture();
+        git(fixture.path(), &["branch", "feature/existing"]);
         enable_repository(fixture.path()).expect("enable repository");
         let arguments = [
             OsString::from("worktree"),
@@ -1915,6 +2066,255 @@ mod tests {
         let error = plan_git_command(fixture.path(), &arguments)
             .expect_err("invocation config must not be ignored");
         assert!(error.to_string().contains("invocation-level configuration"));
+    }
+
+    /// `worktree add` is the only subcommand Riftri intercepts eagerly, so its
+    /// usage text has to stay reachable exactly like `remove -h` and `list -h`.
+    #[test]
+    fn enabled_add_delegates_help_requests_to_git() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for help in ["--help", "-h"] {
+            let arguments = [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from(help),
+            ];
+
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan help request"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`worktree add {help}` was not delegated to Git"
+            );
+        }
+    }
+
+    /// A `--` separator ends option parsing, so a later `--help` is a path.
+    #[test]
+    fn enabled_add_treats_help_after_a_separator_as_a_path() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let arguments = [
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("--detach"),
+            OsString::from("--"),
+            OsString::from("--help"),
+        ];
+
+        let GitProxyPlan::OptimizedAdd { request, .. } =
+            plan_git_command(fixture.path(), &arguments).expect("plan separated add")
+        else {
+            panic!("`worktree add --detach -- --help` was not an optimized add");
+        };
+        assert_eq!(request.destination, fixture.path().join("--help"));
+    }
+
+    /// IDE Git integrations pass `--no-optional-locks` on every invocation.
+    /// None of these options can change what a checkout contains, so an add
+    /// carrying one delegates to ordinary Git instead of failing.
+    #[test]
+    fn enabled_add_delegates_checkout_neutral_global_options() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for option in ["--no-optional-locks", "--no-advice", "--literal-pathspecs"] {
+            let arguments = [
+                OsString::from(option),
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("--detach"),
+                OsString::from("../neutral-view"),
+                OsString::from("HEAD"),
+            ];
+
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan neutral add"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`git {option} worktree add` was not delegated to Git"
+            );
+        }
+    }
+
+    /// Without a mode flag, only an existing local branch is checked out.
+    /// Every other revision would make ordinary Git detach or create a
+    /// tracking branch, so the refusal has to name that limitation before any
+    /// Git process runs rather than surface as a missing-branch failure later.
+    #[test]
+    fn enabled_add_refuses_a_revision_that_is_not_a_local_branch() {
+        let fixture = repository_fixture();
+        git(fixture.path(), &["tag", "v1.0.0"]);
+        enable_repository(fixture.path()).expect("enable repository");
+        for revision in ["v1.0.0", "origin/main", "HEAD"] {
+            let arguments = [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("../detached-candidate"),
+                OsString::from(revision),
+            ];
+
+            let error = plan_git_command(fixture.path(), &arguments)
+                .expect_err("a non-branch revision must be refused before any mutation");
+            let message = error.to_string();
+            assert!(
+                message.contains("is not one") && message.contains(revision),
+                "{revision}: {message}"
+            );
+            assert!(message.contains("--detach"), "{revision}: {message}");
+            assert!(message.contains(BYPASS_ENV), "{revision}: {message}");
+            assert!(
+                !message.contains("existing local branch does not exist"),
+                "{revision}: {message}"
+            );
+        }
+    }
+
+    /// `-n`/`--dry-run` is Git's own "show what would be pruned", and the
+    /// verbosity and help options report just as harmlessly, so none of them
+    /// may be refused as journal-bypassing mutations.
+    #[test]
+    fn enabled_prune_delegates_read_only_options_to_git() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for options in [
+            &["-n"][..],
+            &["--dry-run"][..],
+            &["-h"][..],
+            &["--help"][..],
+            &["--dry-run", "-v"][..],
+            &["--dry-run", "--expire", "1.day.ago"][..],
+            &["--dry-run", "--expire=1.day.ago"][..],
+            &["--expire", "1.day.ago", "-h"][..],
+        ] {
+            let mut arguments = vec![OsString::from("worktree"), OsString::from("prune")];
+            arguments.extend(options.iter().map(OsString::from));
+
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan read-only prune"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`worktree prune {options:?}` was not delegated to Git"
+            );
+        }
+    }
+
+    /// Deactivation evaluated inside a `riftri exec` session must strip the
+    /// process-scoped shim from `PATH` and drop its scope variable, not only
+    /// the durable shell-hook shim.
+    #[cfg(unix)]
+    #[test]
+    fn posix_deactivation_removes_process_scoped_shim_entries() {
+        let script = prepare_posix_shell_deactivation_inner().expect("render deactivation code");
+        assert!(script.contains(PROCESS_SHIM_DIR_ENV));
+        assert!(script.contains(&format!("*{PROCESS_SHIM_DIR_PREFIX}*")));
+        // Both shim scopes are torn down: the durable shell hook's variable and
+        // the process-scoped one are unset in the same statement.
+        let unset = script
+            .lines()
+            .find(|line| line.starts_with("unset RIFTRI_REAL_GIT "))
+            .expect("deactivation unsets the shim variables");
+        for variable in [
+            "RIFTRI_SHIM_ACTIVE",
+            SHELL_SHIM_DIR_ENV,
+            PROCESS_SHIM_DIR_ENV,
+        ] {
+            assert!(unset.contains(variable), "{variable} is not unset: {unset}");
+        }
+
+        let shim = "/tmp/riftri-test/riftri-git-shim-abc123";
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                "eval \"$RIFTRI_TEST_DEACTIVATION\"\n\
+                 printf 'path=%s\\n' \"$PATH\"\n\
+                 printf 'scope=%s\\n' \"${RIFTRI_PROCESS_SHIM_DIR-unset}\"\n\
+                 printf 'marker=%s\\n' \"${RIFTRI_SHIM_ACTIVE-unset}\"\n\
+                 printf 'real=%s\\n' \"${RIFTRI_REAL_GIT-unset}\"",
+            ])
+            .env("RIFTRI_TEST_DEACTIVATION", &script)
+            .env("PATH", format!("{shim}:/usr/bin:/bin"))
+            .env(PROCESS_SHIM_DIR_ENV, shim)
+            .env(super::SHIM_ACTIVE_ENV, "1")
+            .env(riftri_git::REAL_GIT_ENV, "/usr/bin/git")
+            .output()
+            .expect("evaluate deactivation in sh");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+        assert!(stdout.contains("path=/usr/bin:/bin\n"), "{stdout}");
+        assert!(stdout.contains("scope=unset"), "{stdout}");
+        assert!(stdout.contains("marker=unset"), "{stdout}");
+        assert!(stdout.contains("real=unset"), "{stdout}");
+    }
+
+    /// A shim with a stripped environment must resolve the real Git without
+    /// ever selecting itself or another shim's `git` entry.
+    #[cfg(unix)]
+    #[test]
+    fn stripped_shim_resolution_skips_shim_directories_and_uses_the_baked_marker() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempdir().expect("fixture");
+        let shim_directory = fixture.path().join("riftri-git-shim-test");
+        let real_directory = fixture.path().join("real");
+        fs::create_dir_all(&shim_directory).expect("create shim directory");
+        fs::create_dir_all(&real_directory).expect("create real directory");
+        for executable in [shim_directory.join("git"), real_directory.join("git")] {
+            fs::write(&executable, "#!/bin/sh\n").expect("write executable");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("mark executable");
+        }
+        let real_git = real_directory.join("git");
+        record_real_git_marker(&shim_directory, &real_git).expect("record marker");
+        assert!(shim_directory.join(REAL_GIT_MARKER_FILE).is_file());
+        let path = std::env::join_paths([&shim_directory, &real_directory]).expect("join PATH");
+
+        // The scope variable alone is enough to find the baked real Git.
+        assert_eq!(
+            resolve_stripped_real_git(None, Some(shim_directory.clone()), Some(path.clone()), None,),
+            Some(real_git.clone())
+        );
+
+        // Without any scope variable, the PATH walk reads the marker of the
+        // shim directory it skips instead of executing that shim.
+        assert_eq!(
+            resolve_stripped_real_git(None, None, Some(path.clone()), None),
+            Some(real_git.clone())
+        );
+
+        // A still-present recorded environment value wins.
+        assert_eq!(
+            resolve_stripped_real_git(
+                Some(real_git.clone().into_os_string()),
+                None,
+                Some(path.clone()),
+                None,
+            ),
+            Some(real_git.clone())
+        );
+
+        // A markerless shim entry that resolves to the running executable is
+        // skipped in favor of the next PATH entry.
+        fs::remove_file(shim_directory.join(REAL_GIT_MARKER_FILE)).expect("remove marker");
+        let canonical_shim_git =
+            fs::canonicalize(shim_directory.join("git")).expect("canonical shim git");
+        assert_eq!(
+            resolve_stripped_real_git(None, None, Some(path.clone()), Some(canonical_shim_git)),
+            Some(real_git.clone())
+        );
+
+        // With no real Git anywhere, resolution reports failure instead of
+        // selecting the shim itself.
+        let canonical_shim_git =
+            fs::canonicalize(shim_directory.join("git")).expect("canonical shim git");
+        let shim_only = std::env::join_paths([&shim_directory]).expect("join shim-only PATH");
+        assert_eq!(
+            resolve_stripped_real_git(None, None, Some(shim_only), Some(canonical_shim_git)),
+            None
+        );
     }
 
     fn repository_fixture() -> tempfile::TempDir {

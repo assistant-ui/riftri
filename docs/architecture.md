@@ -52,8 +52,9 @@ repository-local consent is still required.
 `riftri shell status` reports the two independent activation layers and whether
 they combine into effective optimized interception for a selected repository.
 `riftri shell deactivate <sh|bash|zsh|powershell>` prints code that removes
-every cached shim-directory occurrence from `PATH` and unsets Riftri's shim environment in
-the current shell when explicitly evaluated. It does not change repository
+every Riftri shim-directory occurrence from `PATH` — the durable cached shim
+and any process-scoped `riftri exec` shim entries — and unsets Riftri's shim
+environment in the current shell when explicitly evaluated. It does not change repository
 configuration or edit a shell profile, so persistent global activation remains
 under the user's direct control.
 
@@ -442,6 +443,12 @@ Native `clonefile` is used for every regular file in an APFS view. An error is
 returned if APFS cannot clone; there is no byte-copy path. Directory structure,
 symlinks, and executable modes are preserved. The base is made read-only and the
 cloned view restores owner write permission before Git index synchronization.
+On APFS, permission restoration is part of the per-entry clone traversal rather
+than a second directory walk. It reads each cloned file's actual mode before
+adding owner write permission, leaves symlink targets alone, and uses the same
+directory mode policy and failure cleanup. Linux and ReFS retain their existing
+two-pass implementation. Immutable-base integrity verification, journal
+transitions, Git index initialization, and final clean-state checks are unchanged.
 
 On Linux, Riftri accepts Btrfs and reflink-enabled XFS only after an active
 `FICLONE` check succeeds on two unnamed files in the destination volume. The
