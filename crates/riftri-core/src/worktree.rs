@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
@@ -343,6 +343,12 @@ pub struct RecoveryReport {
     pub unresolvable_worktrees: Vec<PathBuf>,
     /// Riftri's own interrupted atomic-write temporaries removed this pass.
     pub reaped_artifacts: Vec<PathBuf>,
+    /// Abandoned OverlayFS probe roots removed this pass after the kernel
+    /// mount inventory proved nothing was mounted at or below them.
+    pub reaped_probe_roots: Vec<PathBuf>,
+    /// Abandoned OverlayFS probe roots preserved because a mount still covers
+    /// them; repair never touches a probe root that may be live.
+    pub preserved_probe_mounts: Vec<PathBuf>,
     pub errors: Vec<String>,
 }
 
@@ -4888,12 +4894,69 @@ fn diagnose_state_paths(
         }
     }
 
+    // A probe unmount that failed through every retry deliberately abandons
+    // its mount and layer directories next to the user's worktrees instead of
+    // deleting under a possibly live mount. Name each leftover so the leak
+    // stops being invisible; only `riftri repair` removes one, and only when
+    // the kernel mount inventory proves it unmounted.
+    for directory in probe_scan_directories(add_journals) {
+        for path in abandoned_probe_roots(&directory) {
+            add_state_issue(
+                &mut issues,
+                path,
+                "an abandoned OverlayFS probe mount was preserved here after a failed \
+                 unmount; `riftri repair` removes it only when the kernel reports it \
+                 unmounted",
+            );
+        }
+    }
+
     issues.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     issues.dedup_by(|left, right| left.path == right.path && left.reason == right.reason);
     Ok(StatePathDiagnosis {
         issues,
         coordination_locks,
     })
+}
+
+/// Directories a Riftri capability probe may have run in: each journaled
+/// destination and its parent, because probing resolves to the nearest
+/// existing ancestor of the requested destination.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn probe_scan_directories(add_journals: &[DecodedJournal]) -> BTreeSet<PathBuf> {
+    let mut directories = BTreeSet::new();
+    for journal in add_journals {
+        if let Some(parent) = journal.destination.parent() {
+            directories.insert(parent.to_path_buf());
+        }
+        directories.insert(journal.destination.clone());
+    }
+    directories
+}
+
+/// Riftri OverlayFS probe roots present in `directory`, best effort: these
+/// live in user-owned directories, so an unreadable entry is skipped rather
+/// than failing the whole diagnosis.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn abandoned_probe_roots(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    let mut roots = Vec::new();
+    for entry in entries.flatten() {
+        if !riftri_storage::OverlayFsMounter::is_abandoned_probe_name(&entry.file_name()) {
+            continue;
+        }
+        let path = entry.path();
+        if matches!(
+            fs::symlink_metadata(&path),
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
+        ) {
+            roots.push(path);
+        }
+    }
+    roots.sort_unstable();
+    roots
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -5959,6 +6022,8 @@ pub fn recover_incomplete_operations(
         .iter()
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    #[cfg(target_os = "linux")]
+    let probe_directories = probe_scan_directories(&journals);
     let mut report = RecoveryReport {
         scanned: journals
             .len()
@@ -6265,6 +6330,25 @@ pub fn recover_incomplete_operations(
         Err(error) => report
             .errors
             .push(format!("interrupted journal writes: {error}")),
+    }
+
+    // A failed probe unmount deliberately abandons its mount and layers next
+    // to the user's worktrees; the leak is unbounded because probing reruns on
+    // every add. Remove each leftover only when the kernel mount inventory
+    // proves nothing is mounted at or below it, and preserve — but report —
+    // any root a mount still covers.
+    #[cfg(target_os = "linux")]
+    for directory in probe_directories {
+        for root in abandoned_probe_roots(&directory) {
+            match OverlayFsMounter::remove_abandoned_probe_root(&root) {
+                Ok(true) => report.reaped_probe_roots.push(root),
+                Ok(false) => report.preserved_probe_mounts.push(root),
+                Err(error) => report.errors.push(format!(
+                    "abandoned OverlayFS probe {}: {error}",
+                    root.display()
+                )),
+            }
+        }
     }
     Ok(report)
 }
@@ -8278,6 +8362,13 @@ fn recover_active_overlayfs_mount(
             journal.journal_path.display()
         ))
     })?;
+    // Both branches load non-destructively: the boot/namespace/liveness
+    // determination below (`mount_state` or `recover_mount`) must run before
+    // any destructive reset, because a mount created in another namespace of
+    // this boot is invisible here and `load_for_remount` would wipe the work
+    // directory of that still-live overlay. The disposable work directory is
+    // reset only on the remount path, after the guards preserved-and-reported
+    // every live-elsewhere shape.
     let layout = if overlayfs.mount_identity.is_some() {
         OverlayFsMounter::load(
             &overlayfs.layout_root,
@@ -8285,7 +8376,7 @@ fn recover_active_overlayfs_mount(
             &journal.destination,
         )?
     } else {
-        OverlayFsMounter::load_for_remount(
+        OverlayFsMounter::load_for_recovery(
             &overlayfs.layout_root,
             &journal.base_path,
             &journal.destination,
@@ -8372,6 +8463,7 @@ fn recover_active_overlayfs_mount(
         &remount.layout_root,
         &remount_journal.base_path,
         &remount_journal.destination,
+        context,
     )?;
     match OverlayFsMounter::recover_mount(&remount_layout, context, &remount.recovery_token)? {
         OverlayFsRecoveryState::Mounted(identity) => {
@@ -10545,6 +10637,246 @@ mod tests {
             false,
         )
         .expect("the helper exits from the post-mount test hook");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn overlayfs_recovery_preserves_a_workdir_the_journaled_namespace_cannot_rule_out() {
+        use riftri_storage::{OverlayFsMounter, OverlayFsRecoveryState};
+
+        let fixture = tempdir().expect("fixture");
+        if !require_overlayfs_test_namespace(fixture.path()) {
+            return;
+        }
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        create_overlayfs_repository(&repository);
+
+        // Reproduce the crash window: exit after the mount syscall succeeds
+        // but before the mount identity reaches the journal.
+        let status = Command::new(std::env::current_exe().expect("unit test executable"))
+            .arg("--exact")
+            .arg("worktree::tests::overlayfs_mount_gap_helper")
+            .arg("--nocapture")
+            .env("RIFTRI_OVERLAYFS_CORE_HELPER", "1")
+            .env("RIFTRI_TEST_EXIT_AFTER_OVERLAYFS_MOUNT", "1")
+            .env("RIFTRI_OVERLAYFS_CORE_REPOSITORY", &repository)
+            .env("RIFTRI_OVERLAYFS_CORE_DESTINATION", &destination)
+            .env("RIFTRI_OVERLAYFS_CORE_STATE", &state)
+            .status()
+            .expect("run mount-gap helper");
+        assert_eq!(status.code(), Some(86));
+
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load interrupted journal")
+            .pop()
+            .expect("one interrupted journal");
+        let overlayfs = journal.overlayfs.clone().expect("OverlayFS intent");
+        assert!(overlayfs.mount_identity.is_none(), "crash window closed");
+        let context = overlayfs.mount_context.clone().expect("mount context");
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )
+        .expect("load interrupted layout");
+        let identity =
+            match OverlayFsMounter::recover_mount(&layout, &context, &overlayfs.recovery_token)
+                .expect("adopt interrupted mount")
+            {
+                OverlayFsRecoveryState::Mounted(identity) => identity,
+                state => panic!("expected mounted recovery state, got {state:?}"),
+            };
+        // Make the mount invisible to this namespace, exactly what recovery
+        // sees when the mount lives on in a namespace it cannot inspect.
+        OverlayFsMounter::unmount(&layout, &identity).expect("hide interrupted mount");
+
+        // Give the journal the interrupted-remount shape (active, identity
+        // never journaled) and a mount context recorded in a different
+        // namespace of this boot: from here, the mount may still be live.
+        let mut record: serde_json::Value = serde_json::from_slice(
+            &fs::read(&journal.journal_path).expect("read interrupted journal"),
+        )
+        .expect("decode interrupted journal");
+        record["phase"] = "active".into();
+        record["last_forward_phase"] = "active".into();
+        let recorded_inode = record["overlayfs"]["mount_context"]["mount_namespace_inode"]
+            .as_u64()
+            .expect("journaled namespace inode");
+        record["overlayfs"]["mount_context"]["mount_namespace_inode"] = (recorded_inode + 1).into();
+        fs::write(
+            &journal.journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode foreign-namespace journal"),
+        )
+        .expect("persist foreign-namespace journal");
+        let sentinel = layout.work().join("live-mount-sentinel");
+        fs::write(&sentinel, b"must survive").expect("plant work-directory sentinel");
+
+        let preserved =
+            recover_incomplete_operations(&state).expect("repair with a possibly live mount");
+        assert_eq!(preserved.recovered_mounts, 0);
+        assert_eq!(preserved.errors.len(), 1, "{:?}", preserved.errors);
+        assert!(
+            preserved.errors[0].contains("different mount namespace"),
+            "{:?}",
+            preserved.errors
+        );
+        assert!(
+            sentinel.exists(),
+            "a destructive work-directory reset ran before the namespace guard"
+        );
+        assert!(layout.upper().join(".git").exists());
+
+        // Back in the journaled namespace the absence of the mount is
+        // provable, so recovery may reset the disposable work state and
+        // remount the view.
+        record["overlayfs"]["mount_context"]["mount_namespace_inode"] = recorded_inode.into();
+        fs::write(
+            &journal.journal_path,
+            serde_json::to_vec_pretty(&record).expect("encode restored journal"),
+        )
+        .expect("persist restored journal");
+        let repaired =
+            recover_incomplete_operations(&state).expect("repair in the journaled namespace");
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        assert_eq!(repaired.recovered_mounts, 1);
+        assert!(
+            Command::new("mountpoint")
+                .arg("--quiet")
+                .arg(&destination)
+                .status()
+                .expect("inspect remounted view")
+                .success()
+        );
+        let marker_name = format!(".riftri-overlayfs-recovery-{}", overlayfs.recovery_token);
+        assert!(
+            !destination.join(&marker_name).exists(),
+            "recovery marker still visible in the merged view"
+        );
+
+        let remounted = JournalStore::open(&state)
+            .load_all()
+            .expect("reload remounted journal")
+            .pop()
+            .expect("one remounted journal");
+        let remounted_overlayfs = remounted.overlayfs.expect("remounted OverlayFS intent");
+        let identity = remounted_overlayfs
+            .mount_identity
+            .expect("remounted identity");
+        let layout = OverlayFsMounter::load(
+            &remounted_overlayfs.layout_root,
+            &remounted.base_path,
+            &remounted.destination,
+        )
+        .expect("reload remounted layout");
+        OverlayFsMounter::unmount(&layout, &identity).expect("unmount remounted view");
+    }
+
+    #[test]
+    fn abandoned_probe_scan_names_only_real_probe_directories() {
+        let fixture = tempdir().expect("fixture");
+        let probe = fixture.path().join(".riftri-overlay-probe-42-1-0");
+        fs::create_dir(&probe).expect("create probe directory");
+        fs::write(probe.join("leftover"), b"layer").expect("write probe leftover");
+        fs::write(
+            fixture.path().join(".riftri-overlay-probe-42-1-1"),
+            b"not a directory",
+        )
+        .expect("write probe-named file");
+        fs::create_dir(fixture.path().join("user-directory")).expect("create user directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&probe, fixture.path().join(".riftri-overlay-probe-42-1-2"))
+            .expect("create probe-named symlink");
+
+        assert_eq!(super::abandoned_probe_roots(fixture.path()), vec![probe]);
+        assert!(super::abandoned_probe_roots(&fixture.path().join("absent")).is_empty());
+    }
+
+    #[test]
+    fn status_names_an_abandoned_overlayfs_probe_next_to_a_worktree() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/probe-diagnostic")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+
+        // A failed probe unmount abandons its directory beside the worktree.
+        // Diagnostics scan the journaled destination's canonical parent, so
+        // compare against the canonical probe path.
+        let probe = fixture.path().join(".riftri-overlay-probe-4242-7-0");
+        fs::create_dir(&probe).expect("create abandoned probe");
+        fs::write(probe.join("leftover"), b"layer").expect("write abandoned layer");
+        let probe = probe.canonicalize().expect("resolve abandoned probe");
+
+        let status = storage_accounting(&state).expect("account with abandoned probe");
+        assert!(
+            status.diagnostic_issues.iter().any(|issue| {
+                issue.path == probe && issue.reason.contains("abandoned OverlayFS probe")
+            }),
+            "abandoned probe not named: {:?}",
+            status.diagnostic_issues
+        );
+
+        let repaired = recover_incomplete_operations(&state).expect("repair with abandoned probe");
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(repaired.reaped_probe_roots, vec![probe.clone()]);
+            assert!(repaired.preserved_probe_mounts.is_empty());
+            assert!(!probe.exists(), "unmounted probe leftover not reaped");
+            let clean = storage_accounting(&state).expect("account after probe reap");
+            assert!(
+                !clean
+                    .diagnostic_issues
+                    .iter()
+                    .any(|issue| issue.reason.contains("abandoned OverlayFS probe")),
+                "{:?}",
+                clean.diagnostic_issues
+            );
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Only the Linux mount inventory can prove the probe unmounted,
+            // so other platforms report it and leave it alone.
+            assert!(repaired.reaped_probe_roots.is_empty());
+            assert!(probe.is_dir(), "probe removed without a liveness proof");
+        }
+
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state),
+            },
+            None,
+        )
+        .expect("remove probe-diagnostic worktree");
+        assert!(!destination.exists());
     }
 
     #[cfg(target_os = "linux")]

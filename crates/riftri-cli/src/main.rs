@@ -1343,13 +1343,19 @@ fn run_overlayfs_helper() -> Result<()> {
             )?;
             println!("{unmounted}");
         }
-        ("reset-work", [layout_root, lower, merged]) => {
+        ("reset-work", [layout_root, lower, merged, context]) => {
+            let context = context
+                .to_str()
+                .context("internal mount context is not UTF-8")?;
+            let context =
+                serde_json::from_str(context).context("decode internal OverlayFS mount context")?;
             riftri_storage::OverlayFsMounter::helper_reset_work(
                 Path::new(layout_root),
                 Path::new(lower),
                 Path::new(merged),
                 requester_uid,
                 requester_gid,
+                &context,
             )?;
         }
         _ => anyhow::bail!("invalid internal OverlayFS helper request"),
@@ -1517,6 +1523,26 @@ fn print_recovery_report(
                     })
                 })
                 .collect::<Vec<_>>(),
+            "reaped_probe_roots": report
+                .reaped_probe_roots
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "preserved_probe_mounts": report
+                .preserved_probe_mounts
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
             "errors": report.errors,
         });
         println!(
@@ -1556,6 +1582,22 @@ fn print_recovery_report(
     );
     for path in &report.reaped_artifacts {
         println!("- {}", path.display());
+    }
+    println!(
+        "Reaped abandoned OverlayFS probes: {}",
+        report.reaped_probe_roots.len()
+    );
+    for path in &report.reaped_probe_roots {
+        println!("- {}", path.display());
+    }
+    if !report.preserved_probe_mounts.is_empty() {
+        println!("Abandoned OverlayFS probes still covered by a mount (preserved):");
+        for path in &report.preserved_probe_mounts {
+            println!(
+                "- {}: unmount it, then rerun `riftri repair`",
+                path.display()
+            );
+        }
     }
     if !report.relocations.is_empty() {
         println!("Relocated worktrees Riftri no longer tracks:");

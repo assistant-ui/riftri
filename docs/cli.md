@@ -291,6 +291,12 @@ Repair also reconciles active journals against Git's own worktree registry:
   (`relocated_worktrees`). The live worktree and its contents are untouched.
 - Temporary files left by an interrupted journal write are removed, reported as
   `Reaped interrupted journal writes` (`reaped_artifacts`).
+- On Linux, an OverlayFS probe directory abandoned next to a worktree after a
+  failed probe unmount (named `.riftri-overlay-probe-*`, also flagged by
+  `riftri status`) is removed only when the kernel's mount inventory proves
+  nothing is mounted at or below it, reported as `Reaped abandoned OverlayFS
+  probes` (`reaped_probe_roots`). A probe root any mount still covers is
+  preserved and reported (`preserved_probe_mounts`) instead of being touched.
 
 Nothing is retired while its directory still exists or still has content.
 

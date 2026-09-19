@@ -19,6 +19,7 @@ const PROBE_CONTENTS: &[u8; 4] = b"base";
 const PRIVATE_CONTENTS: &[u8; 4] = b"view";
 static PROBE_NONCE: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) const ABANDONED_PROBE_PREFIX: &str = ".riftri-overlay-probe-";
 const ROOTLESS_OVERLAY_OPTIONS: &str = "userxattr,index=off,metacopy=off,redirect_dir=nofollow";
 const PRIVILEGED_OVERLAY_OPTIONS: &str = "index=off,metacopy=on";
 const RECOVERY_MARKER_PREFIX: &str = ".riftri-overlayfs-recovery-";
@@ -80,8 +81,10 @@ pub(crate) fn reset_helper_work_directory(
     layout: &OverlayFsLayout,
     requester_uid: u32,
     requester_gid: u32,
+    context: &OverlayFsMountContext,
 ) -> Result<(), StorageError> {
     validate_helper_layout_owner(layout, requester_uid)?;
+    require_context_namespace_visibility(&layout.merged, context)?;
     let entry = current_mount_entry(&layout.merged)?;
     if entry.mount_point == layout.merged {
         return Err(mount_conflict(
@@ -126,6 +129,33 @@ pub(crate) fn reset_helper_work_directory(
         .sync_all()
         .map_err(|source| storage_io("sync OverlayFS work directory", &layout.work, source))?;
     sync_directory(&layout.root)
+}
+
+/// Refuse a destructive reset while the journaled mount may still be live in a
+/// mount namespace this process cannot see.
+///
+/// `/proc/self/mountinfo` only lists the current namespace, so "no mount at
+/// the merged destination" proves nothing about a mount created elsewhere in
+/// the same boot. Within the boot that created the mount, only the recorded
+/// namespace can rule the mount out; any other namespace must fail closed and
+/// preserve the layout. A different boot cannot carry the mount forward, so
+/// prior-boot layouts stay resettable.
+fn require_context_namespace_visibility(
+    merged: &Path,
+    context: &OverlayFsMountContext,
+) -> Result<(), StorageError> {
+    let current = current_mount_context(context.profile)?;
+    if current.boot_id == context.boot_id
+        && (current.mount_namespace_device != context.mount_namespace_device
+            || current.mount_namespace_inode != context.mount_namespace_inode)
+    {
+        return Err(mount_conflict(
+            merged,
+            "the journaled mount may still be live in a different mount namespace; \
+             the private work directory was preserved",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_helper_owned_directory(
@@ -191,7 +221,7 @@ impl ProbeDirectory {
         for _ in 0..128 {
             let nonce = PROBE_NONCE.fetch_add(1, Ordering::Relaxed);
             let path = parent.join(format!(
-                ".riftri-overlay-probe-{}-{timestamp}-{nonce}",
+                "{ABANDONED_PROBE_PREFIX}{}-{timestamp}-{nonce}",
                 std::process::id()
             ));
             match builder.create(&path) {
@@ -490,10 +520,62 @@ pub(crate) fn load(
     })
 }
 
+/// Reopen a layout for inspection and recovery without destroying anything.
+///
+/// The only repair performed is recreating a missing disposable work
+/// directory: a crash between a remount reset's removal and recreation leaves
+/// the layout without one, no overlay can stay mounted once its work
+/// directory is gone (the kernel pins it), and creating an empty directory
+/// modifies no underlying layer of any live mount.
+pub(crate) fn load_for_recovery(
+    layout_root: &Path,
+    lower: &Path,
+    merged: &Path,
+) -> Result<OverlayFsLayout, StorageError> {
+    let root = canonical_real_directory(layout_root, "layout root")?;
+    if root != layout_root {
+        return Err(invalid_layout(
+            layout_root,
+            format!(
+                "layout root resolves through a different path: {}",
+                root.display()
+            ),
+        ));
+    }
+    let work = root.join("work");
+    match fs::symlink_metadata(&work) {
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(&work) {
+                Ok(()) => sync_directory(&root)?,
+                Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    return Err(storage_io(
+                        "restore OverlayFS recovery work directory",
+                        &work,
+                        source,
+                    ));
+                }
+            }
+        }
+        Err(source) => {
+            return Err(storage_io(
+                "inspect OverlayFS recovery work directory",
+                &work,
+                source,
+            ));
+        }
+        Ok(_) => {}
+    }
+    load(&root, lower, merged)
+}
+
 pub(crate) fn load_for_remount(
     layout_root: &Path,
     lower: &Path,
     merged: &Path,
+    context: &OverlayFsMountContext,
 ) -> Result<OverlayFsLayout, StorageError> {
     let root = canonical_real_directory(layout_root, "layout root")?;
     if root != layout_root {
@@ -513,6 +595,10 @@ pub(crate) fn load_for_remount(
     if entry.mount_point == merged {
         return load(&root, &lower, &merged);
     }
+    // The absence check above only inspected this namespace. Prove the
+    // journaled mount cannot be live in another namespace before the
+    // disposable work directory is reset destructively.
+    require_context_namespace_visibility(&merged, context)?;
 
     let mut entries = fs::read_dir(&root)
         .map_err(|source| storage_io("read OverlayFS layout root", &root, source))?
@@ -819,6 +905,44 @@ pub(crate) fn clear_recovery(layout: &OverlayFsLayout, token: &str) -> Result<()
         }
         Err(error) => return Err(error),
     }
+    let entry = current_mount_entry(&layout.merged)?;
+    if entry.mount_point == layout.merged {
+        // A mount covers the merged destination, so the upper layer is an
+        // underlying filesystem of a live overlay and must not be modified
+        // directly (kernel OverlayFS rule; a direct unlink also leaves a
+        // stale entry in the merged root). Unlink through the merged view,
+        // and only when that view provably exposes this journal's marker;
+        // anything else is a foreign mount and the marker is preserved.
+        if entry.filesystem_type != "overlay" {
+            return Err(mount_conflict(
+                &layout.merged,
+                format!(
+                    "a foreign mount ({}) covers the merged destination; the recovery marker was preserved",
+                    entry.filesystem_type
+                ),
+            ));
+        }
+        let merged_marker = layout.merged.join(recovery_marker_name(token)?);
+        require_recovery_marker(&merged_marker, token).map_err(|_| {
+            mount_conflict(
+                &layout.merged,
+                "the mounted view does not expose this journal's recovery marker; \
+                 the marker was preserved",
+            )
+        })?;
+        match fs::remove_file(&merged_marker) {
+            Ok(()) => {}
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(storage_io(
+                    "remove OverlayFS recovery marker through the merged view",
+                    &merged_marker,
+                    source,
+                ));
+            }
+        }
+        return sync_directory(&layout.merged);
+    }
     match fs::remove_file(&marker) {
         Ok(()) => {}
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -863,6 +987,75 @@ pub(crate) fn remove_unmounted_private_layers(
         sync_directory(parent)?;
     }
     Ok(())
+}
+
+/// Remove one abandoned probe root, but only when the kernel's mount inventory
+/// for this namespace proves no mount survives at or below it.
+///
+/// A probe root is abandoned when its unmount failed through every retry and
+/// `probe_current_namespace_with` deliberately leaked it rather than deleting
+/// directories under a live mount. Returns `Ok(false)` — touching nothing —
+/// when any mount still covers a path inside the root; deleting the layers of
+/// a live overlay is exactly the damage the original leak avoided.
+pub(crate) fn remove_abandoned_probe_root(root: &Path) -> Result<bool, StorageError> {
+    if !root.is_absolute() {
+        return Err(invalid_layout(root, "probe root path must be absolute"));
+    }
+    let recognized = root
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.starts_with(ABANDONED_PROBE_PREFIX));
+    if !recognized {
+        return Err(invalid_layout(
+            root,
+            "refusing to remove a path that is not a Riftri OverlayFS probe root",
+        ));
+    }
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(source) => return Err(storage_io("inspect abandoned probe root", root, source)),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(invalid_layout(
+            root,
+            "abandoned probe root must be a real directory",
+        ));
+    }
+    if namespace_has_mount_under(root)? {
+        return Ok(false);
+    }
+    fs::remove_dir_all(root)
+        .map_err(|source| storage_io("remove abandoned probe root", root, source))?;
+    if let Some(parent) = root.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(true)
+}
+
+/// Whether `/proc/self/mountinfo` lists any mount at or below `root`.
+fn namespace_has_mount_under(root: &Path) -> Result<bool, StorageError> {
+    let mountinfo = fs::read("/proc/self/mountinfo").map_err(|source| {
+        storage_io(
+            "read current mount namespace inventory",
+            Path::new("/proc/self/mountinfo"),
+            source,
+        )
+    })?;
+    for line in mountinfo.split(|byte| *byte == b'\n') {
+        let fields = line
+            .split(|byte| *byte == b' ')
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        if fields.len() < 7 {
+            continue;
+        }
+        let mount_point = PathBuf::from(OsString::from_vec(decode_mount_field(fields[4])?));
+        if mount_point.starts_with(root) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(crate) fn mount_state(
