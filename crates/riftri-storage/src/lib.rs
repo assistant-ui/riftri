@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[cfg(any(test, target_os = "windows"))]
+mod exact_copy;
 #[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod parallel;
 
