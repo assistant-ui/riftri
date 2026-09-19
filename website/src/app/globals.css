@@ -201,7 +201,7 @@ code, pre { font-family: var(--font-mono); }
 .hero-install p { margin: 0 0 0.65rem; color: var(--ink-muted); font-size: 0.7rem; line-height: 1.5; }
 .hero-install .command { min-width: 0; }
 .hero-install .command code { white-space: normal; overflow-wrap: anywhere; }
-.hero-install .hero-markdown { display: grid; flex-shrink: 0; min-width: 44px; place-items: center; border-left: 1px solid var(--line); font-size: 0.7rem; }
+.hero-install .hero-markdown { display: grid; flex-shrink: 0; min-width: 44px; place-items: center; padding-inline: 0.85rem; border-left: 1px solid var(--line); font-size: 0.7rem; white-space: nowrap; }
 
 .button {
   position: relative;

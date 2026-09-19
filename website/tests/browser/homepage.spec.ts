@@ -182,20 +182,24 @@ test("clipboard denial offers manual copy and a usable retry", async ({ page }) 
   await expect(command.getByRole("status")).toHaveText("Command copied.");
 });
 
-test("Markdown link navigates in the same tab without a download", async ({ page, request, context }) => {
+test("Markdown copy control copies the whole guide without navigating", async ({ page, request, context }) => {
   const markdown = await request.get("/index.md");
   expect(markdown.status()).toBe(200);
   expect(markdown.headers()["content-type"]).toContain("text/plain");
   expect(markdown.headers()["content-disposition"]).toContain("inline");
-  // Keep CI independent of production: serve the exact built response at the canonical URL.
-  await page.route("https://riftri.dev/index.md", (route) => route.fulfill({ response: markdown }));
+  const guide = await markdown.text();
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   let downloads = 0;
   page.on("download", () => downloads++);
   await page.goto("/");
   const count = context.pages().length;
-  await page.getByRole("link", { name: "Open Markdown guide" }).click();
-  await expect(page).toHaveURL("https://riftri.dev/index.md");
-  await expect(page.locator("body")).toContainText("# Riftri");
+  const copy = page.getByRole("button", { name: "Copy the full Markdown guide for your agent" });
+  await copy.click();
+  await expect(copy).toHaveText("COPIED");
+  const copied = await page.evaluate(() => navigator.clipboard.readText());
+  expect(copied).toBe(guide);
+  expect(copied).toContain("# Riftri");
+  await expect(page).toHaveURL("/");
   expect(downloads).toBe(0);
   expect(context.pages()).toHaveLength(count);
 });

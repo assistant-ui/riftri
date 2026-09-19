@@ -1,5 +1,6 @@
 import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
+import { CopyMarkdown } from "../components/copy-markdown";
 import { Faq } from "../components/faq";
 import { MaterializationMap } from "../components/materialization-map";
 import { SavingsMap } from "../components/savings-map";
@@ -106,15 +107,7 @@ function Hero() {
         </div>
         <div className="hero-install">
           <CopyCommand command={installCommand} compact />
-          <a
-            className="copy-button hero-markdown"
-            href="https://riftri.dev/index.md"
-            type="text/plain"
-            aria-label="Open Markdown guide"
-            title="Open Markdown guide"
-          >
-            .md
-          </a>
+          <CopyMarkdown source="/index.md" className="hero-markdown" />
         </div>
       </div>
       <div className="hero-graph">
