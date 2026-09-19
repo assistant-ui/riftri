@@ -1621,6 +1621,15 @@ fn resume_collection(
         } else if protected_base_paths(state_directory)?.contains(&journal.base_path)
             || journal.marker_path.exists()
         {
+            // A new reference appeared after this journal removed the
+            // completion marker. `retained_base_paths` enumerates only via
+            // markers, so cancelling without restoring it would leave a fully
+            // materialized base that no later `gc` or `status` inventory can
+            // ever see again. Rebuild the marker from the base content in the
+            // same journaled step as the cancellation; on failure the journal
+            // stays at `MarkerRemoved`, which keeps the base explained and
+            // makes recovery retry the restore.
+            restore_completion_marker(journal)?;
             advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
             return Ok(false);
         } else {
@@ -1650,6 +1659,10 @@ fn resume_collection(
 
     if record.phase == GarbageCollectionPhase::BaseQuarantined {
         remove_tree_if_present(&journal.quarantine_path)?;
+        // An interrupted marker restore may have staged a marker before the
+        // protecting reference disappeared again; the collection is finishing
+        // now, so retire that leftover instead of reporting it forever.
+        remove_file_if_present(&restored_marker_staging_path(journal)?)?;
         sync_parent(&journal.quarantine_path)?;
         advance_collection(store, record, GarbageCollectionPhase::Complete, fail_after)?;
     }
@@ -1766,6 +1779,96 @@ fn validate_collection_marker(journal: &DecodedCollectionJournal) -> Result<(), 
             ));
         }
     }
+    Ok(())
+}
+
+/// Deterministic staging path for a marker rebuilt by a cancelling
+/// collection. A fixed name lets an interrupted restore retry over its own
+/// leftover instead of accumulating temporaries.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn restored_marker_staging_path(
+    journal: &DecodedCollectionJournal,
+) -> Result<PathBuf, WorktreeError> {
+    Ok(journal
+        .marker_path
+        .expect_parent()?
+        .join(format!(".riftri-gc-{}.marker", journal.operation_id)))
+}
+
+/// Rebuild the completion marker for a base whose collection is cancelling
+/// after `MarkerRemoved`. The caller holds the exclusive base coordination
+/// lock, so the base content is stable while it is re-hashed; recomputing the
+/// integrity marker from the content on disk (instead of replaying remembered
+/// bytes) means the restored marker never vouches for anything except what
+/// reuse verification will re-hash later, so it can never bless a base that
+/// was modified behind Riftri's back. The marker is staged and renamed into
+/// place so no interruption window can leave a truncated marker.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn restore_completion_marker(journal: &DecodedCollectionJournal) -> Result<(), WorktreeError> {
+    match fs::symlink_metadata(&journal.marker_path) {
+        // A prior restore (or a concurrent rebuild between resume attempts)
+        // already produced a real marker; the base is enumerable again.
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            return Ok(());
+        }
+        Ok(_) => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "collectible base marker {} is not a real file",
+                journal.marker_path.display()
+            )));
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(io(
+                "inspect collectible base marker",
+                &journal.marker_path,
+                source,
+            ));
+        }
+    }
+    match fs::symlink_metadata(&journal.base_path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "collectible base {} is not a real directory",
+                journal.base_path.display()
+            )));
+        }
+        // Nothing is materialized, so there is no storage to make enumerable
+        // again; the referencing operation builds base and marker together.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io("inspect collectible base", &journal.base_path, source)),
+    }
+    let integrity = crate::base_integrity::marker(&journal.base_path).map_err(|source| {
+        io(
+            "recompute immutable-base integrity",
+            &journal.base_path,
+            source,
+        )
+    })?;
+    let staging = restored_marker_staging_path(journal)?;
+    remove_file_if_present(&staging)?;
+    let mut staged = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&staging)
+        .map_err(|source| io("stage restored immutable-base marker", &staging, source))?;
+    use std::io::Write;
+    staged
+        .write_all(&integrity)
+        .map_err(|source| io("write restored immutable-base marker", &staging, source))?;
+    staged
+        .sync_all()
+        .map_err(|source| io("sync restored immutable-base marker", &staging, source))?;
+    drop(staged);
+    fs::rename(&staging, &journal.marker_path).map_err(|source| {
+        io(
+            "activate restored immutable-base marker",
+            &journal.marker_path,
+            source,
+        )
+    })?;
+    sync_parent(&journal.marker_path)?;
     Ok(())
 }
 
@@ -12389,6 +12492,265 @@ mod tests {
             assert_eq!(repeated.completed_collections, 1, "phase {phase:?}");
             assert!(repeated.errors.is_empty(), "phase {phase:?}");
         }
+    }
+
+    /// Build a repository, add one managed worktree, and remove it again so
+    /// its immutable base stays on disk with no referencing journal — the
+    /// starting state for every collection-cancellation test.
+    fn unreferenced_base_fixture(root: &Path, branch: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let repository = root.join("repository");
+        let destination = root.join("worktree");
+        let state = root.join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from(branch)),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove worktree");
+        (repository, state, added.base_path)
+    }
+
+    /// Record an add journal for the same base and fail it before
+    /// `prepare_base` runs — the racing reference from the issue: it protects
+    /// the base while it exists and later rolls back without rebuilding
+    /// anything.
+    fn race_reference_before_prepare_base(repository: &Path, state: &Path, destination: &Path) {
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.to_path_buf(),
+                destination: destination.to_path_buf(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/gc-racing-reference")),
+                state_dir: Some(state.to_path_buf()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::IntentRecorded),
+            false,
+        )
+        .expect_err("record a racing reference before prepare_base");
+    }
+
+    #[test]
+    fn gc_cancellation_after_marker_removed_restores_the_completion_marker() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-race-restore");
+        let marker = base_path.with_extension("complete");
+
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        assert!(!marker.exists());
+        assert!(base_path.is_dir());
+
+        race_reference_before_prepare_base(&repository, &state, &fixture.path().join("second"));
+
+        let resumed = garbage_collect_inner(&state, true, None).expect("cancel collection");
+        assert_eq!(resumed.resumed_collections, 1);
+        assert!(resumed.collected.is_empty());
+        assert_eq!(
+            fs::read(&marker).expect("read restored marker"),
+            crate::base_integrity::marker(&base_path).expect("hash restored base"),
+        );
+
+        let accounting = storage_accounting(&state).expect("account cancelled collection");
+        assert_eq!(accounting.cancelled_collections, 1);
+        assert_eq!(accounting.pending_collections, 0);
+        assert_eq!(accounting.bases.len(), 1);
+        assert_eq!(accounting.bases[0].path, base_path);
+
+        // The racing add rolls back and releases its claim; the restored
+        // marker must leave the base enumerable and collectable by a later gc.
+        let recovery = recover_incomplete_operations(&state).expect("roll back racing add");
+        assert!(recovery.errors.is_empty(), "{recovery:?}");
+        let collected = garbage_collect_inner(&state, true, None).expect("collect restored base");
+        assert_eq!(collected.collected, vec![base_path.clone()]);
+        assert!(!base_path.exists());
+        assert!(!marker.exists());
+        let accounting = storage_accounting(&state).expect("account final collection");
+        assert!(accounting.bases.is_empty());
+        assert_eq!(accounting.completed_collections, 1);
+    }
+
+    #[test]
+    fn marker_restore_recovers_on_either_side_of_the_cancellation_step() {
+        // Interruption immediately after the journaled cancellation: the
+        // marker was already restored in the same step, so recovery is a
+        // no-op and the base stays enumerable.
+        let fixture = tempdir().expect("fixture");
+        let (repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-cancel-window");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        race_reference_before_prepare_base(&repository, &state, &fixture.path().join("second"));
+        let store = crate::journal::CollectionJournalStore::open(&state);
+        let journal = store
+            .load_all()
+            .expect("load collection journals")
+            .into_iter()
+            .find(|journal| journal.base_path == base_path)
+            .expect("collection journal for the base");
+        let resolved_state =
+            super::resolve_real_state_directory(&super::absolute_path(&state).expect("state"))
+                .expect("resolve state directory");
+        let error = super::resume_decoded_collection(
+            &resolved_state,
+            &store,
+            &journal,
+            Some(GarbageCollectionPhase::Cancelled),
+        )
+        .expect_err("interrupt right after the journaled cancellation");
+        assert!(
+            error
+                .to_string()
+                .contains("injected garbage-collection failure"),
+            "unexpected error: {error}"
+        );
+        assert!(marker.is_file());
+        for pass in 0..2 {
+            let recovered = recover_incomplete_operations(&state).expect("recover");
+            assert!(recovered.errors.is_empty(), "pass {pass}: {recovered:?}");
+            assert_eq!(recovered.recovered_collections, 0, "pass {pass}");
+            assert!(marker.is_file(), "pass {pass}");
+        }
+        let accounting = storage_accounting(&state).expect("account cancelled collection");
+        assert_eq!(accounting.cancelled_collections, 1);
+        assert_eq!(accounting.bases.len(), 1);
+
+        // Interruption between the marker restore and the journaled
+        // cancellation: the journal is still MarkerRemoved but the marker is
+        // back, so recovery must settle on the restored marker.
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-restore-window");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        let content = crate::base_integrity::marker(&base_path).expect("hash base");
+        fs::write(&marker, &content).expect("simulate a restore interrupted before cancellation");
+        let recovered = recover_incomplete_operations(&state).expect("recover restored marker");
+        assert!(recovered.errors.is_empty(), "{recovered:?}");
+        assert_eq!(fs::read(&marker).expect("read marker"), content);
+        let accounting = storage_accounting(&state).expect("account recovered cancellation");
+        assert_eq!(accounting.cancelled_collections, 1);
+        assert_eq!(accounting.pending_collections, 0);
+        assert_eq!(accounting.bases.len(), 1);
+        let collected = garbage_collect_inner(&state, true, None).expect("collect restored base");
+        assert_eq!(collected.collected, vec![base_path.clone()]);
+        assert!(!base_path.exists());
+    }
+
+    #[test]
+    fn interrupted_marker_restore_staging_is_reused_and_reaped() {
+        // A crash in the middle of staging the restored marker leaves the
+        // deterministic staging file behind. A retried cancellation must
+        // replace it and still produce a verified marker.
+        let fixture = tempdir().expect("fixture");
+        let (repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-staging-retry");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        race_reference_before_prepare_base(&repository, &state, &fixture.path().join("second"));
+        let store = crate::journal::CollectionJournalStore::open(&state);
+        let journal = store
+            .load_all()
+            .expect("load collection journals")
+            .into_iter()
+            .find(|journal| journal.base_path == base_path)
+            .expect("collection journal for the base");
+        let staging = super::restored_marker_staging_path(&journal).expect("staging path");
+        fs::write(&staging, b"stale partial marker").expect("simulate interrupted staging");
+        let resumed = garbage_collect_inner(&state, true, None).expect("cancel collection");
+        assert_eq!(resumed.resumed_collections, 1);
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read(&marker).expect("read restored marker"),
+            crate::base_integrity::marker(&base_path).expect("hash restored base"),
+        );
+
+        // If the racing reference disappears before the retry, the collection
+        // finishes instead, and the staging leftover is reaped with it: a
+        // genuinely collected base leaves nothing behind.
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-staging-reap");
+        let marker = base_path.with_extension("complete");
+        garbage_collect_inner(&state, true, Some(GarbageCollectionPhase::MarkerRemoved))
+            .expect_err("interrupt collection after marker removal");
+        let store = crate::journal::CollectionJournalStore::open(&state);
+        let journal = store
+            .load_all()
+            .expect("load collection journals")
+            .into_iter()
+            .find(|journal| journal.base_path == base_path)
+            .expect("collection journal for the base");
+        let staging = super::restored_marker_staging_path(&journal).expect("staging path");
+        fs::write(&staging, b"stale partial marker").expect("simulate interrupted staging");
+        let resumed = garbage_collect_inner(&state, true, None).expect("finish collection");
+        assert_eq!(resumed.resumed_collections, 1);
+        assert!(!base_path.exists());
+        assert!(!marker.exists());
+        assert!(!staging.exists());
+        let accounting = storage_accounting(&state).expect("account finished collection");
+        assert!(accounting.bases.is_empty());
+        assert_eq!(accounting.completed_collections, 1);
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    #[test]
+    fn status_diagnoses_a_base_directory_without_a_completion_marker() {
+        // The historical leak: a materialized base whose marker vanished with
+        // no journal explaining it. Marker-driven enumeration cannot list it,
+        // but status must at least surface it as a diagnostic.
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-orphan");
+        let marker = base_path.with_extension("complete");
+        fs::remove_file(&marker).expect("simulate the historical marker leak");
+
+        let plan = garbage_collect_inner(&state, false, None).expect("plan collection");
+        assert!(plan.candidates.is_empty());
+        let accounting = storage_accounting(&state).expect("account orphan base");
+        assert!(accounting.bases.is_empty());
+        let issue = accounting
+            .diagnostic_issues
+            .iter()
+            .find(|issue| issue.path == base_path)
+            .expect("orphan base directory is surfaced as a diagnostic");
+        assert!(
+            issue
+                .reason
+                .contains("not explained by a completion marker or journal"),
+            "unexpected diagnostic: {issue:?}"
+        );
     }
 
     #[test]

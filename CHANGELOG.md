@@ -7,6 +7,22 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Garbage collection that cancels after removing a base's `.complete` marker —
+  because a new reference raced in between the marker removal and the
+  protected re-check — now restores the completion marker in the same
+  journaled step as the cancellation. The marker is recomputed from the base
+  content on disk (never replayed from remembered bytes, so it cannot vouch
+  for a base modified behind Riftri's back) and staged next to the base before
+  an atomic rename, so no interruption window can leave a truncated marker.
+  Previously the cancellation dropped the marker on the floor; if the racing
+  add then rolled back before rebuilding the base, the fully materialized tree
+  became invisible to marker-driven enumeration forever — `gc` could never
+  propose it again and `status` never accounted for it. Recovery of an
+  interruption anywhere around the restore is idempotent: it settles on either
+  the completed collection or the restored marker, and a base leaked by the
+  old behavior is at least surfaced by `status` as an unexplained
+  immutable-base artifact diagnostic.
+
 - Compacting a worktree after a checkout-profile input changed — a Git
   upgrade, a checked config flip such as `core.autocrlf` or `core.eol`, or a
   different Git LFS object set — no longer wedges the worktree's add journal.
