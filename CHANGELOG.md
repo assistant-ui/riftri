@@ -22,6 +22,24 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   — the waiter dies with the conventional `128 + signal` status exactly as a
   shell does after its foreground child, while a `nohup`-style inherited
   ignore still discards it.
+- Garbage collection that cancels after removing a base's `.complete` marker —
+  because a new reference raced in between the marker removal and the
+  protected re-check — now restores the completion marker in the same
+  journaled step as the cancellation. The marker is recomputed from the base
+  on disk with the current versioned digest — the same content-and-metadata
+  hash reuse verification checks, never replayed from remembered bytes, so it
+  cannot vouch for a base modified behind Riftri's back — and staged next to
+  the base before an atomic rename, so no interruption window can leave a
+  truncated marker.
+  Previously the cancellation dropped the marker on the floor; if the racing
+  add then rolled back before rebuilding the base, the fully materialized tree
+  became invisible to marker-driven enumeration forever — `gc` could never
+  propose it again and `status` never accounted for it. Recovery of an
+  interruption anywhere around the restore is idempotent: it settles on either
+  the completed collection or the restored marker, and a base leaked by the
+  old behavior is at least surfaced by `status` as an unexplained
+  immutable-base artifact diagnostic.
+
 - Linux OverlayFS recovery no longer resets the private work directory of a
   mount that may still be live in another mount namespace. When a crash left a
   mount without a journaled identity, the no-identity recovery branch ran the
