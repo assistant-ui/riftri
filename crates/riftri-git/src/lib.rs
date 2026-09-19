@@ -475,11 +475,11 @@ impl Git {
     /// Read simple `section.variable` keys in one Git process, with normal
     /// configuration precedence and the same raw values as `config_value`.
     ///
-    /// Keys are case-insensitive and returned lowercase. This supports the
-    /// conservative ASCII subset needed by checkout configuration, including
-    /// subsection keys such as `filter.lfs.clean`. Missing keys are absent,
-    /// while empty values and implicit booleans are present with empty bytes,
-    /// as with `--get`.
+    /// Section and variable names are case-insensitive and returned lowercase.
+    /// Subsection names keep their case in selectors and returned keys.
+    /// This accepts a conservative ASCII subset, including subsection keys
+    /// such as `filter.Mixed.clean`. Missing keys are absent. Empty values and
+    /// implicit booleans are present with empty bytes, as with `--get`.
     /// The result is operation-local: no answers are cached between calls.
     pub fn config_values(
         &self,
@@ -510,7 +510,11 @@ impl Git {
                         detail: "batch reads require simple section.variable keys".to_owned(),
                     });
                 }
-                Ok(key.to_ascii_lowercase())
+                let mut key = (*key).to_owned();
+                key[..components[0].len()].make_ascii_lowercase();
+                let variable = key.rfind('.').expect("validated configuration key") + 1;
+                key[variable..].make_ascii_lowercase();
+                Ok(key)
             })
             .collect::<Result<Vec<_>, _>>()?;
         // Validation above excludes regexp metacharacters other than the one
@@ -1143,6 +1147,109 @@ impl Git {
         Ok(state)
     }
 
+    /// Inspect staged state without confusing a not-yet-created index with
+    /// staged deletion of the whole tree. Both intent-to-add representations
+    /// are compared so an empty tracked blob cannot hide an intent-only entry.
+    pub fn worktree_index_has_changes(&self, worktree: &Path) -> Result<bool, GitError> {
+        let index = self.worktree_index_path(worktree)?;
+        match std::fs::symlink_metadata(&index) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(GitError::TemporaryState { source }),
+            Ok(metadata) if !metadata.is_file() || metadata.file_type().is_symlink() => {
+                return Err(GitError::InvalidOutput {
+                    context: "worktree index",
+                    detail: "index is not a regular file".to_owned(),
+                });
+            }
+            Ok(_) => {}
+        }
+        for intent in ["--ita-visible-in-index", "--ita-invisible-in-index"] {
+            let args = [
+                "diff",
+                "--cached",
+                "--quiet",
+                "--no-ext-diff",
+                "--no-textconv",
+                intent,
+                "HEAD",
+                "--",
+            ];
+            let output = self.output(Some(worktree), &args)?;
+            match output.status.code() {
+                Some(0) => {}
+                Some(1) => return Ok(true),
+                _ => return Err(command_failed(&args.map(OsString::from), &output)),
+            }
+        }
+        Ok(false)
+    }
+
+    fn worktree_index_path(&self, worktree: &Path) -> Result<PathBuf, GitError> {
+        self.run_path(
+            Some(worktree),
+            &["rev-parse", "--path-format=absolute", "--git-path", "index"],
+            "worktree index path",
+        )
+    }
+
+    /// Build a missing index with real Git in a temporary file, then install
+    /// it without replacing any index a user or another Git process created.
+    /// Recovery must never reset an already populated worktree index.
+    pub fn initialize_missing_worktree_index(
+        &self,
+        worktree: &Path,
+        sparse_directories: &[String],
+    ) -> Result<bool, GitError> {
+        let index = self.worktree_index_path(worktree)?;
+        match std::fs::symlink_metadata(&index) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => return Err(GitError::TemporaryState { source }),
+        }
+        let parent = index.parent().ok_or_else(|| GitError::InvalidOutput {
+            context: "worktree index path",
+            detail: "index has no parent directory".to_owned(),
+        })?;
+        let temporary = tempfile::Builder::new()
+            .prefix("riftri-recovery-index-")
+            .tempdir_in(parent)
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let temporary_index = temporary.path().join("index");
+        let environment = [(OsStr::new("GIT_INDEX_FILE"), temporary_index.as_os_str())];
+        let run = |args: &[&str]| {
+            self.run_os_with_env(
+                Some(worktree),
+                &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                &environment,
+            )
+        };
+        if !sparse_directories.is_empty() {
+            let mut args = vec!["sparse-checkout", "set", "--cone", "--"];
+            args.extend(sparse_directories.iter().map(String::as_str));
+            run(&args)?;
+        }
+        run(&["reset", "--mixed", "--quiet", "HEAD"])?;
+        if !sparse_directories.is_empty() {
+            run(&["sparse-checkout", "reapply"])?;
+        }
+        // Windows FlushFileBuffers requires a handle opened for writing.
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary_index)
+            .and_then(|file| file.sync_all())
+            .map_err(|source| GitError::TemporaryState { source })?;
+        let temporary_index = tempfile::TempPath::try_from_path(temporary_index)
+            .map_err(|source| GitError::TemporaryState { source })?;
+        match temporary_index.persist_noclobber(&index) {
+            Ok(()) => Ok(true),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(GitError::TemporaryState {
+                source: error.error,
+            }),
+        }
+    }
+
     /// Populate the linked worktree index from HEAD without writing files.
     ///
     /// SAFETY ARGUMENT: this intentionally issues no separate
@@ -1356,7 +1463,7 @@ impl Git {
         context: &'static str,
     ) -> Result<PathBuf, GitError> {
         let output = self.run(path, arguments)?;
-        let bytes = trim_line_endings(&output.stdout);
+        let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
         if bytes.is_empty() {
             return Err(GitError::InvalidOutput {
                 context,
@@ -1852,6 +1959,52 @@ mod tests {
     }
 
     #[test]
+    fn recovery_initializes_only_a_missing_worktree_index() {
+        let fixture = RepositoryFixture::committed();
+        let parent = tempdir().unwrap();
+        let worktree = parent.path().join("view");
+        git(
+            fixture.path(),
+            &[
+                "worktree",
+                "add",
+                "--no-checkout",
+                "--detach",
+                worktree.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let git_handle = Git::default();
+        assert!(!git_handle.worktree_index_has_changes(&worktree).unwrap());
+        assert!(
+            git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        let index = git_handle.worktree_index_path(&worktree).unwrap();
+        let before = fs::read(&index).unwrap();
+        assert!(
+            !git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        assert_eq!(fs::read(&index).unwrap(), before);
+        assert!(!git_handle.worktree_index_has_changes(&worktree).unwrap());
+        git(
+            &worktree,
+            &["update-index", "--force-remove", "tracked.txt"],
+        );
+        let staged = fs::read(&index).unwrap();
+        assert!(git_handle.worktree_index_has_changes(&worktree).unwrap());
+        assert!(
+            !git_handle
+                .initialize_missing_worktree_index(&worktree, &[])
+                .unwrap()
+        );
+        assert_eq!(fs::read(&index).unwrap(), staged);
+    }
+
+    #[test]
     fn reads_exact_blob_bytes_and_size() {
         let fixture = RepositoryFixture::committed();
         let object = Command::new("git")
@@ -1936,6 +2089,41 @@ mod tests {
             values.get("filter.lfs.process").map(Vec::as_slice),
             Some(&b"git-lfs filter-process"[..])
         );
+    }
+
+    #[test]
+    fn batched_configuration_preserves_subsection_case() {
+        let fixture = RepositoryFixture::unborn();
+        for (key, value) in [
+            ("filter.Mixed.clean", "cat"),
+            ("filter.mixed.clean", "lowercase"),
+            ("filter.Mixed.Part.clean", "dotted"),
+        ] {
+            git(fixture.path(), &["config", key, value]);
+        }
+        let git = Git::default();
+        let values = git
+            .config_values(
+                fixture.path(),
+                &[
+                    "FILTER.Mixed.CLEAN",
+                    "filter.mixed.clean",
+                    "Filter.Mixed.Part.Clean",
+                    "filter.MIXED.clean",
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            values,
+            std::collections::BTreeMap::from([
+                ("filter.Mixed.clean".to_owned(), b"cat".to_vec()),
+                ("filter.mixed.clean".to_owned(), b"lowercase".to_vec()),
+                ("filter.Mixed.Part.clean".to_owned(), b"dotted".to_vec()),
+            ])
+        );
+        for (key, value) in values {
+            assert_eq!(git.config_value(fixture.path(), &key).unwrap(), Some(value));
+        }
     }
 
     fn git(path: &Path, arguments: &[&str]) {

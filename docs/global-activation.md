@@ -38,8 +38,10 @@ not enable a repository. The temporary directory is passed only to the child
 environment and does not change the parent shell or its cache settings.
 
 `riftri shell status [repository]` reports whether the current process inherited
-a complete hook, whether the selected repository opted in, and whether those two
-conditions make optimized interception effective.
+a complete hook and whether the selected repository opted in. Effective optimized
+interception also requires that `RIFTRI_BYPASS` is not `1`, `true`, or `yes`
+(case-insensitive). When bypass is active, status identifies `RIFTRI_BYPASS` as
+the reason without reporting that the hook is inactive.
 
 Remove Riftri from the current shell with:
 
@@ -53,10 +55,15 @@ PowerShell:
 Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::NewLine)
 ```
 
+The hook records its absolute shim directory in `RIFTRI_SHELL_SHIM_DIR`, so
+status and deactivation keep using that path after the current directory
+changes.
+
 This removes every Riftri shim-directory entry from `PATH` — the durable
 shell-hook shim and any process-scoped `riftri exec` shim entries, including
 nested scopes — and unsets the shim variables (`RIFTRI_REAL_GIT`,
-`RIFTRI_SHIM_ACTIVE`, and `RIFTRI_PROCESS_SHIM_DIR`). Evaluated inside a
+`RIFTRI_SHIM_ACTIVE`, `RIFTRI_SHELL_SHIM_DIR`, and
+`RIFTRI_PROCESS_SHIM_DIR`). Evaluated inside a
 `riftri exec` session, it therefore ends Git interception for the rest of that
 session; the parent `riftri exec` still removes its temporary shim directory
 when the command exits. It does not disable a repository. If the hook is in a
@@ -82,6 +89,7 @@ non-disruptive:
 | Windows PowerShell | The hook installs a real `git.exe` shim, is tested as current-session-only and reversible, and exercises optimized creation on a disposable ReFS volume. |
 | Disabled repository | Normal Git creates an ordinary linked worktree and no Riftri state. |
 | Enabled repository on APFS | Supported adds create clean, real Git worktrees through strict native clones. |
+| Quiet adds | Intercepted `git worktree add --quiet` commands print no success message. Errors remain visible. |
 | Child tools | Plain-shell, `claude`, and `codex`-named child harnesses inherit interception without Riftri-specific prompts. |
 | Shared storage | Three child-created views reuse one immutable base while keeping separate writable views. |
 | Delegation | Standard input, standard output, standard error, and exit status match direct Git for passthrough commands; a signalled child produces the conventional `128 + signal` shell status. |

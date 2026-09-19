@@ -62,6 +62,29 @@ SHA-256 checks are not a separate signature or notarization guarantee.
 
 ## Quick start
 
+### Guided setup
+
+Available starting with v0.3.1. From an existing Git repository, run:
+
+```sh
+riftri setup
+```
+
+Setup asks for a worktree directory and new branch, checks support, and shows a
+creation plan for confirmation. After the COW worktree is ready, it asks which
+installed coding agent to open: Claude Code, Codex, another executable, or
+**Not now**. Choosing an agent leads to a separate confirmation to enable this
+repository and launch the agent in that worktree through Riftri's process-scoped
+wrapper. It does not install an agent, edit shell profiles, or change the agent's
+permissions. Choosing **Not now** keeps the ready worktree without changing
+repository enablement.
+
+On an older release, upgrade using the installer above or use the explicit
+commands below. The [CLI reference](https://github.com/assistant-ui/riftri/blob/main/docs/cli.md)
+documents the full workflow; check `riftri --help` for your installed version.
+
+### Explicit setup and automation
+
 From an existing Git repository, check the proposed destination:
 
 ```sh
@@ -72,36 +95,85 @@ Doctor is read-only: it reports support and blockers without creating a worktree
 If the repository and destination are supported, create a worktree:
 
 ```sh
-riftri worktree add ../app-auth -b feature/auth main
+riftri worktree add ../app-auth -b feature/auth HEAD
 cd ../app-auth
 git status
 ```
 
-Replace `main` with your starting revision if needed. To use an existing local
+`HEAD` starts from your current commit, not uncommitted working files. Replace
+it with another starting revision if needed. To use an existing local
 branch, run `riftri worktree add ../app-auth feature/auth` instead. Git retains
 its normal branch-safety rules. Files changed in one worktree stay private to it.
 
 ## Use normal Git commands
 
-The explicit `riftri worktree add` interface works without activating a shim.
-For an agent or command tree, enable the repository and opt into process-scoped
-interception:
+### Open an agent in the worktree you created
+
+The worktree from the quick start already uses copy-on-write. Open your installed
+coding agent there, for example:
+
+```sh
+cd ../app-auth
+claude
+```
+
+The agent sees ordinary files and a real Git checkout. The filesystem keeps its
+edits private; the agent does not need a Riftri-specific prompt, plugin, or skill
+to preserve that isolation. Explicit `riftri worktree add` does not require
+`riftri enable` or a shell hook.
+
+### Let an agent create additional worktrees
+
+From your existing repository, explicitly enable Riftri and launch the agent
+through its process-scoped wrapper:
 
 ```sh
 riftri enable
 riftri exec -- claude
 ```
 
-Replace `claude` with your agent or another command. Inside that process and its
-children, supported `git worktree` operations use Riftri. Normal Git commands
-and commands in repositories that are not enabled go to the real Git executable.
+Replace `claude` with your installed agent's executable, such as `codex`.
+Riftri does not install agents, sign them in, or bypass their permission prompts.
+If an agent is already running, finish or stop that session and launch a new one
+through Riftri; running `enable` alone does not change an existing process's PATH.
+
+You can then ask the agent: "Work on this task in a separate Git worktree."
+When it runs an ordinary command such as:
+
+```sh
+git worktree add ../app-billing -b feature/billing HEAD
+```
+
+the scoped Git shim routes that supported creation through Riftri. Ordinary Git
+commands and commands in repositories that are not enabled go to real Git.
+Git outside the launched process tree is unchanged.
+
+Riftri changes **how** the worktree is created, not **whether** the agent decides
+to create one. Interception requires the agent to resolve `git` through its
+inherited PATH. An absolute executable such as `/usr/bin/git`, an embedded Git
+library, or a separately launched IDE process is not covered by that wrapper.
+
+To launch an agent in an existing worktree while retaining that scoped
+interception, use this after repository enablement:
+
+```sh
+riftri exec --worktree ../app-auth -- claude
+```
+
+The binding selects an existing registered worktree; it does not create one or
+enable the repository by itself. No special agent instructions are required for
+Riftri's storage safety. See the
+[agent integration guide](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md)
+for harness and automation details.
+
+### Activate the current shell instead
 
 For a current Bash session, explicitly evaluate the shell hook:
 
 ```sh
 eval "$(riftri shell hook bash)"
 riftri enable
-git worktree add -b feature/auth ../app-auth main
+git worktree add -b feature/search ../app-search HEAD
 ```
 
 Use `zsh` or `sh` instead of `bash` for those shells. PowerShell also has an

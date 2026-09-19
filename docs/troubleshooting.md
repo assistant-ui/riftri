@@ -6,6 +6,17 @@ slower or approximate result. Most "failures" below are that design working
 as intended, and most have a specific inspection command that explains the
 decision.
 
+## Git repository or index environment overrides
+
+Riftri lifecycle operations refuse a set `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_COMMON_DIR`, or `GIT_INDEX_FILE`, including an empty value. These overrides
+can redirect an internal Git command away from the linked worktree being
+created or recovered, risking another worktree's index. Unset them in the
+calling process and select the repository with `--repository` where supported,
+or run from that repository. Doctor reports the same compatibility blocker.
+Ordinary Git commands inside `riftri exec` still receive the original
+environment unchanged; this restriction applies to Riftri lifecycle work.
+
 ## Start here
 
 Three read-only commands answer most questions without changing anything:

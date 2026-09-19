@@ -274,6 +274,14 @@ intent-recorded
 Every incomplete forward state may transition to `rollback-pending`, followed
 by `rolled-back`. `active` and `rolled-back` are terminal for an add operation.
 
+Rollback checks staged index changes separately from working-file bytes,
+including intent-to-add and conflicted entries. An existing index is never
+reset to make a failed creation appear clean. If the index is absent and the
+view still matches its exact base, real Git builds a replacement index in a
+temporary file; installation cannot overwrite an index created concurrently.
+This also covers a crash after Git initialized the index but before the
+`index-synchronized` journal transition was persisted.
+
 ## Removal-operation journal state machine
 
 Removal uses separate journals under `removals/`:
@@ -350,7 +358,12 @@ attributes, and Windows file attributes across the complete view. Unix
 setuid, setgid, and sticky bits are not represented by Git trees;
 compaction refuses entries carrying these special bits, including during
 recovery, rather than dropping them. Ordinary-mode snapshot compatibility is
-unchanged. Windows alternate data streams fail closed. Riftri then prepares or
+unchanged. macOS extended ACLs and ACL-wide inheritance flags also fail closed:
+Git cannot reconstruct them and they are not visible through xattr enumeration.
+Native ACL inspection does not follow symlink targets; unreadable ACLs stop the
+operation. This guard also preserves a quarantined view if an ACL appears before
+recovery cleanup, including for older compaction journals. Windows alternate
+data streams fail closed. Riftri then prepares or
 reuses the exact current-tree base,
 creates a fresh native COW replacement, and copies the real linked-worktree
 pointer into it. Immediately before the same-parent directory swap, Riftri
@@ -526,10 +539,15 @@ extents. Any aligned block-clone failure aborts and rolls back; it never
 triggers a full-file copy. The same immutable bases, locks, journals, recovery,
 clean removal, move/prune, and garbage-collection rules apply.
 
-Recovery validates every recorded cleanup path. It removes a visible incomplete
-view only when Git reports it clean or a byte/mode/symlink comparison proves it
-still equals the immutable base. Otherwise it retains the view and journal for
-manual attention.
+Recovery validates every recorded cleanup path. Before removing a materialized
+incomplete view, it requires a complete byte/mode/symlink and directory-entry
+comparison with the immutable base, even when Git calls the worktree clean.
+Ignored files and unexpected empty directories count as private changes and
+are preserved. Native rollback repeats this check at the final removal boundary;
+OverlayFS checks the merged view before unmounting and revalidates its private
+layer afterward. Otherwise it retains the view and journal for manual attention.
+This stronger automatic-rollback rule does not change explicit removal's
+ordinary Git semantics.
 
 Storage accounting is derived from add/removal journals and completion markers.
 It reports active views, retained bases, per-base reference counts, logical

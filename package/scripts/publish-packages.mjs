@@ -71,6 +71,12 @@ export async function publishPackages({
   const expected = [];
 
   for (const packageDirectory of packages) {
+    // Optional dependencies do not make a missing native package fail npm's
+    // install step. Gate the public launcher on *visible* platform versions,
+    // not merely successful publish exits, so first-time installs can run.
+    if (packageDirectory === packages.at(-1)) {
+      await verifyVersions(expected, { runNpm, wait, verificationAttempts });
+    }
     const manifest = await packageManifest(packageDirectory);
     const identifier = `${manifest.name}@${manifest.version}`;
     expected.push({ identifier, version: manifest.version });
@@ -105,6 +111,14 @@ export async function publishPackages({
     }
   }
 
+  await verifyVersions(expected, { runNpm, wait, verificationAttempts });
+  process.stdout.write(
+    `verified ${expected.length} exact npm package versions after publication\n`,
+  );
+  return expected.map(({ identifier }) => identifier);
+}
+
+async function verifyVersions(expected, { runNpm, wait, verificationAttempts }) {
   let missing = [];
   for (let attempt = 1; attempt <= verificationAttempts; attempt += 1) {
     missing = [];
@@ -130,10 +144,6 @@ export async function publishPackages({
       `${missing.join(", ")} still missing after the publish verification retries`,
     );
   }
-  process.stdout.write(
-    `verified ${expected.length} exact npm package versions after publication\n`,
-  );
-  return expected.map(({ identifier }) => identifier);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === scriptPath) {

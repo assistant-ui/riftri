@@ -5,7 +5,34 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.3.1] - 2026-09-18
+
 ### Added
+
+- `riftri setup` guides terminal users through destination checks and an
+  explicitly confirmed, journaled worktree creation at `HEAD`, then offers an
+  optional installed-agent choice. A separate confirmation enables the
+  repository and starts the chosen executable through `riftri exec --worktree`.
+  Cancellation preserves completed work, no agent or shell profile is installed
+  or changed, and automation continues to use the existing explicit commands.
+- An optional `riftri-worktrees` agent skill documents explicit creation,
+  process-scoped Git integration, and permission-respecting cleanup. It is
+  installable through the skills CLI and is not required for COW correctness.
+
+### Documentation
+
+- The Markdown guide at `riftri.dev/index.md` explains guided setup, opening an
+  agent in a ready COW worktree, and wrapping an agent that creates additional
+  worktrees. Installation examples and package metadata now target v0.3.1.
+
+## [0.3.0] - 2026-09-18
+
+### Added
+
+- `enable`, `disable`, `doctor`, `status`, `repair`, `gc`, and `shell status`
+  now accept `--repository <PATH>`, matching the worktree and state commands.
+  Existing positional repository arguments still work; passing both forms is
+  rejected as ambiguous before running the command.
 
 - `riftri worktree add --sparse-dir <DIR>` (repeatable) creates cone-mode
   sparse worktrees through Git's real sparse-checkout and skip-worktree
@@ -74,6 +101,41 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Git shim now records the captured real Git path at creation and fails safe:
   a shim whose environment was stripped delegates invocations to the real Git
   unchanged instead of answering as the Riftri CLI.
+- npm publication now waits for every native platform package to be visible
+  before publishing the launcher, preventing a propagation delay or incomplete
+  platform release from producing an unusable first-time install.
+
+- Lifecycle operations now reject inherited Git repository/index overrides
+  before mutation, preventing worktree creation from resetting the source
+  repository's staged index through `GIT_DIR`. Ordinary Git passthrough is unchanged.
+- Interrupted-add recovery preserves staged modifications, staged deletions,
+  intent-to-add entries, and conflicts even when working files match the base.
+  Recovery initializes only a missing index and never overwrites an existing one.
+
+- Interactive `riftri exec` no longer dies from Ctrl-C while its scoped
+  command survives the interrupt. With a foreground controlling terminal,
+  `riftri exec` now ignores SIGINT and SIGQUIT while waiting — the terminal
+  still delivers both to the whole foreground process group, so the command
+  alone decides whether the interrupt is fatal — and keeps waiting so shim
+  cleanup and exit-status propagation still happen (including 130 when the
+  command does die from SIGINT). The command starts with its inherited
+  dispositions restored, prior dispositions are reinstated after the command
+  is reaped, and supervised process-group forwarding is unchanged.
+- Interrupted-add recovery preserves ignored files and unexpected empty
+  directories, even when Git reports a clean worktree. Rollback verifies the
+  complete view before deleting it; explicit removal semantics are unchanged.
+- Repair of an interrupted forced managed removal no longer deletes a worktree
+  whose metadata changed after force intent was recorded. The forced-removal
+  snapshot now covers each entry's full native permission bits (setuid,
+  setgid, and sticky included) and, on Unix, its extended attribute names and
+  values, so a metadata-only change preserves the worktree and reports why.
+  Pending snapshots recorded by older versions can never match the upgraded
+  digest and therefore also fail closed instead of authorizing deletion.
+  Immutable-base content hashing is unchanged, so existing cached bases stay
+  valid.
+- macOS compaction now refuses extended ACLs instead of silently dropping
+  access-control rules. Native, symlink-aware inspection protects initial
+  compaction and recovery cleanup without changing ordinary snapshot formats.
 - Terminating the native `riftri exec` with SIGTERM, SIGINT, or SIGHUP now
   forwards the signal to the scoped command instead of orphaning it.
   Supervised invocations run the command in its own process group and signal
@@ -102,6 +164,28 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   without deleting files or unregistering existing paths.
 - The website storage diagram shows the full backend status when text wraps
   near the mobile layout breakpoint.
+- Release preparation uses the selected repository for the root launcher
+  package as well as the native packages.
+- The static website preview serves `robots.txt` as plain text and `sitemap.xml`
+  as XML instead of `application/octet-stream`.
+- `riftri shell status` reports optimized interception as inactive when
+  `RIFTRI_BYPASS` is active, without reporting that the shell hook is inactive.
+- `riftri status` reports a file or symlink at `overlays/v1` as an unsafe
+  layout root without traversal or removal of the path.
+- Status keeps completed and cancelled compaction counts after later compactions
+  or managed moves, without false unsafe-journal diagnostics.
+- Linux mount identity checks keep complete paths that contain carriage-return
+  or form-feed bytes.
+- Batched Git configuration reads keep case-sensitive subsection names and
+  lowercase only section and variable names.
+- Intercepted `git worktree add --quiet` commands no longer print a success
+  message. Error messages remain visible.
+- Shell status and deactivation retain the activated shim path after a directory
+  change when `RIFTRI_CACHE_DIR` is relative.
+- `riftri doctor --json` preserves non-UTF-8 paths through display strings and
+  exact native hexadecimal fields instead of rejecting the report.
+- Doctor's suggested worktree command quotes the destination as one shell argument,
+  including paths with spaces or apostrophes.
 - `riftri backends --json` emits a versioned report that preserves non-UTF-8
   requested and probe paths through display strings and exact native
   hexadecimal fields instead of rejecting serialization. The report is now an

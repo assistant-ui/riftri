@@ -387,12 +387,14 @@ pub enum WorktreeError {
 }
 
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     add_worktree_inner(request, None, true)
 }
 
 pub fn remove_worktree(
     request: RemoveWorktreeRequest,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     remove_worktree_inner(request, None)
 }
 
@@ -402,22 +404,26 @@ pub fn remove_worktree(
 pub fn force_remove_worktree(
     request: RemoveWorktreeRequest,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     force_remove_worktree_inner(request, None)
 }
 
 pub fn move_worktree(request: MoveWorktreeRequest) -> Result<MoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     move_worktree_inner(request, None)
 }
 
 pub fn compact_worktree(
     request: CompactWorktreeRequest,
 ) -> Result<CompactWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     compact_worktree_inner(request, None)
 }
 
 pub fn prune_worktrees(
     request: PruneWorktreesRequest,
 ) -> Result<PruneWorktreesResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     prune_worktrees_inner(request, None)
 }
 
@@ -426,7 +432,29 @@ pub fn garbage_collect(
     state_directory: &Path,
     apply: bool,
 ) -> Result<GarbageCollectionReport, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     garbage_collect_inner(state_directory, apply, None)
+}
+
+/// Internal lifecycle commands address several different Git worktrees. A
+/// caller's repository/index override would take precedence over each command's
+/// working directory, potentially resetting or deleting the wrong Git state.
+/// Refuse before mutation rather than silently changing the caller's context.
+/// Ordinary Git passthrough deliberately does not use this guard.
+fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+    ] {
+        if std::env::var_os(name).is_some() {
+            return Err(WorktreeError::Unsupported(format!(
+                "{name} is set and can redirect internal Git operations; unset {name} before using Riftri lifecycle commands, and select the repository with --repository instead"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Return whether `destination` is an active Riftri-managed worktree in any
@@ -442,6 +470,7 @@ pub fn forget_missing_state_directory(
     repository: &Path,
     state_directory: &Path,
 ) -> Result<PathBuf, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     let git = Git::default();
     let repository = git.inspect_repository(repository)?;
     let repository_root = repository.root.as_deref().ok_or_else(|| {
@@ -3193,6 +3222,7 @@ pub(crate) fn inspect_repository_compatibility(
     common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<RepositoryCompatibilityReport, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
@@ -4793,8 +4823,18 @@ fn diagnose_overlay_directories(
     }
 
     let root = overlays.join("v1");
-    if !is_real_directory_if_present(&root)? {
-        return Ok(());
+    match fs::symlink_metadata(&root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            add_state_issue(
+                issues,
+                root,
+                "OverlayFS layout root must be a real directory",
+            );
+            return Ok(());
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(io("inspect OverlayFS layout root", &root, source)),
     }
     let completed_removals = removal_journals
         .iter()
@@ -5057,6 +5097,7 @@ fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, Worktre
 pub fn recover_incomplete_operations(
     state_directory: &Path,
 ) -> Result<RecoveryReport, WorktreeError> {
+    validate_lifecycle_git_environment()?;
     let state_directory = absolute_path(state_directory)?;
     let state_directory =
         resolve_real_state_directory_if_present(&state_directory)?.unwrap_or(state_directory);
@@ -5830,10 +5871,23 @@ fn validate_compaction_paths(
     }
     let source =
         JournalStore::open(state_directory).load_operation(&journal.source_add_operation_id)?;
-    let expected_base = if matches!(
+    if source.phase != AddWorktreePhase::Active
+        || source.repository != journal.repository
+        || source.backend != journal.backend
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} does not match its active add operation",
+            journal.journal_path.display()
+        )));
+    }
+    validate_recovery_paths(state_directory, &source)?;
+    if matches!(
         journal.phase,
-        CompactWorktreePhase::AddJournalUpdated | CompactWorktreePhase::Complete
+        CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
     ) {
+        return Ok(());
+    }
+    let expected_base = if journal.phase == CompactWorktreePhase::AddJournalUpdated {
         &journal.base_path
     } else if source.base_path == journal.old_base_path || source.base_path == journal.base_path {
         &source.base_path
@@ -5843,10 +5897,7 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     };
-    if source.phase != AddWorktreePhase::Active
-        || source.repository != journal.repository
-        || source.destination != journal.destination
-        || source.backend != journal.backend
+    if source.destination != journal.destination
         || source.base_path.as_path() != expected_base.as_path()
     {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -5854,7 +5905,6 @@ fn validate_compaction_paths(
             journal.journal_path.display()
         )));
     }
-    validate_recovery_paths(state_directory, &source)?;
     Ok(())
 }
 
@@ -5964,21 +6014,8 @@ fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
 }
 
 #[cfg(unix)]
-fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+fn hash_entry_xattrs(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
     use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
-    // Git does not reproduce these bits from its tree. Refuse both new
-    // compactions and recovery cleanup instead of silently dropping them.
-    // Leave the legacy digest format unchanged for ordinary permissions.
-    if !metadata.file_type().is_symlink() && metadata.permissions().mode() & 0o7000 != 0 {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "{} has special Unix permissions (setuid, setgid, or sticky); compaction preserved it",
-            path.display()
-        )));
-    }
 
     let mut name_buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
     rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(&mut name_buffer))
@@ -6003,6 +6040,33 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         digest.update((value_buffer.len() as u64).to_le_bytes());
         digest.update(value_buffer);
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(target_os = "macos")]
+    if riftri_storage::has_macos_acl(path)? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} has a macOS ACL that Git cannot reproduce; compaction preserved it",
+            path.display()
+        )));
+    }
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect worktree snapshot entry", path, source))?;
+    // Git does not reproduce these bits from its tree. Refuse both new
+    // compactions and recovery cleanup instead of silently dropping them.
+    // Leave the legacy digest format unchanged for ordinary permissions.
+    if !metadata.file_type().is_symlink() && metadata.permissions().mode() & 0o7000 != 0 {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} has special Unix permissions (setuid, setgid, or sticky); compaction preserved it",
+            path.display()
+        )));
+    }
+
+    hash_entry_xattrs(path, digest)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         let mut entries = fs::read_dir(path)
             .map_err(|source| io("read worktree snapshot directory", path, source))?
@@ -6011,6 +6075,55 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         entries.sort_unstable_by_key(|entry| entry.file_name());
         for entry in entries {
             hash_extended_attributes(&entry.path(), digest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Hash metadata Git does not reproduce from its tree: the full native mode
+/// (including setuid, setgid, and sticky bits) and, on Unix, every extended
+/// attribute name and value. The base-integrity content hash deliberately
+/// ignores these, so the forced-removal snapshot composes them separately;
+/// metadata-only edits after force intent must stop deletion.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| io("inspect forced removal snapshot metadata", path, source))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        digest.update(metadata.mode().to_le_bytes());
+        hash_entry_xattrs(path, digest)?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::fs::MetadataExt;
+        digest.update(metadata.file_attributes().to_le_bytes());
+    }
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        let mut entries = fs::read_dir(path)
+            .map_err(|source| io("read forced removal snapshot directory", path, source))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| io("read forced removal snapshot entry", path, source))?;
+        entries.sort_unstable_by_key(|entry| entry.file_name());
+        digest.update((entries.len() as u64).to_le_bytes());
+        for entry in entries {
+            let name = entry.file_name();
+            #[cfg(unix)]
+            {
+                let bytes = name.as_bytes();
+                digest.update((bytes.len() as u64).to_le_bytes());
+                digest.update(bytes);
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let units = name.encode_wide().collect::<Vec<_>>();
+                digest.update((units.len() as u64).to_le_bytes());
+                for unit in units {
+                    digest.update(unit.to_le_bytes());
+                }
+            }
+            hash_forced_removal_metadata(&entry.path(), digest)?;
         }
     }
     Ok(())
@@ -6587,11 +6700,20 @@ fn snapshot_managed_worktree_for_force(managed: &DecodedJournal) -> Result<Strin
     };
     let git_state = Git::default().worktree_removal_state(&git_root)?;
     let mut digest = Sha256::new();
-    // Old content-only snapshots deliberately cannot authorize deletion after
-    // this upgrade: they cannot prove that the staged index or HEAD is unchanged.
-    digest.update(b"riftri-forced-removal-snapshot-v2\0");
+    // Older snapshot formats deliberately cannot authorize deletion after this
+    // upgrade: v1 could not prove that the staged index or HEAD was unchanged,
+    // and v2 could not prove that special permission bits or extended
+    // attributes were unchanged. A pending older snapshot never matches, so
+    // recovery preserves the worktree instead of trusting it.
+    digest.update(b"riftri-forced-removal-snapshot-v3\0");
     digest.update((content.len() as u64).to_le_bytes());
     digest.update(content);
+    if managed.backend != BackendKind::OverlayFs {
+        // The OverlayFS private-layer snapshot above already covers native
+        // modes and metadata-driven ctime changes; other backends need an
+        // explicit metadata pass over the worktree itself.
+        hash_forced_removal_metadata(&managed.destination, &mut digest)?;
+    }
     digest.update(git_state);
     Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
@@ -7018,25 +7140,33 @@ fn remove_registered_worktree_for_rollback(
     git: &Git,
     journal: &DecodedJournal,
 ) -> Result<(), WorktreeError> {
+    if journal.destination.exists() && git.worktree_index_has_changes(&journal.destination)? {
+        return Err(changed_rollback_worktree(journal));
+    }
     if !journal.destination.exists() || contains_only_git_pointer(&journal.destination)? {
         remove_pointer_only_worktree(git, &journal.repository, journal)?;
     } else if git.worktree_is_clean(&journal.destination)? {
-        remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
+        remove_worktree_for_rollback(
+            git,
+            &journal.repository,
+            &journal.destination,
+            Some(&journal.base_path),
+        )?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
-        if journal.sparse_directories.is_empty() {
-            git.synchronize_worktree_index(&journal.destination)?;
-        } else {
-            // A sparse view compares against its sparse base; rebuilding a
-            // full index here would misreport out-of-cone entries as deleted.
-            git.synchronize_sparse_worktree_index(
-                &journal.destination,
-                &journal.sparse_directories,
-            )?;
+        if !git
+            .initialize_missing_worktree_index(&journal.destination, &journal.sparse_directories)?
+        {
+            return Err(changed_rollback_worktree(journal));
         }
         if !git.worktree_is_clean(&journal.destination)? {
             return Err(changed_rollback_worktree(journal));
         }
-        remove_worktree_for_rollback(git, &journal.repository, &journal.destination)?;
+        remove_worktree_for_rollback(
+            git,
+            &journal.repository,
+            &journal.destination,
+            Some(&journal.base_path),
+        )?;
     } else {
         return Err(changed_rollback_worktree(journal));
     }
@@ -7103,7 +7233,7 @@ fn remove_pointer_only_worktree(
     }
     // Git can remove a missing directory without force. If a writer recreates
     // it first, Git's ordinary safety checks apply to that new directory.
-    if let Err(error) = remove_worktree_for_rollback(git, repository, &journal.destination) {
+    if let Err(error) = remove_worktree_for_rollback(git, repository, &journal.destination, None) {
         restore_staged_git_pointer(journal)?;
         return Err(error);
     }
@@ -7114,12 +7244,25 @@ fn remove_worktree_for_rollback(
     git: &Git,
     repository: &Path,
     destination: &Path,
+    expected_base: Option<&Path>,
 ) -> Result<(), WorktreeError> {
     #[cfg(test)]
     crate::test_hooks::fire(
         crate::test_hooks::FilesystemRacePoint::RollbackGitRemoval,
         destination,
     );
+    // Git's ordinary clean status omits ignored files and empty directories.
+    // Add rollback is not an explicit request to discard those private entries.
+    // Revalidate the complete view at the final removal boundary, not only when
+    // a missing index made Git report the initial checkout as dirty.
+    if let Some(base) = expected_base
+        && !view_matches_base(base, destination)?
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} has changes or private entries; recovery preserved it",
+            destination.display()
+        )));
+    }
     git.remove_worktree(repository, destination)?;
     Ok(())
 }
@@ -7348,6 +7491,15 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
         &journal.base_path,
         &journal.destination,
     )?;
+    // The private pointer also works when the merged view is unmounted.
+    let index_root = if layout.upper().join(".git").exists() {
+        layout.upper()
+    } else {
+        &journal.destination
+    };
+    if index_root.join(".git").exists() && git.worktree_index_has_changes(index_root)? {
+        return Err(changed_rollback_worktree(journal));
+    }
     let identity = if let Some(identity) = overlayfs.mount_identity.clone() {
         match OverlayFsMounter::mount_state(&layout, &identity)? {
             OverlayFsMountState::Active | OverlayFsMountState::Absent => Some(identity),
@@ -7389,8 +7541,7 @@ fn rollback_overlayfs_worktree(git: &Git, journal: &DecodedJournal) -> Result<()
         && OverlayFsMounter::mount_state(&layout, identity)? == OverlayFsMountState::Active
     {
         let clean_snapshot = overlayfs_layer_snapshot(layout.upper())?;
-        let safe_to_remove = git.worktree_is_clean(&journal.destination)?
-            || view_matches_base(&journal.base_path, &journal.destination)?;
+        let safe_to_remove = view_matches_base(&journal.base_path, &journal.destination)?;
         if !safe_to_remove {
             return Err(WorktreeError::InvalidRequest(format!(
                 "worktree {} has changes; recovery preserved it",
@@ -7951,6 +8102,27 @@ mod tests {
                 accounting.diagnostic_issues.is_empty(),
                 "{phase:?}: {accounting:?}"
             );
+
+            move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository,
+                    source: destination,
+                    destination: fixture.path().join("moved"),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("move recovered worktree");
+            let moved = storage_accounting(&state).expect("account after move");
+            assert_eq!(
+                moved.completed_compactions,
+                accounting.completed_compactions
+            );
+            assert_eq!(
+                moved.cancelled_compactions,
+                accounting.cancelled_compactions
+            );
+            assert!(moved.diagnostic_issues.is_empty(), "{phase:?}: {moved:?}");
         }
     }
 
@@ -8008,6 +8180,122 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777)).unwrap();
         }
         super::directory_snapshot(fixture.path()).expect("ordinary permissions remain supported");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compaction_snapshots_refuse_macos_access_control_rules() {
+        let fixture = tempdir().unwrap();
+        let file = fixture.path().join("file");
+        fs::write(&file, "private\n").unwrap();
+        for (path, rule) in [
+            (file.as_path(), "everyone deny write"),
+            (
+                fixture.path(),
+                "everyone allow read,file_inherit,directory_inherit",
+            ),
+        ] {
+            let before = super::directory_snapshot(fixture.path()).unwrap();
+            assert!(
+                Command::new("chmod")
+                    .args(["+a", rule])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let error = super::verify_snapshot(fixture.path(), &before)
+                .expect_err("ACLs must prevent destructive compaction cleanup");
+            assert!(error.to_string().contains("ACL"), "{error}");
+            assert!(
+                Command::new("chmod")
+                    .arg("-N")
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert_eq!(
+                super::directory_snapshot(fixture.path()).unwrap(),
+                before,
+                "ordinary snapshot format stays compatible"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn compaction_recovery_preserves_new_macos_acls() {
+        for phase in [
+            CompactWorktreePhase::ReplacementReady,
+            CompactWorktreePhase::ReplacementActivated,
+            CompactWorktreePhase::AddJournalUpdated,
+        ] {
+            let fixture = tempdir().unwrap();
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("view");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("file"), "original\n").unwrap();
+            git(&repository, &["add", "."]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: vec![],
+                },
+                None,
+                true,
+            )
+            .unwrap();
+            compact_worktree_inner(
+                CompactWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(phase),
+            )
+            .expect_err("interrupt compaction");
+            let journal = super::CompactJournalStore::open(&state)
+                .load_all()
+                .unwrap()
+                .pop()
+                .unwrap();
+            let protected = if phase == CompactWorktreePhase::ReplacementReady {
+                destination.join("file")
+            } else {
+                journal.quarantine.join("file")
+            };
+            assert!(
+                Command::new("chmod")
+                    .args(["+a", "everyone deny write"])
+                    .arg(&protected)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            for _ in 0..2 {
+                let report = recover_incomplete_operations(&state).unwrap();
+                assert_eq!(report.recovered_compactions, 0, "{phase:?}: {report:?}");
+                assert_eq!(report.errors.len(), 1, "{report:?}");
+                assert!(report.errors[0].contains("ACL"), "{report:?}");
+                assert!(riftri_storage::has_macos_acl(&protected).unwrap());
+                assert_eq!(fs::read(&protected).unwrap(), b"original\n");
+                assert_eq!(fs::read(destination.join("file")).unwrap(), b"original\n");
+            }
+        }
     }
 
     #[test]
@@ -9030,6 +9318,65 @@ mod tests {
         assert!(unknown_root.is_dir());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn status_reports_unsafe_overlay_roots_without_traversing_or_removing_them() {
+        use std::os::unix::fs::symlink;
+
+        for kind in [
+            "missing",
+            "directory",
+            "file",
+            "symlink",
+            "dangling-symlink",
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let state = fixture.path().join("state");
+            fs::create_dir_all(state.join("overlays")).expect("create overlays directory");
+            let state = state.canonicalize().expect("resolve state");
+            let root = state.join("overlays/v1");
+            let outside = fixture.path().join("outside");
+            match kind {
+                "missing" => {}
+                "directory" => fs::create_dir(&root).expect("create layout root"),
+                "file" => fs::write(&root, "preserve root\n").expect("write layout root"),
+                _ => {
+                    if kind == "symlink" {
+                        fs::create_dir(&outside).expect("create outside directory");
+                        fs::write(outside.join("private.txt"), "preserve outside\n")
+                            .expect("write outside file");
+                    }
+                    symlink(&outside, &root).expect("symlink layout root");
+                }
+            }
+
+            let report = storage_accounting(&state).expect("diagnose state");
+            let paths = report
+                .diagnostic_issues
+                .iter()
+                .map(|issue| issue.path.as_path())
+                .collect::<Vec<_>>();
+            if matches!(kind, "missing" | "directory") {
+                assert!(paths.is_empty(), "{kind}: {paths:?}");
+            } else {
+                assert_eq!(paths, [root.as_path()], "{kind}");
+            }
+            match kind {
+                "file" => assert_eq!(fs::read_to_string(&root).unwrap(), "preserve root\n"),
+                "symlink" | "dangling-symlink" => {
+                    assert_eq!(fs::read_link(&root).unwrap(), outside);
+                    if kind == "symlink" {
+                        assert_eq!(
+                            fs::read_to_string(outside.join("private.txt")).unwrap(),
+                            "preserve outside\n"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn status_does_not_scan_an_unregistered_journal_destination() {
         let fixture = tempdir().expect("fixture");
@@ -9303,6 +9650,131 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_add_recovery_preserves_staged_index_changes() {
+        for sparse in [false, true] {
+            for phase in [
+                AddWorktreePhase::GitPointerRestored,
+                AddWorktreePhase::IndexSynchronized,
+            ] {
+                for change in ["content", "deletion", "intent-to-add", "conflict"] {
+                    let fixture = tempdir().unwrap();
+                    let repository = fixture.path().join("repository");
+                    let destination = fixture.path().join("view");
+                    let state = fixture.path().join("state");
+                    fs::create_dir_all(repository.join("selected")).unwrap();
+                    git(&repository, &["init", "--quiet"]);
+                    git(&repository, &["config", "user.name", "Riftri Tests"]);
+                    git(
+                        &repository,
+                        &["config", "user.email", "riftri@example.invalid"],
+                    );
+                    git(&repository, &["config", "core.autocrlf", "false"]);
+                    fs::write(repository.join("selected/file"), "original\n").unwrap();
+                    fs::write(repository.join("empty"), "").unwrap();
+                    git(&repository, &["add", "."]);
+                    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+                    let sparse_directories = if sparse {
+                        vec!["selected".to_owned()]
+                    } else {
+                        vec![]
+                    };
+                    add_worktree_inner(
+                        AddWorktreeRequest {
+                            repository: repository.clone(),
+                            destination: destination.clone(),
+                            revision: OsString::from("HEAD"),
+                            mode: WorktreeMode::Detached,
+                            state_dir: Some(state.clone()),
+                            sparse_directories: sparse_directories.clone(),
+                        },
+                        Some(phase),
+                        false,
+                    )
+                    .expect_err("interrupt creation");
+                    // Also cover the crash gap: Git wrote the index, but the
+                    // creator did not yet persist IndexSynchronized.
+                    let git_handle = riftri_git::Git::default();
+                    if phase == AddWorktreePhase::GitPointerRestored {
+                        if sparse {
+                            git_handle
+                                .synchronize_sparse_worktree_index(
+                                    &destination,
+                                    &sparse_directories,
+                                )
+                                .unwrap();
+                        } else {
+                            git_handle.synchronize_worktree_index(&destination).unwrap();
+                        }
+                    }
+                    match change {
+                        "content" => {
+                            fs::write(
+                                destination.join("selected/file"),
+                                "private staged content\n",
+                            )
+                            .unwrap();
+                            git(&destination, &["add", "selected/file"]);
+                            fs::write(destination.join("selected/file"), "original\n").unwrap();
+                        }
+                        "deletion" => git(&destination, &["rm", "--cached", "selected/file"]),
+                        "intent-to-add" => {
+                            git(&destination, &["rm", "--cached", "empty"]);
+                            git(&destination, &["add", "--intent-to-add", "empty"]);
+                        }
+                        "conflict" => {
+                            use std::io::Write;
+                            use std::process::Stdio;
+                            let oid = Command::new("git")
+                                .args(["rev-parse", "HEAD:selected/file"])
+                                .current_dir(&destination)
+                                .output()
+                                .unwrap();
+                            let oid = String::from_utf8(oid.stdout).unwrap();
+                            git(
+                                &destination,
+                                &["update-index", "--force-remove", "selected/file"],
+                            );
+                            let mut child = Command::new("git")
+                                .args(["update-index", "--index-info"])
+                                .current_dir(&destination)
+                                .stdin(Stdio::piped())
+                                .spawn()
+                                .unwrap();
+                            write!(
+                                child.stdin.take().unwrap(),
+                                "100644 {} 1\tselected/file\n100644 {} 2\tselected/file\n",
+                                oid.trim(),
+                                oid.trim()
+                            )
+                            .unwrap();
+                            assert!(child.wait().unwrap().success());
+                        }
+                        _ => unreachable!(),
+                    }
+                    let before = git_handle.worktree_removal_state(&destination).unwrap();
+                    for _ in 0..2 {
+                        let report = recover_incomplete_operations(&state).unwrap();
+                        assert_eq!(
+                            report.recovered, 0,
+                            "{change}, sparse={sparse}, {phase:?}: {report:?}"
+                        );
+                        assert_eq!(report.errors.len(), 1, "{report:?}");
+                        assert!(destination.exists());
+                        assert_eq!(
+                            git_handle.worktree_removal_state(&destination).unwrap(),
+                            before
+                        );
+                        assert_eq!(
+                            fs::read(destination.join("selected/file")).unwrap(),
+                            b"original\n"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn recovery_is_idempotent_after_every_add_transition() {
         let phases = [
             AddWorktreePhase::IntentRecorded,
@@ -9449,6 +9921,66 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_sparse_add_preserves_a_later_git_selection_change() {
+        for phase in [
+            AddWorktreePhase::IndexSynchronized,
+            AddWorktreePhase::CleanVerified,
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("view");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).unwrap();
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            for dir in ["a", "b"] {
+                fs::create_dir(repository.join(dir)).unwrap();
+                fs::write(repository.join(dir).join("file.txt"), dir).unwrap();
+            }
+            git(&repository, &["add", "-A"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            let request = AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: vec!["a".to_owned()],
+            };
+            let error = add_worktree_inner(request, Some(phase), false).unwrap_err();
+            assert!(
+                error.to_string().contains("injected failure"),
+                "unexpected failure after {phase:?}: {error}"
+            );
+            git(&destination, &["sparse-checkout", "set", "--cone", "b"]);
+            let before = Command::new("git")
+                .current_dir(&destination)
+                .args(["ls-files", "-t", "-z"])
+                .output()
+                .unwrap()
+                .stdout;
+            for _ in 0..2 {
+                let report = recover_incomplete_operations(&state).unwrap();
+                assert!(!report.errors.is_empty(), "{phase:?}: {report:?}");
+                assert!(destination.join("b/file.txt").exists());
+                assert!(!destination.join("a").exists());
+                let after = Command::new("git")
+                    .current_dir(&destination)
+                    .args(["ls-files", "-t", "-z"])
+                    .output()
+                    .unwrap()
+                    .stdout;
+                assert_eq!(before, after);
+            }
+        }
+    }
+
+    #[test]
     fn recovery_preserves_a_changed_interrupted_view() {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
@@ -9534,6 +10066,9 @@ mod tests {
                 .pop()
                 .expect("incomplete add journal");
 
+            // A late ignored write must also survive: Git's normal clean
+            // status cannot serve as the final protection for add rollback.
+            fs::write(repository.join(".git/info/exclude"), "raced.txt\n").unwrap();
             let _hook = crate::test_hooks::install(
                 crate::test_hooks::FilesystemRacePoint::RollbackGitRemoval,
                 |path| {
@@ -9549,6 +10084,7 @@ mod tests {
                 matches!(
                     &error,
                     super::WorktreeError::Git(GitError::CommandFailed { .. })
+                        | super::WorktreeError::InvalidRequest(_)
                 ),
                 "unexpected rollback error: {error}"
             );
@@ -9890,7 +10426,7 @@ mod tests {
 
     #[test]
     fn forced_removal_recovery_preserves_later_index_and_head_changes() {
-        for change in ["index", "head", "legacy-snapshot"] {
+        for change in ["index", "head", "legacy-v1-snapshot", "legacy-v2-snapshot"] {
             let fixture = tempdir().expect("fixture");
             let repository = fixture.path().join("repository");
             let destination = fixture.path().join("worktree");
@@ -9936,8 +10472,22 @@ mod tests {
             } else {
                 use sha2::{Digest, Sha256};
                 let mut digest = Sha256::new();
-                digest.update(b"riftri-forced-removal-snapshot-v1\0");
-                digest.update(crate::base_integrity::marker(&destination).unwrap());
+                let content = crate::base_integrity::marker(&destination).unwrap();
+                if change == "legacy-v1-snapshot" {
+                    digest.update(b"riftri-forced-removal-snapshot-v1\0");
+                    digest.update(&content);
+                } else {
+                    // The exact digest a v2 binary recorded: the content
+                    // marker and Git state, with no metadata pass.
+                    digest.update(b"riftri-forced-removal-snapshot-v2\0");
+                    digest.update((content.len() as u64).to_le_bytes());
+                    digest.update(&content);
+                    digest.update(
+                        super::Git::default()
+                            .worktree_removal_state(&destination)
+                            .unwrap(),
+                    );
+                }
                 let store = RemovalJournalStore::open(&state);
                 let journal = store.load_all().unwrap().remove(0);
                 let mut record = store.reload(&journal).unwrap();
@@ -9949,6 +10499,106 @@ mod tests {
                 assert_eq!(report.recovered_removals, 0, "{change}: {report:?}");
                 assert_eq!(report.errors.len(), 1, "{change}: {report:?}");
                 assert!(destination.exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forced_removal_recovery_preserves_later_metadata_only_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        #[cfg(target_os = "macos")]
+        const ATTRIBUTE: &str = "com.riftri.forced-removal-test";
+        #[cfg(not(target_os = "macos"))]
+        const ATTRIBUTE: &str = "user.riftri.forced-removal-test";
+
+        for change in ["xattr", "special-bit"] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            fs::create_dir(destination.join("scratch")).expect("create scratch directory");
+
+            force_remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(RemoveWorktreePhase::IntentRecorded),
+            )
+            .expect_err("simulate interruption after durable force intent");
+            assert!(destination.exists());
+
+            // Metadata-only changes: neither edits file contents nor Git
+            // state, so only the snapshot's metadata pass can see them.
+            if change == "xattr" {
+                rustix::fs::setxattr(
+                    destination.join("tracked.txt"),
+                    ATTRIBUTE,
+                    b"added after intent",
+                    rustix::fs::XattrFlags::empty(),
+                )
+                .expect("set xattr after intent");
+            } else {
+                fs::set_permissions(
+                    destination.join("scratch"),
+                    fs::Permissions::from_mode(0o1755),
+                )
+                .expect("set sticky bit after intent");
+            }
+
+            for _ in 0..2 {
+                let recovery = recover_incomplete_operations(&state).expect("repair report");
+                assert_eq!(recovery.recovered_removals, 0, "{change}: {recovery:?}");
+                assert_eq!(recovery.errors.len(), 1, "{change}: {recovery:?}");
+                assert!(
+                    recovery.errors[0].contains("changed after forced removal intent"),
+                    "{change}: {recovery:?}"
+                );
+                assert!(destination.exists(), "{change}");
+            }
+
+            if change == "xattr" {
+                let mut value: Vec<u8> = Vec::with_capacity(64);
+                rustix::fs::lgetxattr(
+                    destination.join("tracked.txt"),
+                    ATTRIBUTE,
+                    rustix::buffer::spare_capacity(&mut value),
+                )
+                .expect("read preserved xattr");
+                assert_eq!(value, b"added after intent");
+            } else {
+                let mode = fs::symlink_metadata(destination.join("scratch"))
+                    .expect("inspect preserved directory")
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o7777, 0o1755, "{mode:o}");
             }
         }
     }
@@ -9985,6 +10635,30 @@ mod tests {
         .expect("create worktree");
         fs::write(destination.join("untracked.txt"), "explicitly discarded\n")
             .expect("dirty worktree");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            // Metadata present before force intent must not cause a false
+            // refusal: the snapshot records and re-verifies it unchanged.
+            #[cfg(target_os = "macos")]
+            let attribute = "com.riftri.forced-removal-test";
+            #[cfg(not(target_os = "macos"))]
+            let attribute = "user.riftri.forced-removal-test";
+            fs::create_dir(destination.join("scratch")).expect("create scratch directory");
+            fs::set_permissions(
+                destination.join("scratch"),
+                fs::Permissions::from_mode(0o1755),
+            )
+            .expect("set pre-intent sticky bit");
+            rustix::fs::setxattr(
+                destination.join("untracked.txt"),
+                attribute,
+                b"recorded before intent",
+                rustix::fs::XattrFlags::empty(),
+            )
+            .expect("set pre-intent xattr");
+        }
 
         let error = force_remove_worktree_inner(
             RemoveWorktreeRequest {
@@ -10150,6 +10824,99 @@ mod tests {
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved change"),
             "changed after intent\n"
         );
+    }
+
+    #[test]
+    fn interrupted_add_recovery_preserves_ignored_and_empty_entries() {
+        for (phase, sparse) in [
+            (AddWorktreePhase::GitPointerRestored, false),
+            (AddWorktreePhase::IndexSynchronized, false),
+            (AddWorktreePhase::GitPointerRestored, true),
+            (AddWorktreePhase::IndexSynchronized, true),
+        ] {
+            for private_entry in ["ignored-file", "ignored-directory", "empty-directory"] {
+                let fixture = tempdir().unwrap();
+                let repository = fixture.path().join("repository");
+                let destination = fixture.path().join("view");
+                let state = fixture.path().join("state");
+                fs::create_dir(&repository).unwrap();
+                git(&repository, &["init", "--quiet"]);
+                git(&repository, &["config", "user.name", "Riftri Tests"]);
+                git(
+                    &repository,
+                    &["config", "user.email", "riftri@example.invalid"],
+                );
+                git(&repository, &["config", "core.autocrlf", "false"]);
+                fs::write(repository.join("tracked.txt"), "original\n").unwrap();
+                fs::write(repository.join(".gitignore"), "secret.txt\nprivate/\n").unwrap();
+                fs::create_dir(repository.join("selected")).unwrap();
+                fs::write(repository.join("selected/file"), "selected\n").unwrap();
+                git(&repository, &["add", "."]);
+                git(&repository, &["commit", "--quiet", "-m", "initial"]);
+                add_worktree_inner(
+                    AddWorktreeRequest {
+                        repository: repository.clone(),
+                        destination: destination.clone(),
+                        revision: OsString::from("HEAD"),
+                        mode: WorktreeMode::Detached,
+                        state_dir: Some(state.clone()),
+                        sparse_directories: if sparse {
+                            vec!["selected".to_owned()]
+                        } else {
+                            vec![]
+                        },
+                    },
+                    Some(phase),
+                    false,
+                )
+                .expect_err("interrupt creation");
+                if phase == AddWorktreePhase::GitPointerRestored {
+                    if sparse {
+                        riftri_git::Git::default()
+                            .synchronize_sparse_worktree_index(
+                                &destination,
+                                &["selected".to_owned()],
+                            )
+                            .unwrap();
+                    } else {
+                        riftri_git::Git::default()
+                            .synchronize_worktree_index(&destination)
+                            .unwrap();
+                    }
+                }
+                let private_path = match private_entry {
+                    "ignored-file" => destination.join("secret.txt"),
+                    "ignored-directory" => {
+                        fs::create_dir(destination.join("private")).unwrap();
+                        destination.join("private/notes.txt")
+                    }
+                    "empty-directory" => destination.join("empty-private-directory"),
+                    _ => unreachable!(),
+                };
+                if private_entry == "empty-directory" {
+                    fs::create_dir(&private_path).unwrap();
+                } else {
+                    fs::write(&private_path, "private data\n").unwrap();
+                }
+                assert!(
+                    riftri_git::Git::default()
+                        .worktree_is_clean(&destination)
+                        .unwrap()
+                );
+                for _ in 0..2 {
+                    let report = recover_incomplete_operations(&state).unwrap();
+                    assert_eq!(
+                        report.recovered, 0,
+                        "{private_entry}, {phase:?}: {report:?}"
+                    );
+                    assert_eq!(report.errors.len(), 1, "{report:?}");
+                    assert!(private_path.exists());
+                    if private_entry != "empty-directory" {
+                        assert_eq!(fs::read(&private_path).unwrap(), b"private data\n");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -7,7 +7,7 @@ test("unknown paths show the branded 404 and offer a working route home", async 
   await expect(page.locator('meta[name="robots"]')).toHaveAttribute("content", /noindex/);
   await page.getByRole("link", { name: "Back to the homepage" }).click();
   await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByRole("heading", { name: "Riftri", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Git worktrees. Shared storage.", exact: true })).toBeVisible();
 });
 
 test("the emitted 404 route resolves through its build-output override", async ({ page }) => {

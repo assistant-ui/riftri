@@ -5,8 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod setup;
+
 const CLI_EXAMPLES: &str = "\
 Examples:
+  riftri setup                             Create a worktree, then choose an agent
   riftri enable                            Opt the current repository in
   riftri worktree add ../feature -b f/x    Create a COW-backed worktree
   riftri worktree remove ../feature        Safely remove it again
@@ -21,10 +24,10 @@ Environment:
   RIFTRI_CACHE_DIR=PATH  Directory holding the shell-activation Git shim
                          (defaults to the platform cache directory).
 
-RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE are set by riftri itself inside
-activated scopes; RIFTRI_REQUIRE_* variables only make the test suites fail
-instead of falling back. See docs/agent-integration.md for the automation
-contract.";
+Riftri sets RIFTRI_REAL_GIT and RIFTRI_SHIM_ACTIVE inside activated scopes.
+Shell hooks also set RIFTRI_SHELL_SHIM_DIR to the absolute shim directory.
+RIFTRI_REQUIRE_* variables only make the test suites fail instead of falling
+back. See docs/agent-integration.md for the automation contract.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -49,11 +52,30 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Interactively create a COW worktree, then optionally open a coding agent.
+    Setup {
+        /// Existing repository to use; paths entered at prompts are relative to the caller.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Proposed destination (skip the directory question).
+        #[arg(long, value_name = "PATH")]
+        destination: Option<PathBuf>,
+
+        /// New branch at HEAD (skip the branch question; never resets an existing branch).
+        #[arg(short = 'b', long, value_name = "BRANCH")]
+        branch: Option<OsString>,
+    },
+
     /// Enable optimized worktree creation for one repository.
     Enable {
         /// Repository to enable.
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Repository to enable (alternative to the positional path).
+        #[arg(long, value_name = "PATH", conflicts_with = "path")]
+        repository: Option<PathBuf>,
     },
 
     /// Disable optimized worktree creation for one repository.
@@ -61,6 +83,10 @@ enum Command {
         /// Repository to disable.
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Repository to disable (alternative to the positional path).
+        #[arg(long, value_name = "PATH", conflicts_with = "path")]
+        repository: Option<PathBuf>,
     },
 
     /// Run a command with process-scoped Git worktree interception.
@@ -105,6 +131,10 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
 
+        /// Repository to inspect (alternative to the positional path).
+        #[arg(long, value_name = "PATH", conflicts_with = "path")]
+        repository: Option<PathBuf>,
+
         /// Proposed worktree destination whose volume should be probed.
         #[arg(long)]
         destination: Option<PathBuf>,
@@ -131,6 +161,14 @@ enum Command {
         #[arg(default_value = ".")]
         repository: PathBuf,
 
+        /// Repository to inspect (alternative to the positional repository).
+        #[arg(
+            long = "repository",
+            value_name = "PATH",
+            conflicts_with = "repository"
+        )]
+        repository_option: Option<PathBuf>,
+
         /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
@@ -146,6 +184,14 @@ enum Command {
         #[arg(default_value = ".")]
         repository: PathBuf,
 
+        /// Repository to repair (alternative to the positional repository).
+        #[arg(
+            long = "repository",
+            value_name = "PATH",
+            conflicts_with = "repository"
+        )]
+        repository_option: Option<PathBuf>,
+
         /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
         #[arg(long)]
         state_dir: Option<PathBuf>,
@@ -160,6 +206,14 @@ enum Command {
         /// Repository whose default Riftri state should be collected.
         #[arg(default_value = ".")]
         repository: PathBuf,
+
+        /// Repository to collect (alternative to the positional repository).
+        #[arg(
+            long = "repository",
+            value_name = "PATH",
+            conflicts_with = "repository"
+        )]
+        repository_option: Option<PathBuf>,
 
         /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
         #[arg(long)]
@@ -194,6 +248,7 @@ enum Command {
 impl Command {
     fn operation_name(&self) -> &'static str {
         match self {
+            Self::Setup { .. } => "setup",
             Self::Enable { .. } => "enable",
             Self::Disable { .. } => "disable",
             Self::Exec { .. } => "exec",
@@ -386,6 +441,14 @@ enum ShellCommand {
         /// Repository to inspect for local Riftri enablement.
         #[arg(default_value = ".")]
         repository: PathBuf,
+
+        /// Repository to inspect (alternative to the positional repository).
+        #[arg(
+            long = "repository",
+            value_name = "PATH",
+            conflicts_with = "repository"
+        )]
+        repository_option: Option<PathBuf>,
     },
 }
 
@@ -482,7 +545,18 @@ fn confirm_destructive_action(warning: &str, yes: bool) -> Result<()> {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Enable { path } => {
+        Command::Setup {
+            repository,
+            destination,
+            branch,
+        } => {
+            let status = setup::run(repository, destination, branch, cli.json_errors)?;
+            if status != 0 {
+                std::process::exit(status);
+            }
+        }
+        Command::Enable { path, repository } => {
+            let path = repository.unwrap_or(path);
             let activation = riftri_core::enable_repository(&path)?;
             println!("Enabled Riftri for {}", activation.repository.display());
             println!("Git config: riftri.enabled=true");
@@ -501,7 +575,8 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Or activate one process with: riftri exec -- <command>");
             }
         }
-        Command::Disable { path } => {
+        Command::Disable { path, repository } => {
+            let path = repository.unwrap_or(path);
             let activation = riftri_core::disable_repository(&path)?;
             println!("Disabled Riftri for {}", activation.repository.display());
         }
@@ -543,7 +618,12 @@ fn run(cli: Cli) -> Result<()> {
                     print!("{}", riftri_core::prepare_powershell_deactivation()?);
                 }
             },
-            ShellCommand::Status { repository } => print_shell_status(&repository)?,
+            ShellCommand::Status {
+                repository,
+                repository_option,
+            } => {
+                print_shell_status(&repository_option.unwrap_or(repository))?;
+            }
         },
         Command::Completions { shell } => {
             use clap::CommandFactory;
@@ -560,16 +640,19 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Doctor {
             path,
+            repository,
             destination,
             json,
         } => {
+            let path = repository.unwrap_or(path);
             let destination = destination.as_deref().unwrap_or(&path);
             let report = riftri_core::doctor_for_destination(&path, destination);
 
             if json {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&report).context("serialize doctor report")?
+                    serde_json::to_string_pretty(&doctor_json(&report))
+                        .context("serialize doctor report")?
                 );
             } else {
                 print_doctor(&report);
@@ -599,29 +682,35 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Status {
             repository,
+            repository_option,
             state_dir,
             json,
         } => {
+            let repository = repository_option.unwrap_or(repository);
             let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::storage_accounting(&state_directory)?;
             print_storage_accounting(&state_directory, &report, json)?;
         }
         Command::Repair {
             repository,
+            repository_option,
             state_dir,
             json,
         } => {
+            let repository = repository_option.unwrap_or(repository);
             let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::recover_incomplete_operations(&state_directory)?;
             print_recovery_report(&state_directory, &report, json)?;
         }
         Command::Gc {
             repository,
+            repository_option,
             state_dir,
             apply,
             yes,
             json,
         } => {
+            let repository = repository_option.unwrap_or(repository);
             if apply {
                 confirm_destructive_action(
                     "riftri gc --apply permanently deletes every base in the plan.",
@@ -1138,7 +1227,9 @@ fn print_shell_status(repository: &Path) -> Result<()> {
             );
             println!(
                 "Effective optimized interception: {}",
-                if shell.active && activation.enabled {
+                if shell.bypass {
+                    "inactive (RIFTRI_BYPASS)"
+                } else if shell.active && activation.enabled {
                     "active"
                 } else {
                     "inactive"
@@ -1265,17 +1356,19 @@ fn run_git_shim() -> Result<i32> {
 
     match riftri_core::proxy_git_command(&current_directory, &arguments)? {
         riftri_core::GitProxyOutcome::Passthrough(status) => Ok(status),
-        riftri_core::GitProxyOutcome::OptimizedAdd(result) => {
-            eprintln!(
-                "Riftri created an optimized {} worktree at {} ({})",
-                result.backend.display_name(),
-                result.destination.display(),
-                if result.reused_base {
-                    "reused base"
-                } else {
-                    "new base"
-                }
-            );
+        riftri_core::GitProxyOutcome::OptimizedAdd { result, quiet } => {
+            if !quiet {
+                eprintln!(
+                    "Riftri created an optimized {} worktree at {} ({})",
+                    result.backend.display_name(),
+                    result.destination.display(),
+                    if result.reused_base {
+                        "reused base"
+                    } else {
+                        "new base"
+                    }
+                );
+            }
             Ok(0)
         }
         riftri_core::GitProxyOutcome::OptimizedRemove(result) => {
@@ -1987,6 +2080,73 @@ fn print_allocation_note() {
     println!("Physical-sharing proof: use the platform volume-delta benchmark on a quiet volume");
 }
 
+fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
+    let git = match &report.git.value {
+        Some(git) => serde_json::json!({
+            "available": report.git.available,
+            "value": {
+                "command": git.command.display().to_string(),
+                "command_native_hex": native_path_hex(&git.command),
+                "version": git.version,
+            },
+        }),
+        None => serde_json::json!(report.git),
+    };
+    let repository = match &report.repository.value {
+        Some(repository) => serde_json::json!({
+            "available": report.repository.available,
+            "value": {
+                "root": repository.root.as_deref().map(|path| path.display().to_string()),
+                "root_native_hex": repository.root.as_deref().map(native_path_hex),
+                "identity": {
+                    "common_git_dir": repository.identity.common_git_dir.display().to_string(),
+                    "common_git_dir_native_hex": native_path_hex(&repository.identity.common_git_dir),
+                },
+                "is_bare": repository.is_bare,
+                "head_commit": repository.head_commit,
+                "head_tree": repository.head_tree,
+                "clean": repository.clean,
+            },
+        }),
+        None => serde_json::json!(report.repository),
+    };
+    let readiness = &report.destination_readiness;
+    let mut destination_readiness = serde_json::json!({
+        "destination": readiness.destination.display().to_string(),
+        "destination_native_hex": native_path_hex(&readiness.destination),
+        "status": readiness.status,
+        "copy_on_write": readiness.copy_on_write,
+        "overlayfs_helper": readiness.overlayfs_helper,
+        "blockers": readiness.blockers,
+    });
+    if let Some(backend) = readiness.backend {
+        destination_readiness["backend"] = serde_json::json!(backend);
+    }
+    if let Some(command) = &readiness.next_command {
+        destination_readiness["next_command"] = serde_json::json!(command);
+    }
+    let storage_capabilities = report
+        .storage_capabilities
+        .iter()
+        .map(backend_capability_json)
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema_version": 1,
+        "native_path_encoding": native_path_encoding(),
+        "project_stage": report.project_stage,
+        "operating_system": report.operating_system,
+        "architecture": report.architecture,
+        "cow_backend_active": report.cow_backend_active,
+        "repository_enabled": report.repository_enabled,
+        "git_shim_active": report.git_shim_active,
+        "git": git,
+        "repository": repository,
+        "repository_compatibility": report.repository_compatibility,
+        "destination_readiness": destination_readiness,
+        "storage_capabilities": storage_capabilities,
+    })
+}
+
 fn backends_json(
     requested_path: &Path,
     capabilities: &[riftri_storage::BackendCapability],
@@ -2467,17 +2627,35 @@ mod tests {
     fn parses_repository_activation_commands() {
         let enable = Cli::try_parse_from(["riftri", "enable", "../repository"])
             .expect("parse repository enable command");
-        let Command::Enable { path } = enable.command else {
+        let Command::Enable { path, .. } = enable.command else {
             panic!("unexpected enable command");
         };
         assert_eq!(path, Path::new("../repository"));
 
         let disable =
             Cli::try_parse_from(["riftri", "disable"]).expect("parse repository disable command");
-        let Command::Disable { path } = disable.command else {
+        let Command::Disable { path, .. } = disable.command else {
             panic!("unexpected disable command");
         };
         assert_eq!(path, Path::new("."));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_flag_parsing_preserves_native_path_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = OsStr::from_bytes(b"/repository-\xff");
+        let cli = Cli::try_parse_from([
+            OsStr::new("riftri"),
+            OsStr::new("enable"),
+            OsStr::new("--repository"),
+            path,
+        ])
+        .expect("parse native path");
+        let Command::Enable { repository, .. } = cli.command else {
+            panic!("unexpected command")
+        };
+        assert_eq!(repository.unwrap().as_os_str().as_bytes(), path.as_bytes());
     }
 
     #[test]
@@ -2542,7 +2720,7 @@ mod tests {
         let status = Cli::try_parse_from(["riftri", "shell", "status", "../app"])
             .expect("parse shell status command");
         let Command::Shell {
-            command: ShellCommand::Status { repository },
+            command: ShellCommand::Status { repository, .. },
         } = status.command
         else {
             panic!("unexpected shell status command");
@@ -2691,6 +2869,7 @@ mod tests {
             repository,
             state_dir,
             json,
+            ..
         } = status.command
         else {
             panic!("unexpected status command");
@@ -2705,6 +2884,7 @@ mod tests {
             repository,
             state_dir,
             json,
+            ..
         } = repair.command
         else {
             panic!("unexpected repair command");
@@ -2721,6 +2901,7 @@ mod tests {
             apply,
             yes: _,
             json,
+            ..
         } = gc.command
         else {
             panic!("unexpected garbage-collection command");

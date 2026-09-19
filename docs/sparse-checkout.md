@@ -62,8 +62,20 @@ never partially materializes:
 ## Lifecycle
 
 Sparse views use the same journaled add transaction, private-write isolation,
-clean-removal lifecycle, and crash recovery as full views. An interrupted
-sparse add rolls back completely and can simply be retried. Non-cone patterns,
-file-level sparse selection, sparse requests through Git interception, and
-changing an existing worktree's sparse profile in place remain future work
-tracked in the roadmap.
+clean-removal lifecycle, and crash recovery as full views. An unchanged
+interrupted sparse add rolls back and can be retried. If a later selection
+change materializes a different set of files, Riftri preserves that view for
+inspection instead of resetting its index or deleting it.
+
+Git still owns later selection changes. Inside an active view you can run
+`git sparse-checkout set --cone another/directory` or `git sparse-checkout
+disable`. Those commands update only that view: the original immutable base
+and its peers keep their original selection. Newly included files are ordinary
+Git checkouts, not additional Riftri clones. Clean removal works after expanding
+or disabling sparse checkout, and dirty changes still prevent clean removal.
+For a new COW-backed selection, remove the clean view and create a new one with
+the desired `--sparse-dir` arguments.
+
+Non-cone creation, file-level selection, sparse requests through Git
+interception, sparse compaction, and a Riftri-managed profile-change operation
+remain future work tracked in the roadmap.

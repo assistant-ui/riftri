@@ -100,6 +100,16 @@ impl ApfsCloner {
 #[cfg(target_os = "macos")]
 mod apfs;
 
+#[cfg(target_os = "macos")]
+mod macos_acl;
+
+/// Inspect the entry's extended macOS ACL without following symlinks.
+/// Errors are returned rather than interpreting unreadable ACLs as absent.
+#[cfg(target_os = "macos")]
+pub fn has_macos_acl(path: &Path) -> Result<bool, StorageError> {
+    macos_acl::has_extended_acl(path)
+}
+
 /// Linux `FICLONE` operations used by the native reflink backend.
 pub struct ReflinkCloner;
 

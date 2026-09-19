@@ -265,6 +265,57 @@ fn distinct_sparse_selections_at_one_commit_never_share_a_base() {
 }
 
 #[test]
+fn ordinary_git_can_change_sparse_selection_without_changing_cached_bases() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = sparse_fixture_repository(fixture.path());
+    let state = fixture.path().join("state");
+    let first = fixture.path().join("first");
+    let peer = fixture.path().join("peer");
+    let original = add(&repository, &first, &state, "feature/first", &["a"]).unwrap();
+    let peer_result = add(&repository, &peer, &state, "feature/peer", &["a"]).unwrap();
+    assert_eq!(original.base_path, peer_result.base_path);
+
+    // Git owns later profile changes. Newly included files are ordinary Git
+    // checkouts; changing the view never rewrites its immutable creation base.
+    git(&first, &["sparse-checkout", "set", "--cone", "b"]);
+    assert!(!first.join("a").exists());
+    assert!(first.join("b/file.txt").exists());
+    assert!(git(&first, &["ls-files", "-t"]).contains("S a/file.txt"));
+    assert_clean(&first);
+    assert_clean(&peer);
+    assert!(peer.join("a/file.txt").exists());
+    assert!(!peer.join("b").exists());
+    assert!(original.base_path.join("a/file.txt").exists());
+    assert!(!original.base_path.join("b").exists());
+
+    fs::write(first.join("b/file.txt"), "private after selection change\n").unwrap();
+    let request = riftri_core::RemoveWorktreeRequest {
+        repository: repository.clone(),
+        destination: first.clone(),
+        state_dir: Some(state.clone()),
+    };
+    assert!(riftri_core::remove_worktree(request.clone()).is_err());
+    assert_eq!(
+        fs::read_to_string(first.join("b/file.txt")).unwrap(),
+        "private after selection change\n"
+    );
+    git(&first, &["restore", "--", "b/file.txt"]);
+    git(&first, &["sparse-checkout", "disable"]);
+    assert!(first.join("a/file.txt").exists());
+    assert!(first.join("crates/riftri-cli/main.rs").exists());
+    assert_clean(&first);
+    assert_clean(&peer);
+    riftri_core::remove_worktree(request).expect("remove expanded clean view");
+
+    let next = fixture.path().join("next");
+    let reused = add(&repository, &next, &state, "feature/next", &["a"]).unwrap();
+    assert!(reused.reused_base);
+    assert_eq!(reused.base_path, original.base_path);
+    assert!(!next.join("b").exists());
+    assert_clean(&next);
+}
+
+#[test]
 fn refuses_unsupported_sparse_requests_before_creating_state() {
     let fixture = tempdir().expect("fixture directory");
     let repository = sparse_fixture_repository(fixture.path());

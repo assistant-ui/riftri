@@ -12,16 +12,27 @@ Two conventions apply everywhere:
   machine-readable JSON receipt on stderr instead of human-readable text. The
   receipt contract is documented in the
   [agent integration guide](agent-integration.md).
-- **`--json`** is accepted by every command that reports or changes state
+- **`--json`** is accepted by the explicit commands that report or change state
   (`doctor`, `backends`, `status`, `repair`, `gc`, and all `worktree`
   subcommands). It emits stable machine-readable JSON on success.
+
+The interactive-only `setup` command rejects `--json-errors` with a single JSON
+receipt before prompting or making changes; use the explicit commands for
+automation. It has no `--json` or `--yes` mode.
 
 A third convention, [progress reporting](#progress-reporting), applies to the
 long-running lifecycle commands and is suppressed with the global
 `--no-progress` flag.
 
-Commands that operate on a repository accept it as an optional positional
-argument or a `--repository` flag, defaulting to the current directory (`.`).
+Repository-selecting commands consistently accept `--repository <PATH>`,
+defaulting to the current directory (`.`). `enable`, `disable`, `doctor`,
+`status`, `repair`, `gc`, and `shell status` also keep their older positional
+repository argument. Use one form, not both; conflicting selectors are a usage
+error, never a silent override. For example, `riftri status --repository ../app
+--json` and `riftri status ../app --json` inspect the same repository.
+`backends` takes a filesystem destination rather than a repository, and `exec`
+uses `--worktree` to select the child's working directory; neither accepts
+`--repository`.
 Commands that touch Riftri state accept `--state-dir <PATH>` to override the
 default state directory at `<common-git-dir>/riftri`.
 
@@ -84,6 +95,60 @@ existing automation keeps working unchanged.
 
 ## Enablement and activation
 
+### `riftri setup [OPTIONS]`
+
+Interactive first-worktree onboarding, followed by an optional coding-agent
+launch. Available starting with v0.3.1.
+
+```sh
+riftri setup
+riftri setup --repository ../app --destination ../app-auth --branch feature/auth
+```
+
+Standard input, output, and error must all be terminals. `--repository <PATH>`
+defaults to the caller's current directory. The repository must already exist;
+setup does not clone repositories or fetch revisions.
+
+Setup asks for a destination and a new branch, defaulting to a sibling directory
+named `<repository>.task` and `task/first`. `--destination <PATH>` and
+`-b, --branch <BRANCH>` skip their respective questions, not confirmation.
+Relative paths resolve from the caller's working directory, including when
+`--repository` selects a different checkout. Native paths supplied as arguments
+are preserved. The start point is always `HEAD`: uncommitted source changes are
+not copied. Use `worktree add` directly for an existing branch, another revision,
+detached HEAD, sparse checkout, or custom state placement.
+
+Doctor checks the actual destination's storage and checkout compatibility.
+Explicit creation does not need repository enablement. Other blockers stop the
+flow with remedies before creation; there is no full-copy fallback. A printed
+plan and `Create this worktree? [y/N]` confirmation precede the normal journaled
+add transaction. Existing destinations or branches are never overwritten. A
+decline or end-of-input before creation leaves no new worktree or enablement.
+
+After creation, setup asks which coding agent to open:
+
+- **Not now** (the default): keep the worktree without launching anything or
+  changing repository enablement.
+- **Claude Code** (`claude`) or **Codex** (`codex`): resolve the installed CLI
+  through PATH. Setup neither installs nor signs in to an agent.
+- **Another executable**: accept one executable name or path, without arguments
+  or shell evaluation. Missing or non-executable choices return to the menu.
+  For custom arguments, finish setup and use `riftri exec` yourself.
+
+The separate `Enable this repository and launch the agent now? [y/N]` prompt
+explains that enablement is repository-local and shared by its linked worktrees.
+Only explicit approval sets `riftri.enabled=true` and launches through the
+existing `exec --worktree` machinery. Paths are resolved before changing the
+child's directory, arguments are not interpreted by a shell, and no agent
+permission settings or shell profiles are changed. Existing bypass settings are
+preserved. Agent exit status and signal handling follow `riftri exec`.
+
+Declining launch, EOF, a launch failure, or an agent exit does not delete the
+created worktree. Once approved, repository enablement remains in effect even
+if launch fails; use `riftri disable` to reverse it. The agent must still decide
+to create future worktrees and call `git` through the inherited PATH. Absolute
+Git paths and embedded Git libraries are outside interception.
+
 ### `riftri enable [PATH]`
 
 Enable optimized worktree creation for one repository. `PATH` defaults to `.`.
@@ -103,20 +168,25 @@ without any shell-level activation.
 | --- | --- |
 | `--worktree <PATH>` | Start the command from this exact, registered Git worktree root |
 
-Termination follows the platform's conventions. On Unix, SIGTERM, SIGINT, or
-SIGHUP delivered to `riftri exec` is forwarded to the scoped command: without
-a foreground controlling terminal (a supervisor or script), the command runs
-in its own process group and the whole group is signaled, stopping the
-command's descendants without touching unrelated processes; with a foreground
-controlling terminal, the command stays in `riftri exec`'s process group so
-terminal job control is unchanged — the terminal keeps delivering Ctrl-C to
-the command directly, and SIGTERM and SIGHUP are forwarded to the command
-itself. `riftri exec` waits for the command, removes its temporary Git shim,
-and exits with the command's status (`128 + signal` when the command dies from
-a signal). SIGKILL cannot be intercepted and still orphans the command. On
-Windows, the console already delivers Ctrl-C and Ctrl-Break events to the
-command, and a hard `TerminateProcess` cannot be intercepted, so no forwarding
-layer exists.
+Termination follows the platform's conventions. On Unix, without a foreground
+controlling terminal (a supervisor or script), the command runs in its own
+process group, and SIGTERM, SIGINT, or SIGHUP delivered to `riftri exec` is
+forwarded to that whole group, stopping the command's descendants without
+touching unrelated processes. With a foreground controlling terminal, the
+command stays in `riftri exec`'s process group so terminal job control is
+unchanged: the terminal keeps delivering Ctrl-C (SIGINT) and Ctrl-\ (SIGQUIT)
+to the whole foreground process group, and `riftri exec` ignores both while it
+waits — like a shell waiting on a foreground job, the command alone decides
+whether the interrupt is fatal, so a command that catches Ctrl-C (a REPL, an
+agent session) keeps running under an intact wrapper. SIGTERM and SIGHUP
+delivered to interactive `riftri exec` are still forwarded to the command
+itself. In both modes `riftri exec` waits for the command, restores its prior
+signal dispositions, removes its temporary Git shim, and exits with the
+command's status (`128 + signal` when the command dies from a signal — for
+example 130 after a fatal SIGINT). SIGKILL cannot be intercepted and still
+orphans the command. On Windows, the console already delivers Ctrl-C and
+Ctrl-Break events to the command, and a hard `TerminateProcess` cannot be
+intercepted, so no forwarding layer exists.
 
 ### `riftri shell <SUBCOMMAND>`
 
@@ -163,6 +233,10 @@ Inspect Git and show the planned storage path without changing anything.
 | --- | --- |
 | `--destination <DESTINATION>` | Proposed worktree destination whose volume should be probed |
 | `--json` | Emit machine-readable JSON |
+
+The suggested command uses POSIX shell quoting on Unix and PowerShell quoting on
+Windows. If the destination is not valid Unicode, doctor omits the suggested
+command rather than substitute characters in the path.
 
 ### `riftri backends [OPTIONS] [PATH]`
 

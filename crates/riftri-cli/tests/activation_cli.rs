@@ -386,6 +386,62 @@ fn doctor_explains_destination_readiness_and_repository_activation() {
     assert!(!destination.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_json_preserves_non_utf8_destination_paths() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let fixture = RepositoryFixture::new();
+    let destination = OsStr::from_bytes(b"destination-\xff");
+    let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--destination"])
+        .arg(destination)
+        .arg("--json")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("run doctor with a native path");
+    assert!(
+        doctor.status.success(),
+        "doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    assert_eq!(report["native_path_encoding"], "unix-bytes-hex");
+    assert_eq!(
+        report["destination_readiness"]["destination"],
+        "destination-\u{fffd}"
+    );
+    assert_eq!(
+        report["destination_readiness"]["destination_native_hex"],
+        "64657374696e6174696f6e2dff"
+    );
+    for capability in report["storage_capabilities"].as_array().unwrap() {
+        if let Some(volume) = capability.get("volume") {
+            assert_eq!(volume["requested_path"], "destination-\u{fffd}");
+            assert_eq!(
+                volume["requested_path_native_hex"],
+                "64657374696e6174696f6e2dff"
+            );
+            let probe_hex = volume["probe_path_native_hex"].as_str().unwrap();
+            let probe_bytes: Vec<u8> = (0..probe_hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&probe_hex[index..index + 2], 16).unwrap())
+                .collect();
+            assert_eq!(
+                probe_bytes,
+                fs::canonicalize(&fixture.repository)
+                    .unwrap()
+                    .as_os_str()
+                    .as_bytes()
+            );
+        }
+    }
+    assert!(!fixture.repository.join(destination).exists());
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
 #[test]
 fn doctor_human_output_leads_with_a_decisive_destination_summary() {
     let fixture = RepositoryFixture::new();
@@ -410,7 +466,10 @@ fn doctor_human_output_leads_with_a_decisive_destination_summary() {
 #[test]
 fn doctor_marks_an_enabled_supported_destination_ready() {
     let fixture = RepositoryFixture::new();
-    let destination = fixture.directory.path().join("ready-worktree");
+    let destination = fixture
+        .directory
+        .path()
+        .join("ready worktree ' $HOME ; [x]");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
 
     let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
@@ -429,17 +488,38 @@ fn doctor_marks_an_enabled_supported_destination_ready() {
         assert_eq!(readiness["status"], "ready");
         assert_eq!(readiness["copy_on_write"], true);
         assert_eq!(readiness["blockers"], serde_json::json!([]));
-        assert!(
-            readiness["next_command"]
-                .as_str()
-                .is_some_and(|command| command.starts_with("riftri worktree add "))
-        );
     } else {
         assert_eq!(readiness["status"], "blocked");
         assert_eq!(readiness["copy_on_write"], false);
     }
     assert!(!fixture.repository.join(".git/riftri").exists());
     assert!(!destination.exists());
+
+    #[cfg(unix)]
+    if readiness["backend"].is_string() {
+        let command = readiness["next_command"].as_str().expect("next command");
+        let added = Command::new("sh")
+            .args([
+                "-c",
+                &format!("riftri() {{ \"$RIFTRI_TEST_BINARY\" \"$@\"; }}\n{command}"),
+            ])
+            .env("RIFTRI_TEST_BINARY", env!("CARGO_BIN_EXE_riftri"))
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("run suggested command");
+        assert!(
+            added.status.success(),
+            "{}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).expect("read exact destination"),
+            b"tracked\n"
+        );
+        let status = git(&destination, &["status", "--porcelain"]);
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+    }
 }
 
 #[test]
@@ -1025,6 +1105,50 @@ fn shell_status_explains_global_scope_and_deactivation_restores_git() {
 
 #[cfg(unix)]
 #[test]
+fn shell_status_reports_bypass_without_deactivating_the_hook() {
+    let fixture = RepositoryFixture::new();
+    let cache = tempdir().expect("shell hook cache");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for (bypass, effective) in [
+        ("1", "inactive"),
+        ("TrUe", "inactive"),
+        ("YES", "inactive"),
+        ("0", "active"),
+        ("false", "active"),
+        ("", "active"),
+    ] {
+        let output = Command::new("sh")
+            .args([
+                "-ec",
+                "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
+                 \"$RIFTRI_TEST_BIN\" shell status",
+            ])
+            .current_dir(&fixture.repository)
+            .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+            .env("RIFTRI_CACHE_DIR", cache.path())
+            .env("RIFTRI_BYPASS", bypass)
+            .output()
+            .expect("inspect hooked shell with bypass");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+        assert!(stdout.contains("Shell interception: active"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("Effective optimized interception: {effective}")),
+            "RIFTRI_BYPASS={bypass}: {stdout}"
+        );
+        if effective == "inactive" {
+            assert!(stdout.contains("RIFTRI_BYPASS"), "{stdout}");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
     let fixture = RepositoryFixture::new();
     let cache = tempdir().expect("shell hook cache");
@@ -1059,7 +1183,7 @@ fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
 #[test]
 fn powershell_hook_is_session_scoped_idempotent_and_reversible() {
     let fixture = RepositoryFixture::new();
-    let cache = fixture.directory.path().join("cache with ' quote");
+    let cache = Path::new("cache with ' quote");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
     let script = r#"
 $hook = (& $env:RIFTRI_TEST_BIN shell hook powershell) -join [Environment]::NewLine
@@ -1067,12 +1191,14 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Invoke-Expression $hook
 Invoke-Expression $hook
 $shimDirectory = Join-Path $env:RIFTRI_CACHE_DIR 'shims\v1'
+$shimDirectory = (Resolve-Path $shimDirectory).Path
 $shim = Join-Path $shimDirectory 'git.exe'
 $matches = @($env:PATH -split ';' | Where-Object { $_ -eq $shimDirectory }).Count
 if ($matches -ne 1) { exit 41 }
 Write-Output "shim=$((Get-Command git -CommandType Application).Source)"
 & powershell.exe -NoLogo -NoProfile -NonInteractive -Command 'git --version; exit $LASTEXITCODE'
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+Set-Location $env:RIFTRI_TEST_REPOSITORY
 & $env:RIFTRI_TEST_BIN shell status $env:RIFTRI_TEST_REPOSITORY
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $deactivate = (& $env:RIFTRI_TEST_BIN shell deactivate powershell) -join [Environment]::NewLine
@@ -1080,6 +1206,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Invoke-Expression $deactivate
 if (Test-Path Env:RIFTRI_SHIM_ACTIVE) { exit 42 }
 if (Test-Path Env:RIFTRI_REAL_GIT) { exit 43 }
+if (Test-Path Env:RIFTRI_SHELL_SHIM_DIR) { exit 45 }
 if ((Get-Command git -CommandType Application).Source -eq $shim) { exit 44 }
 Write-Output 'deactivated=true'
 "#;
@@ -1091,9 +1218,10 @@ Write-Output 'deactivated=true'
             "-Command",
             script,
         ])
+        .current_dir(fixture.directory.path())
         .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
         .env("RIFTRI_TEST_REPOSITORY", &fixture.repository)
-        .env("RIFTRI_CACHE_DIR", &cache)
+        .env("RIFTRI_CACHE_DIR", cache)
         .output()
         .expect("activate, inspect, and deactivate PowerShell hook");
 
@@ -1430,6 +1558,36 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
             .stdout
             .is_empty()
     );
+
+    let other = RepositoryFixture::new();
+    assert!(riftri(&other.repository, &["enable"]).status.success());
+    for options in [
+        &["--git-dir=.git"][..],
+        &["--git-dir", ".git"][..],
+        &["--work-tree=."][..],
+        &["--work-tree", "."][..],
+    ] {
+        let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(options)
+            .arg("-C")
+            .arg(fixture.directory.path())
+            .args(["-C", "repository", "worktree", "remove"])
+            .arg(&destination)
+            .current_dir(&other.repository)
+            .output()
+            .expect("guard removal after directory changes");
+
+        assert!(
+            !removal.status.success(),
+            "{options:?} bypassed the managed removal guard"
+        );
+        assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+        assert!(destination.is_dir());
+        let status = git(&destination, &["status", "--porcelain=v1"]);
+        assert!(status.status.success());
+        assert!(status.stdout.is_empty());
+    }
 }
 
 #[cfg(target_os = "macos")]

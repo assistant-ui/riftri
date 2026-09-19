@@ -101,7 +101,7 @@ test("stops on a registry rejection without attempting the launcher", async (t) 
   );
 });
 
-test("fails if a successful publish is not visible in the final complete-set verification", async (t) => {
+test("does not publish the launcher if a platform publish never becomes visible", async (t) => {
   const repositoryRoot = await releaseFixture(t);
   const missing = `riftri-win32-x64@${packageVersion}`;
   const registry = fakeRegistry({ omitAfterPublish: missing });
@@ -116,4 +116,52 @@ test("fails if a successful publish is not visible in the final complete-set ver
     }),
     new RegExp(`${missing} still missing`),
   );
+  assert.equal(
+    registry.commands.some(
+      ([command, directory]) =>
+        command === "publish" && path.basename(directory) === "npm-root",
+    ),
+    false,
+    "the launcher must remain unpublished until every platform is visible",
+  );
+});
+
+test("still verifies launcher visibility after publication", async (t) => {
+  const repositoryRoot = await releaseFixture(t);
+  const missing = `riftri@${packageVersion}`;
+  const registry = fakeRegistry({ omitAfterPublish: missing });
+  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+  await assert.rejects(
+    publishPackages({
+      repositoryRoot,
+      runNpm: registry.runNpm,
+      wait: async () => {},
+      verificationAttempts: 2,
+    }),
+    new RegExp(`${missing} still missing`),
+  );
+});
+
+test("waits for platform visibility before publishing the launcher", async (t) => {
+  const repositoryRoot = await releaseFixture(t);
+  const delayed = `riftri-win32-x64@${packageVersion}`;
+  const registry = fakeRegistry({ omitAfterPublish: delayed });
+  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+  let visible = false;
+  let waits = 0;
+  await publishPackages({
+    repositoryRoot,
+    runNpm(arguments_, options) {
+      if (arguments_[0] === "publish" && path.basename(arguments_[1]) === "npm-root") {
+        assert.equal(visible, true, "platform packages must propagate first");
+      }
+      if (visible && arguments_[0] === "view" && arguments_[1] === delayed) {
+        return { status: 0, stdout: JSON.stringify(packageVersion), stderr: "" };
+      }
+      return registry.runNpm(arguments_, options);
+    },
+    wait: async () => { visible = true; waits += 1; },
+    verificationAttempts: 2,
+  });
+  assert.equal(waits, 1);
 });
