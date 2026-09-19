@@ -7,6 +7,21 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Termination forwarding now enforces the single-waiter invariant its design
+  relies on, and no longer loses a termination signal delivered during its
+  own teardown. The forwarding state behind `riftri exec` and the Git shim is
+  process-global, so two overlapping waits would each capture the other's
+  handler as "previous" and restore it, leaving a handler forwarding to a
+  dead PID while the single target slot signalled the wrong child; a second
+  overlapping call is now refused with a clear error instead (Riftri performs
+  one such wait per process lifetime, so nothing supported changes).
+  Separately, a SIGTERM or SIGHUP that landed after the child was reaped but
+  before the original dispositions were restored used to be recorded and then
+  silently discarded; it was aimed at Riftri itself, so it is now re-raised
+  once restoration completes and takes effect under the restored disposition
+  — the waiter dies with the conventional `128 + signal` status exactly as a
+  shell does after its foreground child, while a `nohup`-style inherited
+  ignore still discards it.
 - Linux OverlayFS recovery no longer resets the private work directory of a
   mount that may still be live in another mount namespace. When a crash left a
   mount without a journaled identity, the no-identity recovery branch ran the
