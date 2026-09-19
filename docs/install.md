@@ -150,9 +150,10 @@ that policy; these instructions do not remove quarantine or disable Gatekeeper.
 ## Windows PowerShell
 
 Download the PowerShell installer, inspect it, and run it. It selects Windows
-x64 or ARM64, verifies the release archive against `SHA256SUMS`, checks the
-downloaded executable's version, and replaces only a regular-file installation
-in your per-user application-data directory:
+x64 or ARM64, refuses release downloads whose final URL is not HTTPS, verifies
+the release archive against `SHA256SUMS`, checks the downloaded executable's
+version, and replaces only a regular-file installation in your per-user
+application-data directory:
 
 ```powershell
 $Installer = Join-Path $env:TEMP 'riftri-install.ps1'

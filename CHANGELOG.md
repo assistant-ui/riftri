@@ -98,6 +98,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Riftri's own temporaries and coordination locks as unrecognized foreign
   files. One crash no longer breaks an automation gate on
   `diagnostic_issues == []` permanently.
+- The PowerShell installer's HTTPS-downgrade check now actually runs for the
+  `SHA256SUMS` and archive downloads. `Invoke-WebRequest -OutFile` returns
+  nothing to the pipeline, so the assertion always received `$null` and
+  returned without inspecting anything; downloads now pass `-PassThru`
+  (supported alongside `-OutFile` on Windows PowerShell 5.1 and PowerShell 7+),
+  and the check fails closed when no final URI is observable instead of
+  silently skipping. The installer test mock now matches the real cmdlet's
+  contract — no pipeline output with `-OutFile` unless `-PassThru` — and a
+  regression test proves the installer refuses a download whose final URI is
+  not HTTPS.
 
 ## [0.3.1] - 2026-09-18
 
