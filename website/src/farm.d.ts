@@ -14,13 +14,67 @@ import "@farm.js/core/css";
  */
 export type RoutePath =
   | "/"
-  | "/404";
+  | "/404"
+  | "/docs"
+  | `/docs/${string}`
+  | "/docs/activation"
+  | "/docs/agents"
+  | "/docs/architecture"
+  | "/docs/backend-guarantees"
+  | "/docs/build-caches"
+  | "/docs/cli"
+  | "/docs/comparison"
+  | "/docs/filesystem-compatibility"
+  | "/docs/git-lfs"
+  | "/docs/installation"
+  | "/docs/linux-overlayfs"
+  | "/docs/linux-reflink"
+  | "/docs/safety"
+  | "/docs/sparse-checkout"
+  | "/docs/troubleshooting"
+  | "/docs/windows-refs";
 export type RoutePattern =
   | "/"
-  | "/404";
+  | "/404"
+  | "/docs"
+  | "/docs/[...docs]"
+  | "/docs/activation"
+  | "/docs/agents"
+  | "/docs/architecture"
+  | "/docs/backend-guarantees"
+  | "/docs/build-caches"
+  | "/docs/cli"
+  | "/docs/comparison"
+  | "/docs/filesystem-compatibility"
+  | "/docs/git-lfs"
+  | "/docs/installation"
+  | "/docs/linux-overlayfs"
+  | "/docs/linux-reflink"
+  | "/docs/safety"
+  | "/docs/sparse-checkout"
+  | "/docs/troubleshooting"
+  | "/docs/windows-refs";
 export type RouteModulePattern =
   | "/"
-  | "/404";
+  | "/404"
+  | "/docs"
+  | "/docs/[...docs]"
+  | "/docs/activation"
+  | "/docs/agents"
+  | "/docs/architecture"
+  | "/docs/backend-guarantees"
+  | "/docs/build-caches"
+  | "/docs/cli"
+  | "/docs/comparison"
+  | "/docs/filesystem-compatibility"
+  | "/docs/git-lfs"
+  | "/docs/installation"
+  | "/docs/linux-overlayfs"
+  | "/docs/linux-reflink"
+  | "/docs/safety"
+  | "/docs/sparse-checkout"
+  | "/docs/troubleshooting"
+  | "/docs/windows-refs";
 declare module "@farm.js/core/client" {
   interface LinkDefaultRoute {
     _: import("./farm").RoutePath;

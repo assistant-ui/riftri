@@ -3,6 +3,8 @@
 /dist/
 /website/node_modules/
 /website/.farm/
+/website/src/app/docs/
+/website/public/docs/**/agent.md
 /website/.vercel/
 /website/playwright-report/
 /website/test-results/
