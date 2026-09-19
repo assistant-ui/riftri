@@ -35,10 +35,18 @@ fn presentation_never_changes_machine_receipts() {
 
 #[test]
 fn shell_code_is_not_decorated() {
-    let default = riftri(&["shell", "deactivate", "zsh"]);
-    let plain = riftri(&["--plain", "shell", "deactivate", "zsh"]);
-    assert!(default.status.success());
-    assert!(plain.status.success());
+    // Deactivation code is evaluated by the shell, so it must never carry
+    // presentation decoration. Exercise each platform's real shell: POSIX
+    // deactivation quotes the shim directory as a colon-free PATH entry, which
+    // a Windows drive-letter path cannot be, so Windows uses PowerShell.
+    #[cfg(windows)]
+    let shell = "powershell";
+    #[cfg(not(windows))]
+    let shell = "zsh";
+    let default = riftri(&["shell", "deactivate", shell]);
+    let plain = riftri(&["--plain", "shell", "deactivate", shell]);
+    assert!(default.status.success(), "{default:?}");
+    assert!(plain.status.success(), "{plain:?}");
     assert_eq!(default.stdout, plain.stdout);
     assert!(!default.stdout.contains(&0x1b));
 }
