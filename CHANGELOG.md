@@ -7,6 +7,24 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Compacting a worktree after a checkout-profile input changed — a Git
+  upgrade, a checked config flip such as `core.autocrlf` or `core.eol`, or a
+  different Git LFS object set — no longer wedges the worktree's add journal.
+  Compaction used to rewrite the journal's `base_path` into the newly keyed
+  immutable-base bucket while `base_staging` stayed in the old one, so
+  recovery validation rejected the journal forever afterwards: remove, move,
+  compact, and repair all refused with "journal … contains paths outside its
+  operation scope", storage accounting dropped the view, and an interruption
+  between the base update and completion stranded the original tree in
+  `.riftri-compact-old-<id>`. The base update now retargets `base_path` and
+  `base_staging` in the same durable journal write, recovery validation
+  accepts the cross-bucket staging record an older Riftri left behind in an
+  Active journal (staging is confined to the immutable-base layout either
+  way), repair resumes previously stuck compactions, and the next compaction
+  heals the stale staging record in place. A compaction cancelled before its
+  base build also removes the empty bucket it created for the new profile
+  instead of leaving it as permanently unexplained state.
+
 - One worktree whose HEAD file cannot be resolved (empty, garbage, or an empty
   symref target — classic crash and power-loss shapes) no longer makes every
   Riftri command in the repository fail with "invalid Git output". Git lists
