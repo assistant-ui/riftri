@@ -7,6 +7,34 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Linux OverlayFS recovery no longer resets the private work directory of a
+  mount that may still be live in another mount namespace. When a crash left a
+  mount without a journaled identity, the no-identity recovery branch ran the
+  destructive remount loader — which cannot see mounts in other namespaces and
+  `remove_dir_all`s the work directory — before the boot/namespace/liveness
+  determination, so "recovery preserved it" could report a worktree whose
+  overlay was already damaged (copy-up failing with ESTALE/EIO in its original
+  namespace). Both recovery branches now load non-destructively, decide
+  boot/namespace/liveness first, and reset disposable work state only after
+  that determination proves the mount absent; the same guard now protects the
+  elevated helper's work-directory reset, which receives the journaled mount
+  context and refuses a reset the journaled namespace cannot rule out.
+
+- Linux OverlayFS hygiene around live mounts: the recovery marker is no longer
+  unlinked directly from the upper layer while the overlay is mounted —
+  modifying an underlying layer of a live overlay is undefined per kernel
+  OverlayFS rules and could leave a stale marker entry in the merged root that
+  failed the add's clean check. The marker is now cleared through the merged
+  view (and only when that view provably exposes this journal's marker; a
+  mount that does not is reported and the marker preserved), with the direct
+  upper unlink reserved for unmounted layouts. Abandoned probe mounts — the
+  `.riftri-overlay-probe-*` directories deliberately leaked next to worktrees
+  when a probe unmount fails — are also no longer invisible and unbounded:
+  `riftri status` names each one in its diagnostics, and `riftri repair`
+  removes one only when the kernel mount inventory proves nothing is mounted
+  at or below it, preserving and reporting any probe root a mount still
+  covers.
+
 - Compacting a worktree after a checkout-profile input changed — a Git
   upgrade, a checked config flip such as `core.autocrlf` or `core.eol`, or a
   different Git LFS object set — no longer wedges the worktree's add journal.

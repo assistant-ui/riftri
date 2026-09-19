@@ -323,6 +323,154 @@ fn recovery_marker_adopts_a_mount_after_creator_exit() {
 }
 
 #[test]
+fn recovery_marker_clears_through_the_merged_view_while_mounted() {
+    if !overlayfs_mounts_required() {
+        return;
+    }
+    let fixture = tempdir().expect("fixture directory");
+    let lower = fixture.path().join("lower");
+    let layout_root = fixture.path().join("layout");
+    let merged = fixture.path().join("merged");
+    fs::create_dir(&lower).expect("lower directory");
+    fs::create_dir(&merged).expect("merged directory");
+    fs::write(lower.join("payload"), b"base").expect("lower payload");
+    let layout =
+        OverlayFsMounter::prepare(&layout_root, &lower, &merged).expect("prepare durable layout");
+    let token = "aa".repeat(32);
+    OverlayFsMounter::arm_recovery(&layout, &token).expect("arm recovery marker");
+    let identity = OverlayFsMounter::mount(&layout).expect("mount armed view");
+
+    let marker_name = format!(".riftri-overlayfs-recovery-{token}");
+    let merged_lists_marker = || {
+        fs::read_dir(&merged)
+            .expect("read merged root")
+            .flatten()
+            .any(|entry| entry.file_name() == OsStr::new(&marker_name))
+    };
+    assert!(merged_lists_marker(), "armed marker missing in merged view");
+
+    // The upper directory is an underlying layer of a live overlay: the
+    // marker must leave through the merged view, so the merged root stops
+    // listing it immediately and the upper file is gone as well.
+    OverlayFsMounter::clear_recovery(&layout, &token).expect("clear marker while mounted");
+    assert!(
+        !merged_lists_marker(),
+        "cleared marker still listed in the merged root"
+    );
+    assert!(
+        !layout.upper().join(&marker_name).exists(),
+        "cleared marker still present in the upper layer"
+    );
+    OverlayFsMounter::clear_recovery(&layout, &token)
+        .expect("repeated mounted cleanup is idempotent");
+
+    assert_eq!(
+        OverlayFsMounter::mount_state(&layout, &identity).expect("inspect cleared mount"),
+        OverlayFsMountState::Active
+    );
+    OverlayFsMounter::unmount(&layout, &identity).expect("unmount cleared view");
+    OverlayFsMounter::remove_private_layers(&layout, &identity).expect("remove cleared layers");
+}
+
+#[test]
+fn recovery_marker_is_preserved_under_a_mount_that_does_not_expose_it() {
+    if !overlayfs_mounts_required() {
+        return;
+    }
+    let fixture = tempdir().expect("fixture directory");
+    let lower = fixture.path().join("lower");
+    let armed_root = fixture.path().join("armed-layout");
+    let foreign_root = fixture.path().join("foreign-layout");
+    let merged = fixture.path().join("merged");
+    fs::create_dir(&lower).expect("lower directory");
+    fs::create_dir(&merged).expect("merged directory");
+    let armed = OverlayFsMounter::prepare(&armed_root, &lower, &merged).expect("prepare armed");
+    let token = "bc".repeat(32);
+    OverlayFsMounter::arm_recovery(&armed, &token).expect("arm recovery marker");
+
+    // A different overlay now covers the merged destination. Its view does
+    // not expose the armed journal's marker, so clearing must fail closed
+    // instead of mutating the armed upper layer underneath a live mount.
+    let foreign = OverlayFsMounter::prepare(&foreign_root, &lower, &merged).expect("prepare other");
+    let foreign_identity = OverlayFsMounter::mount(&foreign).expect("mount other view");
+    let error = OverlayFsMounter::clear_recovery(&armed, &token)
+        .expect_err("marker under a mount that does not expose it must be preserved");
+    assert!(matches!(error, StorageError::OverlayFsMountConflict { .. }));
+    let marker = armed_root
+        .join("upper")
+        .join(format!(".riftri-overlayfs-recovery-{token}"));
+    assert!(marker.exists(), "preserved marker was removed");
+
+    OverlayFsMounter::unmount(&foreign, &foreign_identity).expect("unmount other view");
+    OverlayFsMounter::remove_private_layers(&foreign, &foreign_identity)
+        .expect("remove other layers");
+    OverlayFsMounter::clear_recovery(&armed, &token).expect("clear marker once unmounted");
+    assert!(!marker.exists());
+}
+
+#[test]
+fn abandoned_probe_roots_are_reaped_only_when_provably_unmounted() {
+    if !overlayfs_mounts_required() {
+        return;
+    }
+    let fixture = tempdir().expect("fixture directory");
+    let probe_root = fixture.path().join(".riftri-overlay-probe-1234-5678-0");
+    let lower = probe_root.join("lower");
+    let layout_root = probe_root.join("layout");
+    let merged = probe_root.join("merged");
+    fs::create_dir(&probe_root).expect("probe root");
+    fs::create_dir(&lower).expect("probe lower");
+    fs::create_dir(&merged).expect("probe merged");
+    fs::write(lower.join("payload"), b"base").expect("probe payload");
+    let layout =
+        OverlayFsMounter::prepare(&layout_root, &lower, &merged).expect("prepare probe layout");
+    let identity = OverlayFsMounter::mount(&layout).expect("mount probe view");
+
+    // While any mount covers a path inside the root, nothing is touched.
+    assert!(
+        !OverlayFsMounter::remove_abandoned_probe_root(&probe_root)
+            .expect("inspect covered probe root"),
+        "a covered probe root must be preserved"
+    );
+    assert!(probe_root.is_dir(), "preserved probe root was removed");
+    assert_eq!(
+        fs::read(merged.join("payload")).expect("read live probe view"),
+        b"base"
+    );
+
+    OverlayFsMounter::unmount(&layout, &identity).expect("unmount probe view");
+    assert!(
+        OverlayFsMounter::remove_abandoned_probe_root(&probe_root)
+            .expect("reap unmounted probe root"),
+        "an unmounted probe root must be removable"
+    );
+    assert!(!probe_root.exists());
+    assert!(
+        OverlayFsMounter::remove_abandoned_probe_root(&probe_root)
+            .expect("repeated reap is idempotent")
+    );
+}
+
+#[test]
+fn probe_reaper_refuses_paths_that_are_not_probe_roots() {
+    let fixture = tempdir().expect("fixture directory");
+    let unrelated = fixture.path().join("user-directory");
+    fs::create_dir(&unrelated).expect("unrelated directory");
+
+    let error = OverlayFsMounter::remove_abandoned_probe_root(&unrelated)
+        .expect_err("non-probe paths must be refused");
+    assert!(matches!(error, StorageError::InvalidOverlayFsLayout { .. }));
+    assert!(unrelated.is_dir());
+
+    assert!(OverlayFsMounter::is_abandoned_probe_name(OsStr::new(
+        ".riftri-overlay-probe-1-2-3"
+    )));
+    assert!(!OverlayFsMounter::is_abandoned_probe_name(OsStr::new(
+        "riftri-overlay-probe-1-2-3"
+    )));
+}
+
+#[test]
 fn prepared_layers_require_the_original_mount_namespace_for_cleanup() {
     if !overlayfs_mounts_required() {
         return;
@@ -389,18 +537,98 @@ fn remount_loader_resets_only_disposable_work_state() {
     fs::create_dir(&merged).expect("merged directory");
     let layout =
         OverlayFsMounter::prepare(&layout_root, &lower, &merged).expect("prepare durable layout");
+    let context = OverlayFsMounter::current_mount_context().expect("capture mount context");
     fs::write(layout.upper().join("private-change"), b"preserve")
         .expect("write private upper fixture");
     fs::create_dir(layout.work().join("kernel-work")).expect("create stale work state");
     fs::write(layout.work().join("kernel-work/temporary"), b"discard")
         .expect("write stale work state");
 
-    let reloaded = OverlayFsMounter::load_for_remount(&layout_root, &lower, &merged)
+    let reloaded = OverlayFsMounter::load_for_remount(&layout_root, &lower, &merged, &context)
         .expect("reload layout for remount");
     assert_eq!(
         fs::read(reloaded.upper().join("private-change")).expect("read preserved upper state"),
         b"preserve"
     );
+    assert_eq!(
+        fs::read_dir(reloaded.work())
+            .expect("read reset work directory")
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn recovery_loader_restores_only_a_missing_work_directory() {
+    let fixture = tempdir().expect("fixture directory");
+    let lower = fixture.path().join("lower");
+    let layout_root = fixture.path().join("layout");
+    let merged = fixture.path().join("merged");
+    fs::create_dir(&lower).expect("lower directory");
+    fs::create_dir(&merged).expect("merged directory");
+    let layout =
+        OverlayFsMounter::prepare(&layout_root, &lower, &merged).expect("prepare durable layout");
+    fs::write(layout.upper().join("private-change"), b"preserve")
+        .expect("write private upper fixture");
+    fs::create_dir(layout.work().join("kernel-work")).expect("create existing work state");
+
+    // Existing work state is inspection-only: nothing is reset.
+    let reloaded = OverlayFsMounter::load_for_recovery(&layout_root, &lower, &merged)
+        .expect("reload layout for recovery");
+    assert!(reloaded.work().join("kernel-work").is_dir());
+
+    // A crash between a remount reset's removal and recreation leaves the
+    // layout without a work directory; recovery restores an empty one.
+    fs::remove_dir_all(layout.work()).expect("simulate interrupted work reset");
+    let restored = OverlayFsMounter::load_for_recovery(&layout_root, &lower, &merged)
+        .expect("restore missing work directory");
+    assert_eq!(
+        fs::read_dir(restored.work())
+            .expect("read restored work directory")
+            .count(),
+        0
+    );
+    assert_eq!(
+        fs::read(restored.upper().join("private-change")).expect("read preserved upper state"),
+        b"preserve"
+    );
+}
+
+#[test]
+fn remount_loader_preserves_work_state_the_journaled_namespace_cannot_rule_out() {
+    let fixture = tempdir().expect("fixture directory");
+    let lower = fixture.path().join("lower");
+    let layout_root = fixture.path().join("layout");
+    let merged = fixture.path().join("merged");
+    fs::create_dir(&lower).expect("lower directory");
+    fs::create_dir(&merged).expect("merged directory");
+    let layout =
+        OverlayFsMounter::prepare(&layout_root, &lower, &merged).expect("prepare durable layout");
+    let context = OverlayFsMounter::current_mount_context().expect("capture mount context");
+    fs::create_dir(layout.work().join("kernel-work")).expect("create live-looking work state");
+    fs::write(layout.work().join("kernel-work/temporary"), b"preserve")
+        .expect("write live-looking work state");
+
+    // Same boot, different namespace: the mount recorded by the journal may
+    // still be live where this process cannot see it, so nothing is reset.
+    let mut foreign_namespace = context.clone();
+    foreign_namespace.mount_namespace_inode =
+        foreign_namespace.mount_namespace_inode.saturating_add(1);
+    let error =
+        OverlayFsMounter::load_for_remount(&layout_root, &lower, &merged, &foreign_namespace)
+            .expect_err("a possibly live foreign-namespace mount must not be reset");
+    assert!(matches!(error, StorageError::OverlayFsMountConflict { .. }));
+    assert_eq!(
+        fs::read(layout.work().join("kernel-work/temporary")).expect("read preserved work state"),
+        b"preserve"
+    );
+
+    // A different boot cannot carry the mount forward, so the disposable work
+    // directory is resettable again even from another namespace.
+    let mut prior_boot = foreign_namespace;
+    prior_boot.boot_id = "00000000-0000-0000-0000-000000000000".to_owned();
+    let reloaded = OverlayFsMounter::load_for_remount(&layout_root, &lower, &merged, &prior_boot)
+        .expect("reset prior-boot work state");
     assert_eq!(
         fs::read_dir(reloaded.work())
             .expect("read reset work directory")

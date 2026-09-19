@@ -71,6 +71,8 @@ fn repair_emits_a_stable_json_report_for_an_empty_state_directory() {
     assert_eq!(report["retired_adds"], 0);
     assert_eq!(report["relocated_worktrees"], serde_json::json!([]));
     assert_eq!(report["reaped_artifacts"], serde_json::json!([]));
+    assert_eq!(report["reaped_probe_roots"], serde_json::json!([]));
+    assert_eq!(report["preserved_probe_mounts"], serde_json::json!([]));
     assert_eq!(report["errors"], serde_json::json!([]));
 }
 
