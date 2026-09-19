@@ -2417,3 +2417,108 @@ fn enabled_prune_delegates_neutral_and_read_only_invocations() {
     );
     assert!(message.contains("RIFTRI_BYPASS=1"), "{message}");
 }
+
+/// `git worktree prune -v` is a verbose *prune*: with a hand-deleted managed
+/// worktree it must hit the same journaled-path refusal as a bare prune, and
+/// real Git must never remove the managed lifecycle metadata behind the
+/// journal. A dry run stays delegated and removes nothing even with an
+/// expiry window, while a dry run with an unknown option stays fail-closed.
+#[cfg(target_os = "macos")]
+#[test]
+fn enabled_prune_verbose_never_bypasses_the_journal() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("prune-verbose-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "add",
+            "-b",
+            "feature/prune-verbose",
+        ])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    // Hand-delete the managed view so real Git would consider it prunable.
+    fs::remove_dir_all(&destination).expect("delete managed view by hand");
+    let metadata = fixture.repository.join(".git/worktrees/prune-verbose-view");
+    assert!(metadata.is_dir(), "expected linked-worktree metadata");
+
+    for arguments in [
+        &["worktree", "prune", "-v"][..],
+        &["worktree", "prune", "--verbose"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("verbose prune through the intercepted shim");
+
+        // The journaled path refuses while the managed view is missing, and
+        // real Git must not have pruned the metadata behind the journal.
+        assert!(
+            !output.status.success(),
+            "git {arguments:?} succeeded against a missing managed view"
+        );
+        assert!(
+            metadata.is_dir(),
+            "git {arguments:?} removed managed lifecycle metadata"
+        );
+    }
+
+    // A dry run only reports: delegated, successful, metadata intact.
+    for arguments in [
+        &["worktree", "prune", "--dry-run"][..],
+        &["worktree", "prune", "--dry-run", "-v"][..],
+        &["worktree", "prune", "--dry-run", "--expire", "1.day.ago"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("dry-run prune through the intercepted shim");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} was refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            metadata.is_dir(),
+            "git {arguments:?} removed metadata despite --dry-run"
+        );
+    }
+
+    // Unknown options stay fail-closed even beside a dry run.
+    let refused = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "git",
+            "worktree",
+            "prune",
+            "--dry-run",
+            "--unknown-option",
+        ])
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("unknown prune option through the intercepted shim");
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("RIFTRI_BYPASS=1"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
