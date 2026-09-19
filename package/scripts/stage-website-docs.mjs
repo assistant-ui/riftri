@@ -44,9 +44,16 @@ export function renderWebsiteDoc(page, original) {
   const markdown = rewriteDocLinks(body, page.content).trim();
   const markdownUrl = `${pageUrl(page)}.md`;
   // Keep the page action a normal Markdown link: usable before hydration and
-  // kept in sync with each page during client-side navigation.
+  // kept in sync with each page during client-side navigation. The links sit
+  // below the page's intro paragraph so the description leads; a page without
+  // an intro (its first section starts immediately) keeps them under the
+  // title.
   if (!/^# .+(?:\r?\n|$)/.test(markdown)) throw new Error(`Docs page needs a leading title: ${page.content}`);
-  const withAction = markdown.replace(/^(# .+)(\r?\n|$)/, `$1\n\n[View .md](${markdownUrl} "View this page as Markdown") [Agent .md](${agentDocUrl(page)} "View full agent reference")\n$2`);
+  const action = `[View .md](${markdownUrl} "View this page as Markdown") [Agent .md](${agentDocUrl(page)} "View full agent reference")`;
+  const withAction = markdown.replace(
+    /^(# .+(?:\r?\n)+(?:(?![#\r\n])[^\r\n]+(?:\r?\n|$))*)/,
+    (intro) => `${intro.trimEnd()}\n\n${action}\n\n`,
+  );
   return `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n${withAction}\n\n---\n\n[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} "Edit this page on GitHub")\n`;
 }
 

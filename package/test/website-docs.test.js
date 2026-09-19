@@ -78,7 +78,15 @@ test("every staged page has one direct Markdown action and a short canonical edi
     const result = renderWebsiteDoc(page, human);
     const markdownUrl = `/docs${page.slug ? `/${page.slug}` : ""}.md`;
     assert.equal(result.split(`[View .md](${markdownUrl} `).length - 1, 1);
-    assert.match(result, /^---\ntitle: [^\n]+\n---\n\n# [^\n]+\n\n\[View \.md\]/);
+    // The action row sits below the title and intro paragraph (description
+    // first), and always before the page's first section heading.
+    assert.match(
+      result,
+      /^---\ntitle: [^\n]+\n---\n\n# [^\n]+\n\n(?:(?!\[View \.md\])(?!#)[^\n]+\n)*\n?\[View \.md\]/,
+    );
+    const actionIndex = result.indexOf("[View .md](");
+    const firstSection = result.indexOf("\n## ");
+    assert.ok(firstSection === -1 || actionIndex < firstSection, `action must precede the first section: ${page.content}`);
     assert.ok(result.includes(`[Agent .md](/docs${page.slug ? `/${page.slug}` : ""}/agent.md `));
     assert.ok(result.includes(`[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} `));
     assert.doesNotMatch(result, /\[Edit this page on GitHub\]/);
