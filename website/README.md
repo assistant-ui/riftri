@@ -16,15 +16,32 @@ adapts those components to the homepage's Geist typography, orange accents,
 square controls, and dashed borders. AI chat, telemetry, and MCP are disabled;
 reading and searching docs need no API key.
 
-The canonical technical sources remain in `../docs/`. `content/docs.json`
-maps them to titles and routes; only the introduction is authored in
-`content/introduction.md`. The site focuses on getting started, day-to-day use,
-platform support, and core internals. Benchmark reports, allocation evidence,
-and design-decision logs stay in the repository; links to those documents point
-to GitHub instead of adding them to the sidebar or search index.
-`pnpm stage` regenerates ignored `src/app/docs/`
-Markdown before development/build, rewrites internal documentation links,
-and adds an edit link to each original GitHub file. Do not edit staged files.
+There are two reading paths for every topic:
+
+- Public guides live in `content/guides/`, with the introduction in
+  `content/introduction.md`. Keep them short: the task, useful commands,
+  essential limits, and a next step. A test caps each source at 450 words.
+- Full technical references remain in `../docs/` (the overview uses `../README.md`).
+  Each is published in full at `/docs/<topic>/agent.md`; the introduction uses
+  `/docs/agent.md`, which also links to every topic's full reference.
+
+`content/docs.json` pairs each public `content` file with its full `source`.
+`pnpm stage` generates the public pages in ignored `src/app/docs/` and the
+agent companions in ignored `public/docs/**/agent.md`. It rewrites links,
+adds right-aligned `View .md` and `Agent .md` actions, and links public edits to
+the concise source file. Agent references link to the canonical technical
+source, with cross-references pointing to other full references. Do not edit
+generated files. When product behavior changes, update both authored sources.
+
+Only public guides enter the sidebar, search index, and sitemap. Full references
+are static plain text, served inline with `nosniff` and `X-Robots-Tag: noindex`.
+Benchmark reports, allocation evidence, and design-decision logs remain linked
+on GitHub rather than becoming extra public pages.
+The pinned adapter currently imports all project Markdown eagerly. A narrow
+Vite transform in `farm.config.ts` restricts its module map to `src/app/docs`
+so source copies and full agent references never enter browser JavaScript.
+Revisit that guarded workaround when upgrading the adapter; browser tests
+check that reference-only content is absent from the shipped scripts.
 Each sidebar entry also names a Lucide icon in `content/docs.json`.
 Staging regenerates `content/docs-icons.json` as SVG strings for the adapter;
 it also generates small action-icon masks in `public/docs-icons/`. The icon
@@ -33,8 +50,9 @@ Use `node scripts/stage-doc-icons.mjs --check` to check the generated registry.
 After editing a canonical Markdown file during development, rerun `pnpm stage`.
 After changing `docs.config.ts`, restart the dev server.
 
-The build keeps the adapter's Vercel function for `/docs`, Markdown mirrors,
-and `/api/docs` search. All other routes retain the existing static handling.
+The build keeps the adapter's Vercel function for public `/docs` pages, their
+Markdown mirrors, and `/api/docs` search. Static agent companions resolve before
+that runtime. All other routes retain the existing static handling.
 Docs responses are not CDN-cached because HTML and client navigation payloads
 share URLs. `pnpm preview:static` now previews both parts of this finalized
 output; it imports the built function, not the source dev server.

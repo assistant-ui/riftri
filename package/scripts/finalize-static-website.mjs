@@ -2,6 +2,7 @@ import { access, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { currentRevision } from "./verify-website.mjs";
+import { pages } from "./stage-website-docs.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 
@@ -69,6 +70,7 @@ export async function finalizeStaticWebsite(
     // Fail the build if the official adapter runtime or its content is missing.
     await access(path.join(outputDirectory, "functions/__nitro.func/index.mjs"));
     await access(path.join(outputDirectory, "functions/__nitro.func/chunks/nitro/farm-docs-content/page.md"));
+    for (const page of pages) await access(path.join(staticDirectory, "docs", page.slug, "agent.md"));
   } else {
     await rm(path.join(outputDirectory, "functions"), { recursive: true, force: true });
     await rm(path.join(outputDirectory, "nitro.json"), { force: true });
@@ -91,6 +93,11 @@ export async function finalizeStaticWebsite(
           "Content-Disposition": "inline",
           "X-Content-Type-Options": "nosniff",
         },
+        continue: true,
+      },
+      docs && {
+        src: "^/docs(?:/.*)?/agent\\.md$",
+        headers: { "Cache-Control": "public, max-age=300", "X-Robots-Tag": "noindex" },
         continue: true,
       },
       immutableAssetRoute,

@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { pages, agentDocUrl, renderAgentDoc } from "./stage-website-docs.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 export const currentRevision = () => execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
@@ -45,6 +46,13 @@ export async function verifyWebsite({ baseUrl = "https://riftri.dev", revision =
   }
   const search = await (await get("/api/docs?query=OverlayFS", 200, "application/json")).json();
   assert.ok(Array.isArray(search) && search.length > 0, "expected documentation search results");
+  for (const page of pages) {
+    const route = agentDocUrl(page);
+    const response = await get(route, 200, "text/plain");
+    assert.match(response.headers.get("content-disposition") || "", /^inline\b/i, `${route}: agent Markdown must open inline`);
+    const source = await readFile(path.join(root, page.source), "utf8");
+    assert.equal(await response.text(), renderAgentDoc(page, source), `${route}: full agent reference differs from source`);
+  }
   return checked;
 }
 

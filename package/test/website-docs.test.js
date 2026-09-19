@@ -1,18 +1,86 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
+const os = require("node:os");
 const { test } = require("node:test");
 const root = path.resolve(__dirname, "../..");
+
+test("every public page has a concise human source separate from the full reference", async () => {
+  const { pages } = await import("../scripts/stage-website-docs.mjs");
+  for (const page of pages) {
+    assert.match(page.content, /^website\/content\/[\w/.-]+\.md$/);
+    assert.notEqual(page.content, page.source);
+    const human = fs.readFileSync(path.join(root, page.content), "utf8");
+    assert.ok(human.trim().split(/\s+/).length <= 450, `${page.slug}: keep the public guide concise`);
+    assert.match(human, /^# /);
+  }
+});
+
+test("agent companions retain the full canonical document and link to other full references", async () => {
+  const { pages, renderAgentDoc, rewriteDocLinks } = await import("../scripts/stage-website-docs.mjs");
+  for (const page of pages) {
+    const original = fs.readFileSync(path.join(root, page.source), "utf8");
+    const agent = renderAgentDoc(page, original);
+    assert.ok(agent.includes(rewriteDocLinks(original, page.source, { audience: "agent" }).trim()), page.source);
+    assert.ok(agent.includes(`https://github.com/assistant-ui/riftri/blob/main/${page.source}`));
+    assert.ok(agent.includes(`https://riftri.dev/docs${page.slug ? `/${page.slug}` : ""}`));
+  }
+  assert.equal(rewriteDocLinks("[CLI](cli.md#exit-codes)", "docs/install.md", { audience: "agent" }),
+    "[CLI](https://riftri.dev/docs/cli/agent.md#exit-codes)");
+});
+
+test("staging separates public search content from complete agent companions", async (t) => {
+  const { pages, stageWebsiteDocs, renderAgentDoc } = await import("../scripts/stage-website-docs.mjs");
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-docs-stage-"));
+  t.after(() => fs.rmSync(fixture, { recursive: true, force: true }));
+  for (const page of pages) for (const file of [page.source, page.content]) {
+    fs.mkdirSync(path.dirname(path.join(fixture, file)), { recursive: true });
+    fs.copyFileSync(path.join(root, file), path.join(fixture, file));
+  }
+  const stale = path.join(fixture, "website/public/docs/retired/agent.md");
+  fs.mkdirSync(path.dirname(stale), { recursive: true });
+  fs.writeFileSync(stale, "retired reference");
+  fs.writeFileSync(path.join(path.dirname(stale), "keep.txt"), "unrelated asset");
+  await stageWebsiteDocs(fixture);
+  assert.ok(!fs.existsSync(stale));
+  assert.ok(fs.existsSync(path.join(path.dirname(stale), "keep.txt")));
+  for (const page of pages) {
+    const publicFile = path.join(fixture, "website/src/app/docs", page.slug, "page.md");
+    const agentFile = path.join(fixture, "website/public/docs", page.slug, "agent.md");
+    const original = fs.readFileSync(path.join(root, page.source), "utf8");
+    assert.equal(fs.readFileSync(agentFile, "utf8"), renderAgentDoc(page, original));
+    assert.ok(fs.readFileSync(publicFile, "utf8").includes("[Agent .md]"));
+    assert.ok(!fs.existsSync(path.join(path.dirname(publicFile), "agent.md")), "do not index full references in human search");
+  }
+  const sitemap = fs.readFileSync(path.join(fixture, "website/public/sitemap.xml"), "utf8");
+  assert.doesNotMatch(sitemap, /agent\.md/);
+});
+
+test("all root-relative links in public guides resolve to a page, mirror, or public asset", async () => {
+  const { pages, agentDocUrl, renderWebsiteDoc } = await import("../scripts/stage-website-docs.mjs");
+  const routes = new Set(["/install.sh", "/install.ps1", "/index.md"]);
+  for (const page of pages) {
+    const route = `/docs${page.slug ? `/${page.slug}` : ""}`;
+    for (const url of [route, `${route}.md`, agentDocUrl(page)]) routes.add(url);
+  }
+  for (const page of pages) {
+    const human = renderWebsiteDoc(page, fs.readFileSync(path.join(root, page.content), "utf8"));
+    for (const match of human.matchAll(/\]\((\/[^\s)]+)[^)]*\)/g)) {
+      assert.ok(routes.has(match[1]), `${page.content}: unknown local link ${match[1]}`);
+    }
+  }
+});
 
 test("every staged page has one direct Markdown action and a short canonical edit link", async () => {
   const { pages, renderWebsiteDoc } = await import("../scripts/stage-website-docs.mjs");
   for (const page of pages) {
-    const original = fs.readFileSync(path.join(root, page.source), "utf8");
-    const result = renderWebsiteDoc(page, original);
+    const human = fs.readFileSync(path.join(root, page.content), "utf8");
+    const result = renderWebsiteDoc(page, human);
     const markdownUrl = `/docs${page.slug ? `/${page.slug}` : ""}.md`;
     assert.equal(result.split(`[View .md](${markdownUrl} `).length - 1, 1);
     assert.match(result, /^---\ntitle: [^\n]+\n---\n\n# [^\n]+\n\n\[View \.md\]/);
-    assert.ok(result.includes(`[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.source} `));
+    assert.ok(result.includes(`[Agent .md](/docs${page.slug ? `/${page.slug}` : ""}/agent.md `));
+    assert.ok(result.includes(`[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} `));
     assert.doesNotMatch(result, /\[Edit this page on GitHub\]/);
   }
 });
@@ -32,7 +100,7 @@ test("docs navigation uses unique routes backed by canonical Markdown", async ()
   assert.equal(new Set(pages.map((page) => page.slug)).size, pages.length);
   assert.equal(pages.filter((page) => page.slug === "").length, 1);
   for (const page of pages) {
-    assert.match(page.source, /^(docs|website\/content)\/[\w/.-]+\.md$/);
+    assert.match(page.source, /^(README\.md|docs\/[\w/.-]+\.md)$/);
     assert.match(fs.readFileSync(path.join(root, page.source), "utf8"), /^#|\n#/);
   }
   const repositoryOnly = new Set(["benchmarks.md", "allocation-evidence.md", "decisions.md"]);

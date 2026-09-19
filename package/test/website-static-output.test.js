@@ -120,6 +120,13 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   fs.mkdirSync(path.join(runtime, "chunks/nitro/farm-docs-content"), { recursive: true });
   fs.writeFileSync(path.join(runtime, "index.mjs"), "export default {};");
   fs.writeFileSync(path.join(runtime, "chunks/nitro/farm-docs-content/page.md"), "# Docs");
+  await assert.rejects(finalizeStaticWebsite(output, { docs: true }), { code: "ENOENT" });
+  const { pages } = await import("../scripts/stage-website-docs.mjs");
+  for (const page of pages) {
+    const folder = path.join(output, "static/docs", page.slug);
+    fs.mkdirSync(folder, { recursive: true });
+    fs.writeFileSync(path.join(folder, "agent.md"), "# Full reference");
+  }
   await finalizeStaticWebsite(output, { docs: true });
   assert.ok(fs.existsSync(path.join(runtime, "index.mjs")));
   const config = JSON.parse(fs.readFileSync(path.join(output, "config.json")));
@@ -127,6 +134,9 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   assert.equal(markdownRoute.headers["Content-Type"], "text/plain; charset=utf-8");
   assert.equal(markdownRoute.headers["X-Content-Type-Options"], "nosniff");
   assert.equal(markdownRoute.continue, true);
+  const agentRoute = config.routes.find((entry) => entry.headers?.["X-Robots-Tag"] === "noindex");
+  for (const url of ["/docs/agent.md", "/docs/cli/agent.md"]) assert.ok(new RegExp(agentRoute.src).test(url));
+  assert.ok(!new RegExp(agentRoute.src).test("/docs/cli.md"));
   for (const url of ["/docs.md", "/docs/cli.md", "/docs/benchmarks/assistant-ui.md"]) assert.ok(new RegExp(markdownRoute.src).test(url));
   for (const url of ["/docs", "/docs/cli", "/api/docs", "/docs-unrelated.md"]) assert.ok(!new RegExp(markdownRoute.src).test(url));
   const route = config.routes.find((entry) => entry.dest === "/__nitro");

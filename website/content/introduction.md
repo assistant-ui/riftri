@@ -1,41 +1,32 @@
----
-title: Introduction
-description: Real Git worktrees. Shared storage. Private edits.
----
-
 # Riftri documentation
 
-Riftri is an opt-in copy-on-write storage accelerator for real Git linked worktrees.
-Unchanged files share storage. Each worktree keeps its own changes, branch, and Git index.
+Riftri creates Git worktrees that share storage for unchanged files. Each
+worktree has its own branch, files, and edits. Keep using your usual editor
+and Git commands.
 
 ## Start with one worktree
 
-Install the native CLI on macOS or Linux:
-
-```sh
-curl -fsSL https://riftri.dev/install.sh | bash
-```
-
-From an existing Git repository, open the guided setup:
+[Install Riftri](guides/installation.md), then run this in an existing repository:
 
 ```sh
 riftri setup
 ```
 
-Setup checks support, shows a plan, and asks before creating a worktree. Afterward,
-you can choose an installed coding agent to open, or continue without one.
+Choose a directory and branch, review the plan, and confirm. Setup can then
+open an installed coding agent, or leave you with a ready worktree.
+It starts from the current commit, not your uncommitted changes.
 
-Continue with [installation](../../docs/install.md), the [CLI reference](../../docs/cli.md),
-or [coding agent setup](../../docs/agent-integration.md).
+## Choose your workflow
 
-## What stays the same
+- [CLI reference](guides/cli.md): create, inspect, and remove worktrees yourself.
+- [Coding agents](guides/agents.md): launch an agent with Riftri enabled.
+- [Shell activation](guides/activation.md): keep using `git worktree` in your terminal.
 
-Keep using your editor, build tools, and ordinary Git commands. Git owns branches,
-commits, merges, and linked worktree registration. Riftri does not sit between your
-tools and the filesystem.
+## Before you start
 
-## Native storage, explicit support
+Riftri needs a [supported filesystem](guides/filesystem-compatibility.md).
+It stops if storage or repository features are unsupported; it does not
+silently make a full copy. Dependencies and build outputs stay separate.
 
-Riftri uses APFS clones on macOS, reflinks or supported OverlayFS configurations on
-Linux, and block clones on Windows ReFS. It refuses unsupported destinations rather
-than silently making a full copy. Ordinary NTFS is not supported.
+Riftri is experimental. Keep important changes committed or backed up.
+Worktree isolation is not a security sandbox.
