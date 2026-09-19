@@ -254,7 +254,7 @@ code, pre { font-family: var(--font-mono); }
 
 .graph-frame {
   position: relative;
-  border: 1px solid var(--line-strong);
+  border: 1px dashed var(--line-strong);
   background: var(--canvas-deep);
 }
 
