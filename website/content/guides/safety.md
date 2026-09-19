@@ -1,25 +1,24 @@
 # Safety
 
-Riftri is experimental. Keep important work committed or backed up.
+Riftri is experimental; keep important work committed or backed up.
 Copy-on-write isolates file changes; it is **not a security sandbox**.
 
 ## What Riftri protects
 
-- Unsupported storage or checkout features stop creation; there is no silent full-copy fallback.
-- Normal removal refuses local changes. Forced removal is an explicit discard.
+- Unsupported storage or checkout stops creation — no silent full-copy fallback.
+- Normal removal refuses local changes; forced removal is an explicit discard.
 - Lifecycle operations are recorded for recovery after an interruption.
-- Cleanup preserves changed or ambiguous paths instead of guessing they are disposable.
-- Shared bases are collected only when no operation still needs them.
+- Cleanup preserves changed or ambiguous paths; shared bases are collected
+  only when unreferenced.
 
 ## What you control
 
-Use Riftri's lifecycle commands for managed worktrees. Do not delete or edit
-its internal state directories. Review `riftri gc` before applying cleanup
-with `riftri gc --apply`.
-
-Git interception is opt-in for both the repository and the shell or process.
-Riftri does not edit your shell profile. The optional Linux OverlayFS helper
-requires a separate administrator installation.
+- Use Riftri's lifecycle commands; never delete or edit its internal state
+  directories.
+- Review `riftri gc` before `riftri gc --apply`.
+- Interception is opt-in per repository and per shell or process; your shell
+  profile is never edited.
+- The Linux OverlayFS helper needs a separate administrator installation.
 
 ## If something goes wrong
 
@@ -27,9 +26,8 @@ requires a separate administrator installation.
 riftri status
 ```
 
-Follow the reported recovery guidance, retaining any custom repository or
-state-directory arguments. See [troubleshooting](troubleshooting.md).
-
-Report potential data-loss or security problems privately using the
+Follow its recovery guidance, keeping any custom repository or
+state-directory arguments; see [troubleshooting](troubleshooting.md).
+Report potential data-loss or security problems privately via the
 [security policy](https://github.com/assistant-ui/riftri/blob/main/SECURITY.md).
-Testing details and the full safety model remain in **Agent .md**.
+Full safety model and testing details: **Agent .md**.

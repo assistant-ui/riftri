@@ -1,7 +1,7 @@
 # Git LFS
 
-Riftri can use standard Git LFS files when their objects are already present
-locally. It does **not** download them during worktree creation.
+Riftri uses Git LFS files whose objects are already present locally; it does
+**not** download them during worktree creation.
 
 ## Fetch before creating
 
@@ -10,7 +10,7 @@ git lfs fetch
 riftri doctor --destination ../app-auth
 ```
 
-If the checks pass, create the worktree normally:
+If the checks pass:
 
 ```sh
 riftri worktree add ../app-auth -b feature/auth main
@@ -20,11 +20,10 @@ riftri worktree add ../app-auth -b feature/auth main
 
 - Missing or invalid local LFS objects.
 - Custom LFS storage, filter commands, or pointer extensions.
-- An executable `post-checkout` hook, including one installed by Git LFS,
-  or a custom `core.hooksPath`.
+- An executable `post-checkout` hook (including Git LFS's own) or a custom
+  `core.hooksPath`.
+- Sparse worktrees with LFS paths are not supported yet.
 
-Do not remove a required hook just to enable Riftri. Use ordinary Git outside
-Riftri interception if your LFS setup needs it. Sparse worktrees with LFS paths
-are not supported yet.
-
-The full eligibility and object-verification rules are in **Agent .md**.
+Do not remove a required hook to enable Riftri; use ordinary Git outside
+interception instead. Full eligibility and object-verification rules:
+**Agent .md**.

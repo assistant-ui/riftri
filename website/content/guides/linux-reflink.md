@@ -1,7 +1,7 @@
 # Linux reflinks
 
-Riftri supports **Btrfs** and **reflink-enabled XFS**. Reflinks let worktrees
-share unchanged file data while keeping edits private.
+Riftri supports **Btrfs** and **reflink-enabled XFS**: worktrees share
+unchanged file data while edits stay private.
 
 ## Check and create
 
@@ -12,16 +12,13 @@ riftri doctor --destination ../app-auth
 riftri worktree add ../app-auth -b feature/auth main
 ```
 
-Creation actively checks reflink support on the destination before changing
-Git metadata. XFS may need that active check even when the read-only diagnostic
-cannot confirm support.
+Creation actively verifies reflink support before changing Git metadata; XFS
+may need that even when the read-only diagnostic cannot confirm support.
 
-## Keep in mind
+## Requirements
 
 - Riftri state and the new worktree must be on the same filesystem volume.
-- Every file must use the supported native clone operation; failures do not
-  silently fall back to a full copy.
-- Normal reads, writes, builds, and Git commands use the native filesystem.
+- Every file must clone natively; failures never silently fall back to a full copy.
 
-If reflinks are unavailable, [OverlayFS](linux-overlayfs.md) may work.
-Riftri checks that separately; the OS name alone does not establish support.
+No reflinks? [OverlayFS](linux-overlayfs.md) may work; Riftri checks it
+separately — the OS name alone does not establish support.

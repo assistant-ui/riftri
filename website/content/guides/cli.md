@@ -4,15 +4,13 @@ Run these from your repository. New to Riftri? Start with `riftri setup`.
 
 ## Create a worktree
 
-Check the destination, then create a branch from `main`:
-
 ```sh
 riftri doctor --destination ../app-auth
 riftri worktree add ../app-auth -b feature/auth main
 ```
 
-Replace `main` with your starting branch or commit. The new directory is a
-normal Git worktree. Uncommitted changes in the original are not copied.
+Replace `main` with any starting branch or commit. The result is a normal
+Git worktree; uncommitted changes in the original are not copied.
 
 | Option | Use it to |
 | --- | --- |
@@ -20,53 +18,34 @@ normal Git worktree. Uncommitted changes in the original are not copied.
 | `--detach` | Work without creating a branch |
 | `--sparse-dir <dir>` | Include selected directories; see [sparse checkout](sparse-checkout.md) |
 
-## Inspect your worktrees
+## Inspect
 
 ```sh
 riftri worktree list
 riftri status
 ```
 
-`list` shows managed worktrees. `status` also shows shared bases, storage use,
-and anything needing attention.
+`status` adds shared bases, storage use, and anything needing attention.
 
-## Move or remove one
+## Move or remove
 
 ```sh
 riftri worktree move ../app-auth ../app-login
-```
-
-Moves must stay on the same volume. Mounted OverlayFS worktrees cannot be moved.
-
-Once you have saved your work:
-
-```sh
 riftri worktree remove ../app-login
 ```
 
-Removal refuses local changes. `--force` discards them; use it only when you
-intend to lose that work.
+- Moves must stay on the same volume; mounted OverlayFS worktrees cannot be moved.
+- Removal refuses local changes; `--force` discards them.
 
 ## Recover and reclaim space
 
-After an interrupted operation, inspect `riftri status` and follow its recovery
-guidance. `riftri repair` can resume or roll back recorded operations.
-
-Preview unused-base cleanup:
-
-```sh
-riftri gc
-```
-
-Run `riftri gc --apply` only after reviewing the plan. To reclaim private
-storage in a pristine, full native-clone worktree, use
-`riftri worktree compact <path>`. It refuses untracked and ignored files too.
+| Command | Does |
+| --- | --- |
+| `riftri repair` | Resume or roll back an interrupted operation; `riftri status` shows recovery guidance |
+| `riftri gc` | Preview unused-base cleanup; apply with `riftri gc --apply` only after reviewing the plan |
+| `riftri worktree compact <path>` | Reclaim private storage in a pristine, full native-clone worktree; refuses untracked and ignored files |
 
 ## More options
 
-```sh
-riftri worktree add --help
-```
-
-Use `--help` with any command. The **Agent .md** reference has the complete
-flag, JSON, exit-code, and recovery contracts.
+`--help` works with every command. Complete flag, JSON, exit-code, and
+recovery contracts: **Agent .md**.

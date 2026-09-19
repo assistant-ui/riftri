@@ -5,27 +5,26 @@ commits, history, and worktree registration.
 
 ## Create once, share unchanged data
 
-1. **Check support.** Riftri checks the requested checkout and destination.
-2. **Prepare a base.** It builds or reuses an immutable copy of the exact Git tree.
-3. **Create a worktree.** Git registers a real linked worktree, and the filesystem
-   shares unchanged data from the base. Riftri verifies that Git reports it clean.
+1. **Check support** for the requested checkout and destination.
+2. **Prepare a base**: an immutable copy of the exact Git tree, built or reused.
+3. **Create a worktree**: Git registers a real linked worktree, the
+   filesystem shares unchanged data from the base, and Riftri verifies Git
+   reports it clean.
 
-Compatible worktrees can reuse a base. Different trees, checkout settings,
-repositories, or volumes do not accidentally share one.
+Only compatible worktrees reuse a base; different trees, checkout settings,
+repositories, or volumes never share one.
 
 ## Edits stay private
 
-On APFS, Linux reflink filesystems, and ReFS, native copy-on-write keeps
-changed blocks private. OverlayFS stores changes in a separate writable layer.
-
-Riftri is not in the normal file read/write path. Your editor and build tools
-work directly with the filesystem. No always-running daemon is required.
+APFS, Linux reflink filesystems, and ReFS keep changed blocks private through
+native copy-on-write; OverlayFS stores changes in a separate writable layer.
+Riftri is not in the normal read/write path and needs no daemon.
 
 ## Cleanup is recorded
 
-Riftri records lifecycle operations so an interruption can be recovered.
-It removes shared bases only when nothing still references them. If ownership
-or contents are uncertain, it stops and preserves the data.
+Lifecycle operations are recorded so interruptions can be recovered. Shared
+bases are removed only when unreferenced; uncertain ownership or contents
+stop cleanup and preserve the data.
 
-See [safety](safety.md) for day-to-day precautions. **Agent .md** contains
-the full component design, storage layout, and transaction state machines.
+See [safety](safety.md) for precautions. Full component design, storage
+layout, and transaction state machines: **Agent .md**.

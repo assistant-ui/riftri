@@ -1,6 +1,6 @@
 # Installing Riftri
 
-You need Git. Riftri is a native executable; no Node.js or Rust toolchain is required.
+Requires Git. Riftri is a native executable; no Node.js or Rust toolchain.
 
 ## macOS and Linux
 
@@ -8,9 +8,9 @@ You need Git. Riftri is a native executable; no Node.js or Rust toolchain is req
 curl -fsSL https://riftri.dev/install.sh | bash
 ```
 
-This runs the installer from the website. [Read the script](../../../package/install.sh) first
-if you want to review it. It checks the download and installs to `~/.local/bin`.
-Follow the printed PATH command so your terminal can find `riftri`.
+Verifies the download and installs to `~/.local/bin`
+([read the script](../../../package/install.sh) first if you want).
+Follow the printed PATH command.
 
 ## Windows
 
@@ -33,22 +33,19 @@ Follow the printed PATH instructions. Optimized worktrees require
 
 ## Create your first worktree
 
-Check the installation, then start setup **inside an existing Git repository**:
+Inside an existing Git repository:
 
 ```sh
 riftri --version
 riftri setup
 ```
 
-Setup checks your destination, asks for a branch, and shows a plan before
-creating anything. It can open an installed coding agent when finished.
-
 ## Update or install manually
 
-Rerun the installer to update. For a specific version, manual downloads, or
-uninstall steps, open the **Agent .md** reference at the top of this page.
-[GitHub releases](https://github.com/assistant-ui/riftri/releases) also provide
-standalone binaries. The npm channel is not currently available.
+Rerun the installer to update. Pinned versions, manual downloads, and
+uninstall steps: **Agent .md** at the top of this page.
+[GitHub releases](https://github.com/assistant-ui/riftri/releases) provides
+standalone binaries; the npm channel is not currently available.
 
 Neither installer edits your shell profile or enables Git interception.
-If something fails, see [troubleshooting](troubleshooting.md).
+Problems? See [troubleshooting](troubleshooting.md).
