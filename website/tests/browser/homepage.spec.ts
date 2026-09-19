@@ -26,6 +26,13 @@ test("homepage renders without browser errors and captures the final layout", as
   await expect(page.locator(".hero-highlight")).toHaveCSS("background-color", "rgb(240, 106, 58)");
   await expect(page.locator(".hero-graph")).toHaveCSS("background-image", "none");
   await expect(page.locator(".hero-graph")).toHaveCSS("background-color", "rgb(5, 5, 5)");
+  const frames = page.locator(".graph-frame");
+  await expect(frames).toHaveCount(3);
+  for (const frame of await frames.all()) {
+    for (const side of ["top", "right", "bottom", "left"]) {
+      await expect(frame).toHaveCSS(`border-${side}-style`, "dashed");
+    }
+  }
   await expect(page.getByRole("heading", { name: "Worktree disk usage" })).toBeVisible();
   await page.evaluate(() => document.fonts.ready);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
