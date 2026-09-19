@@ -7,6 +7,25 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Reusing a cached immutable base no longer trusts metadata its completion
+  marker never covered. The v1 marker hashed contents, tree shape, symlink
+  targets, and `mode & 0o777`, while the native cloners faithfully propagate
+  more than that: the Linux reflink backend restores the full `st_mode`
+  (setuid, setgid, and sticky bits land) and APFS `clonefile` copies mode,
+  extended attributes, and ACLs verbatim. Anything that modified a cached
+  base under `bases/v1` could therefore inject special permission bits or
+  xattrs into every later worktree cloned from it, with Git reporting the
+  new worktree clean. Completion markers now use a versioned v2 digest that
+  also covers the full native Unix mode, every extended attribute name and
+  value, and macOS ACL presence — hashed in the same traversal that already
+  reads file contents — and a mismatch refuses reuse and preserves the base,
+  exactly like content corruption. Windows continues to cover only the
+  read-only attribute, matching what the ReFS cloner propagates. An existing
+  base with an intact v1 marker migrates predictably: its content digest is
+  still verified, then the base is rebuilt once and re-marked with v2
+  instead of being trusted or silently mass-invalidated; cache keys, journal
+  formats, and the persisted compaction and forced-removal snapshot digests
+  are unchanged.
 - Git failures now report how the process ended. A Git killed by a signal —
   an OOM kill during `checkout-index` on a big tree, a SIGSEGV — usually
   wrote nothing to stderr, so the error rendered as
