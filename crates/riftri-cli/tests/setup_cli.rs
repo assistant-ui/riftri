@@ -63,9 +63,9 @@ fn setup_json_errors_do_not_include_prompts() {
 mod terminal {
     use std::fs::{self, File};
     use std::io::{Read, Write};
-    use std::os::fd::FromRawFd;
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::process::CommandExt;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitStatus, Output, Stdio};
     use std::time::{Duration, Instant};
@@ -76,6 +76,11 @@ mod terminal {
         directory: support::WritableTempDir,
         repository: PathBuf,
         view: PathBuf,
+    }
+
+    enum SignalAt {
+        Prompt(i32),
+        Progress(i32),
     }
 
     fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
@@ -228,8 +233,28 @@ mod terminal {
         }
 
         fn run(&self, input: &[u8]) -> (ExitStatus, String) {
+            self.run_terminal(&[input], false)
+        }
+
+        fn run_terminal(&self, answers: &[&[u8]], rich: bool) -> (ExitStatus, String) {
+            self.run_terminal_options(answers, rich, None, &[])
+        }
+
+        fn run_terminal_options(
+            &self,
+            answers: &[&[u8]],
+            rich: bool,
+            signal: Option<SignalAt>,
+            options: &[&str],
+        ) -> (ExitStatus, String) {
             let mut master = -1;
             let mut slave = -1;
+            let mut size = libc::winsize {
+                ws_row: 24,
+                ws_col: 90,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
             // SAFETY: openpty writes two fresh descriptors; optional pointers are null.
             assert_eq!(
                 unsafe {
@@ -238,7 +263,7 @@ mod terminal {
                         &mut slave,
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
-                        std::ptr::null_mut(),
+                        std::ptr::addr_of_mut!(size),
                     )
                 },
                 0
@@ -246,8 +271,17 @@ mod terminal {
             // SAFETY: these descriptors were returned with exclusive ownership by openpty.
             let (mut master, slave) =
                 unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+            let inspector = slave.try_clone().unwrap();
             let mut process = command(env!("CARGO_BIN_EXE_riftri"));
+            if !rich {
+                process.arg("--plain");
+            }
+            process.args(options);
             process
+                .env("TERM", "xterm-256color")
+                .env_remove("CI")
+                .env_remove("NO_COLOR")
+                .env_remove("RIFTRI_NO_ANIMATION")
                 .args(["setup", "--repository"])
                 .arg(&self.repository)
                 .arg("--destination")
@@ -282,13 +316,32 @@ mod terminal {
             drop(process);
             let mut reader = master.try_clone().unwrap();
             let (sender, receiver) = std::sync::mpsc::channel();
+            let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+            let (progress_sender, progress_receiver) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut output = Vec::new();
                 let mut buffer = [0; 4096];
+                let mut prompts = 0;
                 loop {
                     match reader.read(&mut buffer) {
                         Ok(0) => break,
-                        Ok(count) => output.extend_from_slice(&buffer[..count]),
+                        Ok(count) => {
+                            output.extend_from_slice(&buffer[..count]);
+                            let count = output
+                                .windows(b"\x1b[?2004h".len())
+                                .filter(|window| *window == b"\x1b[?2004h")
+                                .count();
+                            for _ in prompts..count {
+                                let _ = ready_sender.send(());
+                            }
+                            prompts = count;
+                            if output
+                                .windows(b"waiting:".len())
+                                .any(|window| window == b"waiting:")
+                            {
+                                let _ = progress_sender.send(());
+                            }
+                        }
                         Err(error) if error.raw_os_error() == Some(libc::EIO) => break,
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                         Err(error) => panic!("read setup terminal: {error}"),
@@ -296,9 +349,61 @@ mod terminal {
                 }
                 let _ = sender.send(String::from_utf8_lossy(&output).into_owned());
             });
-            master.write_all(input).unwrap();
+            for answer in answers {
+                if rich
+                    && ready_receiver
+                        .recv_timeout(Duration::from_secs(10))
+                        .is_err()
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    drop(inspector);
+                    panic!(
+                        "rich prompt did not open: {}",
+                        receiver
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap_or_default()
+                    );
+                }
+                master.write_all(answer).unwrap();
+            }
+            if let Some(signal) = signal {
+                let (signal, receiver) = match signal {
+                    SignalAt::Prompt(signal) => (signal, &ready_receiver),
+                    SignalAt::Progress(signal) => (signal, &progress_receiver),
+                };
+                if receiver.recv_timeout(Duration::from_secs(10)).is_err() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("signal test did not reach its synchronization point");
+                }
+                // SAFETY: the child is still owned by this test.
+                assert_eq!(unsafe { libc::kill(child.id() as i32, signal) }, 0);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                if child.try_wait().unwrap().is_none() {
+                    child.kill().unwrap();
+                }
+            }
             let status = wait(&mut child);
             drop(child);
+            // SAFETY: master is an open terminal descriptor and mode is writable.
+            let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
+            assert_eq!(
+                unsafe { libc::tcgetattr(master.as_raw_fd(), mode.as_mut_ptr()) },
+                0
+            );
+            // SAFETY: tcgetattr initialized mode above.
+            let mode = unsafe { mode.assume_init() };
+            assert_ne!(
+                mode.c_lflag & libc::ICANON,
+                0,
+                "terminal must leave raw mode"
+            );
+            assert_ne!(mode.c_lflag & libc::ECHO, 0, "terminal must restore echo");
+            drop(inspector);
             let output = receiver
                 .recv_timeout(Duration::from_secs(5))
                 .expect("terminal must close");
@@ -329,6 +434,152 @@ mod terminal {
         }
         let (status, output) = fixture.run(b"\n");
         assert!(status.success(), "{output}");
+        fixture.no_mutation();
+    }
+
+    #[test]
+    fn rich_setup_defaults_to_no_and_restores_the_terminal_on_cancel_or_interrupt() {
+        for (answer, code) in [(&b"\r"[..], 0), (&b"\x1b"[..], 0), (&b"\x03"[..], 130)] {
+            let fixture = Fixture::new();
+            if !fixture.supported() {
+                return;
+            }
+            let (status, output) = fixture.run_terminal(&[answer], true);
+            assert_eq!(status.code(), Some(code), "{output}");
+            assert!(
+                output.contains("\x1b[?1049h"),
+                "Ratatui must open its screen: {output}"
+            );
+            assert!(
+                output.contains("\x1b[?1049l"),
+                "screen must be restored: {output}"
+            );
+            assert!(
+                output.contains("\x1b[?25h"),
+                "cursor must be visible: {output}"
+            );
+            fixture.no_mutation();
+        }
+    }
+
+    #[test]
+    fn rich_setup_creates_a_clean_isolated_worktree_and_not_now_does_not_enable() {
+        let fixture = Fixture::new();
+        if !fixture.supported() {
+            return;
+        }
+        let (status, output) = fixture.run_terminal(&[b"\x1b[B\r", b"\r"], true);
+        assert!(status.success(), "{output}");
+        assert!(
+            git(&fixture.view, &["status", "--porcelain=v1"])
+                .stdout
+                .is_empty()
+        );
+        assert!(
+            !git(
+                &fixture.repository,
+                &["config", "--local", "--get", "riftri.enabled"]
+            )
+            .status
+            .success()
+        );
+        fs::write(fixture.view.join("tracked.txt"), "private change\n").unwrap();
+        assert_eq!(
+            fs::read(fixture.repository.join("tracked.txt")).unwrap(),
+            b"tracked\n"
+        );
+        assert!(output.contains("Worktree kept"));
+    }
+
+    #[test]
+    fn rich_setup_restores_terminal_before_agent_and_preserves_child_exit_code() {
+        let fixture = Fixture::new();
+        if !fixture.supported() {
+            return;
+        }
+        let agent = fixture.directory.path().join("terminal-check-agent");
+        fs::write(&agent, "#!/bin/sh\nset -eu\nstty -a | grep -q -- '-icanon' && exit 99\ntest \"$RIFTRI_SHIM_ACTIVE\" = 1\nprintf 'agent-has-terminal\\n'\nexit 7\n").unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o700)).unwrap();
+        let path = format!("{}\r", agent.display());
+        let (status, output) =
+            fixture.run_terminal(&[b"y\r", b"3\r", path.as_bytes(), b"y\r"], true);
+        assert_eq!(status.code(), Some(7), "{output}");
+        let restored = output.rfind("\x1b[?1049l").unwrap();
+        assert!(output.find("agent-has-terminal").unwrap() > restored);
+        assert!(fixture.view.exists());
+    }
+
+    #[test]
+    fn rich_setup_restores_terminal_on_external_termination() {
+        let fixture = Fixture::new();
+        if !fixture.supported() {
+            return;
+        }
+        let (status, output) =
+            fixture.run_terminal_options(&[], true, Some(SignalAt::Prompt(libc::SIGTERM)), &[]);
+        assert_eq!(status.code(), Some(128 + libc::SIGTERM), "{output}");
+        assert!(output.contains("\x1b[?1049l"));
+        fixture.no_mutation();
+    }
+
+    #[test]
+    fn reduced_motion_keeps_keyboard_setup_but_uses_plain_phase_lines() {
+        let fixture = Fixture::new();
+        if !fixture.supported() {
+            return;
+        }
+        let (status, output) =
+            fixture.run_terminal_options(&[b"y\r", b"\r"], true, None, &["--no-animation"]);
+        assert!(status.success(), "{output}");
+        assert!(output.contains("\x1b[?1049h"));
+        assert!(output.contains("riftri: worktree-add: intent-recorded"));
+        assert!(!output.contains('⠋'));
+        assert!(!output.contains('⠙'));
+    }
+
+    #[test]
+    fn rich_setup_restores_normal_termination_after_confirmation() {
+        for signal in [libc::SIGINT, libc::SIGTERM] {
+            let fixture = Fixture::new();
+            if !fixture.supported() {
+                return;
+            }
+            let lock = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(
+                    fixture
+                        .repository
+                        .join(".git/riftri-worktree-metadata.lock"),
+                )
+                .unwrap();
+            fs2::FileExt::lock_exclusive(&lock).unwrap();
+            let (status, output) = fixture.run_terminal_options(
+                &[b"y\r"],
+                true,
+                Some(SignalAt::Progress(signal)),
+                &["--no-animation"],
+            );
+            drop(lock);
+            assert_eq!(
+                status.signal(),
+                Some(signal),
+                "signal must not be swallowed after the prompt: {output}"
+            );
+            assert!(!fixture.view.exists());
+        }
+    }
+
+    #[test]
+    fn json_error_receipt_stays_undecorated_even_in_a_terminal() {
+        let fixture = Fixture::new();
+        let (status, output) = fixture.run_terminal_options(&[], true, None, &["--json-errors"]);
+        assert!(!status.success());
+        assert!(!output.contains('\x1b'));
+        let receipt: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(receipt["operation"], "setup");
         fixture.no_mutation();
     }
 

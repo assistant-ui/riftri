@@ -5,7 +5,66 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
+use crate::ui::{self, PromptKind};
 use anyhow::{Context, Result, bail};
+
+trait PromptOutput: Write {
+    fn context(&self) -> Option<&str> {
+        None
+    }
+}
+
+struct SetupOutput<W> {
+    output: W,
+    transcript: String,
+    pending: Vec<u8>,
+}
+
+impl<W: Write> Write for SetupOutput<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !ui::interactive() {
+            self.output.write_all(bytes)?;
+            return Ok(bytes.len());
+        }
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+            let line = String::from_utf8_lossy(&self.pending[..=end]);
+            self.transcript.push_str(&line);
+            if self.transcript.len() > 65_536 {
+                // Retain recent questions without unbounded growth on retries.
+                if let Some((end, _)) = self
+                    .transcript
+                    .rmatch_indices('\n')
+                    .find(|(index, _)| *index < self.transcript.len() - 32_768)
+                {
+                    self.transcript.drain(..=end);
+                }
+            }
+            ui::write_transcript(&mut self.output, &line)?;
+            self.pending.drain(..=end);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.pending.is_empty() {
+            let text = String::from_utf8_lossy(&self.pending);
+            self.transcript.push_str(&text);
+            ui::write_transcript(&mut self.output, &text)?;
+            self.pending.clear();
+        }
+        self.output.flush()
+    }
+}
+
+impl<W: Write> PromptOutput for SetupOutput<W> {
+    fn context(&self) -> Option<&str> {
+        ui::interactive().then_some(self.transcript.as_str())
+    }
+}
+
+#[cfg(test)]
+impl PromptOutput for Vec<u8> {}
 
 struct Launch {
     worktree: PathBuf,
@@ -40,11 +99,16 @@ pub(super) fn run(
 
     // Drop terminal locks before handing the terminal to the chosen child.
     let launch = {
-        let mut input = std::io::stdin().lock();
-        let mut output = std::io::stdout().lock();
+        let mut input = std::io::BufReader::new(std::io::stdin());
+        let mut output = SetupOutput {
+            output: std::io::stdout(),
+            transcript: String::new(),
+            pending: Vec::new(),
+        };
         prepare(&mut input, &mut output, &repository, destination, branch)?
     };
     let Some(launch) = launch else { return Ok(0) };
+    ui::pause_progress();
     riftri_core::enable_repository(&launch.worktree)
         .context("worktree was created and is retained, but repository enablement failed")?;
     riftri_core::execute_scoped_command_in_worktree(
@@ -56,7 +120,7 @@ pub(super) fn run(
 
 fn prepare(
     input: &mut impl BufRead,
-    output: &mut impl Write,
+    output: &mut impl PromptOutput,
     repository: &Path,
     destination: Option<PathBuf>,
     branch: Option<OsString>,
@@ -267,9 +331,34 @@ fn print_next_steps(output: &mut impl Write, destination: &Path) -> Result<()> {
 
 fn question(
     input: &mut impl BufRead,
-    output: &mut impl Write,
+    output: &mut impl PromptOutput,
     prompt: &str,
 ) -> Result<Option<String>> {
+    ask(input, output, prompt, PromptKind::Text)
+}
+
+fn ask(
+    input: &mut impl BufRead,
+    output: &mut impl PromptOutput,
+    prompt: &str,
+    kind: PromptKind,
+) -> Result<Option<String>> {
+    if let Some(context) = output.context() {
+        let answer = ui::prompt(context, prompt, kind)?;
+        if let Some(answer) = &answer {
+            writeln!(
+                output,
+                "{}{}",
+                prompt,
+                if answer.is_empty() {
+                    "(default)"
+                } else {
+                    answer
+                }
+            )?;
+        }
+        return Ok(answer);
+    }
     loop {
         write!(output, "{prompt}")?;
         output.flush()?;
@@ -291,8 +380,8 @@ fn question(
     }
 }
 
-fn confirm(input: &mut impl BufRead, output: &mut impl Write, prompt: &str) -> Result<bool> {
-    Ok(question(input, output, prompt)?
+fn confirm(input: &mut impl BufRead, output: &mut impl PromptOutput, prompt: &str) -> Result<bool> {
+    Ok(ask(input, output, prompt, PromptKind::Confirm)?
         .is_some_and(|answer| matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")))
 }
 
@@ -306,15 +395,17 @@ fn cancelled(output: &mut impl Write) -> Result<Option<Launch>> {
 
 fn choose_agent(
     input: &mut impl BufRead,
-    output: &mut impl Write,
+    output: &mut impl PromptOutput,
     resolve: impl Fn(&OsStr) -> Option<PathBuf>,
 ) -> Result<Option<PathBuf>> {
     loop {
-        writeln!(
-            output,
-            "\nWhich coding agent would you like to open?\n  0. Not now\n  1. Claude Code (claude)\n  2. Codex (codex)\n  3. Another executable"
-        )?;
-        let Some(answer) = question(input, output, "Choose [0]: ")? else {
+        if output.context().is_none() {
+            writeln!(
+                output,
+                "\nWhich coding agent would you like to open?\n  0. Not now\n  1. Claude Code (claude)\n  2. Codex (codex)\n  3. Another executable"
+            )?;
+        }
+        let Some(answer) = ask(input, output, "Choose [0]: ", PromptKind::Agent)? else {
             return Ok(None);
         };
         let program = match answer.trim() {

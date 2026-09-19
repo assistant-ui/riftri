@@ -44,6 +44,7 @@ default state directory at `<common-git-dir>/riftri`.
 | `1` | Operational failure — Git, storage, journal, or filesystem I/O |
 | `2` | Usage error — unknown flag or missing argument, reported by the parser |
 | `3` | Policy refusal — Riftri declined a request it will not optimize |
+| `130` | Interactive question interrupted with Ctrl-C (already-created worktrees are retained) |
 
 Codes `1` and `3` mirror the `category` field (`operational` / `policy`) of
 the `--json-errors` receipt, so a wrapper can branch on the exit status
@@ -51,10 +52,42 @@ without parsing JSON. A policy refusal means nothing was changed; consult
 [decisions.md](decisions.md) for the forms Riftri refuses and `RIFTRI_BYPASS=1`
 to run one such command through ordinary Git instead.
 
+## Terminal interface (unreleased)
+
+Riftri uses Ratatui for guided setup and interactive confirmations, with a
+restrained orange accent across human-readable reports and help. Reports remain
+in normal terminal scrollback; full-screen views exist only while a question is
+open. This is presentation around the same core operations, not a new worktree
+implementation.
+
+- Use arrow keys to select, Enter to confirm, and Esc to cancel. Confirmations
+  default to **No** and agent selection defaults to **Not now**. Selecting Yes
+  with `y` still requires Enter. PgUp/PgDn review long plans and paths.
+- **`--plain`** restores line-oriented prompts and undecorated reports. Use it
+  for screen readers, terminal recordings, or a minimal interface.
+- **`--no-animation`** (or nonempty `RIFTRI_NO_ANIMATION`) keeps the interface
+  but replaces the spinner with bounded phase lines. `--no-progress` suppresses
+  progress entirely.
+- A nonempty **`NO_COLOR`** disables colors without removing keyboard navigation.
+- Redirected stdout or stderr, `CI`, and `TERM=dumb` automatically use plain
+  output. On Unix, an unset/empty `TERM` does too. `--json`, `--json-errors`,
+  shell hook/deactivation code, completions, the Git shim, and child process
+  streams are never decorated.
+
+Questions require at least a 30-column × 16-row terminal; smaller windows ask
+you to resize or cancel and do not accept an invisible confirmation. Terminal
+mode and the cursor are restored before any storage mutation or agent launch,
+on errors, and on Ctrl-C. Unix termination signals received during a question
+also restore the terminal and return `128 + signal`. No UI can recover terminal
+state after an uncatchable kill or a terminal disappearing.
+The inherited signal dispositions are restored when each question closes, so
+termination during a later transaction still follows the existing recovery
+contract and agent launch keeps its normal signal forwarding.
+
 ## Progress reporting
 
-Long-running lifecycle commands — `worktree add`, `repair`, and `gc` — print
-one plain line on stderr each time the operation durably reaches a journal
+In pipes, plain mode, or reduced-motion mode, long-running lifecycle commands
+print one plain line on stderr each time the operation durably reaches a journal
 phase, starts waiting on a coordination lock another process holds, or
 resumes after acquiring it:
 
@@ -67,11 +100,12 @@ riftri: resumed: read-lock immutable base
 riftri: worktree-add: active
 ```
 
-Every line reflects a state the operation genuinely reached — there are no
-percentages, timers, or animations, and no terminal control sequences even
-when stderr is a terminal — so redirected logs stay clean and output is
-bounded by the number of real transitions. The phase names match the durable
-journal phases that also appear in `--json-errors` receipts.
+Every phase reflects a state the operation genuinely reached. In a supported
+terminal, one indeterminate spinner shows the latest real phase, including lock
+waits; it does not invent percentages or delay completion. It clears before the
+result, an error, or another question. Keyboard actions themselves do not animate.
+Redirected logs contain no terminal control sequences and remain bounded by real
+transitions. Phase names match those in journals and `--json-errors` receipts.
 
 Two suppression rules keep machine-readable streams intact:
 

@@ -147,6 +147,12 @@ stays reserved for that single receipt. Harnesses that parse stdout with
 output is never interleaved with it — or pass `--no-progress` explicitly;
 the [CLI reference](cli.md#progress-reporting) documents the line format.
 
+The Ratatui interface is human-facing only. JSON, shell code, completions,
+Git-shim calls, and `riftri exec` child streams are never decorated, even under
+a pseudo-terminal. Redirected output automatically stays plain. A harness that
+uses human-readable terminal output can explicitly pass `--plain`; interactive
+setup still requires a person and explicit confirmation.
+
 `RIFTRI_BYPASS=1` routes one intercepted Git command directly to real Git when
 an agent intentionally needs an unmanaged worktree form Riftri refuses.
 
