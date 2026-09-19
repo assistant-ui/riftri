@@ -40,6 +40,17 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   old behavior is at least surfaced by `status` as an unexplained
   immutable-base artifact diagnostic.
 
+- The Windows ReFS block cloner now verifies the length of the sub-cluster
+  tail copy that follows aligned extent cloning. The tail was written with
+  `std::io::copy` over a `take` adaptor and the returned byte count discarded,
+  so a source that yielded fewer bytes than the recorded file size — a base
+  file truncated concurrently, or a stale size — left the clone's tail
+  zero-filled (the destination had already been extended with `set_len`) while
+  the clone reported success. A short read now fails the clone with an
+  explicit error naming the source and destination files and the expected
+  versus copied byte counts, mirroring the read-length check the base
+  integrity hash already performs.
+
 - Linux OverlayFS recovery no longer resets the private work directory of a
   mount that may still be live in another mount namespace. When a crash left a
   mount without a journaled identity, the no-identity recovery branch ran the

@@ -250,9 +250,13 @@ fn clone_file(source: &Path, destination: &Path, cluster_size: u64) -> Result<()
             .seek(SeekFrom::Start(aligned_length))
             .and_then(|_| destination_file.seek(SeekFrom::Start(aligned_length)))
             .and_then(|_| {
-                std::io::copy(
-                    &mut Read::by_ref(&mut source_file).take(length - aligned_length),
+                // The sub-cluster tail is a plain byte copy; verify its length
+                // so a source truncated behind the recorded size fails loudly
+                // instead of leaving a zero-filled tail that reports success.
+                crate::exact_copy::copy_exact(
+                    &mut source_file,
                     &mut destination_file,
+                    length - aligned_length,
                 )
             })
             .map_err(|source_error| StorageError::Clone {
