@@ -68,6 +68,9 @@ fn repair_emits_a_stable_json_report_for_an_empty_state_directory() {
     assert_eq!(report["scanned"], 0);
     assert_eq!(report["busy_adds"], 0);
     assert_eq!(report["recovered_adds"], 0);
+    assert_eq!(report["retired_adds"], 0);
+    assert_eq!(report["relocated_worktrees"], serde_json::json!([]));
+    assert_eq!(report["reaped_artifacts"], serde_json::json!([]));
     assert_eq!(report["errors"], serde_json::json!([]));
 }
 
@@ -91,6 +94,7 @@ fn gc_plan_emits_a_stable_json_report_for_an_empty_state_directory() {
     assert_eq!(report["candidates"], serde_json::json!([]));
     assert_eq!(report["collected"], serde_json::json!([]));
     assert_eq!(report["skipped_in_use"], serde_json::json!([]));
+    assert_eq!(report["skipped_protected"], serde_json::json!([]));
     assert_eq!(report["removed_logical_bytes"], 0);
     assert_eq!(report["removed_allocated_bytes"], 0);
 }

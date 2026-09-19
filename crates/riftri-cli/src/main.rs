@@ -1245,6 +1245,22 @@ fn print_shell_status(repository: &Path) -> Result<()> {
     Ok(())
 }
 
+fn relocated_worktrees_json(report: &riftri_core::RecoveryReport) -> Vec<serde_json::Value> {
+    report
+        .relocations
+        .iter()
+        .map(|relocation| {
+            serde_json::json!({
+                "operation_id": relocation.operation_id,
+                "journal_destination": relocation.journal_destination.display().to_string(),
+                "journal_destination_native_hex": native_path_hex(&relocation.journal_destination),
+                "registered_path": relocation.registered_path.display().to_string(),
+                "registered_path_native_hex": native_path_hex(&relocation.registered_path),
+            })
+        })
+        .collect()
+}
+
 fn print_recovery_report(
     state_directory: &Path,
     report: &riftri_core::RecoveryReport,
@@ -1271,6 +1287,18 @@ fn print_recovery_report(
             "recovered_prunes": report.recovered_prunes,
             "completed_collections": report.completed_collections,
             "recovered_collections": report.recovered_collections,
+            "retired_adds": report.retired_adds,
+            "relocated_worktrees": relocated_worktrees_json(report),
+            "reaped_artifacts": report
+                .reaped_artifacts
+                .iter()
+                .map(|path| {
+                    serde_json::json!({
+                        "path": path.display().to_string(),
+                        "path_native_hex": native_path_hex(path),
+                    })
+                })
+                .collect::<Vec<_>>(),
             "errors": report.errors,
         });
         println!(
@@ -1303,6 +1331,25 @@ fn print_recovery_report(
     println!("Recovered prunes: {}", report.recovered_prunes);
     println!("Completed collections: {}", report.completed_collections);
     println!("Recovered collections: {}", report.recovered_collections);
+    println!("Retired add operations: {}", report.retired_adds);
+    println!(
+        "Reaped interrupted journal writes: {}",
+        report.reaped_artifacts.len()
+    );
+    for path in &report.reaped_artifacts {
+        println!("- {}", path.display());
+    }
+    if !report.relocations.is_empty() {
+        println!("Relocated worktrees Riftri no longer tracks:");
+        for relocation in &report.relocations {
+            println!(
+                "- operation {}: journaled {} is now registered by Git at {}; Riftri did not adopt the new path",
+                relocation.operation_id,
+                relocation.journal_destination.display(),
+                relocation.registered_path.display()
+            );
+        }
+    }
     if !report.errors.is_empty() {
         println!("Operations needing attention:");
         for error in &report.errors {
@@ -2022,6 +2069,18 @@ fn print_garbage_collection_report(
             "candidates": candidates,
             "collected": collected,
             "skipped_in_use": skipped_in_use,
+            "skipped_protected": report
+                .skipped_protected
+                .iter()
+                .map(|protection| {
+                    serde_json::json!({
+                        "base_path": protection.base_path.display().to_string(),
+                        "base_path_native_hex": native_path_hex(&protection.base_path),
+                        "operation_id": protection.operation_id,
+                        "reason": protection.reason,
+                    })
+                })
+                .collect::<Vec<_>>(),
             "resumed_collections": report.resumed_collections,
             "removed_logical_bytes": report.removed_logical_bytes,
             "removed_allocated_bytes": report.removed_allocated_bytes,
@@ -2058,6 +2117,18 @@ fn print_garbage_collection_report(
         "Skipped because now in use: {}",
         report.skipped_in_use.len()
     );
+    println!(
+        "Skipped because a journaled operation still claims them: {}",
+        report.skipped_protected.len()
+    );
+    for protection in &report.skipped_protected {
+        println!(
+            "- {}: {} (operation {})",
+            protection.base_path.display(),
+            protection.reason,
+            protection.operation_id
+        );
+    }
     println!(
         "Removed logical: {}",
         display_byte_count(report.removed_logical_bytes)
