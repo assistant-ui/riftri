@@ -17,6 +17,8 @@ use std::process::Stdio;
 use serde::Serialize;
 use thiserror::Error;
 
+pub mod termination;
+
 /// Absolute real-Git path supplied to a process-scoped Riftri shim.
 pub const REAL_GIT_ENV: &str = "RIFTRI_REAL_GIT";
 /// Marker proving that `REAL_GIT_ENV` belongs to a Riftri process scope.
@@ -217,14 +219,30 @@ impl Git {
 
     /// Run the real Git executable with inherited process I/O and return its
     /// status without interpreting a non-zero Git exit as a Riftri error.
+    ///
+    /// The caller is the Riftri Git shim, so the real Git started here is a
+    /// grandchild of whatever sent a termination signal at the shim. Waiting
+    /// under [`termination::run_forwarding_terminations`] is what keeps that
+    /// signal travelling: without it the shim would die instantly and leave a
+    /// long-running Git — a `clone` or `fetch` still writing to the working
+    /// tree — reparented to init with nothing left to stop it.
     pub fn passthrough(&self, arguments: &[OsString]) -> Result<ExitStatus, GitError> {
-        Command::new(&self.command)
-            .args(arguments)
-            .status()
-            .map_err(|source| GitError::Start {
+        let mut command = Command::new(&self.command);
+        command.args(arguments);
+        termination::run_forwarding_terminations(&mut command).map_err(|error| match error {
+            termination::TerminationError::Wait(source) => GitError::Wait {
                 command: self.command.clone(),
                 source,
-            })
+            },
+            termination::TerminationError::Spawn(source) => GitError::Start {
+                command: self.command.clone(),
+                source,
+            },
+            error @ termination::TerminationError::Disposition { .. } => GitError::Start {
+                command: self.command.clone(),
+                source: std::io::Error::other(error.to_string()),
+            },
+        })
     }
 
     /// Inspect a normal, linked, unborn, detached, or bare repository.

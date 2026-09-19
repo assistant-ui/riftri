@@ -34,6 +34,20 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - `riftri status` and `riftri gc` name the state directory they are reporting
   on in their `riftri repair` and `riftri gc --apply` hints, and `riftri
   doctor` and `riftri setup` share one quoting helper with these paths.
+- `riftri exec` no longer strips a scoped command of the signal dispositions it
+  should have inherited. The command now starts from the disposition Riftri
+  itself inherited for every signal Riftri touches, not just the ones Riftri
+  ignores, so `nohup riftri exec -- <command>` survives a hangup exactly like
+  bare `nohup <command>`, and `riftri exec` started asynchronously by a shell
+  without job control keeps the ignored SIGINT and SIGQUIT that POSIX requires
+  for a background job. Commands launched from an ordinary foreground shell are
+  unaffected and still see Ctrl-C.
+- Terminating `riftri exec -- git …` no longer orphans the real Git. The scoped
+  `git` is Riftri's own shim, which previously died instantly on a forwarded
+  SIGTERM or SIGHUP and left a `clone` or `fetch` running and still writing.
+  The shim now applies the same termination contract to its delegation, so the
+  signal reaches the real Git process, and it still propagates Git's exit
+  status under the `128 + signal` rule.
 - Intercepted `git worktree prune` no longer refuses ordinary invocations in an
   enabled repository that holds managed Riftri state. `--no-optional-locks`,
   which VS Code and most IDE Git integrations pass unconditionally, now reaches

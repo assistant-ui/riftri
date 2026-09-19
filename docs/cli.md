@@ -188,6 +188,29 @@ orphans the command. On Windows, the console already delivers Ctrl-C and
 Ctrl-Break events to the command, and a hard `TerminateProcess` cannot be
 intercepted, so no forwarding layer exists.
 
+The forwarding and ignoring above describe what `riftri exec` does *while it
+waits*; they never change what the command itself starts with. On Unix, every
+signal whose disposition `riftri exec` replaces — SIGTERM, SIGHUP, and SIGINT,
+plus SIGQUIT in interactive mode — is reset in the command before it execs to
+the disposition `riftri exec` itself inherited: `SIG_IGN` stays `SIG_IGN`, and
+anything else becomes `SIG_DFL`, because a caught handler cannot survive an
+exec while an ignore can. So `nohup riftri exec -- <command>` leaves the
+command as immune to a hangup as bare `nohup <command>` would, and
+`riftri exec` started asynchronously by a shell without job control passes on
+the ignored SIGINT and SIGQUIT that POSIX requires for a background job. A
+command launched from an ordinary foreground shell is unaffected: nothing was
+ignored there, so it starts at `SIG_DFL` and Ctrl-C reaches it normally.
+
+Forwarding also survives the Git shim. When the scoped command runs `git`, the
+`git` it resolves is Riftri's own shim, which delegates to the real Git; the
+shim applies this same termination contract to that delegation. A SIGTERM or
+SIGHUP forwarded to the shim is therefore forwarded on to the real Git process
+instead of killing the shim and leaving a `clone` or `fetch` running, orphaned
+and still writing. The shim waits for the real Git, restores its own signal
+dispositions, and exits with Git's status under the same `128 + signal` rule,
+so a terminated `riftri exec -- git …` still reports 143 for SIGTERM and 130
+for a fatal SIGINT.
+
 ### `riftri shell <SUBCOMMAND>`
 
 Configure shell-scoped interception for normal Git commands.
