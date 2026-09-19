@@ -27,7 +27,20 @@ fn json_errors_emit_one_parseable_lifecycle_receipt_on_stderr() {
     assert_eq!(receipt["category"], "operational");
     assert_eq!(receipt["cleanup"], "unknown");
     assert_eq!(receipt["recovery"], "inspect");
-    assert_eq!(receipt["nextCommand"], "riftri status");
+    // The suggestion inspects the repository this command selected, not
+    // whatever the caller's working directory would resolve to.
+    assert_eq!(
+        receipt["nextCommand"],
+        format!(
+            "riftri status --repository {}",
+            riftri_core::shell_quoted_path(outside_repository.path())
+                .expect("the fixture path is representable")
+        )
+    );
+    assert_eq!(
+        receipt["repository"],
+        outside_repository.path().display().to_string()
+    );
 }
 
 #[test]
@@ -215,15 +228,156 @@ fn pending_removal_receipts_require_repair_with_the_state_directory() {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn pending_prune_journal_blocks_prune_with_a_recovery_receipt() {
-    use std::os::unix::ffi::OsStrExt;
-
     let fixture = support::writable_tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");
     let state = fixture.path().join("state");
     init_repository_with_commit(&repository);
+    write_pending_prune_journal(&repository, &state);
 
-    // A durable prune journal frozen at intent-recorded, exactly as an
-    // interrupted prune would leave it. No copy-on-write support is needed.
+    let (receipt, exit_code) = riftri_json_error(
+        &repository,
+        &["worktree", "prune", "--state-dir", state.to_str().unwrap()],
+    );
+    assert_eq!(exit_code, Some(1));
+    assert_eq!(receipt["operation"], "worktree-prune");
+    assert_pending_recovery_receipt(&receipt, &state);
+}
+
+/// The regression that matters: take the `nextCommand` a receipt advertises,
+/// run it through a real shell from an unrelated working directory, and prove
+/// it reaches the pending journal.
+///
+/// A repository and a state directory under paths containing a space and a
+/// quote are exactly what an unquoted, `Path::display`-rendered suggestion
+/// breaks: the shell splits the path, repair inspects a directory that does
+/// not exist, and a missing directory used to report a confident all-clear.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn the_suggested_command_recovers_state_under_paths_with_spaces_and_quotes() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let awkward = fixture.path().join("My Projects and 'quotes'");
+    let repository = awkward.join("app");
+    let state = awkward.join("state dir");
+    std::fs::create_dir(&awkward).expect("create awkward parent directory");
+    init_repository_with_commit(&repository);
+    write_pending_prune_journal(&repository, &state);
+
+    let (receipt, exit_code) = riftri_json_error(
+        &repository,
+        &["worktree", "prune", "--state-dir", state.to_str().unwrap()],
+    );
+    assert_eq!(exit_code, Some(1));
+    assert_pending_recovery_receipt(&receipt, &state);
+
+    // Run the advertised command verbatim, only substituting the binary under
+    // test for `riftri`, and from the fixture root rather than the repository
+    // so nothing but the command itself can select the right state.
+    let next_command = receipt["nextCommand"].as_str().expect("next command");
+    let program = next_command
+        .strip_prefix("riftri ")
+        .expect("nextCommand invokes riftri");
+    let quoted_binary =
+        riftri_core::shell_quoted_path(std::path::Path::new(env!("CARGO_BIN_EXE_riftri")))
+            .expect("the test binary path is representable");
+    let repair = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{quoted_binary} {program}"))
+        .current_dir(fixture.path())
+        .output()
+        .expect("run the advertised recovery command");
+
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+    assert!(
+        repair.status.success(),
+        "advertised command failed: {}\n{stdout}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(
+        stdout.contains(&format!(
+            "State: {}",
+            receipt["stateDirectory"].as_str().expect("state directory")
+        )),
+        "repair inspected a different state directory: {stdout}"
+    );
+    assert!(
+        stdout.contains("Scanned operations: 1"),
+        "repair found no journal, which is the false all-clear: {stdout}"
+    );
+    assert!(
+        stdout.contains("Recovered prunes: 1"),
+        "repair did not resume the pending prune: {stdout}"
+    );
+    let journal: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(state.join("prunes/prune-1.json")).expect("read prune journal"),
+    )
+    .expect("parse prune journal");
+    assert_eq!(journal["phase"], "complete");
+}
+
+/// A `--state-dir` the caller named explicitly must exist. Answering "nothing
+/// needs attention" for a directory Riftri never found is how a mistyped or
+/// shell-split path hides a real pending journal.
+#[test]
+fn an_explicitly_named_missing_state_directory_never_reports_an_all_clear() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let missing = fixture.path().join("absent state");
+
+    for subcommand in [
+        vec!["repair"],
+        vec!["status"],
+        vec!["gc"],
+        vec!["worktree", "list"],
+    ] {
+        let mut arguments = subcommand.clone();
+        arguments.push("--state-dir");
+        arguments.push(missing.to_str().expect("utf-8 path"));
+        let (receipt, exit_code) = riftri_json_error(fixture.path(), &arguments);
+
+        assert_eq!(exit_code, Some(3), "{subcommand:?} must refuse");
+        assert_eq!(receipt["code"], "invalid-request");
+        let message = receipt["message"].as_str().expect("message");
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(message.contains("not an all-clear"), "{message}");
+        assert_eq!(
+            receipt["stateDirectory"],
+            missing.display().to_string(),
+            "the refused directory stays machine-readable"
+        );
+    }
+}
+
+/// The legitimate case must keep working: a repository that has simply never
+/// created Riftri state reports an all-clear and exits zero.
+#[test]
+fn a_repository_without_any_riftri_state_still_reports_an_all_clear() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    std::fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+
+    let repair = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .arg("repair")
+        .current_dir(&repository)
+        .output()
+        .expect("run riftri repair");
+
+    assert!(
+        repair.status.success(),
+        "repair failed: {}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&repair.stdout)
+            .contains("No journaled operation needs manual attention")
+    );
+}
+
+/// A durable prune journal frozen at intent-recorded, exactly as an
+/// interrupted prune would leave it. No copy-on-write support is needed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn write_pending_prune_journal(repository: &std::path::Path, state: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt;
+
     let prunes = state.join("prunes");
     std::fs::create_dir_all(&prunes).expect("create prune journal directory");
     let journal = serde_json::json!({
@@ -231,7 +385,7 @@ fn pending_prune_journal_blocks_prune_with_a_recovery_receipt() {
         "operation_id": "prune-1",
         "repository": {
             "encoding": "unix-bytes",
-            "units": std::fs::canonicalize(&repository)
+            "units": std::fs::canonicalize(repository)
                 .expect("canonical repository")
                 .as_os_str()
                 .as_bytes(),
@@ -243,19 +397,11 @@ fn pending_prune_journal_blocks_prune_with_a_recovery_receipt() {
         serde_json::to_string_pretty(&journal).expect("encode prune journal"),
     )
     .expect("write prune journal");
-
-    let (receipt, exit_code) = riftri_json_error(
-        &repository,
-        &["worktree", "prune", "--state-dir", state.to_str().unwrap()],
-    );
-    assert_eq!(exit_code, Some(1));
-    assert_eq!(receipt["operation"], "worktree-prune");
-    assert_pending_recovery_receipt(&receipt, &state);
 }
 
-/// The receipt must direct the caller to repair, and its `nextCommand` must
-/// quote the exact command the human-readable message names, including the
-/// state directory that holds the pending journal.
+/// The receipt must direct the caller to repair, and its `nextCommand` must be
+/// the exact command the human-readable message names, with the state
+/// directory holding the pending journal quoted as one shell argument.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn assert_pending_recovery_receipt(receipt: &serde_json::Value, state: &std::path::Path) {
     assert_eq!(receipt["schemaVersion"], 1);
@@ -265,11 +411,16 @@ fn assert_pending_recovery_receipt(receipt: &serde_json::Value, state: &std::pat
     assert_eq!(receipt["cleanup"], "not-needed");
     assert_eq!(receipt["recovery"], "required");
     let next_command = receipt["nextCommand"].as_str().expect("next command");
-    let state_directory = next_command
-        .strip_prefix("riftri repair --state-dir ")
-        .expect("nextCommand names the repair command with a state directory");
+    // Automation never has to parse the shell string: the directory is a
+    // field. The command is that same directory, quoted.
+    let reported = receipt["stateDirectory"].as_str().expect("state directory");
     assert_eq!(
-        std::fs::canonicalize(state_directory).expect("receipt state directory exists"),
+        next_command,
+        riftri_core::repair_command(std::path::Path::new(reported))
+            .expect("the fixture path is representable")
+    );
+    assert_eq!(
+        std::fs::canonicalize(reported).expect("receipt state directory exists"),
         std::fs::canonicalize(state).expect("fixture state directory exists")
     );
     assert!(
