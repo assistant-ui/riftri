@@ -2362,7 +2362,13 @@ fn add_worktree_inner(
     // claims this path. Reclaim it, then refuse if anything still claims the
     // destination: a second active journal for one path wedges every later
     // `remove` and `repair` with "multiple active Riftri journals reference".
-    reconcile_active_add_journals(&git, &state_directory, Some(&destination))?;
+    //
+    // The reclaim itself is opportunistic — `riftri repair` is the
+    // authoritative reconciliation pass — so a concurrent operation racing
+    // this scan must never fail this add. The claim check that follows stays
+    // fail-closed on anything unreadable, which is what actually prevents a
+    // duplicate journal.
+    let _ = reconcile_active_add_journals(&git, &state_directory, Some(&destination));
     if let Some(claimant) = active_add_journals_for_destination(&state_directory, &destination)?
         .into_iter()
         .next()
@@ -5441,14 +5447,38 @@ fn active_add_journals_for_destination(
     state_directory: &Path,
     destination: &Path,
 ) -> Result<Vec<DecodedJournal>, WorktreeError> {
-    let adds = JournalStore::open(state_directory).load_all()?;
-    let removals = RemovalJournalStore::open(state_directory).load_all()?;
-    let completed = removals
-        .iter()
+    let load = JournalStore::open(state_directory).load_all_reconciling()?;
+    // Fail closed on anything this scan could not judge. A journal that
+    // stayed unreadable after retries is an active claim of unknown shape —
+    // it might name this destination — so refusing the add is the only answer
+    // that cannot create a duplicate claim. An invalid journal likewise
+    // refuses, exactly as the previous whole-inventory load did.
+    if let Some(blocked) = load.unreadable.first() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "another process is updating Riftri journal {}; retry this command ({})",
+            blocked.path.display(),
+            blocked.reason
+        )));
+    }
+    if let Some(issue) = load.issues.first() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "unsafe durable add journal {}: {}",
+            issue.path.display(),
+            issue.reason
+        )));
+    }
+    // An unreadable removal journal is treated as not completed: the add
+    // journal then still counts as claiming its destination, which can only
+    // refuse an add, never permit a duplicate.
+    let completed = RemovalJournalStore::open(state_directory)
+        .load_all_for_status()?
+        .journals
+        .into_iter()
         .filter(|removal| removal.phase == RemoveWorktreePhase::Complete)
-        .map(|removal| removal.source_add_operation_id.as_str())
+        .map(|removal| removal.source_add_operation_id)
         .collect::<HashSet<_>>();
-    Ok(adds
+    Ok(load
+        .journals
         .into_iter()
         .filter(|journal| {
             journal.phase == AddWorktreePhase::Active
@@ -5569,9 +5599,20 @@ fn reconcile_active_add_journals(
     only_destination: Option<&Path>,
 ) -> Result<(usize, Vec<RelocatedWorktree>, Vec<String>), WorktreeError> {
     let store = JournalStore::open(state_directory);
-    let journals = store.load_all()?;
+    // A journal another process is replacing right now, or one that is
+    // invalid, is skipped: this pass only ever acts on journals it can read
+    // and validate, and taking no action is always safe. `status` owns the
+    // reporting of invalid journals.
+    let journals = store.load_all_reconciling()?.journals;
     let claimed = claimed_destinations(&journals);
-    let removals = RemovalJournalStore::open(state_directory).load_all()?;
+    let removal_load = RemovalJournalStore::open(state_directory).load_all_for_status()?;
+    if !removal_load.issues.is_empty() {
+        // With any removal journal unreadable, no add journal's "already
+        // removed / removal pending" standing can be trusted. Do nothing this
+        // pass rather than risk retiring on stale knowledge.
+        return Ok((0, Vec::new(), Vec::new()));
+    }
+    let removals = removal_load.journals;
     let completed = removals
         .iter()
         .filter(|removal| removal.phase == RemoveWorktreePhase::Complete)
@@ -5605,6 +5646,11 @@ fn reconcile_active_add_journals(
         // Reload under the lock: the inventory may predate the owner's writes.
         let journal = match store.load_operation(&journal.operation_id) {
             Ok(journal) => journal,
+            Err(error) if crate::journal::journal_error_is_in_flight(&error) => {
+                // The owner replaced the journal between our inventory and
+                // this reload. In flight means untouched, not broken.
+                continue;
+            }
             Err(error) => {
                 errors.push(format!("operation {}: {error}", journal.operation_id));
                 continue;
@@ -5651,8 +5697,12 @@ fn superseding_add_journal(
     state_directory: &Path,
     journal: &DecodedJournal,
 ) -> Result<Option<DecodedJournal>, WorktreeError> {
+    // A journal that cannot be read right now cannot prove ownership, and an
+    // in-flight read must not surface as a repair error; both simply mean "no
+    // supersession found this pass", which retires nothing.
     let owner = JournalStore::open(state_directory)
-        .load_all()?
+        .load_all_reconciling()?
+        .journals
         .into_iter()
         .find(|candidate| {
             candidate.operation_id != journal.operation_id
