@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs::File, io};
 
 pub use riftri_git::SHIM_ACTIVE_ENV;
+use riftri_git::termination::TerminationError;
 use riftri_git::{Git, GitError};
 use serde::Serialize;
 use thiserror::Error;
@@ -419,257 +420,26 @@ fn execute_scoped_command_from(
 }
 
 /// Run the scoped command to completion while honoring the termination
-/// contract: termination signals delivered to Riftri are forwarded to the
-/// scoped command or left for the command to decide, Riftri keeps waiting so
-/// the temporary Git shim is removed, and the command's exit status is
-/// propagated unchanged.
-///
-/// Supervised invocations — no controlling terminal owned in the foreground —
-/// run the command in its own process group and forward signals to that whole
-/// group, stopping the command's descendants without touching unrelated
-/// processes. Interactive foreground invocations keep the command in Riftri's
-/// process group so terminal job control and keyboard signal delivery are
-/// unchanged; SIGTERM and SIGHUP are then forwarded to the command itself,
-/// while SIGINT and SIGQUIT are ignored by Riftri for the duration of the
-/// wait, exactly like a shell waiting on a foreground job: the terminal
-/// already delivers both to the whole foreground process group, so the
-/// command alone decides whether the interrupt is fatal, and a command that
-/// catches Ctrl-C keeps running under an intact wrapper whose shim cleanup
-/// and exit-status propagation still happen. All dispositions are restored
-/// after the command is reaped.
-#[cfg(unix)]
+/// contract implemented by [`riftri_git::termination`]: termination signals
+/// delivered to Riftri are forwarded to the scoped command or left for the
+/// command to decide, the command starts from the signal dispositions Riftri
+/// itself inherited, Riftri keeps waiting so the temporary Git shim is
+/// removed, and the command's exit status is propagated unchanged.
 fn wait_for_scoped_child(
     command: &mut Command,
     program: &OsStr,
 ) -> Result<ExitStatus, ActivationError> {
-    use std::os::unix::process::CommandExt;
-
-    let interactive = scoped_child_shares_foreground_terminal();
-    if !interactive {
-        command.process_group(0);
-    }
-    // SIGQUIT gets the same treatment as SIGINT in interactive mode because it
-    // is the other keyboard-generated termination signal (Ctrl-\) that the
-    // terminal delivers to the whole foreground process group: a command that
-    // catches or ignores it must not lose its wrapper either. In supervised
-    // mode SIGQUIT keeps its default disposition, unchanged from the original
-    // forwarding contract.
-    let (forwarded, ignored): (&[libc::c_int], &[libc::c_int]) = if interactive {
-        // The terminal already delivers keyboard-generated SIGINT and SIGQUIT
-        // to the whole foreground process group, which includes the command;
-        // forwarding either would deliver the same interrupt twice, and dying
-        // from either would orphan a command that chose to survive it.
-        (
-            &[libc::SIGTERM, libc::SIGHUP],
-            &[libc::SIGINT, libc::SIGQUIT],
-        )
-    } else {
-        (&[libc::SIGTERM, libc::SIGINT, libc::SIGHUP], &[])
-    };
-    let guard = scoped_child_signals::ForwardingGuard::install(forwarded, ignored)?;
-    // An ignored disposition — unlike a caught handler — survives exec, so
-    // without correction the command would inherit SIG_IGN and never see
-    // Ctrl-C at all. Restore the dispositions Riftri itself inherited in the
-    // child: SIG_IGN stays SIG_IGN, anything else becomes SIG_DFL (a caught
-    // handler cannot cross exec anyway).
-    let inherited = guard.inherited_dispositions(ignored);
-    if !inherited.is_empty() {
-        // SAFETY: the closure runs in the forked child before exec and calls
-        // only the async-signal-safe signal(2).
-        unsafe {
-            command.pre_exec(move || {
-                for &(signal, handler) in &inherited {
-                    if libc::signal(signal, handler) == libc::SIG_ERR {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
-        }
-    }
-    let mut child = command.spawn().map_err(|error| {
-        process_error(format!(
-            "start process-scoped command {}: {error}",
+    riftri_git::termination::run_forwarding_terminations(command).map_err(|error| match error {
+        TerminationError::Disposition { .. } => process_error(error.to_string()),
+        TerminationError::Spawn(source) => process_error(format!(
+            "start process-scoped command {}: {source}",
             Path::new(program).display()
-        ))
-    })?;
-    let child_pid = i32::try_from(child.id())
-        .map_err(|_| process_error("process-scoped command PID does not fit a signal target"))?;
-    guard.arm(if interactive { child_pid } else { -child_pid });
-    let status = child.wait();
-    guard.disarm();
-    status.map_err(|error| {
-        process_error(format!(
-            "wait for process-scoped command {}: {error}",
+        )),
+        TerminationError::Wait(source) => process_error(format!(
+            "wait for process-scoped command {}: {source}",
             Path::new(program).display()
-        ))
+        )),
     })
-}
-
-/// Windows has no POSIX signal forwarding to preserve here: the console
-/// already delivers Ctrl-C and Ctrl-Break events to every process attached to
-/// it, including the scoped command, and a hard `TerminateProcess` of Riftri
-/// cannot be intercepted, so no additional termination handling is possible.
-#[cfg(not(unix))]
-fn wait_for_scoped_child(
-    command: &mut Command,
-    program: &OsStr,
-) -> Result<ExitStatus, ActivationError> {
-    command.status().map_err(|error| {
-        process_error(format!(
-            "start process-scoped command {}: {error}",
-            Path::new(program).display()
-        ))
-    })
-}
-
-/// Report whether Riftri owns a controlling terminal in the foreground, which
-/// is when creating a new process group for the scoped command would steal
-/// terminal job-control semantics from the command.
-#[cfg(unix)]
-fn scoped_child_shares_foreground_terminal() -> bool {
-    // SAFETY: getpgrp, isatty, and tcgetpgrp only read process and descriptor
-    // state for the current process.
-    let process_group = unsafe { libc::getpgrp() };
-    [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO]
-        .into_iter()
-        .any(|descriptor| unsafe {
-            libc::isatty(descriptor) == 1 && libc::tcgetpgrp(descriptor) == process_group
-        })
-}
-
-#[cfg(unix)]
-mod scoped_child_signals {
-    use std::sync::atomic::{AtomicI32, Ordering};
-
-    use super::{ActivationError, process_error};
-
-    /// Signal-forwarding target: `0` before the scoped command exists, its PID
-    /// in shared-process-group (interactive) mode, or its negated
-    /// process-group ID in own-group (supervised) mode. Process-global, like
-    /// the signal dispositions it backs; `riftri exec` runs one scoped
-    /// command per process.
-    static FORWARD_TARGET: AtomicI32 = AtomicI32::new(0);
-    /// Most recent signal received before the scoped command's PID was known.
-    static PENDING_SIGNAL: AtomicI32 = AtomicI32::new(0);
-
-    extern "C" fn forward_signal(signal: libc::c_int) {
-        let target = FORWARD_TARGET.load(Ordering::SeqCst);
-        if target == 0 {
-            PENDING_SIGNAL.store(signal, Ordering::SeqCst);
-        } else {
-            // SAFETY: kill(2) is async-signal-safe, and the target names the
-            // scoped command or its dedicated process group.
-            unsafe {
-                libc::kill(target, signal);
-            }
-        }
-    }
-
-    /// Installs forwarding handlers for the `forwarded` signals, ignores the
-    /// `ignored` signals, and restores the previous dispositions when
-    /// dropped.
-    pub(super) struct ForwardingGuard {
-        previous: Vec<(libc::c_int, libc::sigaction)>,
-    }
-
-    impl ForwardingGuard {
-        pub(super) fn install(
-            forwarded: &[libc::c_int],
-            ignored: &[libc::c_int],
-        ) -> Result<Self, ActivationError> {
-            let mut guard = ForwardingGuard {
-                previous: Vec::with_capacity(forwarded.len() + ignored.len()),
-            };
-            for &signal in forwarded {
-                guard.replace_disposition(signal, forward_signal as *const () as usize)?;
-            }
-            for &signal in ignored {
-                guard.replace_disposition(signal, libc::SIG_IGN)?;
-            }
-            Ok(guard)
-        }
-
-        fn replace_disposition(
-            &mut self,
-            signal: libc::c_int,
-            handler: libc::sighandler_t,
-        ) -> Result<(), ActivationError> {
-            // SAFETY: the action structures are zero-initialized before every
-            // field sigaction reads is assigned, and the handler is either
-            // SIG_IGN or an async-signal-safe function.
-            unsafe {
-                let mut action: libc::sigaction = std::mem::zeroed();
-                action.sa_sigaction = handler;
-                action.sa_flags = libc::SA_RESTART;
-                libc::sigemptyset(&mut action.sa_mask);
-                let mut previous: libc::sigaction = std::mem::zeroed();
-                if libc::sigaction(signal, &action, &mut previous) != 0 {
-                    return Err(process_error(format!(
-                        "install termination handling for signal {signal}: {}",
-                        std::io::Error::last_os_error()
-                    )));
-                }
-                self.previous.push((signal, previous));
-            }
-            Ok(())
-        }
-
-        /// For each requested signal, the disposition a child spawned now
-        /// should start from: the disposition Riftri itself inherited if that
-        /// was SIG_IGN, and SIG_DFL otherwise, because a caught handler never
-        /// survives exec while an ignore does.
-        pub(super) fn inherited_dispositions(
-            &self,
-            signals: &[libc::c_int],
-        ) -> Vec<(libc::c_int, libc::sighandler_t)> {
-            self.previous
-                .iter()
-                .filter(|(signal, _)| signals.contains(signal))
-                .map(|&(signal, previous)| {
-                    let handler = if previous.sa_sigaction == libc::SIG_IGN {
-                        libc::SIG_IGN
-                    } else {
-                        libc::SIG_DFL
-                    };
-                    (signal, handler)
-                })
-                .collect()
-        }
-
-        /// Publish the forwarding target and deliver any signal that arrived
-        /// before the scoped command's PID was known.
-        pub(super) fn arm(&self, target: i32) {
-            FORWARD_TARGET.store(target, Ordering::SeqCst);
-            let pending = PENDING_SIGNAL.swap(0, Ordering::SeqCst);
-            if pending != 0 {
-                // SAFETY: the target names the just-spawned scoped command or
-                // its dedicated process group.
-                unsafe {
-                    libc::kill(target, pending);
-                }
-            }
-        }
-
-        /// Stop forwarding immediately once the scoped command is reaped so a
-        /// late signal cannot reach a recycled PID.
-        pub(super) fn disarm(&self) {
-            FORWARD_TARGET.store(0, Ordering::SeqCst);
-        }
-    }
-
-    impl Drop for ForwardingGuard {
-        fn drop(&mut self) {
-            FORWARD_TARGET.store(0, Ordering::SeqCst);
-            PENDING_SIGNAL.store(0, Ordering::SeqCst);
-            for (signal, previous) in self.previous.drain(..) {
-                // SAFETY: `previous` was returned by sigaction for `signal`.
-                unsafe {
-                    libc::sigaction(signal, &previous, std::ptr::null_mut());
-                }
-            }
-        }
-    }
 }
 
 fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError> {
@@ -1755,7 +1525,9 @@ pub fn stripped_shim_scope_detected() -> bool {
 /// Delegate a `git`-named invocation to the real Git executable although the
 /// shim environment is missing or inconsistent. A broken shim must never
 /// answer as Riftri or intercept anything, so this performs a plain
-/// passthrough with inherited standard streams and exit status.
+/// passthrough with inherited standard streams and exit status — and, like
+/// every other shim delegation, under the termination contract, so a signal
+/// aimed at the shim cannot orphan the real Git it started.
 pub fn delegate_stripped_shim_invocation(arguments: &[OsString]) -> Result<i32, ActivationError> {
     let real_git = resolve_real_git_for_stripped_shim().ok_or_else(|| {
         process_error(
@@ -1764,10 +1536,10 @@ pub fn delegate_stripped_shim_invocation(arguments: &[OsString]) -> Result<i32, 
              the `riftri exec` session, then retry",
         )
     })?;
-    let status = Command::new(&real_git)
-        .args(arguments)
-        .status()
-        .map_err(|error| {
+    let mut command = Command::new(&real_git);
+    command.args(arguments);
+    let status =
+        riftri_git::termination::run_forwarding_terminations(&mut command).map_err(|error| {
             process_error(format!(
                 "delegate to the real Git executable {}: {error}",
                 real_git.display()
