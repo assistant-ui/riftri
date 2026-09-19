@@ -2435,8 +2435,7 @@ fn compact_worktree_inner(
         &compatibility.lfs_objects,
         &[],
     )?;
-    NativeCowCloner::clone_tree(&base_path, &replacement)?;
-    NativeCowCloner::make_tree_owner_writable(&replacement)?;
+    NativeCowCloner::clone_tree_owner_writable(&base_path, &replacement)?;
     copy_git_pointer(&destination, &replacement)?;
     verify_snapshot(&replacement, &journal.expected_snapshot)?;
     sync_parent(&replacement)?;
@@ -2830,8 +2829,7 @@ fn perform_add(
             "OverlayFS worktree execution requires Linux".to_owned(),
         ));
     } else {
-        NativeCowCloner::clone_tree(base_path, scratch)?;
-        NativeCowCloner::make_tree_owner_writable(scratch)?;
+        NativeCowCloner::clone_tree_owner_writable(base_path, scratch)?;
         advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
 
         let git_pointer = destination.join(".git");

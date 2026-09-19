@@ -381,6 +381,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- APFS worktree creation and compaction restore writable clone permissions
+  during the existing clone traversal, avoiding a second directory scan without
+  skipping base-integrity, index, clean-state, or recovery checks. Linux and
+  ReFS behavior is unchanged.
+
 - The standalone `Website deployment check` workflow is removed. It duplicated
   the post-deploy verification that the `Website deploy` workflow already runs
   against https://riftri.dev, and its `deployment_status` trigger produced a
