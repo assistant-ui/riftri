@@ -83,13 +83,13 @@ mod terminal {
         command
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_SYSTEM", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_COUNT", "0");
+            .env("GIT_CONFIG_NOSYSTEM", "1");
         for name in [
             "GIT_DIR",
             "GIT_WORK_TREE",
             "GIT_COMMON_DIR",
             "GIT_INDEX_FILE",
+            "GIT_CONFIG_COUNT",
             "GIT_CONFIG_PARAMETERS",
             "RIFTRI_BYPASS",
             "RIFTRI_REAL_GIT",
@@ -106,6 +106,38 @@ mod terminal {
             .args(args)
             .output()
             .unwrap()
+    }
+
+    fn git_with_input(repository: &Path, args: &[&str], input: &[u8]) -> String {
+        let mut child = command("git")
+            .current_dir(repository)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn destination_is_case_sensitive(parent: &Path) -> bool {
+        let probe = tempfile::Builder::new()
+            .prefix(".riftri-test-case-")
+            .tempdir_in(parent)
+            .expect("create case-sensitivity probe");
+        fs::write(probe.path().join("Case"), b"upper").expect("create first case probe");
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(probe.path().join("case"))
+            .is_ok()
     }
 
     impl Fixture {
@@ -178,6 +210,21 @@ mod terminal {
                 .status
                 .success()
             );
+        }
+
+        /// The diagnostic the explicit `riftri worktree add` prints for the
+        /// same destination. Setup's plan step must refuse with identical
+        /// wording, so tests derive the expected text from this output.
+        fn explicit_add_diagnostic(&self) -> String {
+            let output = command(env!("CARGO_BIN_EXE_riftri"))
+                .args(["worktree", "add"])
+                .arg(&self.view)
+                .args(["-b", "task/explicit", "--repository"])
+                .arg(&self.repository)
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            String::from_utf8_lossy(&output.stderr).into_owned()
         }
 
         fn run(&self, input: &[u8]) -> (ExitStatus, String) {
@@ -301,15 +348,20 @@ mod terminal {
     }
 
     #[test]
-    fn occupied_destination_is_preserved_without_launching_an_agent() {
+    fn occupied_destination_is_refused_before_the_confirmation_prompt() {
         let fixture = Fixture::new();
         if !fixture.supported() {
             return;
         }
         fs::create_dir(&fixture.view).unwrap();
         fs::write(fixture.view.join("keep.txt"), "user data\n").unwrap();
+        let diagnostic = format!("destination already exists: {}", fixture.view.display());
+        let explicit = fixture.explicit_add_diagnostic();
+        assert!(explicit.contains(&diagnostic), "{explicit}");
         let (status, output) = fixture.run(b"y\n");
         assert!(!status.success(), "{output}");
+        assert!(output.contains(&diagnostic), "{output}");
+        assert!(!output.contains("Create this worktree?"), "{output}");
         assert!(!output.contains("Which coding agent"), "{output}");
         assert_eq!(
             fs::read(fixture.view.join("keep.txt")).unwrap(),
@@ -324,6 +376,95 @@ mod terminal {
             .status
             .success()
         );
+    }
+
+    #[test]
+    fn symlinked_destination_is_refused_before_the_confirmation_prompt() {
+        let fixture = Fixture::new();
+        if !fixture.supported() {
+            return;
+        }
+        std::os::unix::fs::symlink(&fixture.repository, &fixture.view).unwrap();
+        let diagnostic = format!("destination already exists: {}", fixture.view.display());
+        let explicit = fixture.explicit_add_diagnostic();
+        assert!(explicit.contains(&diagnostic), "{explicit}");
+        let (status, output) = fixture.run(b"y\n");
+        assert!(!status.success(), "{output}");
+        assert!(output.contains(&diagnostic), "{output}");
+        assert!(!output.contains("Create this worktree?"), "{output}");
+        assert!(!output.contains("Which coding agent"), "{output}");
+        // The symlink and its target are untouched.
+        assert_eq!(fs::read_link(&fixture.view).unwrap(), fixture.repository);
+        assert!(fixture.repository.join("tracked.txt").is_file());
+        assert!(
+            !git(
+                &fixture.repository,
+                &["show-ref", "--verify", "refs/heads/task/setup"]
+            )
+            .status
+            .success()
+        );
+    }
+
+    #[test]
+    fn case_colliding_checkout_paths_are_refused_before_the_confirmation_prompt() {
+        let fixture = Fixture::new();
+        if !fixture.supported() {
+            return;
+        }
+        if destination_is_case_sensitive(fixture.directory.path()) {
+            return;
+        }
+        // Point HEAD at a tree whose paths collide on a case-insensitive
+        // destination filesystem; the repository working tree is never asked
+        // to materialize both, so plumbing builds the commit directly.
+        let upper = git_with_input(
+            &fixture.repository,
+            &["hash-object", "-w", "--stdin"],
+            b"upper\n",
+        );
+        let lower = git_with_input(
+            &fixture.repository,
+            &["hash-object", "-w", "--stdin"],
+            b"lower\n",
+        );
+        let tree_input = format!(
+            "100644 blob {}\tCase.txt\0100644 blob {}\tcase.txt\0",
+            upper.trim(),
+            lower.trim()
+        );
+        let tree = git_with_input(
+            &fixture.repository,
+            &["mktree", "-z"],
+            tree_input.as_bytes(),
+        );
+        let commit = git(
+            &fixture.repository,
+            &["commit-tree", tree.trim(), "-m", "case-collision fixture"],
+        );
+        assert!(commit.status.success());
+        let commit = String::from_utf8(commit.stdout).unwrap();
+        assert!(
+            git(&fixture.repository, &["update-ref", "HEAD", commit.trim()])
+                .status
+                .success()
+        );
+        let explicit = fixture.explicit_add_diagnostic();
+        assert!(
+            explicit.contains("cannot coexist on the destination filesystem"),
+            "{explicit}"
+        );
+        let (status, output) = fixture.run(b"y\n");
+        assert!(!status.success(), "{output}");
+        assert!(output.contains("Git tree path"), "{output}");
+        assert!(
+            output.contains("cannot coexist on the destination filesystem"),
+            "{output}"
+        );
+        assert!(!output.contains("Create this worktree?"), "{output}");
+        assert!(!output.contains("Which coding agent"), "{output}");
+        assert!(!fixture.view.exists());
+        fixture.no_mutation();
     }
 
     #[test]

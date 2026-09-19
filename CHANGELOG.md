@@ -29,6 +29,31 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   destination. None of these additive, null-consistent changes bump any
   `schema_version`.
 
+- Lifecycle commands now refuse the remaining inherited Git environment
+  overrides that could redirect their internal Git operations:
+  `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES`, plus
+  environment-based configuration injection via `GIT_CONFIG_COUNT` (the
+  `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` family) and
+  `GIT_CONFIG_PARAMETERS`, exactly as `GIT_DIR`, `GIT_WORK_TREE`,
+  `GIT_COMMON_DIR`, and `GIT_INDEX_FILE` were already refused before any
+  mutation. Ordinary Git passthrough through the shim and `riftri exec` is
+  unchanged and still delegates these variables to the user's own Git
+  commands. Separately, the isolated base materialization no longer re-injects
+  a caller-set `GIT_ALTERNATE_OBJECT_DIRECTORIES` into its private checkout
+  environment; its comment always said every inherited override is removed,
+  and now the behavior matches, so a foreign object store can no longer
+  satisfy a materialization with objects absent from the source repository.
+- `riftri setup` now validates the destination before printing the plan and
+  asking for confirmation. The plan step runs the same destination pre-checks
+  the explicit `riftri worktree add` performs — an existing destination
+  (including a symlink to an existing target) and checkout paths that cannot
+  coexist on the destination filesystem (case or Unicode-normalization
+  collisions) — by calling the add path's own validation, so the diagnostics
+  and the policy exit code are identical to the explicit command's.
+  Previously setup confidently printed the full plan and asked "Create this
+  worktree?" for a destination the creation step was always going to refuse;
+  the refusal itself was already safe, but the guided flow confirmed a plan
+  it had enough information to reject.
 - Termination forwarding now enforces the single-waiter invariant its design
   relies on, and no longer loses a termination signal delivered during its
   own teardown. The forwarding state behind `riftri exec` and the Git shim is

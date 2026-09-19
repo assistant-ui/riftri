@@ -52,7 +52,7 @@ pub use worktree::{
     WorktreeMode, add_worktree, compact_worktree, force_remove_worktree,
     forget_missing_state_directory, garbage_collect, is_managed_worktree, move_worktree,
     prune_worktrees, recover_incomplete_operations, recovery_pending_error, remove_worktree,
-    storage_accounting, worktree_inventory_across_states,
+    storage_accounting, validate_new_worktree_destination, worktree_inventory_across_states,
 };
 
 /// A diagnostic check and its optional failure explanation.
