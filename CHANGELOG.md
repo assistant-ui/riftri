@@ -7,6 +7,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- The npm launcher now mirrors the termination contract of native `riftri
+  exec`. A native process killed by a signal Node ignores or reserves
+  (SIGUSR1, SIGPIPE, ...) previously made the launcher exit 0 — a killed run
+  reported success — because the death was re-raised through `process.kill`,
+  which is a silent no-op for those signals; the launcher now computes
+  `128 + signal` numerically for every signal death. While the native process
+  runs, the launcher also stays alive through Ctrl-C (SIGINT) and Ctrl-\
+  (SIGQUIT), which the terminal delivers to the whole foreground process
+  group, so a command that catches the interrupt keeps its wrapper instead of
+  outliving a dead launcher on the terminal; PID-directed SIGTERM and SIGHUP
+  are forwarded to the native process, and the child's exit code propagates
+  unchanged.
 - Intercepted `git worktree prune -v` no longer bypasses the journaled prune.
   Git's `-v` is a verbose prune, not a report, so delegating it let ordinary
   Git remove managed lifecycle metadata outside the Riftri journal; verbose
