@@ -1318,12 +1318,17 @@ fn print_recovery_report(
 }
 
 fn invoked_as_git_shim() -> bool {
-    env::var_os(riftri_core::SHIM_ACTIVE_ENV).is_some()
-        && env::args_os()
-            .next()
-            .as_deref()
-            .and_then(|argument| Path::new(argument).file_name())
-            .is_some_and(|name| name == OsStr::new("git") || name == OsStr::new("git.exe"))
+    let named_git = env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|argument| Path::new(argument).file_name())
+        .is_some_and(|name| name == OsStr::new("git") || name == OsStr::new("git.exe"));
+    // A `git`-named invocation without the activation marker is still a shim
+    // when a Riftri shim scope is otherwise recognizable: answering as the
+    // Riftri CLI would shadow normal Git behavior, so fail toward delegation.
+    named_git
+        && (env::var_os(riftri_core::SHIM_ACTIVE_ENV).is_some()
+            || riftri_core::stripped_shim_scope_detected())
 }
 
 #[cfg(unix)]
@@ -1340,10 +1345,13 @@ fn detected_posix_shell() -> &'static str {
 }
 
 fn run_git_shim() -> Result<i32> {
-    env::var_os(riftri_core::REAL_GIT_ENV)
-        .filter(|path| !path.is_empty())
-        .context("Riftri Git shim is missing the real Git executable path")?;
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
+    if !riftri_core::shim_environment_complete() {
+        // Fail safe: a shim whose environment was stripped — for example by
+        // shell deactivation evaluated inside a `riftri exec` session — must
+        // behave exactly like the real Git instead of answering as Riftri.
+        return Ok(riftri_core::delegate_stripped_shim_invocation(&arguments)?);
+    }
     let current_directory = env::current_dir().context("resolve Git working directory")?;
 
     match riftri_core::proxy_git_command(&current_directory, &arguments)? {

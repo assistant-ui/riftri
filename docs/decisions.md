@@ -137,7 +137,13 @@ Status reports both. Deactivation is emitted as shell code because a child
 process cannot modify its parent environment; Riftri never claims that running
 the command without `eval` changes the current shell. If a user added the hook
 to a profile for global per-user activation, only that user removes the profile
-line.
+line. Deactivation removes every recognizable shim scope — the durable cached
+shim and process-scoped `riftri exec` entries alike — because removing only one
+would leave a `git`-named shim on `PATH` without its delegation environment.
+Independently, every shim directory records the captured real Git path at
+creation, and a shim whose environment is missing or inconsistent delegates to
+that real Git unchanged: a degraded scope must fall back to ordinary Git
+behavior, never shadow it.
 
 ### D018: removal moves forward and accounting is journal-derived
 

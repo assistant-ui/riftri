@@ -31,11 +31,13 @@ mod worktree;
 
 pub use activation::{
     ActivationError, BYPASS_ENV, CACHE_DIR_ENV, GitProxyOutcome, GitProxyPlan,
-    RepositoryActivation, SHIM_ACTIVE_ENV, ShellActivationStatus, disable_repository,
+    PROCESS_SHIM_DIR_ENV, PROCESS_SHIM_DIR_PREFIX, RepositoryActivation, SHIM_ACTIVE_ENV,
+    ShellActivationStatus, delegate_stripped_shim_invocation, disable_repository,
     enable_repository, execute_scoped_command, execute_scoped_command_in_worktree,
     install_overlayfs_helper, plan_git_command, prepare_posix_shell_deactivation,
     prepare_posix_shell_hook, prepare_powershell_deactivation, prepare_powershell_hook,
-    proxy_git_command, repository_activation, shell_activation_status,
+    proxy_git_command, repository_activation, shell_activation_status, shim_environment_complete,
+    stripped_shim_scope_detected,
 };
 pub use riftri_git::REAL_GIT_ENV;
 pub use worktree::{

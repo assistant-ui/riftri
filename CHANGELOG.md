@@ -92,6 +92,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Evaluating `riftri shell deactivate <shell>` inside a `riftri exec` session
+  no longer breaks normal Git commands. The emitted code now removes the
+  process-scoped exec shim entries from `PATH` (including nested scopes) and
+  unsets `RIFTRI_PROCESS_SHIM_DIR` alongside the other shim variables, so
+  `git --version` reports the real Git and non-worktree commands such as
+  `git log` keep working for the rest of the session. Independently, every
+  Git shim now records the captured real Git path at creation and fails safe:
+  a shim whose environment was stripped delegates invocations to the real Git
+  unchanged instead of answering as the Riftri CLI.
 - npm publication now waits for every native platform package to be visible
   before publishing the launcher, preventing a propagation delay or incomplete
   platform release from producing an unusable first-time install.

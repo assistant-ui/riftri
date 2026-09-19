@@ -26,8 +26,17 @@ use crate::{
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
 pub const CACHE_DIR_ENV: &str = "RIFTRI_CACHE_DIR";
+/// Environment variable naming the ephemeral `riftri exec` shim directory.
+pub const PROCESS_SHIM_DIR_ENV: &str = "RIFTRI_PROCESS_SHIM_DIR";
+/// Name prefix shared by every ephemeral `riftri exec` shim directory.
+pub const PROCESS_SHIM_DIR_PREFIX: &str = "riftri-git-shim-";
+/// Marker file inside every Riftri shim directory recording the real Git path
+/// captured when the shim was created, so a shim whose environment was
+/// stripped can still identify itself and delegate to the real Git.
+const REAL_GIT_MARKER_FILE: &str = "riftri-real-git";
+/// Environment variable recording the durable shell-hook shim directory,
+/// so status and deactivation keep working after the shell changes directory.
 const SHELL_SHIM_DIR_ENV: &str = "RIFTRI_SHELL_SHIM_DIR";
-const PROCESS_SHIM_DIR_ENV: &str = "RIFTRI_PROCESS_SHIM_DIR";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RepositoryActivation {
@@ -387,10 +396,11 @@ fn execute_scoped_command_from(
     let current_executable = env::current_exe()
         .map_err(|error| process_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = tempfile::Builder::new()
-        .prefix("riftri-git-shim-")
+        .prefix(PROCESS_SHIM_DIR_PREFIX)
         .tempdir()
         .map_err(|error| process_error(format!("create temporary Git shim directory: {error}")))?;
     install_git_shim(shim_directory.path(), &current_executable)?;
+    record_real_git_marker(shim_directory.path(), &real_git)?;
 
     let existing_path = env::var_os("PATH").unwrap_or_default();
     let scoped_path = env::join_paths(
@@ -751,6 +761,7 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     ensure_real_shell_shim_directory(&shim_directory)?;
     set_private_directory_permissions(&shim_directory)?;
     install_durable_git_shim(&shim_directory, &current_executable)?;
+    record_real_git_marker(&shim_directory, &real_git)?;
 
     let shim_directory = posix_quote_path(&shim_directory)?;
     let real_git = posix_quote_path(&real_git)?;
@@ -773,10 +784,12 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = posix_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "_riftri_shim={shim_directory}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  if [ \"$_riftri_entry\" != \"$_riftri_shim\" ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env} {shell_shim_dir_env}\nunset _riftri_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more\n",
+        "_riftri_shim={shim_directory}\n_riftri_process_shim=${{{process_shim_env}-}}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  _riftri_keep=1\n  [ \"$_riftri_entry\" = \"$_riftri_shim\" ] && _riftri_keep=0\n  [ -n \"$_riftri_process_shim\" ] && [ \"$_riftri_entry\" = \"$_riftri_process_shim\" ] && _riftri_keep=0\n  case \"$_riftri_entry\" in *{process_shim_prefix}*) _riftri_keep=0 ;; esac\n  if [ \"$_riftri_keep\" = 1 ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env} {shell_shim_dir_env} {process_shim_env}\nunset _riftri_shim _riftri_process_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more _riftri_keep\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
         shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
+        process_shim_env = PROCESS_SHIM_DIR_ENV,
+        process_shim_prefix = PROCESS_SHIM_DIR_PREFIX,
     ))
 }
 
@@ -796,6 +809,7 @@ fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
     ensure_real_shell_shim_directory(&shim_directory)?;
     set_private_directory_permissions(&shim_directory)?;
     install_durable_git_shim(&shim_directory, &current_executable)?;
+    record_real_git_marker(&shim_directory, &real_git)?;
 
     let shim_directory = powershell_quote_path(&shim_directory)?;
     let real_git = powershell_quote_path(&real_git)?;
@@ -818,10 +832,12 @@ fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_powershell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = powershell_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "$_riftriShim = {shim_directory}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shell_shim_dir_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriPath -ErrorAction SilentlyContinue\n",
+        "$_riftriShim = {shim_directory}\n$_riftriProcessShim = $env:{process_shim_env}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim -and (-not $_riftriProcessShim -or $_ -ne $_riftriProcessShim) -and $_ -notlike '*{process_shim_prefix}*' }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shell_shim_dir_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{process_shim_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriProcessShim, _riftriPath -ErrorAction SilentlyContinue\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
         shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
+        process_shim_env = PROCESS_SHIM_DIR_ENV,
+        process_shim_prefix = PROCESS_SHIM_DIR_PREFIX,
     ))
 }
 
@@ -1582,6 +1598,197 @@ fn environment_truthy(key: &str) -> bool {
     })
 }
 
+/// Report whether the inherited shim environment is complete enough for
+/// optimized interception: the activation marker must be set and the recorded
+/// real Git executable must still be present.
+pub fn shim_environment_complete() -> bool {
+    env::var_os(SHIM_ACTIVE_ENV).is_some()
+        && env::var_os(riftri_git::REAL_GIT_ENV)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .as_deref()
+            .is_some_and(is_executable_file)
+}
+
+/// Report whether the current `git`-named invocation still looks like a
+/// Riftri shim even though the activation marker is gone: either a process
+/// scope recorded its shim directory, or the first `git` resolved from `PATH`
+/// is a Riftri shim (identified by its real-Git marker or because it resolves
+/// to the currently running executable).
+pub fn stripped_shim_scope_detected() -> bool {
+    if env::var_os(PROCESS_SHIM_DIR_ENV).is_some_and(|path| !path.is_empty()) {
+        return true;
+    }
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    let current_executable = canonical_current_executable();
+    for directory in env::split_paths(&path) {
+        let candidates = git_executable_candidates(&directory);
+        if !candidates.iter().any(|path| is_executable_file(path)) {
+            continue;
+        }
+        if directory.join(REAL_GIT_MARKER_FILE).is_file() {
+            return true;
+        }
+        return candidates.iter().any(|candidate| {
+            current_executable.as_deref().is_some_and(|executable| {
+                fs::canonicalize(candidate).is_ok_and(|candidate| candidate == executable)
+            })
+        });
+    }
+    false
+}
+
+/// Delegate a `git`-named invocation to the real Git executable although the
+/// shim environment is missing or inconsistent. A broken shim must never
+/// answer as Riftri or intercept anything, so this performs a plain
+/// passthrough with inherited standard streams and exit status.
+pub fn delegate_stripped_shim_invocation(arguments: &[OsString]) -> Result<i32, ActivationError> {
+    let real_git = resolve_real_git_for_stripped_shim().ok_or_else(|| {
+        process_error(
+            "the Riftri Git shim lost its environment and could not locate the real Git \
+             executable; run `riftri shell deactivate <shell>` in an activated shell or exit \
+             the `riftri exec` session, then retry",
+        )
+    })?;
+    let status = Command::new(&real_git)
+        .args(arguments)
+        .status()
+        .map_err(|error| {
+            process_error(format!(
+                "delegate to the real Git executable {}: {error}",
+                real_git.display()
+            ))
+        })?;
+    Ok(exit_status_code(status))
+}
+
+/// Record the captured real Git path next to a shim so the shim keeps a
+/// delegation target even when its environment is stripped later. The marker
+/// is written atomically because durable shell shim directories are shared by
+/// concurrently activating shells.
+fn record_real_git_marker(directory: &Path, real_git: &Path) -> Result<(), ActivationError> {
+    let Some(contents) = real_git_marker_bytes(real_git) else {
+        // A non-representable path only loses the stripped-environment
+        // fallback; PATH re-resolution still works, so do not fail activation.
+        return Ok(());
+    };
+    let nonce = std::process::id();
+    let temporary = directory.join(format!(".{REAL_GIT_MARKER_FILE}-{nonce}.tmp"));
+    fs::write(&temporary, contents).map_err(|error| {
+        process_error(format!(
+            "record real Git path in {}: {error}",
+            directory.display()
+        ))
+    })?;
+    let destination = directory.join(REAL_GIT_MARKER_FILE);
+    fs::rename(&temporary, &destination).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        process_error(format!(
+            "activate real Git marker {}: {error}",
+            destination.display()
+        ))
+    })
+}
+
+#[cfg(unix)]
+fn real_git_marker_bytes(real_git: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    Some(real_git.as_os_str().as_bytes().to_vec())
+}
+
+#[cfg(not(unix))]
+fn real_git_marker_bytes(real_git: &Path) -> Option<Vec<u8>> {
+    real_git.to_str().map(|path| path.as_bytes().to_vec())
+}
+
+#[cfg(unix)]
+fn read_real_git_marker(directory: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let contents = fs::read(directory.join(REAL_GIT_MARKER_FILE)).ok()?;
+    Some(PathBuf::from(OsString::from_vec(contents)))
+}
+
+#[cfg(not(unix))]
+fn read_real_git_marker(directory: &Path) -> Option<PathBuf> {
+    let contents = fs::read(directory.join(REAL_GIT_MARKER_FILE)).ok()?;
+    Some(PathBuf::from(String::from_utf8(contents).ok()?))
+}
+
+fn canonical_current_executable() -> Option<PathBuf> {
+    env::current_exe().and_then(fs::canonicalize).ok()
+}
+
+/// Locate a real Git executable for a shim whose environment was stripped:
+/// prefer whatever the environment still records, then the path baked into a
+/// shim directory at creation, and finally a `PATH` walk that skips every
+/// Riftri shim directory so the shim can never select itself.
+fn resolve_real_git_for_stripped_shim() -> Option<PathBuf> {
+    resolve_stripped_real_git(
+        env::var_os(riftri_git::REAL_GIT_ENV),
+        env::var_os(PROCESS_SHIM_DIR_ENV).map(PathBuf::from),
+        env::var_os("PATH"),
+        canonical_current_executable(),
+    )
+}
+
+fn resolve_stripped_real_git(
+    recorded_real_git: Option<OsString>,
+    process_shim_directory: Option<PathBuf>,
+    path: Option<OsString>,
+    current_executable: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let not_self = |candidate: &Path| {
+        current_executable.as_deref().is_none_or(|executable| {
+            fs::canonicalize(candidate).is_ok_and(|candidate| candidate != executable)
+        })
+    };
+
+    if let Some(recorded) = recorded_real_git
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| is_executable_file(path) && not_self(path))
+    {
+        return Some(recorded);
+    }
+    if let Some(baked) = process_shim_directory
+        .as_deref()
+        .and_then(read_real_git_marker)
+        .filter(|path| is_executable_file(path) && not_self(path))
+    {
+        return Some(baked);
+    }
+
+    for directory in env::split_paths(path.as_deref()?) {
+        if process_shim_directory
+            .as_deref()
+            .is_some_and(|shim| shim == directory)
+        {
+            continue;
+        }
+        if directory.join(REAL_GIT_MARKER_FILE).is_file() {
+            // Another shim directory: its baked marker names the real Git,
+            // while its own `git` entry must never be executed.
+            if let Some(baked) = read_real_git_marker(&directory)
+                .filter(|path| is_executable_file(path) && not_self(path))
+            {
+                return Some(baked);
+            }
+            continue;
+        }
+        if let Some(candidate) = git_executable_candidates(&directory)
+            .into_iter()
+            .find(|candidate| is_executable_file(candidate) && not_self(candidate))
+        {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn locate_real_git() -> Result<PathBuf, ActivationError> {
     if let Some(command) = env::var_os(SHIM_ACTIVE_ENV)
         .and_then(|_| env::var_os(riftri_git::REAL_GIT_ENV))
@@ -1687,6 +1894,11 @@ mod tests {
     use super::{
         GitProxyPlan, disable_repository, enable_repository, plan_git_command,
         repository_activation,
+    };
+    #[cfg(unix)]
+    use super::{
+        PROCESS_SHIM_DIR_ENV, PROCESS_SHIM_DIR_PREFIX, REAL_GIT_MARKER_FILE, SHELL_SHIM_DIR_ENV,
+        prepare_posix_shell_deactivation_inner, record_real_git_marker, resolve_stripped_real_git,
     };
     use crate::WorktreeMode;
 
@@ -1915,6 +2127,121 @@ mod tests {
         let error = plan_git_command(fixture.path(), &arguments)
             .expect_err("invocation config must not be ignored");
         assert!(error.to_string().contains("invocation-level configuration"));
+    }
+
+    /// Deactivation evaluated inside a `riftri exec` session must strip the
+    /// process-scoped shim from `PATH` and drop its scope variable, not only
+    /// the durable shell-hook shim.
+    #[cfg(unix)]
+    #[test]
+    fn posix_deactivation_removes_process_scoped_shim_entries() {
+        let script = prepare_posix_shell_deactivation_inner().expect("render deactivation code");
+        assert!(script.contains(PROCESS_SHIM_DIR_ENV));
+        assert!(script.contains(&format!("*{PROCESS_SHIM_DIR_PREFIX}*")));
+        // Both shim scopes are torn down: the durable shell hook's variable and
+        // the process-scoped one are unset in the same statement.
+        let unset = script
+            .lines()
+            .find(|line| line.starts_with("unset RIFTRI_REAL_GIT "))
+            .expect("deactivation unsets the shim variables");
+        for variable in [
+            "RIFTRI_SHIM_ACTIVE",
+            SHELL_SHIM_DIR_ENV,
+            PROCESS_SHIM_DIR_ENV,
+        ] {
+            assert!(unset.contains(variable), "{variable} is not unset: {unset}");
+        }
+
+        let shim = "/tmp/riftri-test/riftri-git-shim-abc123";
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                "eval \"$RIFTRI_TEST_DEACTIVATION\"\n\
+                 printf 'path=%s\\n' \"$PATH\"\n\
+                 printf 'scope=%s\\n' \"${RIFTRI_PROCESS_SHIM_DIR-unset}\"\n\
+                 printf 'marker=%s\\n' \"${RIFTRI_SHIM_ACTIVE-unset}\"\n\
+                 printf 'real=%s\\n' \"${RIFTRI_REAL_GIT-unset}\"",
+            ])
+            .env("RIFTRI_TEST_DEACTIVATION", &script)
+            .env("PATH", format!("{shim}:/usr/bin:/bin"))
+            .env(PROCESS_SHIM_DIR_ENV, shim)
+            .env(super::SHIM_ACTIVE_ENV, "1")
+            .env(riftri_git::REAL_GIT_ENV, "/usr/bin/git")
+            .output()
+            .expect("evaluate deactivation in sh");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+        assert!(stdout.contains("path=/usr/bin:/bin\n"), "{stdout}");
+        assert!(stdout.contains("scope=unset"), "{stdout}");
+        assert!(stdout.contains("marker=unset"), "{stdout}");
+        assert!(stdout.contains("real=unset"), "{stdout}");
+    }
+
+    /// A shim with a stripped environment must resolve the real Git without
+    /// ever selecting itself or another shim's `git` entry.
+    #[cfg(unix)]
+    #[test]
+    fn stripped_shim_resolution_skips_shim_directories_and_uses_the_baked_marker() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempdir().expect("fixture");
+        let shim_directory = fixture.path().join("riftri-git-shim-test");
+        let real_directory = fixture.path().join("real");
+        fs::create_dir_all(&shim_directory).expect("create shim directory");
+        fs::create_dir_all(&real_directory).expect("create real directory");
+        for executable in [shim_directory.join("git"), real_directory.join("git")] {
+            fs::write(&executable, "#!/bin/sh\n").expect("write executable");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("mark executable");
+        }
+        let real_git = real_directory.join("git");
+        record_real_git_marker(&shim_directory, &real_git).expect("record marker");
+        assert!(shim_directory.join(REAL_GIT_MARKER_FILE).is_file());
+        let path = std::env::join_paths([&shim_directory, &real_directory]).expect("join PATH");
+
+        // The scope variable alone is enough to find the baked real Git.
+        assert_eq!(
+            resolve_stripped_real_git(None, Some(shim_directory.clone()), Some(path.clone()), None,),
+            Some(real_git.clone())
+        );
+
+        // Without any scope variable, the PATH walk reads the marker of the
+        // shim directory it skips instead of executing that shim.
+        assert_eq!(
+            resolve_stripped_real_git(None, None, Some(path.clone()), None),
+            Some(real_git.clone())
+        );
+
+        // A still-present recorded environment value wins.
+        assert_eq!(
+            resolve_stripped_real_git(
+                Some(real_git.clone().into_os_string()),
+                None,
+                Some(path.clone()),
+                None,
+            ),
+            Some(real_git.clone())
+        );
+
+        // A markerless shim entry that resolves to the running executable is
+        // skipped in favor of the next PATH entry.
+        fs::remove_file(shim_directory.join(REAL_GIT_MARKER_FILE)).expect("remove marker");
+        let canonical_shim_git =
+            fs::canonicalize(shim_directory.join("git")).expect("canonical shim git");
+        assert_eq!(
+            resolve_stripped_real_git(None, None, Some(path.clone()), Some(canonical_shim_git)),
+            Some(real_git.clone())
+        );
+
+        // With no real Git anywhere, resolution reports failure instead of
+        // selecting the shim itself.
+        let canonical_shim_git =
+            fs::canonicalize(shim_directory.join("git")).expect("canonical shim git");
+        let shim_only = std::env::join_paths([&shim_directory]).expect("join shim-only PATH");
+        assert_eq!(
+            resolve_stripped_real_git(None, None, Some(shim_only), Some(canonical_shim_git)),
+            None
+        );
     }
 
     fn repository_fixture() -> tempfile::TempDir {
