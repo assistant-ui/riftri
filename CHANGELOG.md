@@ -7,6 +7,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Piping a riftri command into a reader that closes early (for example
+  `riftri status | head` or `riftri doctor --json | head`) no longer panics
+  with a `BrokenPipe` error and exit code 101. Human-readable and machine
+  (`--json`) stdout writes now treat a closed pipe as a clean stop and exit
+  quietly. Handling the write error kind (rather than resetting the SIGPIPE
+  disposition) keeps this portable to Windows and still lets terminal cleanup
+  run for any other write failure.
 - COW worktrees no longer silently drop the group/other write bits. Because the
   base tree is made read-only (`0o444`) before cloning, files re-gained only the
   owner write bit afterwards, leaving `0o644` where a plain `git worktree add`
