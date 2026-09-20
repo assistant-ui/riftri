@@ -3,12 +3,14 @@
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::{MetadataExt, symlink_dir};
 use std::path::{Path, PathBuf};
 
 use riftri_storage::{CapabilityStatus, RefsBlockCloner};
 use tempfile::tempdir;
-use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SPARSE_FILE;
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE,
+};
 
 struct OwnerWritableOnDrop(PathBuf);
 
@@ -163,5 +165,44 @@ fn block_clone_consumes_materially_less_new_space_than_its_logical_size() {
     assert!(
         physical_growth < (LOGICAL_BYTES as u64 / 4),
         "block clone of {LOGICAL_BYTES} bytes consumed {physical_growth} new physical bytes"
+    );
+}
+
+#[test]
+fn clones_a_dangling_directory_symlink_as_a_directory_reparse_point() {
+    let fixture = tempdir().expect("fixture directory");
+    if !refs_available(fixture.path()) {
+        return;
+    }
+    let source = fixture.path().join("base");
+    let destination = fixture.path().join("view");
+    fs::create_dir(&source).expect("create base");
+
+    // A directory symlink whose target does not exist. `fs::metadata` would
+    // follow the link, fail to resolve the missing target, and fall back to a
+    // file symlink; the clone must instead keep the source link's own directory
+    // reparse type. Creating symlinks needs SeCreateSymbolicLinkPrivilege
+    // (Developer Mode or elevation); skip cleanly when it is unavailable.
+    let link = source.join("dir-link");
+    if let Err(error) = symlink_dir("missing-target", &link) {
+        eprintln!("skipping symlink clone test; cannot create directory symlink: {error}");
+        return;
+    }
+
+    RefsBlockCloner::clone_tree(&source, &destination).expect("clone ReFS tree");
+
+    let cloned = destination.join("dir-link");
+    let attributes = fs::symlink_metadata(&cloned)
+        .expect("inspect cloned link")
+        .file_attributes();
+    assert_ne!(
+        attributes & FILE_ATTRIBUTE_REPARSE_POINT,
+        0,
+        "the clone must remain a symlink reparse point"
+    );
+    assert_ne!(
+        attributes & FILE_ATTRIBUTE_DIRECTORY,
+        0,
+        "a dangling directory symlink must clone as a directory reparse point"
     );
 }
