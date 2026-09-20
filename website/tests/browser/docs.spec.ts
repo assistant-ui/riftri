@@ -43,13 +43,17 @@ test("docs header reuses the landing page logo and wordmark", async ({ page }, i
   await expect(page.locator(".site-brand")).toBeVisible();
 });
 
-test("page actions are one View/Copy row below the intro, above the first section", async ({ page }, info) => {
+test("page actions are one View/Copy row below the intro, above the first section", async ({ page, context }, info) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  let downloaded = false;
+  page.on("download", () => { downloaded = true; });
   for (const slug of ["", "/installation"]) {
     await page.goto(`/docs${slug}`);
     const view = page.getByRole("link", { name: /^view \.md$/i });
     const copy = page.getByRole("link", { name: /^copy \.md$/i });
-    // Both are plain Markdown links that open the page's own `.md`; there is no
-    // framework copy button.
+    // Both render as plain Markdown links (no framework button); "Copy .md" is
+    // upgraded to a real clipboard copy by the client script, and its href is
+    // the fallback when clipboard access is unavailable.
     await expect(page.getByRole("button", { name: /copy page|copy markdown|copy \.md/i })).toHaveCount(0);
     await expect(view).toHaveAttribute("href", `/docs${slug}.md`);
     await expect(copy).toHaveAttribute("href", `/docs${slug}.md`);
@@ -89,7 +93,13 @@ test("page actions are one View/Copy row below the intro, above the first sectio
       const icon = await link.evaluate((el) => getComputedStyle(el, "::before").maskImage);
       expect(icon).toContain("/docs-icons/");
     }
-    // View opens the Markdown.
+    // Copy .md writes this page's Markdown (with frontmatter) to the clipboard
+    // and stays on the page instead of navigating to the `.md`.
+    await copy.click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toMatch(/^---\ntitle:/);
+    await expect(page).toHaveURL(new RegExp(`/docs${slug}$`));
+    expect(downloaded).toBe(false);
+    // View .md opens the Markdown.
     await view.click();
     await expect(page).toHaveURL(new RegExp(`/docs${slug}\\.md$`));
     await page.goBack();
