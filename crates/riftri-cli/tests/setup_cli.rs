@@ -59,7 +59,8 @@ fn setup_json_errors_do_not_include_prompts() {
     );
 }
 
-#[cfg(unix)]
+// The rich terminal setup path is only built with the interactive TUI feature.
+#[cfg(all(unix, feature = "tui"))]
 mod terminal {
     use std::fs::{self, File};
     use std::io::{Read, Write};

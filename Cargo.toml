@@ -39,3 +39,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Ioctl",
     "Win32_System_SystemServices",
 ] }
+
+[profile.release]
+strip = true

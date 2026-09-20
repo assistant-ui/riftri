@@ -63,6 +63,10 @@ $ cargo build --release -p riftri-cli
 $ ./target/release/riftri doctor
 ```
 
+The interactive `riftri setup` terminal UI is behind an off-by-default `tui`
+feature; add `--features tui` to build it in (the published binaries do). The
+default build keeps `setup` working through plain text prompts.
+
 The npm launcher is a separate distribution channel. It is not currently
 available because the initial publication is incomplete; use the verified
 standalone installer or GitHub release assets for now.

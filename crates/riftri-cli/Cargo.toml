@@ -13,17 +13,23 @@ publish = false
 name = "riftri"
 path = "src/main.rs"
 
+[features]
+# The interactive setup TUI (ratatui/crossterm styled prompts and picker).
+# Off by default to keep the binary lean; release archives build with it on.
+default = []
+tui = ["dep:ratatui", "dep:crossterm", "dep:unicode-width"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true
-crossterm.workspace = true
-ratatui.workspace = true
+crossterm = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true }
 riftri-core = { path = "../riftri-core" }
 riftri-storage = { path = "../riftri-storage" }
 serde_json.workspace = true
-unicode-width.workspace = true
+unicode-width = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
