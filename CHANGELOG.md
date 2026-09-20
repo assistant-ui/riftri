@@ -5,6 +5,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Removal journal decoding now validates `overlayfs_clean_snapshot` with the
+  same digest-shape rule already applied to `force_snapshot` — a stored value
+  must be exactly 64 lowercase hexadecimal characters — so a corrupted durable
+  record is rejected as an invalid journal instead of surviving decode.
+
 ## [0.3.2] - 2026-09-19
 
 ### Added
