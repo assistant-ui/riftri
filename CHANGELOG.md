@@ -5,6 +5,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- `--json-errors` now reports command-line usage errors (a missing argument or
+  unknown flag rejected by the parser) as one JSON receipt on stderr, with
+  `"code": "usage-error"`, `"category": "usage"`, and clap's usage exit code
+  `2`, instead of printing clap's plain human-readable text. A caller that
+  always parses `--json-errors` stderr as JSON no longer receives plain text for
+  usage errors. `--help` and `--version` still print normally and exit `0`, and
+  without `--json-errors` usage errors keep clap's exact text and exit code.
+
 ## [0.3.2] - 2026-09-19
 
 ### Added

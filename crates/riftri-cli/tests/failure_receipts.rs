@@ -43,6 +43,86 @@ fn json_errors_emit_one_parseable_lifecycle_receipt_on_stderr() {
     );
 }
 
+/// A usage error is a failure, so `--json-errors` must report it as one JSON
+/// receipt on stderr rather than clap's human-readable text. The receipt keeps
+/// clap's usage exit code (2) so automation still tells a usage error apart
+/// from an operational command failure (1).
+#[test]
+fn json_errors_report_usage_errors_as_one_receipt_with_exit_two() {
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .arg("--json-errors")
+        .args(["worktree", "add"])
+        .output()
+        .expect("run Riftri with a missing required argument");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("stderr is one JSON receipt");
+    assert_eq!(receipt["schemaVersion"], 1);
+    assert_eq!(receipt["outcome"], "failed");
+    assert_eq!(receipt["code"], "usage-error");
+    assert_eq!(receipt["category"], "usage");
+    assert_eq!(receipt["cleanup"], "not-needed");
+    assert_eq!(receipt["recovery"], "not-required");
+    assert!(receipt["operation"].is_null());
+    assert!(receipt["phase"].is_null());
+    assert!(receipt["nextCommand"].is_null());
+    assert!(
+        receipt["message"]
+            .as_str()
+            .expect("message")
+            .contains("required arguments were not provided"),
+        "the receipt carries clap's diagnostic: {}",
+        receipt["message"]
+    );
+}
+
+/// Without `--json-errors`, the very same usage error keeps clap's exact
+/// human-readable behavior: plain text on stderr, exit 2, and not JSON.
+#[test]
+fn usage_errors_without_json_errors_stay_plain_clap_text() {
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .output()
+        .expect("run Riftri with a missing required argument");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("required arguments were not provided"),
+        "clap's text is preserved: {stderr}"
+    );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&output.stderr).is_err(),
+        "unflagged usage errors must not become JSON: {stderr}"
+    );
+}
+
+/// `--help` and `--version` route through clap's error path with a success exit
+/// too, but they are not failures: `--json-errors` must leave them untouched.
+#[test]
+fn json_errors_leave_help_and_version_untouched() {
+    for flag in ["--help", "--version"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .arg("--json-errors")
+            .arg(flag)
+            .output()
+            .unwrap_or_else(|error| panic!("run Riftri {flag}: {error}"));
+
+        assert_eq!(output.status.code(), Some(0), "{flag} exits successfully");
+        assert!(
+            output.stderr.is_empty(),
+            "{flag} prints to stdout, not stderr"
+        );
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).is_err(),
+            "{flag} must not become a JSON receipt"
+        );
+    }
+}
+
 #[test]
 fn policy_refusals_still_report_no_recovery() {
     let fixture = tempfile::tempdir().expect("fixture directory");
