@@ -39,11 +39,10 @@ export default {
     mcp: false,
     telemetry: false,
     lastUpdated: false,
-    pageActions: {
-      copyMarkdown: { enabled: true, label: "Copy .md", copiedLabel: "Copied .md" },
-      position: "below-title",
-      alignment: "right",
-    },
+    // Page actions are hand-injected Markdown links ("View .md / Copy .md")
+    // below each page's intro; the framework's native button is disabled so the
+    // two links can share one row.
+    pageActions: { copyMarkdown: false },
     // /index.md remains the public, hand-maintained agent overview.
     llmsTxt: false,
     sitemap: { enabled: false },
