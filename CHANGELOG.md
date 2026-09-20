@@ -13,6 +13,20 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   under `umask 002` or `core.sharedRepository=group` would leave `0o664`. The
   APFS and reflink backends now restore write bits according to the process
   umask, matching a normal checkout.
+- The macOS/Linux `install.sh` now runs its `--version` sanity check against
+  the staged binary on the install directory's filesystem instead of the
+  freshly extracted copy in the temp directory. Hosts that mount `/tmp` (or
+  `$TMPDIR`) `noexec` — a common CIS-hardened default — could previously abort
+  a valid install with a misleading "Downloaded binary cannot run" error even
+  though the download, platform detection, and checksum were all correct. The
+  checksum gate, single-member archive validation, and atomic stage-then-rename
+  are unchanged.
+- Cloning a Windows symlink into a worktree now chooses the file-vs-directory
+  reparse type from the source link's own attributes via `symlink_metadata`
+  instead of `metadata`, which followed the link to its target. A dangling
+  link (target missing at clone time) is no longer forced to a file symlink,
+  and a link whose target's kind differs from the link's is no longer
+  misclassified.
 
 ## [0.3.2] - 2026-09-19
 

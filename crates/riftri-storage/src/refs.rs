@@ -8,8 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE};
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_TEMPORARY, FILE_FLAG_DELETE_ON_CLOSE,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDiskFreeSpaceW, GetVolumePathNameW,
+    DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_SPARSE_FILE, FILE_ATTRIBUTE_TEMPORARY,
+    FILE_FLAG_DELETE_ON_CLOSE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetDiskFreeSpaceW, GetVolumePathNameW,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
@@ -425,9 +426,23 @@ fn cluster_size(path: &Path) -> std::io::Result<u64> {
 fn clone_symlink(source: &Path, destination: &Path) -> Result<(), StorageError> {
     let target = fs::read_link(source)
         .map_err(|source_error| io("read source symlink", source, source_error))?;
-    let result = match fs::metadata(source) {
-        Ok(metadata) if metadata.is_dir() => symlink_dir(target, destination),
-        _ => symlink_file(target, destination),
+    // The file-vs-directory reparse type must be taken from the SOURCE link
+    // itself, never from whatever its target happens to resolve to. `fs::metadata`
+    // follows the link, so it misclassifies a dangling link (target missing at
+    // clone time always looked like a file symlink) and a link whose target's
+    // kind differs from the link's own reparse type. `fs::symlink_metadata` reads
+    // the link's own attributes without following it. Note that
+    // `FileType::is_dir()` deliberately reports `false` for symlinks, so we read
+    // the raw `FILE_ATTRIBUTE_DIRECTORY` bit that Windows sets on the reparse
+    // point for a directory symlink. Fail loudly if the link's attributes cannot
+    // be read rather than guessing the wrong reparse type.
+    let link_metadata = fs::symlink_metadata(source)
+        .map_err(|source_error| io("inspect source symlink", source, source_error))?;
+    let is_directory_link = link_metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0;
+    let result = if is_directory_link {
+        symlink_dir(target, destination)
+    } else {
+        symlink_file(target, destination)
     };
     result.map_err(|source_error| io("create cloned symlink", destination, source_error))
 }
