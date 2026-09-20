@@ -7,6 +7,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Decoding `/proc/self/mountinfo` path escapes no longer overflows when a mount
+  path contains an octal escape whose leading digit is 4 or greater. Such
+  escapes cannot name a single byte (the maximum is `\377`), so they previously
+  panicked in debug builds and silently wrapped to the wrong byte in release
+  builds; they are now rejected as a malformed layout, and the escape validator
+  only accepts representable `\000`–`\377` sequences.
 - `--json-errors` now reports command-line usage errors (a missing argument or
   unknown flag rejected by the parser) as one JSON receipt on stderr, with
   `"code": "usage-error"`, `"category": "usage"`, and clap's usage exit code
