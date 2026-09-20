@@ -7,6 +7,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- COW worktrees no longer silently drop the group/other write bits. Because the
+  base tree is made read-only (`0o444`) before cloning, files re-gained only the
+  owner write bit afterwards, leaving `0o644` where a plain `git worktree add`
+  under `umask 002` or `core.sharedRepository=group` would leave `0o664`. The
+  APFS and reflink backends now restore write bits according to the process
+  umask, matching a normal checkout.
 - The macOS/Linux `install.sh` now runs its `--version` sanity check against
   the staged binary on the install directory's filesystem instead of the
   freshly extracted copy in the temp directory. Hosts that mount `/tmp` (or
