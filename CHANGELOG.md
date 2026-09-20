@@ -7,6 +7,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- The macOS/Linux `install.sh` now runs its `--version` sanity check against
+  the staged binary on the install directory's filesystem instead of the
+  freshly extracted copy in the temp directory. Hosts that mount `/tmp` (or
+  `$TMPDIR`) `noexec` — a common CIS-hardened default — could previously abort
+  a valid install with a misleading "Downloaded binary cannot run" error even
+  though the download, platform detection, and checksum were all correct. The
+  checksum gate, single-member archive validation, and atomic stage-then-rename
+  are unchanged.
 - Cloning a Windows symlink into a worktree now chooses the file-vs-directory
   reparse type from the source link's own attributes via `symlink_metadata`
   instead of `metadata`, which followed the link to its target. A dangling

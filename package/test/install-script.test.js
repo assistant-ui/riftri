@@ -30,7 +30,12 @@ function fixture(t, options = {}) {
     fs.writeFileSync(path.join(home, name), "# leave this unchanged\n");
   }
   const executable = path.join(files, "riftri");
-  fs.writeFileSync(executable, `#!/bin/sh\nprintf 'riftri ${options.binaryVersion || version}\\n'\nexit ${options.binaryExit || 0}\n`, { mode: 0o755 });
+  // Simulate a noexec $TMPDIR: refuse to run when invoked from under the temp
+  // scratch directory, but run normally from the install destination.
+  const noexecGuard = options.noexecTmp
+    ? `case "$0" in ${scratch}/*) printf 'noexec temp mount\\n' >&2; exit 126 ;; esac\n`
+    : "";
+  fs.writeFileSync(executable, `#!/bin/sh\n${noexecGuard}printf 'riftri ${options.binaryVersion || version}\\n'\nexit ${options.binaryExit || 0}\n`, { mode: 0o755 });
   if (options.symlinkArchive) {
     fs.renameSync(executable, path.join(files, "other"));
     fs.symlinkSync("other", executable);
@@ -208,6 +213,29 @@ for (const command of ["cp", "mv"]) {
     f.unchanged();
   });
 }
+
+test("installs on a noexec temp mount by verifying the staged binary", { skip: !unix }, (t) => {
+  // The fake binary aborts when run from the temp scratch dir (as a noexec
+  // mount would), so this only passes if the --version check runs from the
+  // staged path on the install filesystem, not from the temp download.
+  const f = fixture(t, { noexecTmp: true });
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(fs.readFileSync(f.target, "utf8"), /riftri 0\.1\.1/);
+  assert.deepEqual(fs.readdirSync(f.scratch), []);
+  assert.deepEqual(fs.readdirSync(f.installDir), ["riftri"]);
+});
+
+test("sanity-checks the staged binary, never the temp copy", () => {
+  const source = fs.readFileSync(installer, "utf8");
+  assert.match(source, /reported=\$\("\$staged_file" --version\)/);
+  assert.doesNotMatch(source, /"\$download_dir\/riftri" --version/);
+  // The staged file must exist before it is executed for the sanity check.
+  assert.ok(
+    source.indexOf("staged_file=$(mktemp") < source.indexOf('"$staged_file" --version'),
+    "version check must run after the binary is staged",
+  );
+});
 
 test("user tar options cannot alter extraction", { skip: !unix }, (t) => {
   const f = fixture(t);
