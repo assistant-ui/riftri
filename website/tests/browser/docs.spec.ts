@@ -43,52 +43,41 @@ test("docs header reuses the landing page logo and wordmark", async ({ page }, i
   await expect(page.locator(".site-brand")).toBeVisible();
 });
 
-test("page actions are one View/Copy row below the intro, above the first section", async ({ page }, info) => {
+test("page actions stack a real Copy button with a View link, both as plain links", async ({ page, context }, info) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  let downloaded = false;
+  page.on("download", () => { downloaded = true; });
   for (const slug of ["", "/installation"]) {
     await page.goto(`/docs${slug}`);
+    // "Copy .md" is the framework's real clipboard button, not a link; "View
+    // .md" is a plain link that opens the page's `.md`.
+    await expect(page.getByRole("link", { name: /^copy \.md$/i })).toHaveCount(0);
+    const copy = page.getByRole("button", { name: /^copy \.md$/i });
     const view = page.getByRole("link", { name: /^view \.md$/i });
-    const copy = page.getByRole("link", { name: /^copy \.md$/i });
-    // Both are plain Markdown links that open the page's own `.md`; there is no
-    // framework copy button.
-    await expect(page.getByRole("button", { name: /copy page|copy markdown|copy \.md/i })).toHaveCount(0);
+    await expect(copy).toBeVisible();
     await expect(view).toHaveAttribute("href", `/docs${slug}.md`);
-    await expect(copy).toHaveAttribute("href", `/docs${slug}.md`);
-    // View and Copy sit on one right-aligned row, vertically centered with the
-    // "/" separator between them.
-    const layout = await view.evaluate((v) => {
-      const c = document.querySelectorAll('#nd-page a[title="Copy this page as Markdown"]')[0] as HTMLElement;
-      const row = v.closest("p") as HTMLElement;
-      const vr = v.getBoundingClientRect(), cr = c.getBoundingClientRect();
-      return {
-        sameRow: Math.abs((vr.top + vr.height / 2) - (cr.top + cr.height / 2)) <= 1,
-        viewLeftOfCopy: vr.right <= cr.left,
-        rightAligned: getComputedStyle(row).justifyContent === "flex-end",
-        aligned: getComputedStyle(row).alignItems === "center",
-      };
+    // Copy is stripped of its button chrome and reads as a plain link, stacked
+    // directly above the View link, both right-aligned.
+    await expect(copy).toHaveCSS("text-transform", "uppercase");
+    await expect(copy).toHaveCSS("border-top-width", "0px");
+    await expect(copy).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    for (const el of [copy, view]) await expect(el).toHaveCSS("font-family", /Geist Mono/);
+    const layout = await copy.evaluate((c) => {
+      const v = document.querySelector('#nd-page a[title="View this page as Markdown"]') as HTMLElement;
+      const cr = c.getBoundingClientRect(), vr = v.getBoundingClientRect();
+      return { viewBelowCopy: vr.top >= cr.bottom - 1, gap: vr.top - cr.bottom, rightAligned: Math.abs(cr.right - vr.right) <= 4 };
     });
-    expect(layout.sameRow).toBe(true);
-    expect(layout.viewLeftOfCopy).toBe(true);
+    expect(layout.viewBelowCopy).toBe(true);
+    expect(layout.gap).toBeLessThan(20);
     expect(layout.rightAligned).toBe(true);
-    expect(layout.aligned).toBe(true);
-    // The row is below the intro paragraph and above the first section heading.
-    const order = await page.evaluate(() => {
-      const nodes = [...document.querySelectorAll("#nd-page .fd-docs-content > *")];
-      const h1 = nodes.findIndex((n) => n.tagName === "H1");
-      const row = nodes.findIndex((n) => n.querySelector?.('a[title="View this page as Markdown"]'));
-      const h2 = nodes.findIndex((n, i) => i > h1 && n.tagName === "H2");
-      const introBefore = nodes.slice(h1 + 1, row).some((n) => n.tagName === "P");
-      return { row, h2, introBefore };
-    });
-    expect(order.introBefore).toBe(true);
-    expect(order.h2 === -1 || order.row < order.h2).toBe(true);
-    await view.scrollIntoViewIfNeeded();
+    await copy.scrollIntoViewIfNeeded();
     await page.screenshot({ path: info.outputPath(`page-action${slug ? "-installation" : ""}-${info.project.name}.png`) });
-    for (const link of [view, copy]) {
-      await expect(link).toHaveCSS("text-transform", "uppercase");
-      await expect(link).toHaveCSS("font-family", /Geist Mono/);
-      const icon = await link.evaluate((el) => getComputedStyle(el, "::before").maskImage);
-      expect(icon).toContain("/docs-icons/");
-    }
+    // Copy writes this page's Markdown (with frontmatter) to the clipboard and
+    // stays on the page instead of navigating to the `.md`.
+    await copy.click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toMatch(/^---\ntitle:/);
+    await expect(page).toHaveURL(new RegExp(`/docs${slug}$`));
+    expect(downloaded).toBe(false);
     // View opens the Markdown.
     await view.click();
     await expect(page).toHaveURL(new RegExp(`/docs${slug}\\.md$`));
@@ -348,7 +337,7 @@ test("public guides stay concise while full installation and CLI details remain 
     await expect(body.locator("h1")).toBeVisible();
     const words = (await body.innerText()).trim().split(/\s+/).length;
     expect(words, doc.title).toBeLessThan(500);
-    await expect(page.getByRole("link", { name: /^copy \.md$/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^copy \.md$/i })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), doc.title).toBe(true);
   }
   await page.goto("/docs/installation");

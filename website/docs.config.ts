@@ -39,10 +39,14 @@ export default {
     mcp: false,
     telemetry: false,
     lastUpdated: false,
-    // Page actions are hand-injected Markdown links ("View .md / Copy .md")
-    // below each page's intro; the framework's native button is disabled so the
-    // two links can share one row.
-    pageActions: { copyMarkdown: false },
+    // "Copy .md" is the framework's native action — the only element that can
+    // write to the clipboard on a rendered docs page — restyled as a plain link
+    // in docs-theme.css. A "View .md" link is injected below it in the page body.
+    pageActions: {
+      copyMarkdown: { enabled: true, label: "Copy .md", copiedLabel: "Copied .md" },
+      position: "below-title",
+      alignment: "right",
+    },
     // /index.md remains the public, hand-maintained agent overview.
     llmsTxt: false,
     sitemap: { enabled: false },
