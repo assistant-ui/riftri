@@ -7,6 +7,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Removal journal decoding now validates `overlayfs_clean_snapshot` with the
+  same digest-shape rule already applied to `force_snapshot` — a stored value
+  must be exactly 64 lowercase hexadecimal characters — so a corrupted durable
+  record is rejected as an invalid journal instead of surviving decode.
 - Piping a riftri command into a reader that closes early (for example
   `riftri status | head` or `riftri doctor --json | head`) no longer panics
   with a `BrokenPipe` error and exit code 101. Human-readable and machine
