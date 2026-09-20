@@ -15,6 +15,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   though the download, platform detection, and checksum were all correct. The
   checksum gate, single-member archive validation, and atomic stage-then-rename
   are unchanged.
+- Cloning a Windows symlink into a worktree now chooses the file-vs-directory
+  reparse type from the source link's own attributes via `symlink_metadata`
+  instead of `metadata`, which followed the link to its target. A dangling
+  link (target missing at clone time) is no longer forced to a file symlink,
+  and a link whose target's kind differs from the link's is no longer
+  misclassified.
 
 ## [0.3.2] - 2026-09-19
 
