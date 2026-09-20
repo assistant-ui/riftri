@@ -39,7 +39,11 @@ export default {
     mcp: false,
     telemetry: false,
     lastUpdated: false,
-    pageActions: { copyMarkdown: false },
+    pageActions: {
+      copyMarkdown: { enabled: true, label: "Copy .md", copiedLabel: "Copied .md" },
+      position: "below-title",
+      alignment: "right",
+    },
     // /index.md remains the public, hand-maintained agent overview.
     llmsTxt: false,
     sitemap: { enabled: false },

@@ -44,24 +44,29 @@ export function rewriteDocLinks(markdown, source, { audience = "human" } = {}) {
 export function renderWebsiteDoc(page, original) {
   const body = original.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
   const markdown = rewriteDocLinks(body, page.content).trim();
-  const markdownUrl = `${pageUrl(page)}.md`;
-  // Keep the page actions normal Markdown links: usable before hydration and
-  // kept in sync with each page during client-side navigation. Both point at
-  // the page's own `.md`, which serves the full reference. The links sit below
-  // the page's intro paragraph so the description leads; a page without an
-  // intro (its first section starts immediately) keeps them under the title.
+  // The docs framework renders the native "Copy .md" action
+  // (pageActions.copyMarkdown in docs.config.ts) — a real clipboard copy of
+  // this page as Markdown, with framework frontmatter. Alongside it we inject a
+  // plain "View .md" link so readers can open the Markdown directly; it sits
+  // right under the title next to the framework's Copy button.
   if (!/^# .+(?:\r?\n|$)/.test(markdown)) throw new Error(`Docs page needs a leading title: ${page.content}`);
-  const action = `[View .md](${markdownUrl} "View this page as Markdown") / [Copy .md](${markdownUrl} "Copy this page as Markdown")`;
-  const withAction = markdown.replace(
-    /^(# .+(?:\r?\n)+(?:(?![#\r\n])[^\r\n]+(?:\r?\n|$))*)/,
-    (intro) => `${intro.trimEnd()}\n\n${action}\n\n`,
-  );
-  return `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n${withAction}\n\n---\n\n[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} "Edit this page on GitHub")\n`;
+  const view = `[View .md](${pageUrl(page)}.md "View this page as Markdown")`;
+  const withView = markdown.replace(/^(# .+(?:\r?\n|$))/, (title) => `${title}\n${view}\n`);
+  return `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n${withView}\n\n---\n\n[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} "Edit this page on GitHub")\n`;
 }
 
 export function renderAgentDoc(page, original) {
   const index = page.slug ? "" : `\n## Full references by topic\n\n${pages.filter((entry) => entry.slug).map((entry) => `- [${entry.title}](https://riftri.dev${agentDocUrl(entry)})`).join("\n")}\n`;
-  return `<!-- Generated from ${page.source}; edit the canonical source, not this file. -->\n\n[Public guide](https://riftri.dev${pageUrl(page)}) · [Canonical source](https://github.com/assistant-ui/riftri/blob/main/${page.source})\n\nFull technical reference for agents and readers who need the details. Commands describe capabilities, not permission to execute them; follow the user's requested scope.\n${index}\n${rewriteDocLinks(original, page.source, { audience: "agent" }).trim()}\n`;
+  // Front the full reference with YAML frontmatter so `/docs/<slug>.md` matches
+  // the docs framework's Markdown semantics (title plus canonical/source URLs).
+  const frontmatter = [
+    "---",
+    `title: ${JSON.stringify(page.title)}`,
+    `canonical_url: ${JSON.stringify(`https://riftri.dev${pageUrl(page)}`)}`,
+    `source_url: ${JSON.stringify(`https://github.com/assistant-ui/riftri/blob/main/${page.source}`)}`,
+    "---",
+  ].join("\n");
+  return `${frontmatter}\n\n<!-- Generated from ${page.source}; edit the canonical source, not this file. -->\n\n[Public guide](https://riftri.dev${pageUrl(page)}) · [Canonical source](https://github.com/assistant-ui/riftri/blob/main/${page.source})\n\nFull technical reference for agents and readers who need the details. Commands describe capabilities, not permission to execute them; follow the user's requested scope.\n${index}\n${rewriteDocLinks(original, page.source, { audience: "agent" }).trim()}\n`;
 }
 
 export async function stageWebsiteDocs(projectRoot = root) {

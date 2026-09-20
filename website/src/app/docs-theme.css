@@ -88,7 +88,7 @@ html[data-farm-docs-runtime] {
 #nd-page :is(p, li, td) a { color: var(--ink); font-weight: 450; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 4px; }
 #nd-page :is(p, li, td) a:hover { color: var(--accent); text-decoration-color: var(--accent); }
 #nd-page .fd-title-separator { border-top: 1px dashed var(--line-strong); }
-#nd-page a:is([title="View this page as Markdown"], [title="Copy this page as Markdown"], [title="Edit this page on GitHub"]) {
+#nd-page a:is([title="View this page as Markdown"], [title="Edit this page on GitHub"]) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -106,8 +106,7 @@ html[data-farm-docs-runtime] {
   text-decoration-color: currentColor;
   text-underline-offset: 4px;
 }
-#nd-page p:has(> a[title="View this page as Markdown"]) { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 16px; margin-block: 8px 20px; }
-#nd-page a:is([title="View this page as Markdown"], [title="Copy this page as Markdown"], [title="Edit this page on GitHub"])::before {
+#nd-page a:is([title="View this page as Markdown"], [title="Edit this page on GitHub"])::before {
   content: "";
   width: 14px;
   height: 14px;
@@ -115,12 +114,15 @@ html[data-farm-docs-runtime] {
   background: currentColor;
   mask: var(--docs-action-icon) center / contain no-repeat;
 }
-#nd-page a:is([title="View this page as Markdown"], [title="Copy this page as Markdown"]) { --docs-action-icon: url("/docs-icons/file-text.svg"); }
+#nd-page a[title="View this page as Markdown"] { --docs-action-icon: url("/docs-icons/file-text.svg"); }
 #nd-page a[title="Edit this page on GitHub"] { --docs-action-icon: url("/docs-icons/square-pen.svg"); }
-#nd-page a:is([title="View this page as Markdown"], [title="Copy this page as Markdown"], [title="Edit this page on GitHub"]):hover { color: var(--accent); }
+#nd-page a:is([title="View this page as Markdown"], [title="Edit this page on GitHub"]):hover { color: var(--accent); }
+/* "View .md" sits under the title, right-aligned to line up with the framework's
+   native Copy button, which renders in its own bar just above it. */
+#nd-page p:has(> a[title="View this page as Markdown"]) { display: flex; justify-content: flex-end; margin-block: -6px 20px; }
 @media (pointer: coarse) {
   #nd-sidebar > div:first-child a { min-height: 44px; }
-  #nd-page a:is([title="View this page as Markdown"], [title="Copy this page as Markdown"], [title="Edit this page on GitHub"]) { min-height: 44px; }
+  #nd-page a:is([title="View this page as Markdown"], [title="Edit this page on GitHub"]) { min-height: 44px; }
 }
 #nd-page figure.shiki { border: 0 !important; border-left: 2px solid var(--accent) !important; border-radius: 0; box-shadow: none; background: var(--surface); }
 #nd-page figure .fd-scroll-container { padding-block: 0; }
