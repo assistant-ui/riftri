@@ -44,15 +44,20 @@ export function rewriteDocLinks(markdown, source, { audience = "human" } = {}) {
 export function renderWebsiteDoc(page, original) {
   const body = original.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
   const markdown = rewriteDocLinks(body, page.content).trim();
-  // The docs framework renders the native "Copy .md" action
-  // (pageActions.copyMarkdown in docs.config.ts) — a real clipboard copy of
-  // this page as Markdown, with framework frontmatter. Alongside it we inject a
-  // plain "View .md" link so readers can open the Markdown directly; it sits
-  // right under the title next to the framework's Copy button.
+  // Inject the "View .md / Copy .md" page actions as plain Markdown links that
+  // both open the page's `.md` (served with frontmatter). They sit as one row
+  // below the page's intro paragraph — the description leads — and are styled
+  // as compact links in docs-theme.css. The docs framework runs no custom
+  // JavaScript on rendered pages, so the actions are links, not a clipboard
+  // button; the native button is disabled in docs.config.ts.
+  const markdownUrl = `${pageUrl(page)}.md`;
   if (!/^# .+(?:\r?\n|$)/.test(markdown)) throw new Error(`Docs page needs a leading title: ${page.content}`);
-  const view = `[View .md](${pageUrl(page)}.md "View this page as Markdown")`;
-  const withView = markdown.replace(/^(# .+(?:\r?\n|$))/, (title) => `${title}\n${view}\n`);
-  return `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n${withView}\n\n---\n\n[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} "Edit this page on GitHub")\n`;
+  const action = `[View .md](${markdownUrl} "View this page as Markdown") / [Copy .md](${markdownUrl} "Copy this page as Markdown")`;
+  const withAction = markdown.replace(
+    /^(# .+(?:\r?\n)+(?:(?![#\r\n])[^\r\n]+(?:\r?\n|$))*)/,
+    (intro) => `${intro.trimEnd()}\n\n${action}\n\n`,
+  );
+  return `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n${withAction}\n\n---\n\n[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} "Edit this page on GitHub")\n`;
 }
 
 export function renderAgentDoc(page, original) {
