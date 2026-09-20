@@ -13,6 +13,7 @@ test("every public page has a concise human source separate from the full refere
     const human = fs.readFileSync(path.join(root, page.content), "utf8");
     assert.ok(human.trim().split(/\s+/).length <= 450, `${page.slug}: keep the public guide concise`);
     assert.match(human, /^# /);
+    assert.doesNotMatch(human, /Agent \.md/, `${page.content}: point readers to the actual Markdown route`);
   }
 });
 
@@ -54,11 +55,11 @@ test("staging separates public search content from complete agent companions", a
       : path.join(fixture, "website/public/docs.md");
     const original = fs.readFileSync(path.join(root, page.source), "utf8");
     assert.equal(fs.readFileSync(reference, "utf8"), renderAgentDoc(page, original));
-    // The staged page injects the "View .md / Copy .md" action row; both links
-    // open the page's own `.md`.
+    // The staged page injects one honest action that opens the page's own `.md`.
     const staged = fs.readFileSync(publicFile, "utf8");
     const markdownUrl = `/docs${page.slug ? `/${page.slug}` : ""}.md`;
-    assert.ok(staged.includes(`[View .md](${markdownUrl} "View this page as Markdown") / [Copy .md](${markdownUrl} "Copy this page as Markdown")`));
+    assert.ok(staged.includes(`[View .md](${markdownUrl} "View this page as Markdown")`));
+    assert.doesNotMatch(staged, /Copy \.md/);
     // The rendered HTML page source stays concise; the full reference lives at
     // the page's own `.md`, never as a separate agent.md route.
     assert.ok(!fs.existsSync(path.join(path.dirname(publicFile), "agent.md")));
@@ -82,16 +83,17 @@ test("all root-relative links in public guides resolve to a page, mirror, or pub
   }
 });
 
-test("every staged page has one View/Copy action row below its intro and a short edit link", async () => {
+test("every staged page has one View action below its intro and a short edit link", async () => {
   const { pages, renderWebsiteDoc } = await import("../scripts/stage-website-docs.mjs");
   for (const page of pages) {
     const human = fs.readFileSync(path.join(root, page.content), "utf8");
     const result = renderWebsiteDoc(page, human);
     const markdownUrl = `/docs${page.slug ? `/${page.slug}` : ""}.md`;
-    const action = `[View .md](${markdownUrl} "View this page as Markdown") / [Copy .md](${markdownUrl} "Copy this page as Markdown")`;
+    const action = `[View .md](${markdownUrl} "View this page as Markdown")`;
     // Exactly one action row, and it sits below the title/intro but before the
     // page's first section heading.
     assert.equal(result.split(action).length - 1, 1);
+    assert.doesNotMatch(result, /Copy \.md/);
     // The row follows the title and its intro paragraph (description first).
     assert.match(
       result,

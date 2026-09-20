@@ -30,4 +30,4 @@ Follow its recovery guidance, keeping any custom repository or
 state-directory arguments; see [troubleshooting](troubleshooting.md).
 Report potential data-loss or security problems privately via the
 [security policy](https://github.com/assistant-ui/riftri/blob/main/SECURITY.md).
-Full safety model and testing details: **Agent .md**.
+For the full safety model and testing details, open **View .md**.

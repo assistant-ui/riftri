@@ -25,5 +25,5 @@ riftri worktree add ../app-auth -b feature/auth main
 - Sparse worktrees with LFS paths are not supported yet.
 
 Do not remove a required hook to enable Riftri; use ordinary Git outside
-interception instead. Full eligibility and object-verification rules:
-**Agent .md**.
+interception instead. For the full eligibility and object-verification rules,
+open **View .md** at the top of this page.

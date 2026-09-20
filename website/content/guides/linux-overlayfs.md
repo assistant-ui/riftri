@@ -20,7 +20,7 @@ If the diagnostic calls for it, an administrator installs the helper once:
 sudo riftri overlayfs install-helper
 ```
 
-The helper is privileged and system-wide — review **Agent .md** before
+The helper is privileged and system-wide — open **View .md** before
 installing. It only performs validated mount operations; repository
 enablement stays separate. Then create worktrees normally:
 

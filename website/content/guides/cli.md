@@ -47,5 +47,5 @@ riftri worktree remove ../app-login
 
 ## More options
 
-`--help` works with every command. Complete flag, JSON, exit-code, and
-recovery contracts: **Agent .md**.
+`--help` works with every command. For complete flag, JSON, exit-code, and
+recovery contracts, open **View .md** at the top of this page.

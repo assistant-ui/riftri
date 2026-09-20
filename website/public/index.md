@@ -185,12 +185,11 @@ for harness and automation details.
 
 ### Give the agent this guide
 
-Agents follow these commands well when the guide is in their context. The
-**Copy .md** button on [riftri.dev](https://riftri.dev) copies this entire
-document to the clipboard; paste it into your agent's conversation or drop it
-into the repository (for example as part of `CLAUDE.md` or `AGENTS.md`) so the
-agent knows how to create, use, and clean up Riftri worktrees without guessing.
-The raw document also stays available at
+Agents follow these commands well when the guide is in their context. Open the
+**.md** link on [riftri.dev](https://riftri.dev) to view this entire document,
+then paste or reference it in your agent's context (for example from
+`CLAUDE.md` or `AGENTS.md`) so the agent knows how to create, use, and clean up
+Riftri worktrees without guessing. The raw document stays available at
 [riftri.dev/index.md](https://riftri.dev/index.md) for fetching from scripts or
 agent instructions.
 

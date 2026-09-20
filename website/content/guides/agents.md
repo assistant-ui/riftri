@@ -35,7 +35,7 @@ riftri exec --worktree ../app-auth -- codex
 - No special prompt; the agent creates worktrees by calling `git` through its
   inherited PATH.
 - Embedded Git libraries and absolute Git paths bypass Riftri.
-- Guided setup is interactive only; scripts and harnesses should use
-  **Agent .md** for explicit commands, JSON responses, failures, and cleanup.
+- Guided setup is interactive only; scripts and harnesses should open
+  **View .md** for explicit commands, JSON responses, failures, and cleanup.
 - Not a sandbox for untrusted agents; use an OS sandbox, container, or VM for
   that boundary.

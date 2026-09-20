@@ -28,5 +28,5 @@ not supported.
 Copying uncommitted changes, untracked dependencies, or source-directory
 metadata; faster creation; fixed space savings; a security boundary.
 
-Start with [filesystem compatibility](filesystem-compatibility.md).
-Complete metadata and lifecycle support matrix: **Agent .md**.
+Start with [filesystem compatibility](filesystem-compatibility.md). For the
+complete metadata and lifecycle support matrix, open **View .md**.

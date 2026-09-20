@@ -26,5 +26,5 @@ Lifecycle operations are recorded so interruptions can be recovered. Shared
 bases are removed only when unreferenced; uncertain ownership or contents
 stop cleanup and preserve the data.
 
-See [safety](safety.md) for precautions. Full component design, storage
-layout, and transaction state machines: **Agent .md**.
+See [safety](safety.md) for precautions. For the full component design,
+storage layout, and transaction state machines, open **View .md**.

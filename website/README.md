@@ -22,14 +22,14 @@ There are two reading paths for every topic:
   `content/introduction.md`. Keep them short: the task, useful commands,
   essential limits, and a next step. A test caps each source at 450 words.
 - Full technical references remain in `../docs/` (the overview uses `../README.md`).
-  Each is published in full at `/docs/<topic>/agent.md`; the introduction uses
-  `/docs/agent.md`, which also links to every topic's full reference.
+  Each page's own Markdown route publishes it in full at `/docs/<topic>.md`;
+  the introduction uses `/docs.md` and links to every topic's full reference.
 
 `content/docs.json` pairs each public `content` file with its full `source`.
-`pnpm stage` generates the public pages in ignored `src/app/docs/` and the
-agent companions in ignored `public/docs/**/agent.md`. It rewrites links,
-adds right-aligned `View .md` and `Agent .md` actions, and links public edits to
-the concise source file. Agent references link to the canonical technical
+`pnpm stage` generates the public pages in ignored `src/app/docs/` and their
+full Markdown mirrors in ignored `public/docs/*.md`. It rewrites links, adds a
+right-aligned `View .md` action, and links public edits to the concise source
+file. Full references link to the canonical technical
 source, with cross-references pointing to other full references. Do not edit
 generated files. When product behavior changes, update both authored sources.
 
@@ -51,7 +51,7 @@ After editing a canonical Markdown file during development, rerun `pnpm stage`.
 After changing `docs.config.ts`, restart the dev server.
 
 The build keeps the adapter's Vercel function for public `/docs` pages, their
-Markdown mirrors, and `/api/docs` search. Static agent companions resolve before
+Markdown mirrors, and `/api/docs` search. Static Markdown mirrors resolve before
 that runtime. All other routes retain the existing static handling.
 Docs responses are not CDN-cached because HTML and client navigation payloads
 share URLs. `pnpm preview:static` now previews both parts of this finalized
