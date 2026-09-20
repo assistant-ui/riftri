@@ -96,6 +96,27 @@ test("breakpoint edges keep framed content inside the viewport", async ({ page }
   }
 });
 
+test("hero install command stays on one line across two-column widths", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "exercise intermediate desktop widths once");
+  for (const width of [1041, 1100, 1180]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/");
+    await page.evaluate(() => document.fonts.ready);
+    const layout = await page.locator(".hero-install .command code").evaluate((code) => {
+      const range = document.createRange();
+      range.selectNodeContents(code);
+      const lineTops = new Set([...range.getClientRects()].map((rect) => Math.round(rect.top)));
+      const block = code.closest(".hero-install")!.getBoundingClientRect();
+      return {
+        lines: lineTops.size,
+        overflows: code.scrollWidth > code.clientWidth + 1,
+        clipped: block.left < -1 || block.right > innerWidth + 1,
+      };
+    });
+    expect(layout, `${width}px`).toEqual({ lines: 1, overflows: false, clipped: false });
+  }
+});
+
 test("FAQ answers toggle with the keyboard and keep focus on the question", async ({ page }, testInfo) => {
   await page.goto("/#faq");
   const faq = page.getByRole("region", { name: "Common questions" });

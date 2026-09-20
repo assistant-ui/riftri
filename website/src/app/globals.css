@@ -118,7 +118,7 @@ code, pre { font-family: var(--font-mono); }
   min-width: 0;
   flex-direction: column;
   justify-content: center;
-  padding: 4.5rem var(--gutter);
+  padding: clamp(3.5rem, 6vw, 6.5rem) clamp(2.25rem, 3.4vw, 6.5rem);
   background: var(--canvas);
 }
 
@@ -200,8 +200,13 @@ code, pre { font-family: var(--font-mono); }
 .hero-install { display: flex; width: min(100%, 540px); margin-top: 1.5rem; background: var(--surface); }
 .hero-install p { margin: 0 0 0.65rem; color: var(--ink-muted); font-size: 0.7rem; line-height: 1.5; }
 .hero-install .command { min-width: 0; }
-.hero-install .command code { white-space: normal; overflow-wrap: anywhere; }
-.hero-install .hero-markdown { display: grid; flex-shrink: 0; min-width: 44px; place-items: center; padding-inline: 0.85rem; border-left: 1px solid var(--line); font-size: 0.7rem; white-space: nowrap; }
+.hero-install .command code {
+  padding-inline: 0.7rem;
+  font-size: clamp(0.66rem, 0.82vw, 0.7rem);
+  white-space: nowrap;
+}
+.hero-install .copy-button { min-width: 4.5rem; }
+.hero-install .hero-markdown { display: grid; flex-shrink: 0; min-width: 44px; place-items: center; border-left: 1px solid var(--line); font-size: 0.7rem; }
 
 .button {
   position: relative;
@@ -781,6 +786,12 @@ code, pre { font-family: var(--font-mono); }
   .faq-item summary:hover, .faq-answer a:hover { color: var(--accent); }
 }
 
+/* Below this width the copy column alone cannot hold the install command on one
+   line, so it borrows from the map, which keeps its own minimum. */
+@media (max-width: 1180px) {
+  .hero { grid-template-columns: minmax(0, 1.1fr) minmax(24rem, 0.9fr); }
+}
+
 @media (max-width: 1040px) {
   .hero { grid-template-columns: 1fr; }
   .hero-graph { border-top: 1px solid var(--line); border-left: 0; }
@@ -810,6 +821,7 @@ code, pre { font-family: var(--font-mono); }
   .hero-graph { padding: 2.5rem 1rem; }
   .storage-backends { align-items: flex-start; flex-direction: column; gap: 1rem; }
   .storage-backends ul { gap: 0.65rem 1.5rem; }
+  .hero-install .command code { font-size: 0.7rem; white-space: normal; overflow-wrap: anywhere; }
   .base-node, .view-row { grid-template-columns: 1.5rem minmax(0, 1fr); }
   .base-track, .block-track { grid-column: 2; }
   .block-track { justify-self: start; }
