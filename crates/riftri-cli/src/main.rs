@@ -14,6 +14,12 @@ macro_rules! outputln {
     ($($arg:tt)*) => { ui::print_line(format_args!($($arg)*)) };
 }
 
+// Machine output (JSON reports) skips the renderer but still exits cleanly when
+// a reader closes the pipe early, matching outputln!'s broken-pipe handling.
+macro_rules! machineln {
+    ($($arg:tt)*) => { ui::print_machine(format_args!($($arg)*)) };
+}
+
 const CLI_EXAMPLES: &str = "\
 Examples:
   riftri setup                             Create a worktree, then choose an agent
@@ -647,17 +653,41 @@ fn main() -> Result<()> {
         std::process::exit(run_git_shim()?);
     }
 
-    // Clap handles --help before normal parsing returns. Honor --plain there too.
-    let plain_help = env::args_os()
-        .take_while(|arg| arg != "--")
-        .any(|arg| arg == "--plain");
-    let matches = Cli::command()
-        .color(if plain_help {
+    // Clap handles --help before normal parsing returns. Honor --plain there
+    // too, and force plain rendering whenever `--json-errors` is requested so a
+    // usage-error receipt never carries terminal color escapes.
+    let flag_before_double_dash = |flag: &str| {
+        env::args_os()
+            .take_while(|arg| arg != "--")
+            .any(|arg| arg == flag)
+    };
+    let plain_help = flag_before_double_dash("--plain");
+    let json_errors_flag = flag_before_double_dash("--json-errors");
+    let matches = match Cli::command()
+        .color(if plain_help || json_errors_flag {
             clap::ColorChoice::Never
         } else {
             clap::ColorChoice::Auto
         })
-        .get_matches();
+        .try_get_matches()
+    {
+        Ok(matches) => matches,
+        // `try_get_matches` returns the same conditions `get_matches` would have
+        // exited on: genuine usage errors (exit 2) as well as the `--help` and
+        // `--version` display paths (exit 0). Only the former are failures, so
+        // only they are turned into a JSON receipt when `--json-errors` is set.
+        // Parsing failed, so the flag is detected from the raw arguments rather
+        // than the parsed struct.
+        Err(error) if json_errors_flag && error.use_stderr() => {
+            eprintln!("{}", serde_json::to_string(&usage_receipt(&error))?);
+            // Match clap's usage-error exit code so automation can still tell a
+            // usage error apart from an operational command failure (exit 1).
+            std::process::exit(2);
+        }
+        // Help, version, and (without `--json-errors`) every usage error keep
+        // clap's exact human-readable behavior and exit code.
+        Err(error) => error.exit(),
+    };
     let cli = Cli::from_arg_matches(&matches)?;
     let json_errors = cli.json_errors;
     let operation = cli.command.operation_name();
@@ -845,7 +875,7 @@ fn run(cli: Cli) -> Result<()> {
             let report = riftri_core::doctor_for_destination(&path, destination);
 
             if json {
-                println!(
+                machineln!(
                     "{}",
                     serde_json::to_string_pretty(&doctor_json(&report))
                         .context("serialize doctor report")?
@@ -858,7 +888,7 @@ fn run(cli: Cli) -> Result<()> {
             let backends = riftri_core::backends(&path);
 
             if json {
-                println!(
+                machineln!(
                     "{}",
                     serde_json::to_string_pretty(&backends_json(&path, &backends))
                         .context("serialize backend report")?
@@ -1078,6 +1108,32 @@ fn report_progress(event: &riftri_core::progress::ProgressEvent) {
         _ => return,
     };
     ui::progress(line);
+}
+
+/// A machine-readable receipt for a command-line usage error, produced when
+/// clap rejects the arguments before a subcommand is ever selected and the
+/// caller asked for `--json-errors`. It mirrors [`failure_receipt`]'s shape so
+/// the same parser handles it, but carries the `usage` category matching exit
+/// code 2. Parsing failed, so no operation, repository, or state directory is
+/// known: those fields are explicit `null`.
+fn usage_receipt(error: &clap::Error) -> serde_json::Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "outcome": "failed",
+        "operation": serde_json::Value::Null,
+        "code": "usage-error",
+        "category": "usage",
+        "message": error.to_string().trim_end(),
+        "phase": serde_json::Value::Null,
+        "cleanup": "not-needed",
+        "recovery": "not-required",
+        "nextCommand": serde_json::Value::Null,
+        "repository": serde_json::Value::Null,
+        "repositoryNativeHex": serde_json::Value::Null,
+        "stateDirectory": serde_json::Value::Null,
+        "stateDirectoryNativeHex": serde_json::Value::Null,
+        "nativePathEncoding": native_path_encoding(),
+    })
 }
 
 fn failure_receipt(
@@ -1626,7 +1682,7 @@ fn print_recovery_report(
                 .collect::<Vec<_>>(),
             "errors": report.errors,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize recovery report")?
         );
@@ -1805,7 +1861,7 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize add result")?
         );
@@ -1849,7 +1905,7 @@ fn print_remove_result(
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize remove result")?
         );
@@ -1881,7 +1937,7 @@ fn print_move_result(result: &riftri_core::MoveWorktreeResult, json: bool) -> Re
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize move result")?
         );
@@ -1913,7 +1969,7 @@ fn print_compact_result(result: &riftri_core::CompactWorktreeResult, json: bool)
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize compact result")?
         );
@@ -1937,7 +1993,7 @@ fn print_prune_result(result: &riftri_core::PruneWorktreesResult, json: bool) ->
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize prune result")?
         );
@@ -2003,7 +2059,7 @@ fn print_worktree_inventory(
             "worktrees": worktrees,
             "diagnostic_issues": diagnostic_issues,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
         );
@@ -2113,7 +2169,7 @@ fn print_all_states_worktree_inventory(
             "worktrees": worktrees,
             "diagnostic_issues": diagnostic_issues,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
         );
@@ -2287,7 +2343,7 @@ fn print_storage_accounting(
             "total_logical_bytes": report.total_logical_bytes,
             "total_allocated_bytes": report.total_allocated_bytes,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize storage status")?
         );
@@ -2447,7 +2503,7 @@ fn print_garbage_collection_report(
             "removed_logical_bytes": report.removed_logical_bytes,
             "removed_allocated_bytes": report.removed_allocated_bytes,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize collection report")?
         );

@@ -112,10 +112,6 @@ main() (
   [[ $details == -* && $details != *$'\n'* ]] || fail 'Archive must contain one regular file.'
   # Stream the single validated member into our file; never let tar create paths or links.
   tar -xOzf "$download_dir/archive.tar.gz" riftri > "$download_dir/riftri" || fail 'Archive extraction failed.'
-  chmod 755 "$download_dir/riftri"
-  reported=$("$download_dir/riftri" --version) ||
-    fail 'Downloaded binary cannot run. Check OS/runtime support and security policy; installation is unchanged.'
-  [[ $reported == "riftri $version" ]] || fail 'Downloaded binary version does not match the release.'
 
   mkdir -p -- "$install_dir"
   # Stage on the destination filesystem so replacing an existing regular binary
@@ -123,6 +119,14 @@ main() (
   staged_file=$(mktemp "$install_dir/.riftri-install.XXXXXX")
   cp -- "$download_dir/riftri" "$staged_file"
   chmod 755 "$staged_file"
+  # Sanity-check the binary from its staged path on the destination filesystem,
+  # not from the temp dir: $TMPDIR may be mounted noexec (a common hardened-host
+  # default) and reject a perfectly valid binary. install_dir carries the real
+  # executable and is not noexec. The checksum was already verified above, and a
+  # failure here leaves the target untouched (the staged file is cleaned up).
+  reported=$("$staged_file" --version) ||
+    fail 'Downloaded binary cannot run. Check OS/runtime support and security policy; installation is unchanged.'
+  [[ $reported == "riftri $version" ]] || fail 'Downloaded binary version does not match the release.'
   validate_target
   mv -f -- "$staged_file" "$target"
   staged_file=
