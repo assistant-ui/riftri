@@ -55,6 +55,44 @@ pub enum StorageError {
     },
 }
 
+/// Write-permission bits (a subset of `0o222`) that a normal checkout would
+/// grant under the current process umask.
+///
+/// COW backends make the base tree read-only before cloning, so files inherit
+/// `0o444`. Restoring only the owner bit (`0o200`) would drop the group/other
+/// write bits that a plain `git worktree add` keeps under `umask 002` or
+/// `core.sharedRepository=group`. ORing these bits back in makes a COW
+/// worktree match what a normal checkout under the same umask produces.
+#[cfg(unix)]
+pub(crate) fn umask_writable_bits() -> u32 {
+    writable_bits_for_umask(current_umask())
+}
+
+/// Pure computation of the write bits granted under `umask`, split out so the
+/// masking logic is unit-testable without mutating the real process umask.
+#[cfg(unix)]
+fn writable_bits_for_umask(umask: u32) -> u32 {
+    0o222 & !umask
+}
+
+/// Read the current process umask without permanently changing it.
+#[cfg(unix)]
+fn current_umask() -> u32 {
+    // SAFETY: `umask` only reads and replaces the calling process's file-mode
+    // creation mask; it never fails and touches no other state. We immediately
+    // restore the value we observed so the mask is left untouched.
+    let previous = unsafe {
+        let previous = libc::umask(0o022);
+        libc::umask(previous);
+        previous
+    };
+    // `mode_t` is `u16` on macOS and `u32` on Linux; the conversion is a no-op
+    // on the latter, so silence the platform-dependent lint.
+    #[allow(clippy::useless_conversion)]
+    let umask = u32::from(previous) & 0o777;
+    umask
+}
+
 /// Native APFS clone operations used by the explicit macOS prototype.
 pub struct ApfsCloner;
 
@@ -1713,5 +1751,43 @@ mod tests {
 
         assert_eq!(supported[0].status, CapabilityStatus::Supported);
         assert_eq!(unsupported[0].status, CapabilityStatus::Unsupported);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_bits_track_the_umask() {
+        use super::writable_bits_for_umask;
+
+        // A permissive `umask 002` (or `core.sharedRepository=group`) keeps the
+        // group write bit; the stricter `umask 022` default does not.
+        assert_eq!(writable_bits_for_umask(0o002), 0o220);
+        assert_eq!(writable_bits_for_umask(0o022), 0o200);
+        assert_eq!(writable_bits_for_umask(0o000), 0o222);
+        assert_eq!(writable_bits_for_umask(0o222), 0o000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_clone_regains_write_bits_matching_a_normal_checkout() {
+        use super::writable_bits_for_umask;
+
+        // A file cloned from a read-only base inherits `0o444`. Restoring the
+        // umask-appropriate write bits must reproduce what a plain
+        // `git worktree add` would leave behind.
+        let cloned = 0o444;
+        assert_eq!(cloned | writable_bits_for_umask(0o002), 0o664);
+        assert_eq!(cloned | writable_bits_for_umask(0o022), 0o644);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reading_the_umask_leaves_it_unchanged() {
+        use super::current_umask;
+
+        let observed = current_umask();
+        // The read-then-restore trick must not leave the temporary `0o022`
+        // behind: a second read observes the same value it started with.
+        assert_eq!(observed, current_umask());
+        assert_eq!(observed & !0o777, 0);
     }
 }

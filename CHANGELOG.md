@@ -11,6 +11,33 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   same digest-shape rule already applied to `force_snapshot` — a stored value
   must be exactly 64 lowercase hexadecimal characters — so a corrupted durable
   record is rejected as an invalid journal instead of surviving decode.
+- Piping a riftri command into a reader that closes early (for example
+  `riftri status | head` or `riftri doctor --json | head`) no longer panics
+  with a `BrokenPipe` error and exit code 101. Human-readable and machine
+  (`--json`) stdout writes now treat a closed pipe as a clean stop and exit
+  quietly. Handling the write error kind (rather than resetting the SIGPIPE
+  disposition) keeps this portable to Windows and still lets terminal cleanup
+  run for any other write failure.
+- COW worktrees no longer silently drop the group/other write bits. Because the
+  base tree is made read-only (`0o444`) before cloning, files re-gained only the
+  owner write bit afterwards, leaving `0o644` where a plain `git worktree add`
+  under `umask 002` or `core.sharedRepository=group` would leave `0o664`. The
+  APFS and reflink backends now restore write bits according to the process
+  umask, matching a normal checkout.
+- The macOS/Linux `install.sh` now runs its `--version` sanity check against
+  the staged binary on the install directory's filesystem instead of the
+  freshly extracted copy in the temp directory. Hosts that mount `/tmp` (or
+  `$TMPDIR`) `noexec` — a common CIS-hardened default — could previously abort
+  a valid install with a misleading "Downloaded binary cannot run" error even
+  though the download, platform detection, and checksum were all correct. The
+  checksum gate, single-member archive validation, and atomic stage-then-rename
+  are unchanged.
+- Cloning a Windows symlink into a worktree now chooses the file-vs-directory
+  reparse type from the source link's own attributes via `symlink_metadata`
+  instead of `metadata`, which followed the link to its target. A dangling
+  link (target missing at clone time) is no longer forced to a file symlink,
+  and a link whose target's kind differs from the link's is no longer
+  misclassified.
 
 ## [0.3.2] - 2026-09-19
 
