@@ -5,6 +5,26 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.3.2] - 2026-09-19
+
+### Added
+
+- Guided setup and interactive confirmations now render through a Ratatui
+  terminal interface: editable inputs, arrow-key choices with safe defaults
+  (confirmations default to **No**, agent selection to **Not now**), and
+  PgUp/PgDn review for long plans and paths, with a restrained orange accent
+  across human-readable reports and help and an indeterminate spinner driven
+  only by real lifecycle events. `--plain` restores line-oriented prompts and
+  undecorated reports; `--no-animation` (or a nonempty `RIFTRI_NO_ANIMATION`)
+  keeps the interface but replaces the spinner with bounded phase lines;
+  `--no-progress` suppresses progress; a nonempty `NO_COLOR` disables colors
+  while keeping keyboard navigation. Redirected stdout or stderr, `CI`, and
+  `TERM=dumb` fall back to plain output automatically. JSON, `--json-errors`,
+  generated shell hook/deactivation code, completions, the Git shim, and child
+  process streams are never decorated, and terminal modes, cursor visibility,
+  and inherited Unix signal dispositions are restored before any transaction or
+  agent launch.
+
 ### Fixed
 
 - Suggested recovery commands in messages and JSON receipts now use POSIX

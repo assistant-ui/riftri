@@ -52,13 +52,13 @@ without parsing JSON. A policy refusal means nothing was changed; consult
 [decisions.md](decisions.md) for the forms Riftri refuses and `RIFTRI_BYPASS=1`
 to run one such command through ordinary Git instead.
 
-## Terminal interface (unreleased)
+## Terminal interface
 
-Riftri uses Ratatui for guided setup and interactive confirmations, with a
-restrained orange accent across human-readable reports and help. Reports remain
-in normal terminal scrollback; full-screen views exist only while a question is
-open. This is presentation around the same core operations, not a new worktree
-implementation.
+Available starting with v0.3.2. Riftri uses Ratatui for guided setup and
+interactive confirmations, with a restrained orange accent across
+human-readable reports and help. Reports remain in normal terminal scrollback;
+full-screen views exist only while a question is open. This is presentation
+around the same core operations, not a new worktree implementation.
 
 - Use arrow keys to select, Enter to confirm, and Esc to cancel. Confirmations
   default to **No** and agent selection defaults to **Not now**. Selecting Yes
