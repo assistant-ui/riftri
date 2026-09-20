@@ -5,6 +5,22 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- `status --json` now reports `total_allocated_bytes` as the actual physical
+  footprint on disk, counting each copy-on-write base's shared blocks once,
+  instead of a naive per-tree sum. Every view is a CoW clone that shares
+  physical blocks with its base, so summing each tree's `allocated_bytes`
+  double-counted the shared blocks: a freshly created view made the total jump
+  by roughly its base's full allocation even though almost nothing new was
+  written, badly overstating usage for a tool whose headline value is space
+  savings. The total now adds each base once plus, per view, only the blocks
+  that diverge from its base (`max(0, view − base)`), falling back to a view's
+  full allocation when its base cannot be resolved. Per-tree `allocated_bytes`
+  fields are unchanged. The total is an approximation: it assumes a view's
+  extra allocation is entirely unshared and does not detect blocks shared
+  between sibling views.
+
 ## [0.3.2] - 2026-09-19
 
 ### Added

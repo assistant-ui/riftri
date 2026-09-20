@@ -1060,6 +1060,48 @@ fn managed_destination_candidates(destination: &Path) -> Result<Vec<PathBuf>, Wo
     Ok(candidates)
 }
 
+/// Approximate the ACTUAL physical footprint of every retained base and active
+/// view, counting shared copy-on-write blocks once.
+///
+/// Each view is a copy-on-write clone that shares physical blocks with its
+/// base, so the view's own `allocated_bytes` (blocks * 512) re-counts blocks
+/// that already belong to the base. Naively summing base and view allocations
+/// therefore double-counts shared storage: a freshly created view would report
+/// roughly its base's full allocation even though almost nothing new was
+/// physically written — badly overstating usage for a tool whose headline value
+/// is space savings.
+///
+/// Instead this counts every base's blocks once and, for each view, adds only
+/// the blocks that diverge from its base: `max(0, view - base)`. Views are
+/// linked to their base by `ViewStorageAccounting::base_path`, which matches a
+/// `BaseStorageAccounting::path`. When a view's base cannot be resolved (e.g.
+/// the base directory is gone) it falls back to counting the view's full
+/// allocation, which is conservative — it never under-reports.
+///
+/// This remains an approximation: it assumes a view's extra allocation is
+/// entirely unshared and does not detect blocks shared between sibling views.
+fn cow_aware_allocated_total(
+    bases: &[BaseStorageAccounting],
+    views: &[ViewStorageAccounting],
+) -> u64 {
+    let base_allocated: BTreeMap<&Path, u64> = bases
+        .iter()
+        .map(|base| (base.path.as_path(), base.allocated_bytes))
+        .collect();
+    bases
+        .iter()
+        .map(|base| base.allocated_bytes)
+        .chain(
+            views
+                .iter()
+                .map(|view| match base_allocated.get(view.base_path.as_path()) {
+                    Some(&base_bytes) => view.allocated_bytes.saturating_sub(base_bytes),
+                    None => view.allocated_bytes,
+                }),
+        )
+        .fold(0_u64, u64::saturating_add)
+}
+
 /// Inventory retained immutable bases and active views from durable journals.
 pub fn storage_accounting(
     state_directory: &Path,
@@ -1251,11 +1293,7 @@ pub fn storage_accounting(
         .map(|base| base.logical_bytes)
         .chain(views.iter().map(|view| view.logical_bytes))
         .fold(0_u64, u64::saturating_add);
-    let total_allocated_bytes = bases
-        .iter()
-        .map(|base| base.allocated_bytes)
-        .chain(views.iter().map(|view| view.allocated_bytes))
-        .fold(0_u64, u64::saturating_add);
+    let total_allocated_bytes = cow_aware_allocated_total(&bases, &views);
     let mut state_diagnosis = diagnose_state_paths(
         &state_directory,
         &add_journals,
@@ -9123,9 +9161,10 @@ mod tests {
     #[cfg(unix)]
     use super::Git;
     use super::{
-        AddWorktreeRequest, BackendKind, CompactWorktreeRequest, MoveWorktreeRequest,
-        PruneWorktreesRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree_inner,
-        classify_in_tree_attributes, compact_worktree_inner, force_remove_worktree_inner,
+        AddWorktreeRequest, BackendKind, BaseStorageAccounting, CompactWorktreeRequest,
+        MoveWorktreeRequest, ObjectId, PruneWorktreesRequest, RemoveWorktreeRequest,
+        ViewStorageAccounting, WorktreeMode, add_worktree_inner, classify_in_tree_attributes,
+        compact_worktree_inner, cow_aware_allocated_total, force_remove_worktree_inner,
         garbage_collect_inner, has_ascii_case_alias, move_worktree_inner, next_operation_id,
         prune_worktrees_inner, recover_incomplete_operations, remove_empty_directory_if_present,
         remove_worktree_inner, storage_accounting,
@@ -9154,6 +9193,71 @@ mod tests {
             output.status.success(),
             "git {arguments:?}: {}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn cow_aware_total_counts_shared_base_blocks_once() {
+        // A null (all-zero) object ID is a valid 40-char hex string.
+        let head = ObjectId::parse("0".repeat(40)).expect("null object id");
+        let base_path = PathBuf::from("/state/bases/base-a");
+        let base_allocated = 4_096_000_u64;
+        let bases = vec![BaseStorageAccounting {
+            path: base_path.clone(),
+            reference_count: 3,
+            logical_bytes: base_allocated,
+            allocated_bytes: base_allocated,
+        }];
+        let fresh_view = |destination: &str| ViewStorageAccounting {
+            repository: PathBuf::from("/repo"),
+            destination: PathBuf::from(destination),
+            base_path: base_path.clone(),
+            backend: BackendKind::ApfsClone,
+            head: head.clone(),
+            branch: None,
+            detached: false,
+            locked_reason: None,
+            prunable_reason: None,
+            // A freshly cloned CoW view shares every base block, so its
+            // per-tree allocation equals the base's allocation.
+            logical_bytes: base_allocated,
+            allocated_bytes: base_allocated,
+        };
+
+        // One base plus three fresh views that share all of the base's blocks.
+        // The naive per-tree sum would report 4 * base_allocated; the CoW-aware
+        // total must report ~base_allocated because nothing new was written.
+        let views = vec![
+            fresh_view("/views/one"),
+            fresh_view("/views/two"),
+            fresh_view("/views/three"),
+        ];
+        assert_eq!(
+            cow_aware_allocated_total(&bases, &views),
+            base_allocated,
+            "shared base blocks must be counted once, not once per view"
+        );
+
+        // A diverged view that wrote extra private blocks adds only its delta.
+        let divergence = 512_000_u64;
+        let mut diverged = fresh_view("/views/diverged");
+        diverged.allocated_bytes = base_allocated + divergence;
+        let views = vec![fresh_view("/views/one"), diverged];
+        assert_eq!(
+            cow_aware_allocated_total(&bases, &views),
+            base_allocated + divergence,
+            "a diverged view must add exactly its allocation above the base"
+        );
+
+        // An unresolvable base (view.base_path matches no base) falls back to
+        // counting the view's full allocation rather than dropping it.
+        let mut orphan = fresh_view("/views/orphan");
+        orphan.base_path = PathBuf::from("/state/bases/missing");
+        orphan.allocated_bytes = 777_000;
+        assert_eq!(
+            cow_aware_allocated_total(&bases, std::slice::from_ref(&orphan)),
+            base_allocated + 777_000,
+            "a view whose base is missing must count its full allocation"
         );
     }
 
