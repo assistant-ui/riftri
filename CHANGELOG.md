@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.3.3] - 2026-09-20
+
 ### Fixed
 
 - Decoding `/proc/self/mountinfo` path escapes no longer overflows when a mount
