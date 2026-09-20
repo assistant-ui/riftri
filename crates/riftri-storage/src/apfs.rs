@@ -83,7 +83,10 @@ fn clone_directory(
                 // pass: clonefile/umask/inherited ACL semantics remain intact.
                 let cloned = fs::symlink_metadata(&destination_path)
                     .map_err(|error| io("inspect cloned permissions", &destination_path, error))?;
-                set_mode(&destination_path, cloned.permissions().mode() | 0o200)?;
+                set_mode(
+                    &destination_path,
+                    cloned.permissions().mode() | crate::umask_writable_bits(),
+                )?;
             }
         } else if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
@@ -194,7 +197,9 @@ fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
     } else if metadata.is_file() {
         let mode = match update {
             ModeUpdate::ReadOnly => metadata.permissions().mode() & !0o222,
-            ModeUpdate::OwnerWritable => metadata.permissions().mode() | 0o200,
+            ModeUpdate::OwnerWritable => {
+                metadata.permissions().mode() | crate::umask_writable_bits()
+            }
         };
         set_mode(path, mode)?;
     } else {
