@@ -201,7 +201,9 @@ fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
     } else if metadata.is_file() {
         let mode = match update {
             ModeUpdate::ReadOnly => metadata.permissions().mode() & !0o222,
-            ModeUpdate::OwnerWritable => metadata.permissions().mode() | 0o200,
+            ModeUpdate::OwnerWritable => {
+                metadata.permissions().mode() | crate::umask_writable_bits()
+            }
         };
         set_mode(path, mode)?;
     } else {

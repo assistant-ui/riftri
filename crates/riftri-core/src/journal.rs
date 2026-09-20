@@ -832,6 +832,13 @@ impl JournalRecord {
     }
 }
 
+fn is_lowercase_sha256_digest(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_recovery_token(journal_path: &Path, token: &str) -> Result<(), JournalError> {
     if token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Ok(());
@@ -909,16 +916,25 @@ impl RemovalJournalRecord {
             });
         }
         if self.force != self.force_snapshot.is_some()
-            || self.force_snapshot.as_deref().is_some_and(|snapshot| {
-                snapshot.len() != 64
-                    || !snapshot
-                        .bytes()
-                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            })
+            || self
+                .force_snapshot
+                .as_deref()
+                .is_some_and(|snapshot| !is_lowercase_sha256_digest(snapshot))
         {
             return Err(JournalError::InvalidRecord {
                 path: journal_path,
                 detail: "forced removal must contain one lowercase SHA-256 content snapshot"
+                    .to_owned(),
+            });
+        }
+        if self
+            .overlayfs_clean_snapshot
+            .as_deref()
+            .is_some_and(|snapshot| !is_lowercase_sha256_digest(snapshot))
+        {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path,
+                detail: "OverlayFS clean snapshot must be one lowercase SHA-256 content snapshot"
                     .to_owned(),
             });
         }
@@ -2326,6 +2342,38 @@ mod tests {
         for snapshot in [None, Some("AB".repeat(32)), Some("ab".repeat(31))] {
             let mut invalid = valid.clone();
             invalid.force_snapshot = snapshot;
+            assert!(matches!(
+                invalid.decode(journal_path.clone()),
+                Err(JournalError::InvalidRecord { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn removal_journal_rejects_malformed_overlayfs_clean_snapshot() {
+        let paths = RemovalJournalPaths {
+            repository: Path::new("/repository"),
+            destination: Path::new("/destination"),
+            base_path: Path::new("/base"),
+        };
+        let base = RemovalJournalRecord::new(
+            "remove-operation".to_owned(),
+            paths,
+            "add-operation".to_owned(),
+        );
+        let journal_path = Path::new("/state/removals/remove-operation.json").to_path_buf();
+
+        let mut valid = base.clone();
+        valid.overlayfs_clean_snapshot = Some("ab".repeat(32));
+        assert!(valid.decode(journal_path.clone()).is_ok());
+
+        for snapshot in [
+            "AB".repeat(32),                // uppercase hex
+            "ab".repeat(31),                // wrong length
+            format!("g{}", "a".repeat(63)), // non-hex character
+        ] {
+            let mut invalid = base.clone();
+            invalid.overlayfs_clean_snapshot = Some(snapshot);
             assert!(matches!(
                 invalid.decode(journal_path.clone()),
                 Err(JournalError::InvalidRecord { .. })

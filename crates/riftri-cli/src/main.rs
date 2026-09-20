@@ -14,6 +14,12 @@ macro_rules! outputln {
     ($($arg:tt)*) => { ui::print_line(format_args!($($arg)*)) };
 }
 
+// Machine output (JSON reports) skips the renderer but still exits cleanly when
+// a reader closes the pipe early, matching outputln!'s broken-pipe handling.
+macro_rules! machineln {
+    ($($arg:tt)*) => { ui::print_machine(format_args!($($arg)*)) };
+}
+
 const CLI_EXAMPLES: &str = "\
 Examples:
   riftri setup                             Create a worktree, then choose an agent
@@ -869,7 +875,7 @@ fn run(cli: Cli) -> Result<()> {
             let report = riftri_core::doctor_for_destination(&path, destination);
 
             if json {
-                println!(
+                machineln!(
                     "{}",
                     serde_json::to_string_pretty(&doctor_json(&report))
                         .context("serialize doctor report")?
@@ -882,7 +888,7 @@ fn run(cli: Cli) -> Result<()> {
             let backends = riftri_core::backends(&path);
 
             if json {
-                println!(
+                machineln!(
                     "{}",
                     serde_json::to_string_pretty(&backends_json(&path, &backends))
                         .context("serialize backend report")?
@@ -1676,7 +1682,7 @@ fn print_recovery_report(
                 .collect::<Vec<_>>(),
             "errors": report.errors,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize recovery report")?
         );
@@ -1855,7 +1861,7 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize add result")?
         );
@@ -1899,7 +1905,7 @@ fn print_remove_result(
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize remove result")?
         );
@@ -1931,7 +1937,7 @@ fn print_move_result(result: &riftri_core::MoveWorktreeResult, json: bool) -> Re
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize move result")?
         );
@@ -1963,7 +1969,7 @@ fn print_compact_result(result: &riftri_core::CompactWorktreeResult, json: bool)
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize compact result")?
         );
@@ -1987,7 +1993,7 @@ fn print_prune_result(result: &riftri_core::PruneWorktreesResult, json: bool) ->
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize prune result")?
         );
@@ -2053,7 +2059,7 @@ fn print_worktree_inventory(
             "worktrees": worktrees,
             "diagnostic_issues": diagnostic_issues,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
         );
@@ -2163,7 +2169,7 @@ fn print_all_states_worktree_inventory(
             "worktrees": worktrees,
             "diagnostic_issues": diagnostic_issues,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize worktree inventory")?
         );
@@ -2337,7 +2343,7 @@ fn print_storage_accounting(
             "total_logical_bytes": report.total_logical_bytes,
             "total_allocated_bytes": report.total_allocated_bytes,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize storage status")?
         );
@@ -2497,7 +2503,7 @@ fn print_garbage_collection_report(
             "removed_logical_bytes": report.removed_logical_bytes,
             "removed_allocated_bytes": report.removed_allocated_bytes,
         });
-        println!(
+        machineln!(
             "{}",
             serde_json::to_string_pretty(&output).context("serialize collection report")?
         );
