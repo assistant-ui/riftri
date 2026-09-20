@@ -54,10 +54,11 @@ test("staging separates public search content from complete agent companions", a
       : path.join(fixture, "website/public/docs.md");
     const original = fs.readFileSync(path.join(root, page.source), "utf8");
     assert.equal(fs.readFileSync(reference, "utf8"), renderAgentDoc(page, original));
-    // The staged page carries no hand-rolled action links; the docs framework
-    // renders the native "Copy .md" button from docs.config.ts instead.
+    // The staged page injects a plain "View .md" link; the real "Copy .md" is
+    // the docs framework's native button (pageActions.copyMarkdown), not a link.
     const staged = fs.readFileSync(publicFile, "utf8");
-    assert.ok(!staged.includes("[Copy .md]") && !staged.includes("[View .md]"));
+    assert.ok(staged.includes(`[View .md](/docs${page.slug ? `/${page.slug}` : ""}.md `));
+    assert.ok(!staged.includes("[Copy .md]"));
     // The rendered HTML page source stays concise; the full reference lives at
     // the page's own `.md`, never as a separate agent.md route.
     assert.ok(!fs.existsSync(path.join(path.dirname(publicFile), "agent.md")));
@@ -81,16 +82,16 @@ test("all root-relative links in public guides resolve to a page, mirror, or pub
   }
 });
 
-test("every staged page leads with its title and ends with a short canonical edit link", async () => {
+test("every staged page leads with its title, a View link, and a short canonical edit link", async () => {
   const { pages, renderWebsiteDoc } = await import("../scripts/stage-website-docs.mjs");
   for (const page of pages) {
     const human = fs.readFileSync(path.join(root, page.content), "utf8");
     const result = renderWebsiteDoc(page, human);
-    // The page carries only frontmatter, its title, and content. The docs
-    // framework renders the native "Copy .md" button (pageActions.copyMarkdown
-    // in docs.config.ts), so no Markdown action links are injected here.
-    assert.match(result, /^---\ntitle: [^\n]+\n---\n\n# [^\n]+\n/);
-    assert.ok(!result.includes("[View .md]") && !result.includes("[Copy .md]"));
+    const markdownUrl = `/docs${page.slug ? `/${page.slug}` : ""}.md`;
+    // The title leads, then the "View .md" link (the real "Copy .md" is the
+    // docs framework's native button, so it is not injected as a link here).
+    assert.match(result, new RegExp(`^---\\ntitle: [^\\n]+\\n---\\n\\n# [^\\n]+\\n\\n\\[View \\.md\\]\\(${markdownUrl.replace(/[/.]/g, "\\$&")} `));
+    assert.ok(!result.includes("[Copy .md]"));
     assert.ok(result.includes(`[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} `));
   }
 });

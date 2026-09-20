@@ -43,15 +43,13 @@ test("docs header reuses the landing page logo and wordmark", async ({ page }, i
   await expect(page.locator(".site-brand")).toBeVisible();
 });
 
-test("page actions use the framework copy button and a compact edit link", async ({ page, context }, info) => {
+test("page actions pair the framework copy button with a View link and a compact edit link", async ({ page, context }, info) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   let downloaded = false;
   page.on("download", () => { downloaded = true; });
   for (const slug of ["", "/installation"]) {
     await page.goto(`/docs${slug}`);
-    // The docs framework renders a real "Copy .md" button; there is no
-    // hand-rolled Markdown link that navigates away.
-    await expect(page.getByRole("link", { name: /^view \.md$/i })).toHaveCount(0);
+    // "Copy .md" is the docs framework's real button, not a link that navigates.
     await expect(page.getByRole("link", { name: /^copy \.md$/i })).toHaveCount(0);
     const copy = page.getByRole("button", { name: /^copy \.md$/i });
     await expect(copy).toBeVisible();
@@ -61,14 +59,25 @@ test("page actions use the framework copy button and a compact edit link", async
       parentRight: el.parentElement!.getBoundingClientRect().right,
     }));
     expect(position.parentRight - position.right).toBeLessThanOrEqual(2);
+    // "View .md" is a plain link that opens the page's Markdown.
+    const view = page.getByRole("link", { name: /^view \.md$/i });
+    await expect(view).toHaveAttribute("href", `/docs${slug}.md`);
+    await expect(view).toHaveCSS("text-transform", "uppercase");
+    await expect(view).toHaveCSS("font-family", /Geist Mono/);
+    const viewIcon = await view.evaluate((el) => getComputedStyle(el, "::before").maskImage);
+    expect(viewIcon).toContain("/docs-icons/");
     await copy.scrollIntoViewIfNeeded();
     await page.screenshot({ path: info.outputPath(`page-action${slug ? "-installation" : ""}-${info.project.name}.png`) });
-    // Clicking copies this page as Markdown (with frontmatter) to the clipboard
-    // and stays on the page instead of navigating to the `.md`.
+    // Clicking Copy copies this page as Markdown (with frontmatter) to the
+    // clipboard and stays on the page instead of navigating to the `.md`.
     await copy.click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toMatch(/^---\ntitle:/);
     await expect(page).toHaveURL(new RegExp(`/docs${slug}$`));
     expect(downloaded).toBe(false);
+    // View navigates to the Markdown.
+    await view.click();
+    await expect(page).toHaveURL(new RegExp(`/docs${slug}\\.md$`));
+    await page.goBack();
     const edit = page.getByRole("link", { name: /^edit on github$/i });
     await expect(edit).toHaveAttribute("href", `https://github.com/assistant-ui/riftri/blob/main/${slug ? "website/content/guides/installation.md" : "website/content/introduction.md"}`);
     await expect(edit).toHaveCSS("text-transform", "uppercase");

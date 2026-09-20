@@ -44,12 +44,15 @@ export function rewriteDocLinks(markdown, source, { audience = "human" } = {}) {
 export function renderWebsiteDoc(page, original) {
   const body = original.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
   const markdown = rewriteDocLinks(body, page.content).trim();
-  // The page carries only its title and content; the docs framework renders the
-  // native "Copy .md" action (pageActions.copyMarkdown in docs.config.ts), which
-  // copies this page as Markdown with framework frontmatter instead of a link
-  // that navigates away.
+  // The docs framework renders the native "Copy .md" action
+  // (pageActions.copyMarkdown in docs.config.ts) — a real clipboard copy of
+  // this page as Markdown, with framework frontmatter. Alongside it we inject a
+  // plain "View .md" link so readers can open the Markdown directly; it sits
+  // right under the title next to the framework's Copy button.
   if (!/^# .+(?:\r?\n|$)/.test(markdown)) throw new Error(`Docs page needs a leading title: ${page.content}`);
-  return `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n${markdown}\n\n---\n\n[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} "Edit this page on GitHub")\n`;
+  const view = `[View .md](${pageUrl(page)}.md "View this page as Markdown")`;
+  const withView = markdown.replace(/^(# .+(?:\r?\n|$))/, (title) => `${title}\n${view}\n`);
+  return `---\ntitle: ${JSON.stringify(page.title)}\n---\n\n${withView}\n\n---\n\n[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} "Edit this page on GitHub")\n`;
 }
 
 export function renderAgentDoc(page, original) {
