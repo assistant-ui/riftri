@@ -123,9 +123,11 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   await assert.rejects(finalizeStaticWebsite(output, { docs: true }), { code: "ENOENT" });
   const { pages } = await import("../scripts/stage-website-docs.mjs");
   for (const page of pages) {
-    const folder = path.join(output, "static/docs", page.slug);
-    fs.mkdirSync(folder, { recursive: true });
-    fs.writeFileSync(path.join(folder, "agent.md"), "# Full reference");
+    const reference = page.slug
+      ? path.join(output, "static/docs", `${page.slug}.md`)
+      : path.join(output, "static/docs.md");
+    fs.mkdirSync(path.dirname(reference), { recursive: true });
+    fs.writeFileSync(reference, "# Full reference");
   }
   await finalizeStaticWebsite(output, { docs: true });
   assert.ok(fs.existsSync(path.join(runtime, "index.mjs")));
@@ -134,9 +136,10 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   assert.equal(markdownRoute.headers["Content-Type"], "text/plain; charset=utf-8");
   assert.equal(markdownRoute.headers["X-Content-Type-Options"], "nosniff");
   assert.equal(markdownRoute.continue, true);
-  const agentRoute = config.routes.find((entry) => entry.headers?.["X-Robots-Tag"] === "noindex");
-  for (const url of ["/docs/agent.md", "/docs/cli/agent.md"]) assert.ok(new RegExp(agentRoute.src).test(url));
-  assert.ok(!new RegExp(agentRoute.src).test("/docs/cli.md"));
+  // The reference `.md` files reuse the general Markdown route, which also
+  // carries the noindex header; there is no separate agent.md route.
+  assert.equal(markdownRoute.headers["X-Robots-Tag"], "noindex");
+  assert.ok(!config.routes.some((entry) => entry.src === "^/docs(?:/.*)?/agent\\.md$"));
   for (const url of ["/docs.md", "/docs/cli.md", "/docs/benchmarks/assistant-ui.md"]) assert.ok(new RegExp(markdownRoute.src).test(url));
   for (const url of ["/docs", "/docs/cli", "/api/docs", "/docs-unrelated.md"]) assert.ok(!new RegExp(markdownRoute.src).test(url));
   const route = config.routes.find((entry) => entry.dest === "/__nitro");

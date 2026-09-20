@@ -49,13 +49,13 @@ test("page actions use a plain Markdown link and a compact edit link", async ({ 
   page.on("download", () => { downloaded = true; });
   for (const slug of ["", "/installation"]) {
     const markdown = page.getByRole("link", { name: /^view \.md$/i });
-    const agent = page.getByRole("link", { name: /^agent \.md$/i });
+    const copy = page.getByRole("link", { name: /^copy \.md$/i });
     await expect(markdown).toHaveAttribute("href", `/docs${slug}.md`);
-    await expect(agent).toHaveAttribute("href", `/docs${slug}/agent.md`);
+    await expect(copy).toHaveAttribute("href", `/docs${slug}.md`);
     await expect(page.getByRole("button", { name: /copy page|copy markdown/i })).toHaveCount(0);
     const edit = page.getByRole("link", { name: /^edit on github$/i });
     await expect(edit).toHaveAttribute("href", `https://github.com/assistant-ui/riftri/blob/main/${slug ? "website/content/guides/installation.md" : "website/content/introduction.md"}`);
-    for (const link of [markdown, agent, edit]) {
+    for (const link of [markdown, copy, edit]) {
       await expect(link).toHaveCSS("border-top-width", "0px");
       await expect(link).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
       await expect(link).toHaveCSS("text-transform", "uppercase");
@@ -70,7 +70,7 @@ test("page actions use a plain Markdown link and a compact edit link", async ({ 
       expect(icon.width).toBe("14px");
       expect(icon.mask).toContain("/docs-icons/");
     }
-    const position = await agent.evaluate((el) => ({
+    const position = await copy.evaluate((el) => ({
       right: el.getBoundingClientRect().right,
       parentRight: el.parentElement!.getBoundingClientRect().right,
     }));
@@ -81,12 +81,12 @@ test("page actions use a plain Markdown link and a compact edit link", async ({ 
     await expect(markdown).toBeFocused();
     await markdown.press("Enter");
     await expect(page).toHaveURL(new RegExp(`/docs${slug}\\.md$`));
-    await expect(page.locator("body")).toContainText(slug ? "# Installing Riftri" : "# Riftri documentation");
+    await expect(page.locator("body")).toContainText("Full technical reference");
     expect(downloaded).toBe(false);
     await page.goBack();
-    await agent.focus();
-    await agent.press("Enter");
-    await expect(page).toHaveURL(new RegExp(`/docs${slug}/agent\\.md$`));
+    await copy.focus();
+    await copy.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`/docs${slug}\\.md$`));
     await expect(page.locator("body")).toContainText("Full technical reference");
     expect(downloaded).toBe(false);
     await page.goBack();
@@ -311,23 +311,19 @@ test("every docs page and Markdown mirror is served by the production build", as
     const body = await response.text();
     expect(body, url).toContain("farm-docs-root");
     expect(body, url).not.toContain("Page module missing");
+    // The page's own `.md` serves the full reference (there is no /agent.md).
     const markdown = await request.get(`${url}.md`);
     expect(markdown.status(), `${url}.md`).toBe(200);
     expect(markdown.headers()["content-type"]).toContain("text/plain");
     expect(markdown.headers()["content-disposition"]).toBe("inline");
-    expect(await markdown.text()).toContain("[Edit on GitHub]");
-    const agent = await request.get(`${url}/agent.md`);
-    expect(agent.status(), `${url}/agent.md`).toBe(200);
-    expect(agent.headers()["content-type"]).toContain("text/plain");
-    expect(agent.headers()["content-disposition"]).toBe("inline");
-    expect(agent.headers()["x-robots-tag"]).toBe("noindex");
-    expect(await agent.text()).toContain(`Generated from ${page.source}`);
-    const head = await request.head(`${url}/agent.md`);
+    expect(markdown.headers()["x-robots-tag"]).toBe("noindex");
+    expect(await markdown.text()).toContain(`Generated from ${page.source}`);
+    const head = await request.head(`${url}.md`);
     expect(head.status()).toBe(200);
     expect(await head.body()).toHaveLength(0);
   }
   expect((await request.get("/docs/does-not-exist")).status()).toBe(404);
-  expect((await request.get("/docs/does-not-exist/agent.md")).status()).toBe(404);
+  expect((await request.get("/docs/does-not-exist.md")).status()).toBe(404);
   const search = await request.get("/api/docs?query=OverlayFS");
   expect(search.status()).toBe(200);
   expect((await search.json()).length).toBeGreaterThan(0);
@@ -343,15 +339,15 @@ test("public guides stay concise while full installation and CLI details remain 
     await expect(body.locator("h1")).toBeVisible();
     const words = (await body.innerText()).trim().split(/\s+/).length;
     expect(words, doc.title).toBeLessThan(500);
-    await expect(page.getByRole("link", { name: /^agent \.md$/i })).toBeVisible();
+    await expect(page.getByRole("link", { name: /^copy \.md$/i })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), doc.title).toBe(true);
   }
   await page.goto("/docs/installation");
   await expect(page.locator("#nd-page")).not.toContainText("RIFTRI_INSTALL_DIR");
   await expect(page.locator("#nd-page")).toContainText("riftri setup");
   await page.screenshot({ path: info.outputPath(`simple-installation-${info.project.name}.png`), fullPage: true });
-  const installation = await request.get("/docs/installation/agent.md");
+  const installation = await request.get("/docs/installation.md");
   expect(await installation.text()).toContain("RIFTRI_INSTALL_DIR");
-  const cli = await request.get("/docs/cli/agent.md");
+  const cli = await request.get("/docs/cli.md");
   expect(await cli.text()).toContain("## Exit codes");
 });

@@ -68,7 +68,7 @@ test("hero copies the Markdown guide beside the command copy control", () => {
   // The copy control fetches the same-origin guide and copies its full text.
   assert.match(component, /fetch\(source/);
   assert.match(component, /navigator\.clipboard\.writeText\(markdown\)/);
-  assert.match(component, /Copy \.md/);
+  assert.match(component, /COPY \.MD/);
   assert.doesNotMatch(hero, />\s*(?:Read|Download) Markdown\s*</);
   assert.doesNotMatch(page, /MarkdownGuide|markdown-callout|id="markdown"/);
 });
