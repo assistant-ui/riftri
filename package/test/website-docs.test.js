@@ -26,7 +26,7 @@ test("agent companions retain the full canonical document and link to other full
     assert.ok(agent.includes(`https://riftri.dev/docs${page.slug ? `/${page.slug}` : ""}`));
   }
   assert.equal(rewriteDocLinks("[CLI](cli.md#exit-codes)", "docs/install.md", { audience: "agent" }),
-    "[CLI](https://riftri.dev/docs/cli/agent.md#exit-codes)");
+    "[CLI](https://riftri.dev/docs/cli.md#exit-codes)");
 });
 
 test("staging separates public search content from complete agent companions", async (t) => {
@@ -37,20 +37,25 @@ test("staging separates public search content from complete agent companions", a
     fs.mkdirSync(path.dirname(path.join(fixture, file)), { recursive: true });
     fs.copyFileSync(path.join(root, file), path.join(fixture, file));
   }
-  const stale = path.join(fixture, "website/public/docs/retired/agent.md");
+  const stale = path.join(fixture, "website/public/docs/retired.md");
   fs.mkdirSync(path.dirname(stale), { recursive: true });
   fs.writeFileSync(stale, "retired reference");
-  fs.writeFileSync(path.join(path.dirname(stale), "keep.txt"), "unrelated asset");
+  const keep = path.join(fixture, "website/public/docs/keep.txt");
+  fs.writeFileSync(keep, "unrelated asset");
   await stageWebsiteDocs(fixture);
-  assert.ok(!fs.existsSync(stale));
-  assert.ok(fs.existsSync(path.join(path.dirname(stale), "keep.txt")));
+  assert.ok(!fs.existsSync(stale), "a retired page's reference is removed");
+  assert.ok(fs.existsSync(keep), "unrelated public assets are left in place");
   for (const page of pages) {
     const publicFile = path.join(fixture, "website/src/app/docs", page.slug, "page.md");
-    const agentFile = path.join(fixture, "website/public/docs", page.slug, "agent.md");
+    const reference = page.slug
+      ? path.join(fixture, "website/public/docs", `${page.slug}.md`)
+      : path.join(fixture, "website/public/docs.md");
     const original = fs.readFileSync(path.join(root, page.source), "utf8");
-    assert.equal(fs.readFileSync(agentFile, "utf8"), renderAgentDoc(page, original));
-    assert.ok(fs.readFileSync(publicFile, "utf8").includes("[Agent .md]"));
-    assert.ok(!fs.existsSync(path.join(path.dirname(publicFile), "agent.md")), "do not index full references in human search");
+    assert.equal(fs.readFileSync(reference, "utf8"), renderAgentDoc(page, original));
+    assert.ok(fs.readFileSync(publicFile, "utf8").includes("[Copy .md]"));
+    // The rendered HTML page source stays concise; the full reference lives at
+    // the page's own `.md`, never as a separate agent.md route.
+    assert.ok(!fs.existsSync(path.join(path.dirname(publicFile), "agent.md")));
   }
   const sitemap = fs.readFileSync(path.join(fixture, "website/public/sitemap.xml"), "utf8");
   assert.doesNotMatch(sitemap, /agent\.md/);
@@ -87,7 +92,7 @@ test("every staged page has one direct Markdown action and a short canonical edi
     const actionIndex = result.indexOf("[View .md](");
     const firstSection = result.indexOf("\n## ");
     assert.ok(firstSection === -1 || actionIndex < firstSection, `action must precede the first section: ${page.content}`);
-    assert.ok(result.includes(`[Agent .md](/docs${page.slug ? `/${page.slug}` : ""}/agent.md `));
+    assert.ok(result.includes(`[View .md](${markdownUrl} "View this page as Markdown") / [Copy .md](${markdownUrl} `));
     assert.ok(result.includes(`[Edit on GitHub](https://github.com/assistant-ui/riftri/blob/main/${page.content} `));
     assert.doesNotMatch(result, /\[Edit this page on GitHub\]/);
   }

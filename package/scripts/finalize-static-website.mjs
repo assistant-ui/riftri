@@ -70,7 +70,11 @@ export async function finalizeStaticWebsite(
     // Fail the build if the official adapter runtime or its content is missing.
     await access(path.join(outputDirectory, "functions/__nitro.func/index.mjs"));
     await access(path.join(outputDirectory, "functions/__nitro.func/chunks/nitro/farm-docs-content/page.md"));
-    for (const page of pages) await access(path.join(staticDirectory, "docs", page.slug, "agent.md"));
+    // Each page's full reference is served at its own `.md` path.
+    for (const page of pages) {
+      const reference = page.slug ? path.join(staticDirectory, "docs", `${page.slug}.md`) : path.join(staticDirectory, "docs.md");
+      await access(reference);
+    }
   } else {
     await rm(path.join(outputDirectory, "functions"), { recursive: true, force: true });
     await rm(path.join(outputDirectory, "nitro.json"), { force: true });
@@ -92,12 +96,8 @@ export async function finalizeStaticWebsite(
           "Content-Type": "text/plain; charset=utf-8",
           "Content-Disposition": "inline",
           "X-Content-Type-Options": "nosniff",
+          "X-Robots-Tag": "noindex",
         },
-        continue: true,
-      },
-      docs && {
-        src: "^/docs(?:/.*)?/agent\\.md$",
-        headers: { "Cache-Control": "public, max-age=300", "X-Robots-Tag": "noindex" },
         continue: true,
       },
       immutableAssetRoute,

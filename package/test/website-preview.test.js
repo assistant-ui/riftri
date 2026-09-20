@@ -7,9 +7,9 @@ const { test } = require("node:test");
 test("static agent references take precedence over the docs runtime", async (t) => {
   const output = await fs.mkdtemp(path.join(os.tmpdir(), "riftri-agent-preview-test-"));
   t.after(() => fs.rm(output, { recursive: true, force: true }));
-  await fs.mkdir(path.join(output, "static/docs/installation"), { recursive: true });
+  await fs.mkdir(path.join(output, "static/docs"), { recursive: true });
   await fs.mkdir(path.join(output, "functions/__nitro.func"), { recursive: true });
-  await fs.writeFile(path.join(output, "static/docs/installation/agent.md"), "# Full installation reference");
+  await fs.writeFile(path.join(output, "static/docs/installation.md"), "# Full installation reference");
   await fs.writeFile(path.join(output, "functions/__nitro.func/index.mjs"),
     'export default { fetch: () => new Response("docs runtime", { headers: { "Content-Type": "text/html" } }) };');
   await fs.writeFile(path.join(output, "config.json"), JSON.stringify({ version: 3, routes: [
@@ -23,7 +23,7 @@ test("static agent references take precedence over the docs runtime", async (t) 
   t.after(() => new Promise((resolve) => { server.close(resolve); server.closeAllConnections(); }));
   const base = `http://127.0.0.1:${server.address().port}`;
   for (const method of ["GET", "HEAD"]) {
-    const response = await fetch(`${base}/docs/installation/agent.md`, { method });
+    const response = await fetch(`${base}/docs/installation.md`, { method });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("content-disposition"), "inline");
     assert.match(response.headers.get("content-type"), /text\/plain/);
