@@ -16,6 +16,16 @@ test("footer stays compact with comfortable link targets", async ({ page }, test
   await footer.screenshot({ path: testInfo.outputPath(`footer-${testInfo.project.name}.png`) });
 });
 
+test("install reference links expose comfortable touch targets", async ({ page }) => {
+  await page.goto("/");
+  const heights = await page.locator(".install-links a").evaluateAll((links) =>
+    links.map((link) => link.getBoundingClientRect().height));
+  expect(heights.length).toBeGreaterThan(0);
+  for (const height of heights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+});
+
 test("homepage renders without browser errors and captures the final layout", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
