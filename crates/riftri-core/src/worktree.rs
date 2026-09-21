@@ -5293,6 +5293,19 @@ fn is_operation_coordination_lock(path: &Path) -> bool {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+/// The one journal directory whose interrupted atomic-write temporaries
+/// `riftri repair` reaps; see `reap_interrupted_journal_temporaries`.
+const REAPABLE_JOURNAL_DIRECTORY: &str = "operations";
+
+/// Whether [`reap_interrupted_journal_temporaries`] covers this directory.
+///
+/// The reaper is deliberately limited to `operations/`; this keeps the advice
+/// `status` prints from promising a cleanup that never happens.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn reapable_journal_directory(directory: &Path) -> bool {
+    directory.file_name() == Some(OsStr::new(REAPABLE_JOURNAL_DIRECTORY))
+}
+
 fn diagnose_journal_directory(
     directory: &Path,
     expected: HashSet<PathBuf>,
@@ -5310,11 +5323,16 @@ fn diagnose_journal_directory(
             // atomic write is reapable by `riftri repair`, and a coordination
             // lock outliving its journal is expected by design.
             if interrupted_journal_temporary_owner(&path).is_some() {
-                add_state_issue(
-                    issues,
-                    path,
-                    "an interrupted Riftri journal write left this temporary file; `riftri repair` removes it",
-                );
+                // Only `operations/` is reaped: it is the one directory whose
+                // per-operation lock makes removal provably safe. Promising
+                // `riftri repair` elsewhere sends the user in a loop, because
+                // repair reports success and leaves the file in place.
+                let advice = if reapable_journal_directory(directory) {
+                    "an interrupted Riftri journal write left this temporary file; `riftri repair` removes it"
+                } else {
+                    "an interrupted Riftri journal write left this temporary file; it holds no operation and Riftri preserves it"
+                };
+                add_state_issue(issues, path, advice);
             } else if !is_operation_coordination_lock(&path) {
                 add_state_issue(
                     issues,
@@ -6221,7 +6239,7 @@ fn retire_superseded_add_journal(
 fn reap_interrupted_journal_temporaries(
     state_directory: &Path,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
-    let directory = state_directory.join("operations");
+    let directory = state_directory.join(REAPABLE_JOURNAL_DIRECTORY);
     if !is_real_directory_if_present(&directory)? {
         return Ok(Vec::new());
     }
@@ -11740,6 +11758,57 @@ mod tests {
         assert!(
             fixture.path().join("one").is_dir() && fixture.path().join("two").is_dir(),
             "both worktrees still exist and still depend on the base"
+        );
+    }
+
+    /// `repair`'s reaper is deliberately scoped to `operations/`, the one
+    /// journal directory whose per-operation lock makes removal provably safe.
+    /// `status` promised "`riftri repair` removes it" for all six directories,
+    /// so a temporary in any other one was flagged forever while repair kept
+    /// reporting success — advice the user can never satisfy.
+    #[test]
+    fn journal_temporary_advice_matches_what_repair_actually_reaps() {
+        let fixture = tempdir().expect("fixture");
+        let state = fixture.path().join("state");
+        for directory in ["operations", "removals"] {
+            fs::create_dir_all(state.join(directory)).expect("create journal directory");
+        }
+        // Diagnostics record canonical paths.
+        let state = fs::canonicalize(&state).expect("canonical state directory");
+        let reapable = state.join("operations/.add-op-0.Qq34Cd.tmp");
+        let preserved = state.join("removals/.remove-op-0.Zz12Ab.tmp");
+        fs::write(&reapable, b"{\"partial\"").expect("write temporary");
+        fs::write(&preserved, b"{\"partial\"").expect("write temporary");
+
+        let report = storage_accounting(&state).expect("status must diagnose temporaries");
+        let advice = |path: &Path| {
+            report
+                .diagnostic_issues
+                .iter()
+                .find(|issue| issue.path == path)
+                .map(|issue| issue.reason.clone())
+                .unwrap_or_else(|| panic!("no diagnostic for {}", path.display()))
+        };
+        assert!(
+            advice(&reapable).contains("`riftri repair` removes it"),
+            "a reapable temporary must name repair: {}",
+            advice(&reapable)
+        );
+        assert!(
+            !advice(&preserved).contains("`riftri repair` removes it"),
+            "repair does not reap this directory, so it must not be promised: {}",
+            advice(&preserved)
+        );
+
+        // And the advice matches what repair does.
+        let reaped = recover_incomplete_operations(&state)
+            .expect("repair")
+            .reaped_artifacts;
+        assert!(reaped.contains(&reapable), "{reaped:?}");
+        assert!(!reaped.contains(&preserved), "{reaped:?}");
+        assert!(
+            preserved.exists(),
+            "a preserved temporary must stay in place"
         );
     }
 
