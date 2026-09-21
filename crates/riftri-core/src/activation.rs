@@ -1943,21 +1943,47 @@ fn locate_real_git() -> Result<PathBuf, ActivationError> {
 
     let path =
         env::var_os("PATH").ok_or_else(|| process_error("PATH is not set; cannot locate Git"))?;
-    for directory in env::split_paths(&path) {
-        for candidate in git_executable_candidates(&directory) {
-            if is_executable_file(&candidate) {
-                return candidate.canonicalize().map_err(|error| {
-                    process_error(format!(
-                        "resolve Git executable {}: {error}",
-                        candidate.display()
-                    ))
-                });
+    real_git_on_path(
+        &path,
+        env::current_exe()
+            .ok()
+            .and_then(|executable| fs::canonicalize(executable).ok()),
+    )
+    .ok_or_else(|| process_error("could not find the real Git executable on PATH"))
+}
+
+/// Walk `PATH` for the Git executable that later calls are delegated to.
+///
+/// This records the binary every subsequent Git call runs, so
+/// it must never select a shim: a shell whose durable shim is still on `PATH`
+/// but whose marker variable has been cleared would otherwise bake Riftri in as
+/// the real Git, and every Git command would then re-enter the shim forever.
+/// [`resolve_stripped_real_git`] already guards its own walk this way.
+fn real_git_on_path(path: &OsStr, current_executable: Option<PathBuf>) -> Option<PathBuf> {
+    let not_self = |candidate: &Path| {
+        current_executable.as_deref().is_none_or(|executable| {
+            fs::canonicalize(candidate).is_ok_and(|candidate| candidate != executable)
+        })
+    };
+    for directory in env::split_paths(path) {
+        if directory.join(REAL_GIT_MARKER_FILE).is_file() {
+            // A shim directory: its baked marker names the real Git, while its
+            // own `git` entry must never be executed.
+            if let Some(baked) = read_real_git_marker(&directory)
+                .filter(|path| is_executable_file(path) && not_self(path))
+            {
+                return Some(baked);
             }
+            continue;
+        }
+        if let Some(candidate) = git_executable_candidates(&directory)
+            .into_iter()
+            .find(|candidate| is_executable_file(candidate) && not_self(candidate))
+        {
+            return Some(candidate.canonicalize().unwrap_or(candidate));
         }
     }
-    Err(process_error(
-        "could not find the real Git executable on PATH",
-    ))
+    None
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -2794,6 +2820,55 @@ mod tests {
     }
 
     /// A shim with a stripped environment must resolve the real Git without
+    /// The `PATH` walk that bakes `RIFTRI_REAL_GIT` for `riftri exec` and the
+    /// shell hooks must never select a shim. A shell whose durable shim is
+    /// still on `PATH` but whose marker variable has been cleared would
+    /// otherwise record Riftri as the real Git, and every later Git command
+    /// would re-enter the shim forever.
+    #[cfg(unix)]
+    #[test]
+    fn real_git_lookup_skips_shim_directories_and_never_selects_itself() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempdir().expect("fixture");
+        let shim_directory = fixture.path().join("shim");
+        let real_directory = fixture.path().join("real");
+        fs::create_dir_all(&shim_directory).expect("create shim directory");
+        fs::create_dir_all(&real_directory).expect("create real directory");
+        for executable in [shim_directory.join("git"), real_directory.join("git")] {
+            fs::write(&executable, "#!/bin/sh\n").expect("write executable");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("mark executable");
+        }
+        let real_git = real_directory.join("git");
+        super::record_real_git_marker(&shim_directory, &real_git).expect("record marker");
+        let path = std::env::join_paths([&shim_directory, &real_directory]).expect("join PATH");
+
+        // The shim directory comes first, but its baked marker names the real
+        // Git rather than its own entry.
+        assert_eq!(
+            super::real_git_on_path(&path, None),
+            Some(real_git.clone()),
+            "the shim's own `git` entry must never be selected"
+        );
+
+        // A markerless directory whose `git` is this very executable is skipped
+        // in favour of the next entry.
+        let self_directory = fixture.path().join("self");
+        fs::create_dir_all(&self_directory).expect("create self directory");
+        let running = fs::canonicalize(std::env::current_exe().expect("current executable"))
+            .expect("canonical executable");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&running, self_directory.join("git")).expect("link self");
+        let path = std::env::join_paths([&self_directory, &real_directory]).expect("join PATH");
+        let selected = super::real_git_on_path(&path, Some(running)).expect("resolve real Git");
+        assert_eq!(
+            fs::canonicalize(&selected).ok(),
+            fs::canonicalize(&real_git).ok(),
+            "Riftri must never record itself as the real Git"
+        );
+    }
+
     /// ever selecting itself or another shim's `git` entry.
     #[cfg(unix)]
     #[test]
