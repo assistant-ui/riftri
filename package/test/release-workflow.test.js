@@ -41,6 +41,36 @@ async function releaseWorkflow() {
   );
 }
 
+async function rootCargoToml() {
+  return readFile(
+    path.resolve(__dirname, "..", "..", "Cargo.toml"),
+    "utf8",
+  );
+}
+
+test("release binaries ship the tui feature and are stripped", async () => {
+  const workflow = await releaseWorkflow();
+  const build = jobSource(workflow, "build");
+  const buildStep = build.match(/      - name: Build release binary\n        run: (.*)\n/);
+  assert.ok(buildStep, "missing single-line release build run");
+  const command = buildStep[1];
+  // #290 gated the styled setup TUI behind an off-by-default `tui` feature.
+  // Published archives must keep building it, or the release silently ships the
+  // plain UI. Guard the exact release-build flags so a regression fails here.
+  assert.match(command, /\bcargo build\b/);
+  assert.match(command, /--release\b/);
+  assert.match(command, /--locked\b/);
+  assert.match(command, /-p riftri-cli\b/);
+  assert.match(command, /--features tui\b/);
+
+  // The same change strips release binaries; losing this quietly inflates every
+  // published archive, so pin it in the workspace release profile.
+  const cargoToml = await rootCargoToml();
+  const releaseProfile = cargoToml.match(/\[profile\.release\]\n((?:[^\[].*\n?)*)/);
+  assert.ok(releaseProfile, "missing [profile.release] in root Cargo.toml");
+  assert.match(releaseProfile[1], /^strip = true$/m);
+});
+
 test("manual release rehearsals cannot receive publishing permissions", async () => {
   const workflow = await releaseWorkflow();
   const stage = jobSource(workflow, "stage");
