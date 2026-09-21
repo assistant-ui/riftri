@@ -144,6 +144,18 @@ test("docs links stay local where possible without changing command examples", a
   assert.match(actual, /\[ref\]: \/docs\/installation/);
   assert.match(actual, /\[anchor\]\(#intro\)/);
   assert.equal(rewriteDocLinks("[CLI](cli.md?view=full#setup)", "docs/README.md"), "[CLI](/docs/cli?view=full#setup)");
+  // A title after the URL must not defeat the rewrite: only the URL changes,
+  // the title and surrounding syntax are preserved verbatim.
+  assert.equal(rewriteDocLinks("[CLI](cli.md \"the CLI\")", "docs/README.md"), "[CLI](/docs/cli \"the CLI\")");
+  assert.equal(rewriteDocLinks("[CLI](cli.md 'the CLI')", "docs/README.md"), "[CLI](/docs/cli 'the CLI')");
+  // Images carry titles too; the URL is rewritten and the title kept.
+  assert.equal(rewriteDocLinks("![a](architecture.md \"x\")", "docs/README.md"), "![a](/docs/architecture \"x\")");
+  // Untitled links, anchors, and titled external links are unaffected.
+  assert.equal(rewriteDocLinks("[CLI](cli.md)", "docs/README.md"), "[CLI](/docs/cli)");
+  assert.equal(rewriteDocLinks("[anchor](#intro)", "docs/README.md"), "[anchor](#intro)");
+  assert.equal(rewriteDocLinks("[remote](https://example.com \"site\")", "docs/README.md"), "[remote](https://example.com \"site\")");
+  // A titled link inside a fenced code block stays verbatim.
+  assert.equal(rewriteDocLinks("```sh\n[CLI](cli.md \"the CLI\")\n```", "docs/README.md"), "```sh\n[CLI](cli.md \"the CLI\")\n```");
   for (const target of ["benchmarks.md", "allocation-evidence.md", "decisions.md", "benchmarks/assistant-ui-ten-agents-2026-09-12.md"]) {
     assert.equal(rewriteDocLinks(`[Details](${target})`, "docs/README.md"), `[Details](https://github.com/assistant-ui/riftri/blob/main/docs/${target})`);
   }
