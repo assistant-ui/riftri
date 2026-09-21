@@ -61,7 +61,7 @@ export function CopyMarkdown({ source, className = "" }: CopyMarkdownProps) {
         {copied
           ? "Markdown guide copied."
           : state === "failed"
-            ? "Copy unavailable. Open /index.md to copy it manually."
+            ? `Copy unavailable. Open ${source} to copy it manually.`
             : ""}
       </span>
     </>
