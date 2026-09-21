@@ -26,4 +26,4 @@ riftri worktree add ../app-auth -b feature/auth main
 
 Do not remove a required hook to enable Riftri; use ordinary Git outside
 interception instead. Full eligibility and object-verification rules:
-**Agent .md**.
+**View .md**.

@@ -43,7 +43,7 @@ riftri setup
 ## Update or install manually
 
 Rerun the installer to update. Pinned versions, manual downloads, and
-uninstall steps: **Agent .md** at the top of this page.
+uninstall steps: **View .md** at the top of this page.
 [GitHub releases](https://github.com/assistant-ui/riftri/releases) provides
 standalone binaries; the npm channel is not currently available.
 
