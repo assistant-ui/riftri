@@ -7,6 +7,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- CI now test-executes the default/plain build again. Gating the setup TUI
+  behind the `tui` feature made the Quality job run tests only with
+  `--features riftri-cli/tui`, which deselects `crates/riftri-cli/src/ui/plain.rs`
+  and left the default build shipped by `cargo install riftri-cli` and
+  `npm run build:native` unexecuted (MSRV only `cargo check`s it). The Quality
+  job now also runs `cargo test --workspace --locked` with default features on
+  Linux. New workflow guard tests assert the release build keeps
+  `--features tui` (alongside `-p riftri-cli`, `--release`, `--locked`) and that
+  the workspace `[profile.release]` keeps `strip = true`, so #290's shipped
+  feature set and stripping cannot silently regress.
 - Copy-on-write worktree directories now regain the umask-appropriate group and
   other write bits, matching a plain `git worktree add`. Restoring write access
   after cloning a read-only base only re-added the owner bits to directories, so
