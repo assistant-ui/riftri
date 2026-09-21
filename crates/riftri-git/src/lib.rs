@@ -308,7 +308,15 @@ impl Git {
         let clean = if is_bare {
             None
         } else {
-            let status = self.run(Some(path), &["status", "--porcelain=v1", "-z"])?;
+            // `--untracked-files=all` overrides `status.showUntrackedFiles`,
+            // which a repository or the user's global configuration may set to
+            // `no`. Without it this probe reports a working tree with
+            // untracked content as clean. The sibling cleanliness checks
+            // (`worktree_is_clean`, `worktree_is_pristine`) already pass it.
+            let status = self.run(
+                Some(path),
+                &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+            )?;
             Some(status.stdout.is_empty())
         };
 
@@ -2301,6 +2309,33 @@ mod tests {
         assert!(repository.head_commit.is_none());
         assert!(repository.head_tree.is_none());
         assert_eq!(repository.clean, Some(true));
+    }
+
+    /// `git status --porcelain` honours `status.showUntrackedFiles`, which is
+    /// a commonly recommended setting for large repositories. Without an
+    /// explicit `--untracked-files=all` this probe reported a working tree
+    /// holding untracked content as clean, and `riftri doctor` repeated that.
+    #[test]
+    fn repository_cleanliness_ignores_show_untracked_files_configuration() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        fs::write(fixture.path().join("untracked.txt"), "private\n").expect("write untracked file");
+
+        for value in ["no", "normal", "all"] {
+            git.set_local_config(
+                fixture.path(),
+                "status.showUntrackedFiles",
+                OsStr::new(value),
+            )
+            .expect("configure untracked-file reporting");
+            assert_eq!(
+                git.inspect_repository(fixture.path())
+                    .expect("inspect repository")
+                    .clean,
+                Some(false),
+                "status.showUntrackedFiles={value} must not hide untracked content"
+            );
+        }
     }
 
     /// Remove the loose object file backing `object_id`, clearing the
