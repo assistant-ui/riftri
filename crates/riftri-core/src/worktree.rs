@@ -1078,6 +1078,13 @@ fn managed_destination_candidates(destination: &Path) -> Result<Vec<PathBuf>, Wo
 /// the base directory is gone) it falls back to counting the view's full
 /// allocation, which is conservative — it never under-reports.
 ///
+/// The subtraction only applies to backends whose per-tree measurement
+/// re-counts the shared base blocks (APFS clone, reflink, ReFS block clone).
+/// OverlayFS measures only its private upper/work layers, which are already
+/// base-exclusive, so its `allocated_bytes` is added whole — subtracting the
+/// base again would saturate every OverlayFS view to zero and silently drop
+/// its real on-disk write cost from the total.
+///
 /// This remains an approximation: it assumes a view's extra allocation is
 /// entirely unshared and does not detect blocks shared between sibling views.
 fn cow_aware_allocated_total(
@@ -1091,14 +1098,16 @@ fn cow_aware_allocated_total(
     bases
         .iter()
         .map(|base| base.allocated_bytes)
-        .chain(
-            views
-                .iter()
-                .map(|view| match base_allocated.get(view.base_path.as_path()) {
-                    Some(&base_bytes) => view.allocated_bytes.saturating_sub(base_bytes),
-                    None => view.allocated_bytes,
-                }),
-        )
+        .chain(views.iter().map(|view| {
+            if view.backend.allocation_excludes_shared_base() {
+                // Already base-exclusive: the private layers are the unique cost.
+                return view.allocated_bytes;
+            }
+            match base_allocated.get(view.base_path.as_path()) {
+                Some(&base_bytes) => view.allocated_bytes.saturating_sub(base_bytes),
+                None => view.allocated_bytes,
+            }
+        }))
         .fold(0_u64, u64::saturating_add)
 }
 
@@ -9258,6 +9267,44 @@ mod tests {
             cow_aware_allocated_total(&bases, std::slice::from_ref(&orphan)),
             base_allocated + 777_000,
             "a view whose base is missing must count its full allocation"
+        );
+    }
+
+    #[test]
+    fn cow_aware_total_counts_overlayfs_private_layers_whole() {
+        // A null (all-zero) object ID is a valid 40-char hex string.
+        let head = ObjectId::parse("0".repeat(40)).expect("null object id");
+        let base_path = PathBuf::from("/state/bases/base-a");
+        let base_allocated = 4_096_000_u64;
+        let bases = vec![BaseStorageAccounting {
+            path: base_path.clone(),
+            reference_count: 1,
+            logical_bytes: base_allocated,
+            allocated_bytes: base_allocated,
+        }];
+        // Unlike a CoW clone, an OverlayFS view's `allocated_bytes` measures
+        // only its private upper/work layers, so it is already base-exclusive.
+        // Here that private cost is much smaller than the base allocation, so
+        // the old blanket `view - base` subtraction would saturate it to zero
+        // and silently drop the view's real write cost from the total.
+        let private_layers = 512_000_u64;
+        let overlay_view = ViewStorageAccounting {
+            repository: PathBuf::from("/repo"),
+            destination: PathBuf::from("/views/overlay"),
+            base_path: base_path.clone(),
+            backend: BackendKind::OverlayFs,
+            head: head.clone(),
+            branch: None,
+            detached: false,
+            locked_reason: None,
+            prunable_reason: None,
+            logical_bytes: private_layers,
+            allocated_bytes: private_layers,
+        };
+        assert_eq!(
+            cow_aware_allocated_total(&bases, std::slice::from_ref(&overlay_view)),
+            base_allocated + private_layers,
+            "an OverlayFS view must add its full private allocation, not saturate to zero"
         );
     }
 

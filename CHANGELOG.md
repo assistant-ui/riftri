@@ -5,6 +5,17 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- `status --json` now counts each OverlayFS worktree's on-disk write cost in
+  `total_allocated_bytes` instead of silently dropping it. The CoW-aware total
+  subtracts each view's shared base blocks so they are counted once, but an
+  OverlayFS view's `allocated_bytes` already measures only its private
+  upper/work layers (base-exclusive), so subtracting the base again saturated
+  every OverlayFS view to zero and omitted its real footprint. The subtraction
+  now applies only to backends whose per-tree measurement re-counts the base
+  (APFS clone, reflink, ReFS block clone); OverlayFS views are added whole.
+
 ### Changed
 
 - The interactive `riftri setup` terminal UI is now behind an off-by-default
