@@ -5,6 +5,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- The interactive `riftri setup` terminal UI is now behind an off-by-default
+  `tui` Cargo feature. Default builds omit ratatui and crossterm, dropping the
+  release binary from 3.03 MB to 2.70 MB; `setup` still works through plain
+  text prompts. Published release archives build with `--features tui` to keep
+  the styled experience. Release binaries are now stripped.
+
 ## [0.3.3] - 2026-09-20
 
 ### Fixed

@@ -1,6 +1,9 @@
 use std::process::{Command, Stdio};
 
-#[cfg(unix)]
+// `support` is only used by the `tui`-gated terminal tests below, so gating the
+// module import to match keeps its helpers from reading as dead code when the
+// feature is off.
+#[cfg(all(unix, feature = "tui"))]
 mod support;
 
 #[test]
@@ -59,7 +62,8 @@ fn setup_json_errors_do_not_include_prompts() {
     );
 }
 
-#[cfg(unix)]
+// The rich terminal setup path is only built with the interactive TUI feature.
+#[cfg(all(unix, feature = "tui"))]
 mod terminal {
     use std::fs::{self, File};
     use std::io::{Read, Write};

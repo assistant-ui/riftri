@@ -48,7 +48,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --features riftri-cli/tui
 
       - name: Create disposable APFS benchmark volume
         if: matrix.os == 'macos-15'
