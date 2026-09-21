@@ -28,6 +28,12 @@ pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
 
 /// The only Git subcommand Riftri claims from the proxy.
 const WORKTREE_SUBCOMMAND: &str = "worktree";
+
+/// Git's own grace period for `git worktree prune`, which `git gc` runs
+/// internally. Riftri pins it so Git never prunes a managed worktree outside
+/// the journal; see `protect_worktrees_from_git_prune`.
+pub const WORKTREE_PRUNE_EXPIRE_CONFIG_KEY: &str = "gc.worktreePruneExpire";
+const WORKTREE_PRUNE_EXPIRE_NEVER: &str = "never";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
 pub const CACHE_DIR_ENV: &str = "RIFTRI_CACHE_DIR";
 /// Environment variable naming the ephemeral `riftri exec` shim directory.
@@ -112,6 +118,7 @@ pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, Activation
     let git = Git::default();
     let status = repository_identity_with_git(&git, path)?;
     git.set_local_config(&status.repository, ENABLED_CONFIG_KEY, OsStr::new("true"))?;
+    protect_worktrees_from_git_prune(&git, &status.repository)?;
     Ok(RepositoryActivation {
         enabled: true,
         ..status
@@ -122,10 +129,52 @@ pub fn disable_repository(path: &Path) -> Result<RepositoryActivation, Activatio
     let git = Git::default();
     let status = repository_identity_with_git(&git, path)?;
     git.unset_local_config(&status.repository, ENABLED_CONFIG_KEY)?;
+    release_worktree_prune_protection(&git, &status.repository)?;
     Ok(RepositoryActivation {
         enabled: false,
         ..status
     })
+}
+
+/// Stop Git from pruning managed worktrees behind Riftri's back.
+///
+/// `git gc` runs `git worktree prune --expire <gc.worktreePruneExpire>`
+/// internally, and `gc.auto` fires that from ordinary commands like
+/// `git commit`. Those inner calls resolve `git` from Git's own exec-path, so
+/// they never re-enter the shim and never reach the journaled prune the proxy
+/// would otherwise plan. Dropping a managed worktree's admin files that way
+/// leaves a stale add journal behind and pins its retained base until the user
+/// runs `riftri repair`. Pinning the expiry to `never` closes every one of
+/// those routes at the source, including config aliases and future Git
+/// options, because it is Git itself that declines to prune.
+///
+/// A value the user already chose is left alone: this only writes the key when
+/// the repository has no local setting of its own.
+fn protect_worktrees_from_git_prune(git: &Git, repository: &Path) -> Result<(), ActivationError> {
+    if git
+        .local_config_value(repository, WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    git.set_local_config(
+        repository,
+        WORKTREE_PRUNE_EXPIRE_CONFIG_KEY,
+        OsStr::new(WORKTREE_PRUNE_EXPIRE_NEVER),
+    )?;
+    Ok(())
+}
+
+/// Undo [`protect_worktrees_from_git_prune`], but only when the recorded value
+/// is still the one Riftri wrote. A value the user has since changed is theirs.
+fn release_worktree_prune_protection(git: &Git, repository: &Path) -> Result<(), ActivationError> {
+    let Some(value) = git.local_config_value(repository, WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)? else {
+        return Ok(());
+    };
+    if value == WORKTREE_PRUNE_EXPIRE_NEVER.as_bytes() {
+        git.unset_local_config(repository, WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)?;
+    }
+    Ok(())
 }
 
 pub fn repository_activation(path: &Path) -> Result<RepositoryActivation, ActivationError> {
@@ -1932,6 +1981,75 @@ mod tests {
             );
             git(&neighbor, &["config", "--unset", "riftri.enabled"]);
         }
+    }
+
+    /// `git gc` prunes worktrees itself — and `gc.auto` fires it from ordinary
+    /// commands like `git commit`. Those inner calls resolve `git` from Git's
+    /// own exec-path, so they never re-enter the shim and never reach the
+    /// journaled prune the proxy plans. Enabling a repository must pin Git's
+    /// own expiry so Git declines to prune managed worktrees at the source.
+    #[test]
+    fn enabling_pins_gits_worktree_prune_expiry_and_disabling_restores_it() {
+        let client = riftri_git::Git::default();
+        let fixture = repository_fixture();
+        let repository = fixture.path();
+
+        assert_eq!(
+            client
+                .local_config_value(repository, super::WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)
+                .unwrap(),
+            None
+        );
+        enable_repository(repository).expect("enable repository");
+        assert_eq!(
+            client
+                .local_config_value(repository, super::WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(super::WORKTREE_PRUNE_EXPIRE_NEVER.as_bytes())
+        );
+
+        disable_repository(repository).expect("disable repository");
+        assert_eq!(
+            client
+                .local_config_value(repository, super::WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)
+                .unwrap(),
+            None,
+            "disabling must remove the value Riftri wrote"
+        );
+    }
+
+    /// An expiry the user chose is theirs: enabling must not overwrite it, and
+    /// disabling must not delete it.
+    #[test]
+    fn worktree_prune_protection_preserves_a_user_chosen_expiry() {
+        let client = riftri_git::Git::default();
+        let fixture = repository_fixture();
+        let repository = fixture.path();
+        let chosen = OsStr::new("2.weeks.ago");
+        client
+            .set_local_config(repository, super::WORKTREE_PRUNE_EXPIRE_CONFIG_KEY, chosen)
+            .expect("record a user-chosen expiry");
+
+        enable_repository(repository).expect("enable repository");
+        assert_eq!(
+            client
+                .local_config_value(repository, super::WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(b"2.weeks.ago".as_slice()),
+            "enabling must not overwrite an expiry the user chose"
+        );
+
+        disable_repository(repository).expect("disable repository");
+        assert_eq!(
+            client
+                .local_config_value(repository, super::WORKTREE_PRUNE_EXPIRE_CONFIG_KEY)
+                .unwrap()
+                .as_deref(),
+            Some(b"2.weeks.ago".as_slice()),
+            "disabling must not delete an expiry the user chose"
+        );
     }
 
     #[test]
