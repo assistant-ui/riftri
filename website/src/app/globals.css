@@ -631,7 +631,7 @@ code, pre { font-family: var(--font-mono); }
 .install-notes p { margin: 0; }
 .install-notes code { font-size: 0.7rem; }
 .install-links { display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem; margin-top: 0.75rem; }
-.install-links a { text-decoration: underline; text-underline-offset: 0.2em; }
+.install-links a { display: inline-flex; align-items: center; min-height: 44px; text-decoration: underline; text-underline-offset: 0.2em; }
 
 .install-options { min-width: 0; }
 .install-platform { margin: 0 0 0.6rem; color: var(--ink-muted); font-size: 0.7rem; }
