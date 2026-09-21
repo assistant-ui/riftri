@@ -7,6 +7,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Default (non-`tui`) builds again escape control characters in human output
+  written to an interactive terminal, so an untrusted branch name, path, or git
+  stderr containing terminal escape sequences (for example `\x1b[2J`) can no
+  longer clear the screen or spoof output. The `tui`-feature split moved
+  control-character sanitization into the rich renderer only, leaving the
+  default binary emitting raw bytes on a terminal — a regression against
+  pre-split behavior. Piped/redirected output and machine (`--json`) output stay
+  byte-for-byte faithful, matching the rich build's policy.
 - CI now test-executes the default/plain build again. Gating the setup TUI
   behind the `tui` feature made the Quality job run tests only with
   `--features riftri-cli/tui`, which deselects `crates/riftri-cli/src/ui/plain.rs`
