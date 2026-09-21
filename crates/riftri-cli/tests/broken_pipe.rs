@@ -80,10 +80,13 @@ fn completions_exit_cleanly_when_the_reader_closes_the_pipe() {
 
 // Shell hooks are `eval`/`source`d; their byte-exact output now flows through the
 // broken-pipe-safe path, so a closed reader is a clean stop, not a panic.
+// The sh/bash/zsh hook is only emitted on Unix; on Windows the command errors
+// before any write, so this POSIX-shell broken-pipe case is Unix-gated. The
+// cross-platform broken-pipe path is covered by the completions test above.
+#[cfg(unix)]
 #[test]
 fn shell_hook_exits_cleanly_when_the_reader_closes_the_pipe() {
-    // PowerShell hooks are Windows-only and fail before any write off-Windows, so
-    // exercise the POSIX shells whose hook text actually reaches the pipe here.
+    // Exercise the POSIX shells whose hook text actually reaches the pipe.
     for shell in ["bash", "zsh", "sh"] {
         let (code, panicked, stderr) = run_with_closed_stdout(&["shell", "hook", shell]);
         assert!(
@@ -100,9 +103,10 @@ fn shell_hook_exits_cleanly_when_the_reader_closes_the_pipe() {
 
 // Deactivation output shares the same path as the hook; verify it too exits
 // cleanly rather than panicking when the reader closes the pipe.
+#[cfg(unix)]
 #[test]
 fn shell_deactivate_exits_cleanly_when_the_reader_closes_the_pipe() {
-    // PowerShell deactivation is Windows-only; use the POSIX shells off-Windows.
+    // sh/bash/zsh deactivation is Unix-only; use the POSIX shells here.
     for shell in ["bash", "zsh", "sh"] {
         let (code, panicked, stderr) = run_with_closed_stdout(&["shell", "deactivate", shell]);
         assert!(
