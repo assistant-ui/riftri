@@ -1794,6 +1794,21 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_read_only_clone_directory_regains_write_bits_matching_a_normal_checkout() {
+        use super::writable_bits_for_umask;
+
+        // `make_tree_read_only` clears every write bit, so a `0o775` directory
+        // becomes `0o555`. Restoring owner traversal (`0o700`) plus the
+        // umask-appropriate write bits must reproduce what a plain
+        // `git worktree add` would leave behind, so a second group member can
+        // still create, rename, and delete entries inside the directory.
+        let cloned = 0o555;
+        assert_eq!(cloned | 0o700 | writable_bits_for_umask(0o002), 0o775);
+        assert_eq!(cloned | 0o700 | writable_bits_for_umask(0o022), 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn reading_the_umask_leaves_it_unchanged() {
         use super::current_umask;
 

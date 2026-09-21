@@ -7,6 +7,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Copy-on-write worktree directories now regain the umask-appropriate group and
+  other write bits, matching a plain `git worktree add`. Restoring write access
+  after cloning a read-only base only re-added the owner bits to directories, so
+  under `umask 002` or `core.sharedRepository=group` a `0o775` directory came
+  back as `0o755`: a second group member could edit files but could not create,
+  rename, or delete entries inside the directory. Directories now mirror the
+  file fix and OR in `0o700` plus the umask-appropriate write bits.
 - `status --json` now counts each OverlayFS worktree's on-disk write cost in
   `total_allocated_bytes` instead of silently dropping it. The CoW-aware total
   subtracts each view's shared base blocks so they are counted once, but an

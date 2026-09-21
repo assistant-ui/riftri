@@ -187,7 +187,15 @@ fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
 
     if metadata.is_dir() {
         if matches!(update, ModeUpdate::OwnerWritable) {
-            set_mode(path, metadata.permissions().mode() | 0o700)?;
+            // Owner rwx (`0o700`) guarantees traversal and edits; the
+            // umask-appropriate bits restore the group/other write access a
+            // plain `git worktree add` keeps under `umask 002` or
+            // `core.sharedRepository=group`, which `make_tree_read_only`
+            // stripped when it cleared every write bit.
+            set_mode(
+                path,
+                metadata.permissions().mode() | 0o700 | crate::umask_writable_bits(),
+            )?;
         }
         for entry in fs::read_dir(path)
             .map_err(|source_error| io("read tree permissions", path, source_error))?
