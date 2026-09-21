@@ -1377,6 +1377,7 @@ impl Git {
             OsString::from("worktree"),
             OsString::from("remove"),
             OsString::from("--force"),
+            OsString::from("--"),
             git_path_argument(worktree),
         ];
         self.run_os(Some(repository), &arguments)?;
@@ -2617,6 +2618,32 @@ mod tests {
             fs::read(output.path().join("tracked.txt")).unwrap(),
             b"tracked\n"
         );
+    }
+
+    /// `remove_worktree` has always passed `--`; the force variant did not, so
+    /// a selector beginning with `-` was parsed as a bundle of short options
+    /// instead of a worktree. Force is the path that bypasses Git's own
+    /// dirty-worktree checks, so it is the one that must be built most
+    /// defensively.
+    #[test]
+    fn force_removal_accepts_a_worktree_selector_beginning_with_a_dash() {
+        let fixture = RepositoryFixture::committed();
+        let linked = fixture.path().join("-dash");
+        let git = Git::default();
+
+        git.add_worktree_no_checkout(
+            fixture.path(),
+            &linked,
+            OsStr::new("HEAD"),
+            WorktreeHead::NewBranch(OsStr::new("feature/dash")),
+        )
+        .expect("add no-checkout worktree");
+        assert!(linked.join(".git").is_file());
+
+        // Relative, so the argument Git receives keeps its leading dash.
+        git.remove_worktree_force(fixture.path(), Path::new("-dash"))
+            .expect("force-remove a dash-leading worktree");
+        assert!(!linked.exists());
     }
 
     #[test]
