@@ -25,6 +25,9 @@ use crate::{
 };
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
+
+/// The only Git subcommand Riftri claims from the proxy.
+const WORKTREE_SUBCOMMAND: &str = "worktree";
 pub const BYPASS_ENV: &str = "RIFTRI_BYPASS";
 pub const CACHE_DIR_ENV: &str = "RIFTRI_CACHE_DIR";
 /// Environment variable naming the ephemeral `riftri exec` shim directory.
@@ -143,7 +146,7 @@ pub fn plan_git_command(
     if arguments
         .get(context.command_index)
         .map(OsString::as_os_str)
-        != Some(OsStr::new("worktree"))
+        != Some(OsStr::new(WORKTREE_SUBCOMMAND))
     {
         return Ok(GitProxyPlan::Passthrough);
     }
@@ -1045,6 +1048,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
     let mut work_tree = None;
     let mut git_directory = None;
     let mut global_options = GlobalOptionScope::None;
+    let mut unrecognized_global_option = false;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "-C" {
@@ -1113,8 +1117,31 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument.to_string_lossy().starts_with('-') {
-            return None;
+            // An option this parser does not know. Treating it as "not our
+            // business" would fail *open*: `git --attr-source=HEAD worktree
+            // remove <managed>` would reach real Git with no lifecycle guard,
+            // even though the same command without the option is refused. Note
+            // the asymmetry that used to exist — an unrecognized *subcommand*
+            // option already fails closed. Record it as significant, which
+            // disqualifies the optimized paths and leaves the managed-path
+            // guard in charge, and keep scanning for the subcommand.
+            unrecognized_global_option = true;
+            global_options.observe(GlobalOptionScope::Significant);
+            index += 1;
         } else {
+            // The option above may have taken a separate value, in which case
+            // the token here is that value rather than the subcommand. Rather
+            // than guess its arity, look for the subcommand Riftri actually
+            // claims; anything else still resolves to this token and falls
+            // through to passthrough as before.
+            if unrecognized_global_option
+                && argument != WORKTREE_SUBCOMMAND
+                && let Some(offset) = arguments[index..]
+                    .iter()
+                    .position(|argument| argument == WORKTREE_SUBCOMMAND)
+            {
+                index += offset;
+            }
             let work_tree = work_tree.map(|path| resolve_command_path(&repository, &path));
             let git_directory = git_directory.map(|path| resolve_command_path(&repository, &path));
             let git_directory = work_tree.is_none().then_some(git_directory).flatten();
@@ -2135,6 +2162,108 @@ mod tests {
                     GitProxyPlan::Passthrough
                 ),
                 "`git {option} worktree add` was not delegated to Git"
+            );
+        }
+    }
+
+    /// A global option this parser does not know must not fail *open*. It used
+    /// to: the parse bailed out and the command reached real Git with no
+    /// lifecycle guard, so `git --attr-source=HEAD worktree remove <managed>`
+    /// removed a managed worktree that the same command without the option
+    /// refuses. Every future Git global option inherits that hole, so the
+    /// unknown-token policy has to match the subcommand parser's, which
+    /// already fails closed.
+    // Creating a managed worktree needs a native copy-on-write backend, so
+    // this runs where `worktree.rs`'s own tests run.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn unrecognized_global_options_do_not_bypass_the_managed_lifecycle_guard() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("guarded-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/guarded")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+
+        // Both spellings: the value may be attached or separate, and the
+        // parser cannot know an unknown option's arity.
+        for option in [
+            vec![OsString::from("--attr-source=HEAD")],
+            vec![OsString::from("--attr-source"), OsString::from("HEAD")],
+        ] {
+            let mut arguments = option.clone();
+            arguments.extend([
+                OsString::from(super::WORKTREE_SUBCOMMAND),
+                OsString::from("remove"),
+                destination.clone().into_os_string(),
+            ]);
+
+            let error = plan_git_command(fixture.path(), &arguments)
+                .expect_err("an unknown global option must not bypass the guard");
+            assert!(
+                error.to_string().contains("managed Riftri worktree"),
+                "{option:?}: {error}"
+            );
+        }
+    }
+
+    /// Failing closed must stay narrow: an unknown global option may only
+    /// change the outcome for a managed worktree in an enabled repository.
+    #[test]
+    fn unrecognized_global_options_still_delegate_ordinary_commands() {
+        let fixture = repository_fixture();
+        let unmanaged = fixture.path().join("plain-view");
+        git(
+            fixture.path(),
+            &["worktree", "add", "--detach", unmanaged.to_str().unwrap()],
+        );
+        enable_repository(fixture.path()).expect("enable repository");
+
+        for arguments in [
+            // Not a `worktree` command at all.
+            vec![OsString::from("--attr-source=HEAD"), OsString::from("log")],
+            // Read-only `worktree` subcommand.
+            vec![
+                OsString::from("--attr-source=HEAD"),
+                OsString::from(super::WORKTREE_SUBCOMMAND),
+                OsString::from("list"),
+            ],
+            // A worktree Riftri does not manage.
+            vec![
+                OsString::from("--attr-source=HEAD"),
+                OsString::from(super::WORKTREE_SUBCOMMAND),
+                OsString::from("remove"),
+                unmanaged.clone().into_os_string(),
+            ],
+            // `worktree` appearing as an option value rather than a subcommand.
+            vec![
+                OsString::from("--attr-source=HEAD"),
+                OsString::from("log"),
+                OsString::from("--grep"),
+                OsString::from(super::WORKTREE_SUBCOMMAND),
+            ],
+        ] {
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan ordinary command"),
+                    GitProxyPlan::Passthrough
+                ),
+                "{arguments:?} was not delegated to Git"
             );
         }
     }
