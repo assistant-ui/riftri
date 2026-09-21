@@ -189,6 +189,14 @@ pub fn plan_git_command(
         return Ok(GitProxyPlan::Passthrough);
     }
 
+    plan_git_command_inner(current_directory, arguments, true)
+}
+
+fn plan_git_command_inner(
+    current_directory: &Path,
+    arguments: &[OsString],
+    expand_aliases: bool,
+) -> Result<GitProxyPlan, ActivationError> {
     let Some(context) = command_context(current_directory, arguments) else {
         return Ok(GitProxyPlan::Passthrough);
     };
@@ -197,6 +205,11 @@ pub fn plan_git_command(
         .map(OsString::as_os_str)
         != Some(OsStr::new(WORKTREE_SUBCOMMAND))
     {
+        if expand_aliases && let Some(expanded) = expand_worktree_alias(&context, arguments)? {
+            // Re-plan the command Git will actually run. Aliases are not
+            // expanded recursively, so one pass is enough and terminates.
+            return plan_git_command_inner(current_directory, &expanded, false);
+        }
         return Ok(GitProxyPlan::Passthrough);
     }
 
@@ -1090,6 +1103,123 @@ struct CommandContext {
     git_directory: Option<PathBuf>,
     command_index: usize,
     global_options: GlobalOptionScope,
+}
+
+/// Git commands common enough that resolving an alias for them would add a
+/// configuration read to the hot path. Git never lets an alias shadow a
+/// built-in command, so skipping the lookup for these is correct as well as
+/// cheap; a built-in missing from this list only costs one harmless read.
+const COMMON_GIT_BUILTINS: &[&str] = &[
+    "add",
+    "branch",
+    "checkout",
+    "cherry-pick",
+    "clone",
+    "commit",
+    "config",
+    "diff",
+    "fetch",
+    "grep",
+    "init",
+    "log",
+    "ls-files",
+    "merge",
+    "pull",
+    "push",
+    "rebase",
+    "remote",
+    "reset",
+    "restore",
+    "rev-parse",
+    "show",
+    "stash",
+    "status",
+    "switch",
+    "tag",
+    WORKTREE_SUBCOMMAND,
+];
+
+/// Resolve a `git` alias that ultimately runs `git worktree ...`.
+///
+/// The proxy compares the subcommand token to `worktree` literally, so an alias
+/// such as `alias.wtp = worktree prune -v` reaches real Git unclassified and
+/// performs exactly the lifecycle change the spelled-out command refuses. Git
+/// expands these internally, so nothing re-enters the shim.
+///
+/// Shell aliases (`!command`) are deliberately left alone: they spawn a new
+/// process that resolves `git` through `PATH`, so any worktree command inside
+/// one already re-enters the proxy on its own.
+fn expand_worktree_alias(
+    context: &CommandContext,
+    arguments: &[OsString],
+) -> Result<Option<Vec<OsString>>, ActivationError> {
+    let Some(token) = arguments.get(context.command_index) else {
+        return Ok(None);
+    };
+    let Some(name) = token.to_str() else {
+        return Ok(None);
+    };
+    if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name) {
+        return Ok(None);
+    }
+    let Some(value) = Git::default().config_value(&context.repository, &format!("alias.{name}"))?
+    else {
+        return Ok(None);
+    };
+    let Ok(value) = String::from_utf8(value) else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.starts_with('!') {
+        return Ok(None);
+    }
+    let mut words = split_alias_words(value).into_iter();
+    if words.next().as_deref() != Some(WORKTREE_SUBCOMMAND) {
+        return Ok(None);
+    }
+
+    // Rebuild the command Git will run: the global options as given, then the
+    // alias body, then the arguments that followed the alias name.
+    let mut expanded = arguments[..context.command_index].to_vec();
+    expanded.push(OsString::from(WORKTREE_SUBCOMMAND));
+    expanded.extend(words.map(OsString::from));
+    expanded.extend_from_slice(&arguments[context.command_index + 1..]);
+    Ok(Some(expanded))
+}
+
+/// Split an alias body the way Git's own command-line splitter does for the
+/// forms that can reach a worktree command: whitespace separated, with single
+/// or double quotes grouping a word. A quote Git would reject leaves the word
+/// as written, which can only make the result fail to match `worktree`.
+fn split_alias_words(value: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut started = false;
+    for character in value.chars() {
+        match quote {
+            Some(open) if character == open => quote = None,
+            Some(_) => word.push(character),
+            None if character == '\'' || character == '"' => {
+                quote = Some(character);
+                started = true;
+            }
+            None if character.is_whitespace() => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            None => {
+                word.push(character);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    words
 }
 
 fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
@@ -2255,6 +2385,130 @@ mod tests {
             panic!("`worktree add --detach -- --help` was not an optimized add");
         };
         assert_eq!(request.destination, fixture.path().join("--help"));
+    }
+
+    /// The proxy compares the subcommand token to `worktree` literally, so a
+    /// config alias used to reach real Git unclassified and perform exactly the
+    /// lifecycle change the spelled-out command refuses — Git expands aliases
+    /// internally, so nothing re-enters the shim. Planning the command Git will
+    /// actually run keeps the alias working *and* journaled.
+    // Creating a managed worktree needs a native copy-on-write backend, so
+    // this runs where `worktree.rs`'s own tests run.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn worktree_aliases_are_planned_as_the_command_git_will_run() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("aliased-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/aliased")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+
+        git(
+            fixture.path(),
+            &["config", "alias.wtp", "worktree prune -v"],
+        );
+        assert!(
+            matches!(
+                plan_git_command(fixture.path(), &[OsString::from("wtp")]).expect("plan alias"),
+                GitProxyPlan::OptimizedPrune(_)
+            ),
+            "an alias for `worktree prune` was not journaled"
+        );
+
+        // A quoted alias body splits the way Git splits it, and arguments after
+        // the alias name still apply.
+        git(
+            fixture.path(),
+            &["config", "alias.wtrm", "worktree 'remove'"],
+        );
+        assert!(
+            matches!(
+                plan_git_command(
+                    fixture.path(),
+                    &[OsString::from("wtrm"), destination.clone().into_os_string()],
+                )
+                .expect("plan alias"),
+                GitProxyPlan::OptimizedRemove(_)
+            ),
+            "an alias for `worktree remove` was not journaled"
+        );
+        assert!(
+            matches!(
+                plan_git_command(
+                    fixture.path(),
+                    &[
+                        OsString::from("wtrm"),
+                        OsString::from("--force"),
+                        destination.into_os_string(),
+                    ],
+                )
+                .expect("plan alias"),
+                GitProxyPlan::OptimizedForceRemove(_)
+            ),
+            "arguments after the alias name were not applied"
+        );
+    }
+
+    /// Alias resolution must not capture anything else. A shell alias spawns a
+    /// process that resolves `git` through `PATH`, so a worktree command inside
+    /// one already re-enters the proxy on its own and must be left alone.
+    #[test]
+    fn alias_expansion_leaves_other_commands_to_git() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        git(
+            fixture.path(),
+            &["config", "alias.shellwt", "!git worktree prune"],
+        );
+        git(fixture.path(), &["config", "alias.plain", "log --oneline"]);
+
+        for argument in ["shellwt", "plain", "status", "definitely-not-a-command"] {
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &[OsString::from(argument)])
+                        .expect("plan ordinary command"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`git {argument}` was not delegated to Git"
+            );
+        }
+    }
+
+    #[test]
+    fn alias_bodies_split_the_way_git_splits_them() {
+        assert_eq!(
+            super::split_alias_words("worktree prune -v"),
+            ["worktree", "prune", "-v"]
+        );
+        assert_eq!(
+            super::split_alias_words("  worktree   prune  "),
+            ["worktree", "prune"]
+        );
+        assert_eq!(
+            super::split_alias_words("worktree 'remove' \"--force\""),
+            ["worktree", "remove", "--force"]
+        );
+        assert_eq!(
+            super::split_alias_words("worktree add 'my dir'"),
+            ["worktree", "add", "my dir"]
+        );
+        assert!(super::split_alias_words("   ").is_empty());
     }
 
     /// IDE Git integrations pass `--no-optional-locks` on every invocation.
