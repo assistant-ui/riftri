@@ -1177,6 +1177,19 @@ impl BackendKind {
             Self::FullCopyFallback => "full-copy fallback",
         }
     }
+
+    /// Whether a view's measured per-tree `allocated_bytes` already excludes
+    /// the shared base blocks.
+    ///
+    /// Copy-on-write backends (APFS clone, reflink, ReFS block clone) measure
+    /// the whole materialized tree, so a view's allocation re-counts the base
+    /// blocks it still shares; the CoW-aware total must subtract the base to
+    /// avoid double-counting. OverlayFS instead measures only the private
+    /// upper/work layers, which are already base-exclusive, so subtracting the
+    /// base again would wrongly saturate the view to zero.
+    pub const fn allocation_excludes_shared_base(self) -> bool {
+        matches!(self, Self::OverlayFs)
+    }
 }
 
 /// The result of probing one backend against a concrete destination volume.
