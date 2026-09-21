@@ -1037,6 +1037,55 @@ fn try_lock_add_operation(journal_path: &Path) -> Result<Option<AddOperationLock
     Ok(Some(lock))
 }
 
+/// Claim the per-worktree operation lock for a managed worktree.
+///
+/// Every lifecycle operation that mutates one worktree — add, remove, move, and
+/// compact — takes this lock, keyed on the add journal that owns the worktree,
+/// so that at most one of them is ever in flight for a given worktree.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn lock_managed_worktree(
+    managed: &DecodedJournal,
+    destination: &Path,
+) -> Result<AddOperationLock, WorktreeError> {
+    try_lock_add_operation(&managed.journal_path)?.ok_or_else(|| WorktreeError::Busy {
+        message: format!(
+            "worktree {} is busy with another Riftri operation; wait for it to finish and retry",
+            destination.display()
+        ),
+    })
+}
+
+/// Re-resolve a managed worktree after its operation lock has been taken.
+///
+/// The lookup that precedes the lock is only advisory: a competing lifecycle
+/// operation can publish its journal between that read and the moment the lock
+/// is acquired. Without this re-check the loser of that race proceeds against a
+/// worktree another operation already claimed, and leaves behind a journal whose
+/// filesystem shape no `resume_*` branch can classify — which permanently blocks
+/// `repair`, `prune`, and base reclamation. Confirming the claim under the lock
+/// turns that silent wedge into a clean, retryable refusal.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn revalidate_managed_add_journal(
+    state_directory: &Path,
+    destination: &Path,
+    expected: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    let current = find_managed_add_journal(state_directory, destination)?.ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "{} is no longer an active Riftri-managed worktree in {}",
+            destination.display(),
+            state_directory.display()
+        ))
+    })?;
+    if current.operation_id != expected.operation_id {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} was claimed by another Riftri operation while waiting for its worktree lock",
+            destination.display()
+        )));
+    }
+    Ok(())
+}
+
 fn managed_destination_candidates(destination: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
     let absolute = absolute_path(destination)?;
     let mut candidates = vec![absolute.clone()];
@@ -2122,6 +2171,11 @@ fn remove_worktree_with_mode(
         ))
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
+    // Claim the worktree before reading any state that decides what to mutate,
+    // then confirm the claim: a competing compaction or move may have published
+    // its journal after the lookup above.
+    let _operation_lock = lock_managed_worktree(&managed, &destination)?;
+    revalidate_managed_add_journal(&state_directory, &destination, &managed)?;
     let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
     let registered = git
         .list_worktrees(&repository_root)?
@@ -2257,6 +2311,11 @@ fn move_worktree_inner(
         ))
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
+    // Claim the worktree before reading any state that decides what to mutate,
+    // then confirm the claim: a competing removal or compaction may have
+    // published its journal after the lookup above.
+    let _operation_lock = lock_managed_worktree(&managed, &source)?;
+    revalidate_managed_add_journal(&state_directory, &source, &managed)?;
     if managed.backend == BackendKind::OverlayFs {
         return Err(WorktreeError::Unsupported(
             "moving an active OverlayFS worktree is not yet supported; remove and recreate the worktree at its new path"
@@ -2386,14 +2445,11 @@ fn compact_worktree_inner(
         ));
     }
 
-    let _operation_lock = try_lock_add_operation(&managed.journal_path)?.ok_or_else(|| {
-        WorktreeError::Busy {
-            message: format!(
-                "worktree {} is busy with another Riftri operation; wait for it to finish and retry",
-                destination.display()
-            ),
-        }
-    })?;
+    let _operation_lock = lock_managed_worktree(&managed, &destination)?;
+    // The pending-lifecycle check above ran before this lock was held, so a
+    // competing removal or move may have claimed the worktree since. Confirm
+    // the claim now that no other lifecycle operation can be in flight.
+    revalidate_managed_add_journal(&state_directory, &destination, &managed)?;
     let resolved = git.resolve_revision(&destination, OsStr::new("HEAD"))?;
     verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)?;
     // `verify_compaction_source` proved above that `destination` is one of
@@ -9377,6 +9433,110 @@ mod tests {
                 "accepted non-canonical pointer {rejected:?}"
             );
         }
+    }
+
+    /// `remove`, `move`, and `compact` must all claim the same per-worktree
+    /// operation lock. Before they did, a `remove` could slip between a
+    /// competing operation's pending-journal check and the moment that
+    /// operation published its own journal, leaving behind a journal shape no
+    /// `resume_*` branch can classify — which permanently blocks `repair`,
+    /// `prune`, and base reclamation. Holding the lock must make every other
+    /// lifecycle operation fail fast and cleanly instead.
+    #[test]
+    fn lifecycle_operations_refuse_a_worktree_locked_by_another_operation() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/lock-exclusion")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+
+        // Journals record canonical paths, so resolve both before looking the
+        // managed worktree up (on macOS the fixture lives under /private/tmp).
+        let canonical_state = fs::canonicalize(&state).expect("canonical state directory");
+        let canonical_destination = fs::canonicalize(&destination).expect("canonical destination");
+        let managed = super::find_managed_add_journal(&canonical_state, &canonical_destination)
+            .expect("load managed journal")
+            .expect("worktree is managed");
+
+        {
+            // Stand in for a competing lifecycle operation that is in flight
+            // but has not published its journal yet.
+            let _held = super::try_lock_add_operation(&managed.journal_path)
+                .expect("take operation lock")
+                .expect("lock is available");
+
+            let removal = remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect_err("remove must refuse a locked worktree");
+            assert!(
+                matches!(removal, super::WorktreeError::Busy { .. }),
+                "expected Busy, got {removal:?}"
+            );
+
+            let moved = move_worktree_inner(
+                MoveWorktreeRequest {
+                    repository: repository.clone(),
+                    source: destination.clone(),
+                    destination: fixture.path().join("moved"),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect_err("move must refuse a locked worktree");
+            assert!(
+                matches!(moved, super::WorktreeError::Busy { .. }),
+                "expected Busy, got {moved:?}"
+            );
+
+            assert!(
+                destination.is_dir(),
+                "a refused operation must leave the worktree untouched"
+            );
+        }
+
+        // Once the competing operation releases the worktree, the same request
+        // succeeds: the lock refuses, it does not wedge.
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove succeeds after the lock is released");
+        assert!(!destination.exists());
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
     }
 
     #[test]
