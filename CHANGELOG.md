@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.3.5] - 2026-09-21
+
 ### Fixed
 
 - The shipped rich (`tui`) build now escapes control characters in human output
