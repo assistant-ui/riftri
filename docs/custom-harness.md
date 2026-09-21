@@ -138,6 +138,47 @@ follow-up is required — a `recovery` of `required` with a `nextCommand` of
 `--json-errors` implies `--no-progress`, so stderr stays exactly one JSON
 document.
 
+## Beyond cheaper worktrees
+
+Disk is the headline, but it is not the reason most harnesses stay. Plain
+`git worktree` gives a runner no way to answer "what happened?" — Riftri
+turns the worktree lifecycle into something a program can supervise.
+
+**Operations are journaled and recoverable.** Every add, remove, move,
+prune, and compaction advances through a durable state machine. If your
+runner is killed halfway through creating a workspace, `riftri repair`
+resumes or rolls it back and reports what it did. Plain Git leaves a
+half-created worktree and stale metadata for you to untangle by hand.
+
+**Outcomes are machine-readable.** Failures arrive as one receipt naming the
+durable phase reached, whether cleanup is pending, and whether recovery is
+required — and exit code `3` separates "we refuse" from "something broke."
+A runner can decide what to do without matching on error text.
+
+**Correctness is checked before mutation, not after.** Configurations Riftri
+cannot reproduce exactly — sparse checkout, submodules, custom filters,
+conditional config includes — stop with an explanation before any state
+exists. The alternative is discovering mid-task that a workspace does not
+match the commit it claims.
+
+**Destructive actions are guarded.** Clean removal refuses a dirty worktree.
+A forced removal records an exact content snapshot first and stops if the
+view changed after that intent — so a task that wrote files while you were
+tearing it down does not lose them silently.
+
+**Storage is observable.** `worktree list --json` reports `allocated_bytes`
+and `logical_bytes` per worktree alongside its backend and shared base, and
+`status --json` adds totals, pending operations, and `diagnostic_issues`.
+That is what lets a harness show users where disk actually went, and what
+`gc` and `worktree compact` act on when reclaiming it.
+
+**Parallel creation is coordinated.** Concurrent adds of the same base are
+serialized by per-base locks: one process materializes it, the rest verify
+and reuse, so you do not need a lock of your own around `worktree add`.
+
+None of this exists in plain `git worktree`. It is worth knowing exactly
+what a fallback path gives up.
+
 ## Making Riftri the default workspace layer
 
 A harness that wants Riftri as its normal path — not an opt-in flag — needs
@@ -193,14 +234,10 @@ whether they got optimized workspaces or the fallback.
 
 ## Concurrency
 
-Independent runner processes can create worktrees at the same time. Adds that
-need the same base are coordinated with per-base locks: one process
-materializes it and the others reuse it after verifying its integrity. You do
-not need your own lock around `worktree add`.
-
-A worktree whose operation lock is held by a live process reports
-`"code": "worktree-busy"` with `"recovery": "retry"` — that one genuinely
-means wait and try again, unlike a policy refusal.
+Parallel adds are coordinated for you, as described above. The one case your
+runner must handle is a worktree whose operation lock is held by a live
+process: that reports `"code": "worktree-busy"` with `"recovery": "retry"`.
+Unlike a policy refusal, that one genuinely means wait and try again.
 
 ## Paths that are not valid UTF-8
 
