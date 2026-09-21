@@ -100,7 +100,12 @@ fn clone_directory(
     }
 
     let final_mode = if owner_writable {
-        final_mode | 0o700
+        // Mirror the file branch above: owner rwx (`0o700`) guarantees
+        // traversal and edits, and the umask-appropriate write bits restore the
+        // group/other access a plain `git worktree add` keeps under `umask 002`
+        // or `core.sharedRepository=group`. The base tree was made read-only
+        // before cloning, so `final_mode` arrives with every write bit cleared.
+        final_mode | 0o700 | crate::umask_writable_bits()
     } else {
         final_mode
     };
@@ -183,7 +188,15 @@ fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
 
     if metadata.is_dir() {
         if matches!(update, ModeUpdate::OwnerWritable) {
-            set_mode(path, metadata.permissions().mode() | 0o700)?;
+            // Owner rwx (`0o700`) guarantees traversal and edits; the
+            // umask-appropriate bits restore the group/other write access a
+            // plain `git worktree add` keeps under `umask 002` or
+            // `core.sharedRepository=group`, which `make_tree_read_only`
+            // stripped when it cleared every write bit.
+            set_mode(
+                path,
+                metadata.permissions().mode() | 0o700 | crate::umask_writable_bits(),
+            )?;
         }
         for entry in fs::read_dir(path)
             .map_err(|source_error| io("read tree permissions", path, source_error))?
@@ -250,6 +263,20 @@ mod tests {
         super::make_tree_owner_writable(&old).expect("old permission pass");
         super::clone_tree_owner_writable(&source, &fused).expect("fused clone");
         assert_tree_matches(&old, &fused);
+        // The base directory was made read-only (`0o750` -> `0o550`) before
+        // cloning. Restoring write access must re-add owner traversal plus the
+        // umask-appropriate group/other write bits, matching a plain
+        // `git worktree add`; owner-only (`0o750`) would leave a second group
+        // member unable to create, rename, or delete inside the directory.
+        let expected_dir_mode = 0o550 | 0o700 | crate::umask_writable_bits();
+        assert_eq!(
+            fs::symlink_metadata(fused.join("directory-00"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            expected_dir_mode
+        );
         assert_eq!(
             get_xattr(&fused.join(file), "com.riftri.clone-test"),
             Some(b"keep".to_vec())
