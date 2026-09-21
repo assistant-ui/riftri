@@ -1,6 +1,6 @@
 {
   "name": "riftri-darwin-arm64",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Riftri native binary for macOS ARM64",
   "license": "MIT",
   "os": [

@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.3.4] - 2026-09-20
+
 ### Fixed
 
 - `riftri completions <shell>` and `riftri shell hook|deactivate <shell>` no
