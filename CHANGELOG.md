@@ -5,6 +5,21 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- The shipped rich (`tui`) build now escapes control characters in human output
+  per output stream, matching the default build's #310 fix. Sanitization was
+  gated on `policy.rich`, which is false whenever stdout/stderr is redirected,
+  `CI` is set, or `TERM=dumb` — so when stdout stayed an interactive terminal
+  (for example `riftri status 2>/dev/null`), an untrusted branch name, worktree
+  path, or git stderr containing terminal escape sequences (for example
+  `\x1b[2J`) could clear the screen or spoof output. `print_line`, `print_error`,
+  and the `progress` fallback now sanitize when their own target stream is an
+  interactive terminal, independent of `policy.rich` (which still governs the
+  animated/styled rendering). This closes the same escape-injection class as
+  #310 for the rich build. Piped/redirected output and machine (`--json`) output
+  stay byte-for-byte faithful.
+
 ## [0.3.4] - 2026-09-20
 
 ### Fixed

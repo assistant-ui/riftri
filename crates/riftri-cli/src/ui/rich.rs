@@ -182,6 +182,11 @@ pub(crate) fn progress(message: String) {
             .unwrap_or_else(|error| error.into_inner())
             .message = Some(safe(&message));
         state.wake.notify_all();
+    } else if io::stderr().is_terminal() {
+        // Sanitize control characters on an interactive terminal even when the
+        // animated renderer is off, leaving redirected stderr byte-for-byte
+        // faithful. Matches the plain build's per-stream gating.
+        eprintln!("riftri: {}", safe(&message));
     } else {
         eprintln!("riftri: {message}");
     }
@@ -195,6 +200,11 @@ pub(crate) fn print_line(args: fmt::Arguments<'_>) {
             write_styled(&mut stdout, &report_line(&safe(line)), state.policy.color)?;
             writeln!(stdout)
         })
+    } else if io::stdout().is_terminal() {
+        // Even without the rich renderer, escape control characters when stdout
+        // is a terminal so untrusted paths/refs cannot inject escape sequences;
+        // a redirected stdout stays byte-for-byte faithful. Mirrors plain.rs.
+        writeln!(stdout, "{}", safe(&args.to_string()))
     } else {
         writeln!(stdout, "{args}")
     };
@@ -236,8 +246,13 @@ fn commit_stdout(result: io::Result<()>) {
 pub(crate) fn print_error(message: &str) {
     pause_progress();
     let color = UI.get().is_some_and(|state| state.policy.color);
+    // Escape control characters whenever stderr is an interactive terminal, so
+    // the shipped rich build stays safe even when the styled renderer is off
+    // (stderr redirected, CI, or `TERM=dumb`); a redirected stderr stays
+    // byte-for-byte faithful. Mirrors plain.rs's per-stream gating. A rich
+    // policy always implies a terminal here, so this preserves the styled path.
     let line = Line::styled(
-        if UI.get().is_some_and(|state| state.policy.rich) {
+        if io::stderr().is_terminal() {
             safe(message)
         } else {
             message.to_owned()
@@ -747,6 +762,18 @@ mod tests {
         }
         let reduced = Policy::detect(false, true, true, false, false, true);
         assert!(reduced.rich && !reduced.color && !reduced.animate);
+    }
+
+    #[test]
+    fn safe_escapes_control_characters_but_keeps_newlines_and_text() {
+        // Byte-for-byte identical to the plain build's `safe()`, so both builds
+        // neutralize the same escape-injection payloads on an interactive stream.
+        assert_eq!(safe("plain text"), "plain text");
+        assert_eq!(safe("with unicode 界é"), "with unicode 界é");
+        assert_eq!(safe("line one\nline two"), "line one\nline two");
+        assert_eq!(safe("clear\x1b[2Jscreen"), "clear\\u{1b}[2Jscreen");
+        assert_eq!(safe("tab\there"), "tab\\there");
+        assert_eq!(safe("bell\x07"), "bell\\u{7}");
     }
 
     #[test]
