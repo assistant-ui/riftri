@@ -17,7 +17,11 @@ const COPY_MARKDOWN_CLIENT = `
     event.preventDefault();
     event.stopPropagation();
     var href = link.getAttribute("href");
-    var label = link.textContent;
+    // Snapshot the original label exactly once so repeated clicks within the
+    // restore window can never capture the transient "Copied .md" text and
+    // leave the link stuck on it.
+    var label = link.dataset.riftriCopyLabel;
+    if (label == null) { label = link.dataset.riftriCopyLabel = link.textContent; }
     fetch(href, { headers: { Accept: "text/plain" } })
       .then(function (response) { if (!response.ok) throw new Error(String(response.status)); return response.text(); })
       .then(function (markdown) { return navigator.clipboard.writeText(markdown); })

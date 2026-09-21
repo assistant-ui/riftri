@@ -115,6 +115,47 @@ test("page actions are one View/Copy row below the intro, above the first sectio
   }
 });
 
+test("Copy .md returns to its original label after quick repeat clicks", async ({ page, context }) => {
+  // Regression: clicking again while the link still reads "Copied .md" must not
+  // capture that transient text as the label to restore, or the link would stay
+  // stuck on "Copied .md" until a reload.
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/docs");
+  const copy = page.locator('#nd-page a[title="Copy this page as Markdown"]');
+  await expect(copy).toHaveText(/^copy \.md$/i);
+  // First click copies and swaps the label to the transient "Copied .md".
+  await copy.click();
+  await expect(copy).toHaveText(/^copied \.md$/i);
+  // A second click inside the ~1.8s restore window (link still shows "Copied
+  // .md") must still restore the ORIGINAL label, not the transient one.
+  await copy.click();
+  await expect(copy).toHaveText(/^copied \.md$/i);
+  await expect(copy).toHaveText(/^copy \.md$/i, { timeout: 4000 });
+});
+
+test("Copy .md passes modifier clicks through instead of copying", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/docs");
+  const copy = page.locator('#nd-page a[title="Copy this page as Markdown"]');
+  await expect(copy).toHaveText(/^copy \.md$/i);
+  await page.evaluate(() => navigator.clipboard.writeText("sentinel-not-markdown"));
+  // A meta/ctrl-click is the browser's "open in new tab" gesture. The handler
+  // must ignore it: not preventDefault, not copy. Dispatch a guarded synthetic
+  // click so we can read defaultPrevented without following the link.
+  const prevented = await copy.evaluate((el) => {
+    let seen = true;
+    const guard = (e: Event) => { seen = e.defaultPrevented; e.preventDefault(); };
+    el.addEventListener("click", guard, false);
+    el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0, metaKey: true }));
+    el.removeEventListener("click", guard, false);
+    return seen;
+  });
+  expect(prevented).toBe(false);
+  // The clipboard was never touched and the label never flipped.
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("sentinel-not-markdown");
+  await expect(copy).toHaveText(/^copy \.md$/i);
+});
+
 test("docs use smaller headings and a constrained reading column", async ({ page }, info) => {
   for (const url of ["/docs", "/docs/installation", "/docs/cli"]) {
     await page.goto(url);
