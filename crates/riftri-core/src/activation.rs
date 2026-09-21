@@ -558,7 +558,7 @@ fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = posix_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "_riftri_shim={shim_directory}\n_riftri_process_shim=${{{process_shim_env}-}}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  _riftri_keep=1\n  [ \"$_riftri_entry\" = \"$_riftri_shim\" ] && _riftri_keep=0\n  [ -n \"$_riftri_process_shim\" ] && [ \"$_riftri_entry\" = \"$_riftri_process_shim\" ] && _riftri_keep=0\n  case \"$_riftri_entry\" in *{process_shim_prefix}*) _riftri_keep=0 ;; esac\n  if [ \"$_riftri_keep\" = 1 ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env} {shell_shim_dir_env} {process_shim_env}\nunset _riftri_shim _riftri_process_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more _riftri_keep\n",
+        "_riftri_shim={shim_directory}\n_riftri_process_shim=${{{process_shim_env}-}}\n_riftri_remaining=${{PATH-}}\n_riftri_clean_path=\n_riftri_separator=\nwhile :; do\n  case \"$_riftri_remaining\" in\n    *:*) _riftri_entry=${{_riftri_remaining%%:*}}; _riftri_remaining=${{_riftri_remaining#*:}}; _riftri_more=1 ;;\n    *) _riftri_entry=$_riftri_remaining; _riftri_remaining=; _riftri_more=0 ;;\n  esac\n  _riftri_keep=1\n  [ \"$_riftri_entry\" = \"$_riftri_shim\" ] && _riftri_keep=0\n  [ -n \"$_riftri_process_shim\" ] && [ \"$_riftri_entry\" = \"$_riftri_process_shim\" ] && _riftri_keep=0\n  case \"${{_riftri_entry##*/}}\" in {process_shim_prefix}*) _riftri_keep=0 ;; esac\n  if [ \"$_riftri_keep\" = 1 ]; then\n    _riftri_clean_path=${{_riftri_clean_path}}${{_riftri_separator}}${{_riftri_entry}}\n    _riftri_separator=:\n  fi\n  [ \"$_riftri_more\" = 0 ] && break\ndone\nexport PATH=$_riftri_clean_path\nunset {real_git_env} {shim_active_env} {shell_shim_dir_env} {process_shim_env}\nunset _riftri_shim _riftri_process_shim _riftri_remaining _riftri_clean_path _riftri_separator _riftri_entry _riftri_more _riftri_keep\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
         shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
@@ -606,7 +606,7 @@ fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
 fn prepare_powershell_deactivation_inner() -> Result<String, ActivationError> {
     let shim_directory = powershell_quote_path(&shell_shim_directory()?)?;
     Ok(format!(
-        "$_riftriShim = {shim_directory}\n$_riftriProcessShim = $env:{process_shim_env}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim -and (-not $_riftriProcessShim -or $_ -ne $_riftriProcessShim) -and $_ -notlike '*{process_shim_prefix}*' }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shell_shim_dir_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{process_shim_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriProcessShim, _riftriPath -ErrorAction SilentlyContinue\n",
+        "$_riftriShim = {shim_directory}\n$_riftriProcessShim = $env:{process_shim_env}\n$_riftriPath = @($env:PATH -split ';' | Where-Object {{ $_ -ne $_riftriShim -and (-not $_riftriProcessShim -or $_ -ne $_riftriProcessShim) -and ($_ -split '[\\\\/]')[-1] -notlike '{process_shim_prefix}*' }})\n$env:PATH = $_riftriPath -join ';'\nRemove-Item Env:{real_git_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shim_active_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{shell_shim_dir_env} -ErrorAction SilentlyContinue\nRemove-Item Env:{process_shim_env} -ErrorAction SilentlyContinue\nRemove-Variable _riftriShim, _riftriProcessShim, _riftriPath -ErrorAction SilentlyContinue\n",
         real_git_env = riftri_git::REAL_GIT_ENV,
         shim_active_env = SHIM_ACTIVE_ENV,
         shell_shim_dir_env = SHELL_SHIM_DIR_ENV,
@@ -2210,7 +2210,12 @@ mod tests {
     fn posix_deactivation_removes_process_scoped_shim_entries() {
         let script = prepare_posix_shell_deactivation_inner().expect("render deactivation code");
         assert!(script.contains(PROCESS_SHIM_DIR_ENV));
-        assert!(script.contains(&format!("*{PROCESS_SHIM_DIR_PREFIX}*")));
+        // The sweep keys on each PATH entry's final component, not a raw
+        // substring, so it no longer strips a directory that merely embeds the
+        // prefix in a parent segment.
+        assert!(script.contains(&format!("{PROCESS_SHIM_DIR_PREFIX}*")));
+        assert!(script.contains("${_riftri_entry##*/}"));
+        assert!(!script.contains(&format!("*{PROCESS_SHIM_DIR_PREFIX}*")));
         // Both shim scopes are torn down: the durable shell hook's variable and
         // the process-scoped one are unset in the same statement.
         let unset = script
@@ -2248,6 +2253,43 @@ mod tests {
         assert!(stdout.contains("scope=unset"), "{stdout}");
         assert!(stdout.contains("marker=unset"), "{stdout}");
         assert!(stdout.contains("real=unset"), "{stdout}");
+    }
+
+    /// The process-shim sweep keys on each PATH entry's final component, so a
+    /// user directory that merely embeds the shim prefix in a parent segment
+    /// survives, while a stacked shim from a nested `riftri exec` — on PATH as
+    /// its own `riftri-git-shim-*` directory but not the recorded scope
+    /// variable — is still removed.
+    #[cfg(unix)]
+    #[test]
+    fn posix_deactivation_preserves_unrelated_prefix_paths_and_strips_nested_shims() {
+        let script = prepare_posix_shell_deactivation_inner().expect("render deactivation code");
+        let unrelated = "/opt/riftri-git-shim-tools/bin";
+        let outer_shim = "/tmp/outer/riftri-git-shim-outer1";
+        let inner_shim = "/tmp/inner/riftri-git-shim-inner2";
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                "eval \"$RIFTRI_TEST_DEACTIVATION\"\nprintf 'path=%s\\n' \"$PATH\"",
+            ])
+            .env("RIFTRI_TEST_DEACTIVATION", &script)
+            .env(
+                "PATH",
+                format!("{inner_shim}:{outer_shim}:{unrelated}:/usr/bin:/bin"),
+            )
+            // Only the innermost shim is recorded as the process scope; the
+            // outer stacked shim must still be stripped by the leaf-name match.
+            .env(PROCESS_SHIM_DIR_ENV, inner_shim)
+            .env(super::SHIM_ACTIVE_ENV, "1")
+            .env(riftri_git::REAL_GIT_ENV, "/usr/bin/git")
+            .output()
+            .expect("evaluate deactivation in sh");
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 shell output");
+        assert!(
+            stdout.contains(&format!("path={unrelated}:/usr/bin:/bin\n")),
+            "unrelated prefix path must survive while both shims are stripped: {stdout}"
+        );
     }
 
     /// A shim with a stripped environment must resolve the real Git without
