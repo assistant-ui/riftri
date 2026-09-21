@@ -830,18 +830,22 @@ fn run(cli: Cli) -> Result<()> {
         Command::Shell { command } => match command {
             ShellCommand::Hook { shell } => match shell {
                 ShellKind::Sh | ShellKind::Bash | ShellKind::Zsh => {
-                    print!("{}", riftri_core::prepare_posix_shell_hook()?);
+                    ui::print_machine_raw(riftri_core::prepare_posix_shell_hook()?.as_bytes());
                 }
                 ShellKind::Powershell => {
-                    print!("{}", riftri_core::prepare_powershell_hook()?);
+                    ui::print_machine_raw(riftri_core::prepare_powershell_hook()?.as_bytes());
                 }
             },
             ShellCommand::Deactivate { shell } => match shell {
                 ShellKind::Sh | ShellKind::Bash | ShellKind::Zsh => {
-                    print!("{}", riftri_core::prepare_posix_shell_deactivation()?);
+                    ui::print_machine_raw(
+                        riftri_core::prepare_posix_shell_deactivation()?.as_bytes(),
+                    );
                 }
                 ShellKind::Powershell => {
-                    print!("{}", riftri_core::prepare_powershell_deactivation()?);
+                    ui::print_machine_raw(
+                        riftri_core::prepare_powershell_deactivation()?.as_bytes(),
+                    );
                 }
             },
             ShellCommand::Status {
@@ -854,7 +858,11 @@ fn run(cli: Cli) -> Result<()> {
         Command::Completions { shell } => {
             use clap::CommandFactory;
 
-            clap_complete::generate(shell, &mut Cli::command(), "riftri", &mut std::io::stdout());
+            // clap_complete `.expect()`s its writer, so render into memory and
+            // emit through the broken-pipe-safe path (a closed reader exits 0).
+            let mut buffer = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "riftri", &mut buffer);
+            ui::print_machine_raw(&buffer);
         }
         Command::Man { directory } => {
             use clap::CommandFactory;

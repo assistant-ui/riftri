@@ -7,6 +7,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri completions <shell>` and `riftri shell hook|deactivate <shell>` no
+  longer abort with a panic backtrace (exit 101) when the reader closes the pipe
+  early (`| head`, `| less` then `q`). These stdout writers bypassed the
+  broken-pipe-safe path added for `--json` output: `print!` panicked on `EPIPE`
+  and `clap_complete::generate` `.expect()`ed its writer. Completions now render
+  into an in-memory buffer and every one of these writers flows through a shared
+  broken-pipe-safe path that exits cleanly (code 0). Hook output stays
+  byte-exact, so sourced hooks are unaffected.
 - Default (non-`tui`) builds again escape control characters in human output
   written to an interactive terminal, so an untrusted branch name, path, or git
   stderr containing terminal escape sequences (for example `\x1b[2J`) can no
