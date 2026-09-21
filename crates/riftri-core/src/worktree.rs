@@ -1452,7 +1452,7 @@ fn garbage_collect_inner(
     _fail_after: Option<GarbageCollectionPhase>,
 ) -> Result<GarbageCollectionReport, WorktreeError> {
     Err(WorktreeError::Unsupported(
-        "immutable-base garbage collection currently requires macOS".to_owned(),
+        "immutable-base garbage collection currently requires macOS, Linux, or Windows".to_owned(),
     ))
 }
 
@@ -2065,7 +2065,7 @@ fn remove_worktree_inner(
     _fail_after: Option<RemoveWorktreePhase>,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
     Err(WorktreeError::Unsupported(
-        "journaled Riftri removal currently requires macOS".to_owned(),
+        "journaled Riftri removal currently requires macOS, Linux, or Windows".to_owned(),
     ))
 }
 
@@ -2224,7 +2224,7 @@ fn move_worktree_inner(
     _fail_after: Option<MoveWorktreePhase>,
 ) -> Result<MoveWorktreeResult, WorktreeError> {
     Err(WorktreeError::Unsupported(
-        "journaled Riftri moves currently require macOS".to_owned(),
+        "journaled Riftri moves currently require macOS, Linux, or Windows".to_owned(),
     ))
 }
 
@@ -2516,7 +2516,7 @@ fn prune_worktrees_inner(
     _fail_after: Option<PruneWorktreesPhase>,
 ) -> Result<PruneWorktreesResult, WorktreeError> {
     Err(WorktreeError::Unsupported(
-        "journaled Riftri pruning currently requires macOS".to_owned(),
+        "journaled Riftri pruning currently requires macOS, Linux, or Windows".to_owned(),
     ))
 }
 
