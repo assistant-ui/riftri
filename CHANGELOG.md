@@ -15,6 +15,39 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   into an in-memory buffer and every one of these writers flows through a shared
   broken-pipe-safe path that exits cleanly (code 0). Hook output stays
   byte-exact, so sourced hooks are unaffected.
+- Default (non-`tui`) builds again escape control characters in human output
+  written to an interactive terminal, so an untrusted branch name, path, or git
+  stderr containing terminal escape sequences (for example `\x1b[2J`) can no
+  longer clear the screen or spoof output. The `tui`-feature split moved
+  control-character sanitization into the rich renderer only, leaving the
+  default binary emitting raw bytes on a terminal — a regression against
+  pre-split behavior. Piped/redirected output and machine (`--json`) output stay
+  byte-for-byte faithful, matching the rich build's policy.
+- CI now test-executes the default/plain build again. Gating the setup TUI
+  behind the `tui` feature made the Quality job run tests only with
+  `--features riftri-cli/tui`, which deselects `crates/riftri-cli/src/ui/plain.rs`
+  and left the default build shipped by `cargo install riftri-cli` and
+  `npm run build:native` unexecuted (MSRV only `cargo check`s it). The Quality
+  job now also runs `cargo test --workspace --locked` with default features on
+  Linux. New workflow guard tests assert the release build keeps
+  `--features tui` (alongside `-p riftri-cli`, `--release`, `--locked`) and that
+  the workspace `[profile.release]` keeps `strip = true`, so #290's shipped
+  feature set and stripping cannot silently regress.
+- Copy-on-write worktree directories now regain the umask-appropriate group and
+  other write bits, matching a plain `git worktree add`. Restoring write access
+  after cloning a read-only base only re-added the owner bits to directories, so
+  under `umask 002` or `core.sharedRepository=group` a `0o775` directory came
+  back as `0o755`: a second group member could edit files but could not create,
+  rename, or delete entries inside the directory. Directories now mirror the
+  file fix and OR in `0o700` plus the umask-appropriate write bits.
+- `status --json` now counts each OverlayFS worktree's on-disk write cost in
+  `total_allocated_bytes` instead of silently dropping it. The CoW-aware total
+  subtracts each view's shared base blocks so they are counted once, but an
+  OverlayFS view's `allocated_bytes` already measures only its private
+  upper/work layers (base-exclusive), so subtracting the base again saturated
+  every OverlayFS view to zero and omitted its real footprint. The subtraction
+  now applies only to backends whose per-tree measurement re-counts the base
+  (APFS clone, reflink, ReFS block clone); OverlayFS views are added whole.
 
 ### Changed
 

@@ -2,7 +2,7 @@
 //! unstyled; `interactive()` is always false, so `setup` drives its own
 //! text prompts and never reaches the TUI picker.
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use anyhow::Result;
 
@@ -29,12 +29,24 @@ pub(crate) fn interactive() -> bool {
 pub(crate) fn pause_progress() {}
 
 pub(crate) fn progress(message: String) {
-    eprintln!("riftri: {message}");
+    // Match the rich build: sanitize control characters only on an interactive
+    // terminal, leaving piped/redirected stderr byte-for-byte faithful.
+    if io::stderr().is_terminal() {
+        eprintln!("riftri: {}", safe(&message));
+    } else {
+        eprintln!("riftri: {message}");
+    }
 }
 
 pub(crate) fn print_line(args: fmt::Arguments<'_>) {
+    let interactive = io::stdout().is_terminal();
     let mut stdout = io::stdout().lock();
-    commit_stdout(writeln!(stdout, "{args}"));
+    let result = if interactive {
+        writeln!(stdout, "{}", safe(&args.to_string()))
+    } else {
+        writeln!(stdout, "{args}")
+    };
+    commit_stdout(result);
 }
 
 // Machine output (for example `--json`) shares the same broken-pipe handling so
@@ -64,11 +76,33 @@ fn commit_stdout(result: io::Result<()>) {
 }
 
 pub(crate) fn print_error(message: &str) {
-    eprintln!("{message}");
+    if io::stderr().is_terminal() {
+        eprintln!("{}", safe(message));
+    } else {
+        eprintln!("{message}");
+    }
 }
 
 pub(crate) fn write_transcript(output: &mut impl Write, text: &str) -> io::Result<()> {
-    write!(output, "{text}")
+    // The rich build always escapes control characters in the setup transcript;
+    // mirror that so the two builds render identical scrollback on a terminal.
+    write!(output, "{}", safe(text))
+}
+
+// Escape control characters (except `\n`) so untrusted git stderr, ref names,
+// and paths cannot inject terminal escape sequences into human output. Byte-for-
+// byte identical to the rich build's `safe()`; machine output never uses it.
+fn safe(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| {
+            if ch.is_control() && ch != '\n' {
+                ch.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![ch]
+            }
+        })
+        .collect()
 }
 
 #[allow(dead_code)]
@@ -102,3 +136,27 @@ impl fmt::Display for Interrupted {
     }
 }
 impl std::error::Error for Interrupted {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn safe_escapes_control_characters_but_keeps_newlines_and_text() {
+        assert_eq!(safe("plain text"), "plain text");
+        assert_eq!(safe("with unicode 界é"), "with unicode 界é");
+        // Newlines survive so multi-line reports still wrap as authored.
+        assert_eq!(safe("line one\nline two"), "line one\nline two");
+        // A branch name that tries to clear the screen is neutralized.
+        assert_eq!(safe("clear\x1b[2Jscreen"), "clear\\u{1b}[2Jscreen");
+        assert_eq!(safe("tab\there"), "tab\\there");
+        assert_eq!(safe("bell\x07"), "bell\\u{7}");
+    }
+
+    #[test]
+    fn write_transcript_sanitizes_control_characters() {
+        let mut output = Vec::new();
+        write_transcript(&mut output, "branch\x1b[2Jname\n").unwrap();
+        assert_eq!(String::from_utf8(output).unwrap(), "branch\\u{1b}[2Jname\n");
+    }
+}
