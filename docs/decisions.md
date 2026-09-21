@@ -118,7 +118,15 @@ checkout-changing configuration are rejected rather than approximated.
 
 `riftri enable` writes `riftri.enabled=true` to the repository's local Git
 configuration, which is shared by its linked worktrees. It does not edit shell
-startup files or replace Git globally. `riftri exec` prepends a temporary Git
+startup files or replace Git globally. It also pins
+`gc.worktreePruneExpire=never` in the same local configuration, because `git gc`
+prunes worktrees itself and `gc.auto` fires it from ordinary commands such as
+`git commit`. Those inner calls resolve `git` from Git's own exec-path, so they
+never re-enter the shim and would drop a managed worktree's admin files outside
+the journal, stranding its add journal and pinning its retained base. Pruning
+stays available through the journaled `riftri worktree prune`. An expiry the
+user already set is left untouched, and `riftri disable` removes the value only
+when it is still the one Riftri wrote. `riftri exec` prepends a temporary Git
 shim only to the selected child process tree and records the exact real Git
 executable before changing `PATH`. Its optional `--worktree` binding accepts an
 exact live root from Git's worktree inventory, changes only the child working
