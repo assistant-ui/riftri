@@ -209,6 +209,15 @@ pub(crate) fn print_machine(args: fmt::Arguments<'_>) {
     commit_stdout(writeln!(stdout, "{args}"));
 }
 
+// Byte-exact machine output (shell hooks, completions) that must not gain or
+// lose a trailing newline: hooks are `eval`/`source`d, so the bytes are emitted
+// verbatim while keeping the same broken-pipe handling as `print_machine`.
+pub(crate) fn print_machine_raw(bytes: &[u8]) {
+    pause_progress();
+    let mut stdout = io::stdout().lock();
+    commit_stdout(stdout.write_all(bytes));
+}
+
 // A reader that closes the pipe early (`| head`, `| less` then `q`) is a clean
 // stop, not a failure: leave without a panic or backtrace. Rust ignores SIGPIPE
 // by default, so this is what keeps a closed stdout from aborting the process.

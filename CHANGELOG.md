@@ -5,6 +5,17 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- `riftri completions <shell>` and `riftri shell hook|deactivate <shell>` no
+  longer abort with a panic backtrace (exit 101) when the reader closes the pipe
+  early (`| head`, `| less` then `q`). These stdout writers bypassed the
+  broken-pipe-safe path added for `--json` output: `print!` panicked on `EPIPE`
+  and `clap_complete::generate` `.expect()`ed its writer. Completions now render
+  into an in-memory buffer and every one of these writers flows through a shared
+  broken-pipe-safe path that exits cleanly (code 0). Hook output stays
+  byte-exact, so sourced hooks are unaffected.
+
 ### Changed
 
 - The interactive `riftri setup` terminal UI is now behind an off-by-default

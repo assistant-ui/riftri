@@ -59,3 +59,60 @@ fn machine_output_exits_cleanly_when_the_reader_closes_the_pipe() {
     );
     assert_eq!(code, Some(0), "expected a clean exit, stderr: {stderr}");
 }
+
+// Shell completions (`clap_complete::generate`) render into a buffer and go out
+// the same broken-pipe-safe path; a closed reader must not abort with 101.
+#[test]
+fn completions_exit_cleanly_when_the_reader_closes_the_pipe() {
+    for shell in ["bash", "zsh", "fish", "powershell"] {
+        let (code, panicked, stderr) = run_with_closed_stdout(&["completions", shell]);
+        assert!(
+            !panicked,
+            "completions {shell} panicked on a broken pipe: {stderr}"
+        );
+        assert_eq!(
+            code,
+            Some(0),
+            "completions {shell} expected a clean exit, stderr: {stderr}"
+        );
+    }
+}
+
+// Shell hooks are `eval`/`source`d; their byte-exact output now flows through the
+// broken-pipe-safe path, so a closed reader is a clean stop, not a panic.
+#[test]
+fn shell_hook_exits_cleanly_when_the_reader_closes_the_pipe() {
+    // PowerShell hooks are Windows-only and fail before any write off-Windows, so
+    // exercise the POSIX shells whose hook text actually reaches the pipe here.
+    for shell in ["bash", "zsh", "sh"] {
+        let (code, panicked, stderr) = run_with_closed_stdout(&["shell", "hook", shell]);
+        assert!(
+            !panicked,
+            "shell hook {shell} panicked on a broken pipe: {stderr}"
+        );
+        assert_eq!(
+            code,
+            Some(0),
+            "shell hook {shell} expected a clean exit, stderr: {stderr}"
+        );
+    }
+}
+
+// Deactivation output shares the same path as the hook; verify it too exits
+// cleanly rather than panicking when the reader closes the pipe.
+#[test]
+fn shell_deactivate_exits_cleanly_when_the_reader_closes_the_pipe() {
+    // PowerShell deactivation is Windows-only; use the POSIX shells off-Windows.
+    for shell in ["bash", "zsh", "sh"] {
+        let (code, panicked, stderr) = run_with_closed_stdout(&["shell", "deactivate", shell]);
+        assert!(
+            !panicked,
+            "shell deactivate {shell} panicked on a broken pipe: {stderr}"
+        );
+        assert_eq!(
+            code,
+            Some(0),
+            "shell deactivate {shell} expected a clean exit, stderr: {stderr}"
+        );
+    }
+}
