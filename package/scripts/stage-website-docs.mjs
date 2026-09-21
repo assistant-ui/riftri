@@ -36,7 +36,11 @@ export function rewriteDocLinks(markdown, source, { audience = "human" } = {}) {
       const target = path.posix.normalize(path.posix.join(path.posix.dirname(source), file));
       return `${destinations.get(target) ?? `https://github.com/assistant-ui/riftri/blob/main/${target}`}${suffix}`;
     };
-    return line.replace(/(\]\()([^\s)]+)(\))/g, (_, before, url, after) => `${before}${destination(url)}${after}`)
+    // Rewrite only the URL, preserving an optional trailing title so that both
+    // links and images keep their `"..."`, `'...'`, or `(...)` title intact —
+    // matching how the reference-definition branch below tolerates titles.
+    return line.replace(/(\]\()([^\s)]+)(\s+(?:"[^"]*"|'[^']*'|\([^)]*\)))?(\))/g,
+        (_, before, url, title, after) => `${before}${destination(url)}${title ?? ""}${after}`)
       .replace(/^(\s*\[[^\]]+\]:\s*)(\S+)/, (_, before, url) => `${before}${destination(url)}`);
   }).join("\n");
 }
