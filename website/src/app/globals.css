@@ -807,6 +807,21 @@ code, pre { font-family: var(--font-mono); }
   .hero-kicker { font-size: 0.7rem; }
   .hero-lede { font-size: 0.9rem; }
   .hero-actions { gap: 1.25rem; }
+  /* Stack the install box so the command gets the full width (its URL no longer
+     breaks mid-word) and "Copy .md" becomes a full-width row beneath it, rather
+     than a cramped side-by-side split. */
+  .hero-install { flex-direction: column; width: 100%; }
+  .hero-install .command { width: 100%; }
+  /* Wrap at spaces and keep the URL as one token (break it only as a last
+     resort on very narrow screens) instead of breaking it mid-word. */
+  .hero-install .command code { white-space: normal; overflow-wrap: break-word; word-break: normal; }
+  .hero-install .hero-markdown {
+    width: 100%;
+    min-height: 44px;
+    padding-block: 0.75rem;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
   .hero-graph { padding: 2.5rem 1rem; }
   .storage-backends { align-items: flex-start; flex-direction: column; gap: 1rem; }
   .storage-backends ul { gap: 0.65rem 1.5rem; }
