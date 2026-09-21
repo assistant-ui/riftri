@@ -22,16 +22,17 @@ There are two reading paths for every topic:
   `content/introduction.md`. Keep them short: the task, useful commands,
   essential limits, and a next step. A test caps each source at 450 words.
 - Full technical references remain in `../docs/` (the overview uses `../README.md`).
-  Each is published in full at `/docs/<topic>/agent.md`; the introduction uses
-  `/docs/agent.md`, which also links to every topic's full reference.
+  Each is published in full at `/docs/<topic>.md`; the introduction uses
+  `/docs.md`, which also links to every topic's full reference.
 
 `content/docs.json` pairs each public `content` file with its full `source`.
 `pnpm stage` generates the public pages in ignored `src/app/docs/` and the
-agent companions in ignored `public/docs/**/agent.md`. It rewrites links,
-adds right-aligned `View .md` and `Agent .md` actions, and links public edits to
-the concise source file. Agent references link to the canonical technical
-source, with cross-references pointing to other full references. Do not edit
-generated files. When product behavior changes, update both authored sources.
+full-reference companions in ignored `public/docs/<topic>.md` (plus
+`public/docs.md` for the introduction). It rewrites links, adds a right-aligned
+`View .md` / `Copy .md` action row, and links public edits to the concise source
+file. The full references link to the canonical technical source, with
+cross-references pointing to other full references. Do not edit generated files.
+When product behavior changes, update both authored sources.
 
 Only public guides enter the sidebar, search index, and sitemap. Full references
 are static plain text, served inline with `nosniff` and `X-Robots-Tag: noindex`.

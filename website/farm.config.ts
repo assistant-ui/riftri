@@ -39,7 +39,8 @@ export default withDocs(defineConfig({
       transform(code: string, id: string) {
         if (!id.split("?")[0].replace(/\\/g, "/").endsWith("/@farming-labs/farmjs/dist/react.js")) return null;
         // Adapter 0.2.115 eagerly imports every Markdown file in the project.
-        // Only staged public guides belong in the UI; agent.md stays a raw asset.
+        // Only staged public guides belong in the UI; the full-reference `.md`
+        // companions under public/docs stay raw assets, not adapter pages.
         const broadGlob = 'import.meta.glob("/**/*.{md,mdx}",';
         if (!code.includes(broadGlob)) throw new Error("Review the docs adapter Markdown glob before upgrading it.");
         const narrowed = code.replace(broadGlob, 'import.meta.glob("/src/app/docs/**/*.{md,mdx}",');

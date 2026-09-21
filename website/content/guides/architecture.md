@@ -27,4 +27,4 @@ bases are removed only when unreferenced; uncertain ownership or contents
 stop cleanup and preserve the data.
 
 See [safety](safety.md) for precautions. Full component design, storage
-layout, and transaction state machines: **Agent .md**.
+layout, and transaction state machines: **View .md**.

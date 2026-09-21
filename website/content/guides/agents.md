@@ -36,6 +36,6 @@ riftri exec --worktree ../app-auth -- codex
   inherited PATH.
 - Embedded Git libraries and absolute Git paths bypass Riftri.
 - Guided setup is interactive only; scripts and harnesses should use
-  **Agent .md** for explicit commands, JSON responses, failures, and cleanup.
+  **View .md** for explicit commands, JSON responses, failures, and cleanup.
 - Not a sandbox for untrusted agents; use an OS sandbox, container, or VM for
   that boundary.
