@@ -40,7 +40,7 @@ export function CopyCommand({ command, label = "COPY", compact = false, multilin
   }
 
   return (
-    <div className={`command ${compact ? "command-compact" : ""}${multiline ? " command-multiline" : ""}`} aria-label={`Command: ${command}`}>
+    <div className={`command ${compact ? "command-compact" : ""}${multiline ? " command-multiline" : ""}`}>
       <span className="command-prompt" aria-hidden="true">{prompt}</span>
       <code>{command}</code>
       <button className={`copy-button${copied ? " is-copied" : ""}`} type="button" onClick={copy} aria-label={`${state === "failed" ? "Retry copying" : "Copy"} command: ${command}`}>
