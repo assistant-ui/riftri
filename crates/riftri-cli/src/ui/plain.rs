@@ -34,7 +34,25 @@ pub(crate) fn progress(message: String) {
 
 pub(crate) fn print_line(args: fmt::Arguments<'_>) {
     let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{args}").expect("write command output");
+    commit_stdout(writeln!(stdout, "{args}"));
+}
+
+// Machine output (for example `--json`) shares the same broken-pipe handling so
+// `riftri … | head` never panics; without the TUI feature it is a plain write.
+pub(crate) fn print_machine(args: fmt::Arguments<'_>) {
+    let mut stdout = io::stdout().lock();
+    commit_stdout(writeln!(stdout, "{args}"));
+}
+
+// A reader that closes the pipe early (`| head`) is a clean stop, not a failure:
+// leave without a panic. Any other error kind is a genuine fault worth reporting.
+fn commit_stdout(result: io::Result<()>) {
+    if let Err(error) = result {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        panic!("write command output: {error}");
+    }
 }
 
 pub(crate) fn print_error(message: &str) {

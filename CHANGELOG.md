@@ -13,6 +13,88 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   text prompts. Published release archives build with `--features tui` to keep
   the styled experience. Release binaries are now stripped.
 
+## [0.3.3] - 2026-09-20
+
+### Fixed
+
+- Decoding `/proc/self/mountinfo` path escapes no longer overflows when a mount
+  path contains an octal escape whose leading digit is 4 or greater. Such
+  escapes cannot name a single byte (the maximum is `\377`), so they previously
+  panicked in debug builds and silently wrapped to the wrong byte in release
+  builds; they are now rejected as a malformed layout, and the escape validator
+  only accepts representable `\000`–`\377` sequences.
+- `--json-errors` now reports command-line usage errors (a missing argument or
+  unknown flag rejected by the parser) as one JSON receipt on stderr, with
+  `"code": "usage-error"`, `"category": "usage"`, and clap's usage exit code
+  `2`, instead of printing clap's plain human-readable text. A caller that
+  always parses `--json-errors` stderr as JSON no longer receives plain text for
+  usage errors. `--help` and `--version` still print normally and exit `0`, and
+  without `--json-errors` usage errors keep clap's exact text and exit code.
+- `status --json` now reports `total_allocated_bytes` as the actual physical
+  footprint on disk, counting each copy-on-write base's shared blocks once,
+  instead of a naive per-tree sum. Every view is a CoW clone that shares
+  physical blocks with its base, so summing each tree's `allocated_bytes`
+  double-counted the shared blocks: a freshly created view made the total jump
+  by roughly its base's full allocation even though almost nothing new was
+  written, badly overstating usage for a tool whose headline value is space
+  savings. The total now adds each base once plus, per view, only the blocks
+  that diverge from its base (`max(0, view − base)`), falling back to a view's
+  full allocation when its base cannot be resolved. Per-tree `allocated_bytes`
+  fields are unchanged. The total is an approximation: it assumes a view's
+  extra allocation is entirely unshared and does not detect blocks shared
+  between sibling views.
+- Removal journal decoding now validates `overlayfs_clean_snapshot` with the
+  same digest-shape rule already applied to `force_snapshot` — a stored value
+  must be exactly 64 lowercase hexadecimal characters — so a corrupted durable
+  record is rejected as an invalid journal instead of surviving decode.
+- Piping a riftri command into a reader that closes early (for example
+  `riftri status | head` or `riftri doctor --json | head`) no longer panics
+  with a `BrokenPipe` error and exit code 101. Human-readable and machine
+  (`--json`) stdout writes now treat a closed pipe as a clean stop and exit
+  quietly. Handling the write error kind (rather than resetting the SIGPIPE
+  disposition) keeps this portable to Windows and still lets terminal cleanup
+  run for any other write failure.
+- COW worktrees no longer silently drop the group/other write bits. Because the
+  base tree is made read-only (`0o444`) before cloning, files re-gained only the
+  owner write bit afterwards, leaving `0o644` where a plain `git worktree add`
+  under `umask 002` or `core.sharedRepository=group` would leave `0o664`. The
+  APFS and reflink backends now restore write bits according to the process
+  umask, matching a normal checkout.
+- The macOS/Linux `install.sh` now runs its `--version` sanity check against
+  the staged binary on the install directory's filesystem instead of the
+  freshly extracted copy in the temp directory. Hosts that mount `/tmp` (or
+  `$TMPDIR`) `noexec` — a common CIS-hardened default — could previously abort
+  a valid install with a misleading "Downloaded binary cannot run" error even
+  though the download, platform detection, and checksum were all correct. The
+  checksum gate, single-member archive validation, and atomic stage-then-rename
+  are unchanged.
+- Cloning a Windows symlink into a worktree now chooses the file-vs-directory
+  reparse type from the source link's own attributes via `symlink_metadata`
+  instead of `metadata`, which followed the link to its target. A dangling
+  link (target missing at clone time) is no longer forced to a file symlink,
+  and a link whose target's kind differs from the link's is no longer
+  misclassified.
+
+## [0.3.2] - 2026-09-19
+
+### Added
+
+- Guided setup and interactive confirmations now render through a Ratatui
+  terminal interface: editable inputs, arrow-key choices with safe defaults
+  (confirmations default to **No**, agent selection to **Not now**), and
+  PgUp/PgDn review for long plans and paths, with a restrained orange accent
+  across human-readable reports and help and an indeterminate spinner driven
+  only by real lifecycle events. `--plain` restores line-oriented prompts and
+  undecorated reports; `--no-animation` (or a nonempty `RIFTRI_NO_ANIMATION`)
+  keeps the interface but replaces the spinner with bounded phase lines;
+  `--no-progress` suppresses progress; a nonempty `NO_COLOR` disables colors
+  while keeping keyboard navigation. Redirected stdout or stderr, `CI`, and
+  `TERM=dumb` fall back to plain output automatically. JSON, `--json-errors`,
+  generated shell hook/deactivation code, completions, the Git shim, and child
+  process streams are never decorated, and terminal modes, cursor visibility,
+  and inherited Unix signal dispositions are restored before any transaction or
+  agent launch.
+
 ### Fixed
 
 - Suggested recovery commands in messages and JSON receipts now use POSIX

@@ -1508,7 +1508,7 @@ fn decode_mount_field(field: &[u8]) -> Result<Vec<u8>, StorageError> {
             continue;
         }
         if index + 3 >= field.len()
-            || !(b'0'..=b'7').contains(&field[index + 1])
+            || !(b'0'..=b'3').contains(&field[index + 1])
             || !(b'0'..=b'7').contains(&field[index + 2])
             || !(b'0'..=b'7').contains(&field[index + 3])
         {
@@ -1517,11 +1517,18 @@ fn decode_mount_field(field: &[u8]) -> Result<Vec<u8>, StorageError> {
                 "kernel mount inventory contains an invalid path escape",
             ));
         }
-        decoded.push(
-            (field[index + 1] - b'0') * 64
-                + (field[index + 2] - b'0') * 8
-                + (field[index + 3] - b'0'),
-        );
+        // Reconstruct the octal escape in a wide integer so a leading digit of
+        // 4 or greater cannot overflow (debug) or silently wrap (release) a u8.
+        let value = u32::from(field[index + 1] - b'0') * 64
+            + u32::from(field[index + 2] - b'0') * 8
+            + u32::from(field[index + 3] - b'0');
+        if value > u32::from(u8::MAX) {
+            return Err(invalid_layout(
+                Path::new("/proc/self/mountinfo"),
+                "kernel mount inventory contains an out-of-range path escape",
+            ));
+        }
+        decoded.push(value as u8);
         index += 4;
     }
     Ok(decoded)
@@ -2049,6 +2056,17 @@ mod tests {
         );
         assert_eq!(entry.mount_id, 42);
         assert_eq!(entry.filesystem_type, "overlay");
+    }
+
+    #[test]
+    fn decode_mount_field_handles_octal_escapes() {
+        // A representable escape (`\040`) decodes to its byte (a space).
+        assert_eq!(decode_mount_field(b"a\\040b").unwrap(), b"a b");
+        // A leading octal digit of 4 or greater cannot name a single byte
+        // (the maximum is `\377`), so it must be rejected rather than
+        // overflowing (debug) or wrapping (release) the u8 reconstruction.
+        assert!(decode_mount_field(b"a\\400b").is_err());
+        assert!(decode_mount_field(b"\\777").is_err());
     }
 
     struct DescriptorContext {

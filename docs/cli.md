@@ -46,19 +46,22 @@ default state directory at `<common-git-dir>/riftri`.
 | `3` | Policy refusal — Riftri declined a request it will not optimize |
 | `130` | Interactive question interrupted with Ctrl-C (already-created worktrees are retained) |
 
-Codes `1` and `3` mirror the `category` field (`operational` / `policy`) of
-the `--json-errors` receipt, so a wrapper can branch on the exit status
-without parsing JSON. A policy refusal means nothing was changed; consult
+Codes `1`, `2`, and `3` mirror the `category` field (`operational` / `usage` /
+`policy`) of the `--json-errors` receipt, so a wrapper can branch on the exit
+status without parsing JSON. Under `--json-errors`, a usage error the parser
+rejects is itself emitted as one receipt (`"code": "usage-error"`) on stderr,
+so a caller that always parses stderr as JSON never receives plain clap text.
+A policy refusal means nothing was changed; consult
 [decisions.md](decisions.md) for the forms Riftri refuses and `RIFTRI_BYPASS=1`
 to run one such command through ordinary Git instead.
 
-## Terminal interface (unreleased)
+## Terminal interface
 
-Riftri uses Ratatui for guided setup and interactive confirmations, with a
-restrained orange accent across human-readable reports and help. Reports remain
-in normal terminal scrollback; full-screen views exist only while a question is
-open. This is presentation around the same core operations, not a new worktree
-implementation.
+Available starting with v0.3.2. Riftri uses Ratatui for guided setup and
+interactive confirmations, with a restrained orange accent across
+human-readable reports and help. Reports remain in normal terminal scrollback;
+full-screen views exist only while a question is open. This is presentation
+around the same core operations, not a new worktree implementation.
 
 - Use arrow keys to select, Enter to confirm, and Esc to cancel. Confirmations
   default to **No** and agent selection defaults to **Not now**. Selecting Yes

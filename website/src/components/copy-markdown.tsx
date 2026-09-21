@@ -55,7 +55,7 @@ export function CopyMarkdown({ source, className = "" }: CopyMarkdownProps) {
         }
         title="Copy the full Markdown guide for your agent"
       >
-        {copied ? "COPIED" : state === "failed" ? "RETRY" : "Copy .md"}
+        {copied ? "COPIED" : state === "failed" ? "RETRY" : "COPY .MD"}
       </button>
       <span className={state === "failed" ? "copy-error" : "visually-hidden"} role="status" aria-atomic="true">
         {copied

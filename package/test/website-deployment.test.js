@@ -53,9 +53,9 @@ for (const [name, mutate, error] of [
   ["generic 404", (f) => { f.get("/__riftri_deployment_check_missing__").body = "Not found"; }, /branded 404/],
   ["missing docs runtime", (f) => f.delete("/docs"), /docs.*404/],
   ["broken docs search", (f) => { f.get("/api/docs").body = "[]"; }, /search results/],
-  ["missing agent reference", (f) => f.delete("/docs/installation/agent.md"), /agent.md.*404/],
-  ["abridged agent reference", (f) => { f.get("/docs/installation/agent.md").body = "# Short version"; }, /full agent reference differs/],
-  ["downloaded agent reference", (f) => { f.get("/docs/installation/agent.md").disposition = "attachment"; }, /agent Markdown must open inline/],
+  ["missing agent reference", (f) => f.delete("/docs/installation.md"), /installation\.md.*404/],
+  ["abridged agent reference", (f) => { f.get("/docs/installation.md").body = "# Short version"; }, /full agent reference differs/],
+  ["downloaded agent reference", (f) => { f.get("/docs/installation.md").disposition = "attachment"; }, /agent Markdown must open inline/],
 ]) test(`deployment check rejects ${name}`, async () => {
   const { verifyWebsite } = await import("../scripts/verify-website.mjs");
   const files = await fixture();

@@ -190,14 +190,37 @@ pub(crate) fn progress(message: String) {
 pub(crate) fn print_line(args: fmt::Arguments<'_>) {
     pause_progress();
     let mut stdout = io::stdout().lock();
-    if let Some(state) = UI.get().filter(|state| state.policy.rich) {
-        for line in args.to_string().split('\n') {
-            write_styled(&mut stdout, &report_line(&safe(line)), state.policy.color)
-                .expect("write terminal report");
-            writeln!(stdout).expect("write terminal report");
-        }
+    let result = if let Some(state) = UI.get().filter(|state| state.policy.rich) {
+        args.to_string().split('\n').try_for_each(|line| {
+            write_styled(&mut stdout, &report_line(&safe(line)), state.policy.color)?;
+            writeln!(stdout)
+        })
     } else {
-        writeln!(stdout, "{args}").expect("write command output");
+        writeln!(stdout, "{args}")
+    };
+    commit_stdout(result);
+}
+
+// Machine output (for example `--json`) bypasses the terminal renderer but
+// shares the same broken-pipe handling so `riftri … | head` never panics.
+pub(crate) fn print_machine(args: fmt::Arguments<'_>) {
+    pause_progress();
+    let mut stdout = io::stdout().lock();
+    commit_stdout(writeln!(stdout, "{args}"));
+}
+
+// A reader that closes the pipe early (`| head`, `| less` then `q`) is a clean
+// stop, not a failure: leave without a panic or backtrace. Rust ignores SIGPIPE
+// by default, so this is what keeps a closed stdout from aborting the process.
+// Handling the error kind (rather than resetting SIGPIPE) also works on Windows
+// and still lets terminal-restore cleanup run before any real write error
+// surfaces loudly. Any other error kind is a genuine fault worth reporting.
+fn commit_stdout(result: io::Result<()>) {
+    if let Err(error) = result {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            std::process::exit(0);
+        }
+        panic!("write command output: {error}");
     }
 }
 
