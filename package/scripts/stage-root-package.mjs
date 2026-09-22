@@ -16,6 +16,21 @@ export async function stageRootPackage(
     manifest.optionalDependencies[packageName] = manifest.version;
   }
   manifest.bin.riftri = "bin/riftri.js";
+  // The tarball places bin/ and lib/ at its root, so every published entry
+  // point drops the repository's `package/` prefix. The programmatic API is
+  // resolved through these, so a stale prefix would publish a package whose
+  // `require("riftri")` cannot be resolved.
+  const published = (entry) => entry.replace(/^package\//, "");
+  manifest.main = published(manifest.main);
+  manifest.types = published(manifest.types);
+  manifest.exports = {
+    ".": Object.fromEntries(
+      Object.entries(manifest.exports["."]).map(([condition, entry]) => [
+        condition,
+        `./${published(entry.replace(/^\.\//, ""))}`,
+      ]),
+    ),
+  };
   manifest.files = ["bin", "lib", "README.md", "LICENSE"];
   delete manifest.scripts;
 
