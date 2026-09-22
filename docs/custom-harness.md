@@ -260,6 +260,19 @@ agent already runs take the optimized path.
 **Do not retry a policy refusal.** Exit code `3` is deterministic. Fall back
 or surface it; retrying the same command wastes time and hides the reason.
 
+## Runnable examples
+
+[`examples/`](../examples/) implements everything on this page as scripts you
+can run against your own repository — no dependencies, no build step:
+
+- [`basic-runner`](../examples/basic-runner/) — the lifecycle above, end to end
+- [`fallback-detection`](../examples/fallback-detection/) — Riftri as a default
+  layer with a plain-Git fallback
+- [`parallel-tasks`](../examples/parallel-tasks/) — many workspaces at once and
+  what base sharing saves
+- [`wrapped-agent`](../examples/wrapped-agent/) — optimizing an agent you do not
+  control
+
 ## Related
 
 - [agent-integration.md](agent-integration.md) — setup for Claude Code,
