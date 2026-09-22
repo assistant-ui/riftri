@@ -41,8 +41,28 @@ function fetchFixture(files) {
 
 test("deployment check validates the revision and every public entry point", async () => {
   const { verifyWebsite } = await import("../scripts/verify-website.mjs");
+  const { pages, agentDocUrl } = await import("../scripts/stage-website-docs.mjs");
   const checked = await verifyWebsite({ revision, fetchImpl: fetchFixture(await fixture()) });
-  assert.equal(checked.length, 31);
+
+  // Naming the routes beats counting them. A bare total made every docs page
+  // bump the same constant, so two pull requests could each pass alone and
+  // still break main together -- which is how #334 and #344 landed red.
+  assert.deepEqual(checked.slice(0, 12), [
+    "/build-info.json",
+    "/",
+    "/index.md",
+    "/install.sh",
+    "/install.ps1",
+    "/og.png",
+    "/robots.txt",
+    "/sitemap.xml",
+    "/__riftri_deployment_check_missing__",
+    "/docs",
+    "/docs/installation",
+    "/api/docs?query=OverlayFS",
+  ]);
+  // Every registered page must be fetched, and nothing beyond them.
+  assert.deepEqual(checked.slice(12), pages.map(agentDocUrl));
 });
 
 for (const [name, mutate, error] of [
