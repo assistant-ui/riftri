@@ -14,6 +14,15 @@ const PLATFORM_PACKAGES = Object.freeze({
   "win32-x64": "riftri-win32-x64",
 });
 
+// Native packages the registry has refused, mapped to the route that does work.
+// A name only belongs here while it is genuinely absent from npm; remove the
+// entry in the release that first publishes it.
+const UNPUBLISHED_PACKAGES = Object.freeze({
+  "riftri-win32-arm64":
+    "install it with the PowerShell installer instead: " +
+    "https://riftri.dev/docs/installation",
+});
+
 function detectLinuxLibc(report = process.report) {
   if (!report || typeof report.getReport !== "function") {
     return "unknown";
@@ -102,8 +111,13 @@ function resolveBinary(options = {}) {
   try {
     packageJson = require.resolve(`${packageName}/package.json`);
   } catch {
+    // Reinstalling cannot help when the package was never published, so say so
+    // instead of sending the user around the same loop.
+    const unpublished = UNPUBLISHED_PACKAGES[packageName];
     throw new Error(
-      `the optional native package ${packageName} is missing; reinstall without --omit=optional, or build Riftri from source`,
+      unpublished
+        ? `${packageName} is not published to npm, so riftri cannot run on this platform through npm; ${unpublished}`
+        : `the optional native package ${packageName} is missing; reinstall without --omit=optional, or build Riftri from source`,
     );
   }
 
@@ -125,6 +139,7 @@ function resolveBinary(options = {}) {
 
 module.exports = {
   PLATFORM_PACKAGES,
+  UNPUBLISHED_PACKAGES,
   assertCompatiblePackageManifest,
   binaryName,
   detectLinuxLibc,

@@ -165,3 +165,41 @@ test("waits for platform visibility before publishing the launcher", async (t) =
   });
   assert.equal(waits, 1);
 });
+
+test("a name the registry already refused does not strand the launcher", async (t) => {
+  // v0.2.1 died exactly here: riftri-win32-arm64 sorts before riftri-win32-x64
+  // and the launcher, so one refusal left npm with no installable riftri.
+  const repositoryRoot = await releaseFixture(t);
+  const blocked = `riftri-win32-arm64@${packageVersion}`;
+  const registry = fakeRegistry({ reject: blocked });
+  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+
+  const packages = await publishPackages({
+    repositoryRoot,
+    runNpm: registry.runNpm,
+  });
+
+  assert.ok(!packages.includes(blocked), "a refused name must not be verified");
+  assert.equal(packages.length, 8);
+  const publishes = registry.commands.filter(([command]) => command === "publish");
+  // Attempted anyway — that attempt is how we learn the name was unblocked.
+  assert.ok(publishes.some(([, directory]) => path.basename(directory) === "riftri-win32-arm64"));
+  assert.equal(path.basename(publishes.at(-1)[1]), "npm-root");
+  assert.ok(
+    publishes.some(([, directory]) => path.basename(directory) === "riftri-win32-x64"),
+    "packages queued behind the refused name must still publish",
+  );
+});
+
+test("an unexpected rejection still stops the release", async (t) => {
+  // The tolerance is per-name; any other failure must remain fatal.
+  const repositoryRoot = await releaseFixture(t);
+  const rejected = `riftri-darwin-x64@${packageVersion}`;
+  const registry = fakeRegistry({ reject: rejected });
+  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+
+  await assert.rejects(
+    publishPackages({ repositoryRoot, runNpm: registry.runNpm }),
+    new RegExp(`publishing ${rejected} failed`),
+  );
+});

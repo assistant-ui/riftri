@@ -102,7 +102,7 @@ test("manual release rehearsals cannot receive publishing permissions", async ()
   assert.doesNotMatch(githubRelease, /NPM_TOKEN|npm publish|registry\.npmjs\.org/);
 });
 
-test("npm publication stays paused until registry review explicitly enables it", async () => {
+test("npm publication stays opt-in, and GitHub releases never depend on it", async () => {
   const workflow = await releaseWorkflow();
   const publish = jobSource(workflow, "publish");
   const githubRelease = jobSource(workflow, "github-release");

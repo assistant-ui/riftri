@@ -59,10 +59,19 @@ Linux, and Windows x64.
 `riftri-win32-arm64` remains rejected with
 `E403: Package name triggered spam detection`. That one name is blocked at the
 registry; every other name, including `riftri-win32-x64`, publishes normally.
-Windows ARM64 therefore installs the launcher without a binary and fails at
-runtime, so the installation guide sends those users to the PowerShell
-installer. Do not work around it by creating another tag or advertising npm
+Windows ARM64 therefore installs the launcher without a binary, so the launcher
+sends those users to the PowerShell installer and the installation guide says
+the same. Do not work around it by creating another tag or advertising npm
 availability for that platform.
+
+That name is listed in `UNPUBLISHED_PACKAGES` in `package/lib/platform.js`,
+which both the launcher and `publish-packages.mjs` read. The publish script
+still attempts it every release — that attempt is how a maintainer learns the
+name was accepted — but a repeat refusal no longer aborts the run, so the
+packages sorted behind it still reach npm. Without that, one refused name
+strands the launcher, which is how `v0.2.1` shipped with nothing installable.
+**When npm accepts the name, delete its entry**; the guard test in
+`package/test/platform.test.js` fails once the list is empty.
 
 Those `0.3.5` packages were published from a maintainer workstation and
 **carry no provenance attestation**. Every manifest sets
