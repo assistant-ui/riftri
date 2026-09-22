@@ -10,7 +10,12 @@ test("release-facing documentation matches current guarantees", () => {
   const readme = read("README.md");
   assert.match(readme, /MIT License/);
   assert.doesNotMatch(readme, /Apache License 2\.0/);
-  assert.match(readme, /npm launcher is a separate distribution channel[\s\S]*not currently\s+available/);
+  // npm publication is live as of 0.3.5; only riftri-win32-arm64 is still
+  // held in registry review, so the README must scope the caveat to that
+  // platform rather than claiming the whole channel is unavailable.
+  assert.match(readme, /npm install --global riftri/);
+  assert.match(readme, /Windows on ARM64 is not yet available through npm/);
+  assert.doesNotMatch(readme, /npm launcher is a separate distribution channel/);
 
   const support = read("SUPPORT.md");
   assert.match(support, /APFS/);

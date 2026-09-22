@@ -67,9 +67,16 @@ The interactive `riftri setup` terminal UI is behind an off-by-default `tui`
 feature; add `--features tui` to build it in (the published binaries do). The
 default build keeps `setup` working through plain text prompts.
 
-The npm launcher is a separate distribution channel. It is not currently
-available because the initial publication is incomplete; use the verified
-standalone installer or GitHub release assets for now.
+Or install through npm, which fetches the binary for your platform:
+
+```sh
+npm install --global riftri
+```
+
+> **Windows on ARM64 is not yet available through npm.** Its platform package
+> is held up in registry review, so npm installs there resolve without a
+> binary. Use the PowerShell installer above until that clears. Every other
+> platform — macOS, Linux, and Windows x64 — installs normally.
 
 ## Quick start
 
