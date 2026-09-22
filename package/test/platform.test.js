@@ -9,10 +9,12 @@ const { test } = require("node:test");
 const { version } = require("../../package.json");
 
 const {
+  PLATFORM_PACKAGES,
   assertCompatiblePackageManifest,
   detectLinuxLibc,
   packageNameForPlatform,
   platformKey,
+  resolveBinary,
 } = require("../lib/platform.js");
 
 const glibcReport = {
@@ -135,4 +137,55 @@ test("launcher preserves Rust CLI failures", () => {
 
   assert.equal(result.status, 2);
   assert.match(result.stderr, /unrecognized subcommand/);
+});
+
+test("a platform npm refused explains the route that works", () => {
+  // riftri-win32-arm64 is rejected by the registry, so the launcher installs
+  // on Windows ARM64 with no binary behind it. Telling that user to reinstall
+  // sends them around the same loop; point at the PowerShell installer.
+  assert.throws(
+    () =>
+      resolveBinary({
+        platform: "win32",
+        architecture: "arm64",
+        environment: {},
+      }),
+    (error) => {
+      assert.match(error.message, /riftri-win32-arm64 is not published to npm/);
+      assert.match(error.message, /PowerShell installer/);
+      assert.doesNotMatch(error.message, /--omit=optional/);
+      return true;
+    },
+  );
+});
+
+test("a merely uninstalled platform still suggests reinstalling", () => {
+  // The tailored message must not swallow the ordinary case, where the package
+  // exists on npm and the user skipped optional dependencies.
+  assert.throws(
+    () =>
+      resolveBinary({
+        platform: "win32",
+        architecture: "x64",
+        environment: {},
+      }),
+    /riftri-win32-x64 is missing; reinstall without --omit=optional/,
+  );
+});
+
+test("every unpublished platform is still a known package name", async () => {
+  // Guards the cleanup: when a name starts publishing, its entry must go, and
+  // a typo here would silently never match.
+  const source = await readFile(
+    path.join(__dirname, "..", "lib", "platform.js"),
+    "utf8",
+  );
+  const block = source.match(/UNPUBLISHED_PACKAGES = Object\.freeze\(\{([\s\S]*?)\}\);/);
+  assert.ok(block, "platform.js must declare UNPUBLISHED_PACKAGES");
+  const names = [...block[1].matchAll(/"(riftri-[a-z0-9-]+)":/g)].map((m) => m[1]);
+  assert.ok(names.length > 0, "drop UNPUBLISHED_PACKAGES once it is empty");
+  const published = Object.values(PLATFORM_PACKAGES);
+  for (const name of names) {
+    assert.ok(published.includes(name), `${name} is not a platform package`);
+  }
 });

@@ -1,10 +1,15 @@
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRepositoryRoot = path.resolve(path.dirname(scriptPath), "..", "..");
+
+// One source of truth with the launcher, so a name cannot be tolerated here
+// while the runtime still tells that platform to reinstall.
+const { UNPUBLISHED_PACKAGES } = createRequire(scriptPath)("../lib/platform.js");
 
 function defaultRunNpm(arguments_, options = {}) {
   return spawnSync("npm", arguments_, options);
@@ -107,7 +112,19 @@ export async function publishPackages({
     );
     if (publish.error) throw publish.error;
     if (publish.status !== 0) {
-      throw new Error(`publishing ${identifier} failed`);
+      // A name the registry has already refused must not strand the packages
+      // queued behind it — that is how v0.2.1 shipped without a launcher. Try
+      // it anyway each release, since that is how we learn it was unblocked,
+      // but drop it from the expected set and keep going when it fails again.
+      if (!UNPUBLISHED_PACKAGES[manifest.name]) {
+        throw new Error(`publishing ${identifier} failed`);
+      }
+      expected.pop();
+      process.stderr.write(
+        `${identifier} was refused again; continuing without it. ` +
+          `Remove it from UNPUBLISHED_PACKAGES in package/lib/platform.js ` +
+          `once the registry accepts the name.\n`,
+      );
     }
   }
 

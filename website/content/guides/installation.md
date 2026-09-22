@@ -45,7 +45,9 @@ riftri setup
 Rerun the installer to update. Pinned versions, manual downloads, and
 uninstall steps: **View .md** at the top of this page.
 [GitHub releases](https://github.com/assistant-ui/riftri/releases) provides
-standalone binaries; the npm channel is not currently available.
+standalone binaries, and `npm install --global riftri` fetches the one for
+your platform. Windows on ARM64 is the exception: its platform package is
+still in registry review, so use the PowerShell installer there.
 
 Neither installer edits your shell profile or enables Git interception.
 Problems? See [troubleshooting](troubleshooting.md).

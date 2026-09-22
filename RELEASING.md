@@ -22,7 +22,8 @@ artifact (retained for seven days). After all staging checks pass:
 
 - `publish` publishes npm packages with `contents: read` and `id-token: write`
   only when the repository variable `NPM_PUBLISH_ENABLED` is exactly `true`.
-  It is paused by default while the registry security rejection is unresolved.
+  It stays off until a maintainer sets that variable, so tag pushes do not
+  publish to npm by default.
 - `github-release` downloads the staged assets, verifies the exact eight-archive
   set and every checksum, and creates the GitHub release with `contents: write`.
   It has no npm token or OIDC publishing permission and does not depend on npm.
@@ -51,16 +52,34 @@ package renaming or blind retries.
 GitHub release availability does not imply that `npm install riftri` or
 `npx riftri` is available for the same version.
 
-As of September 14, 2026, the `v0.2.1` npm publication stopped at
-`riftri-win32-arm64` with `E403: Package name triggered spam detection` after
-publishing the six macOS and Linux native packages. The Windows x64 package and
-main launcher were not attempted. The corresponding GitHub release completed
-with all eight native archives and checksums. Resolve the registry rejection
-before retrying the failed npm job; do not rename packages, create another tag,
-or advertise npm availability as a workaround. New releases may still ship
-through GitHub direct downloads without attempting npm publication. After npm
-confirms the rejection is resolved, a maintainer can explicitly set the
-repository variable `NPM_PUBLISH_ENABLED=true` before resuming that channel.
+As of September 22, 2026, `0.3.5` is published for the launcher and seven of
+the eight native packages. `npm install riftri` and `npx riftri` work on macOS,
+Linux, and Windows x64.
+
+`riftri-win32-arm64` remains rejected with
+`E403: Package name triggered spam detection`. That one name is blocked at the
+registry; every other name, including `riftri-win32-x64`, publishes normally.
+Windows ARM64 therefore installs the launcher without a binary, so the launcher
+sends those users to the PowerShell installer and the installation guide says
+the same. Do not work around it by creating another tag or advertising npm
+availability for that platform.
+
+That name is listed in `UNPUBLISHED_PACKAGES` in `package/lib/platform.js`,
+which both the launcher and `publish-packages.mjs` read. The publish script
+still attempts it every release — that attempt is how a maintainer learns the
+name was accepted — but a repeat refusal no longer aborts the run, so the
+packages sorted behind it still reach npm. Without that, one refused name
+strands the launcher, which is how `v0.2.1` shipped with nothing installable.
+**When npm accepts the name, delete its entry**; the guard test in
+`package/test/platform.test.js` fails once the list is empty.
+
+Those `0.3.5` packages were published from a maintainer workstation and
+**carry no provenance attestation**. Every manifest sets
+`publishConfig.provenance: true`, which npm rejects outside a CI provider
+(`Automatic provenance generation not supported for provider: null`), so the
+publish used `--provenance=false`. The GitHub release assets for the same tag
+do carry build-provenance attestations. Restoring provenance on npm means
+publishing the next release through the workflow rather than by hand.
 
 Resuming the channel is two concrete maintainer actions:
 
