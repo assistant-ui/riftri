@@ -32,6 +32,8 @@ add it to that overview's documentation index — CI enforces the link.
   worktree subset, its base-key rules, and refusal behavior.
 - [troubleshooting.md](troubleshooting.md) — symptom-first answers: refused
   operations, activation gaps, recovery, disk usage, and installation.
+- [backing-out.md](backing-out.md) — what survives if you stop using
+  Riftri, and how to remove it cleanly.
 - [build-caches.md](build-caches.md) — which dependency stores are safe to
   share across parallel worktrees, and which directories never are.
 

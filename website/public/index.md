@@ -367,6 +367,7 @@ maps every document in one place.
 - [Git LFS](https://github.com/assistant-ui/riftri/blob/main/docs/git-lfs.md): accepted pointers, local object requirements, and limitations.
 - [Sparse checkout](https://github.com/assistant-ui/riftri/blob/main/docs/sparse-checkout.md): the supported cone-mode sparse worktree subset, base-key rules, and refusals.
 - [Troubleshooting and FAQ](https://github.com/assistant-ui/riftri/blob/main/docs/troubleshooting.md): symptom-first answers for refused operations, activation gaps, recovery, and disk usage.
+- [Backing out](https://github.com/assistant-ui/riftri/blob/main/docs/backing-out.md): what survives if you stop using Riftri, and how to remove it cleanly.
 - [Dependencies and build caches](https://github.com/assistant-ui/riftri/blob/main/docs/build-caches.md): which dependency stores are safe to share across parallel worktrees, and which directories never are.
 
 ### Architecture and guarantees
