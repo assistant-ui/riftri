@@ -53,5 +53,14 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
+  },
+  "main": "package/lib/client.js",
+  "types": "package/lib/client.d.ts",
+  "exports": {
+    ".": {
+      "types": "./package/lib/client.d.ts",
+      "require": "./package/lib/client.js",
+      "default": "./package/lib/client.js"
+    }
   }
 }

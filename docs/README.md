@@ -18,6 +18,8 @@ add it to that overview's documentation index — CI enforces the link.
 - [custom-harness.md](custom-harness.md) — building your own runner on the
   CLI: the lifecycle, exit codes, and using Riftri as a default workspace
   layer with a fallback.
+- [node-api.md](node-api.md) — the programmatic API shipped with the
+  `riftri` npm package, its methods, and its typed errors.
 - [linux-reflink.md](linux-reflink.md) — Btrfs and reflink-enabled XFS support
   and verification.
 - [linux-overlayfs.md](linux-overlayfs.md) — OverlayFS mount requirements,
