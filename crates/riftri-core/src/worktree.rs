@@ -11670,6 +11670,79 @@ mod tests {
         );
     }
 
+    /// Reference counts come only from journals that parsed, so an unreadable
+    /// one silently under-counts. Two live worktrees sharing a base reported
+    /// `refs=0` once their add journals were damaged, and the CLI described
+    /// that base as an unreferenced cache — an invitation to delete storage two
+    /// working trees still depend on. The accounting must keep reporting the
+    /// damage so the renderer can refuse to claim the base is unused.
+    #[test]
+    fn storage_accounting_reports_damage_alongside_its_under_counted_references() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        // Windows runners default this on, and Riftri refuses a checkout whose
+        // bytes Git would rewrite.
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        for (destination, branch) in [("one", "feature/one"), ("two", "feature/two")] {
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: fixture.path().join(destination),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(branch)),
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create managed worktree");
+        }
+
+        let healthy = storage_accounting(&state).expect("status");
+        assert!(healthy.diagnostic_issues.is_empty());
+        assert_eq!(healthy.bases.len(), 1);
+        assert_eq!(healthy.bases[0].reference_count, 2);
+
+        for entry in fs::read_dir(state.join("operations")).expect("read operations") {
+            let path = entry.expect("entry").path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                let contents = fs::read(&path).expect("read journal");
+                fs::write(&path, &contents[..contents.len() / 4]).expect("truncate journal");
+            }
+        }
+
+        let damaged = storage_accounting(&state).expect("status must still report");
+        assert_eq!(
+            damaged.bases[0].reference_count, 0,
+            "the count is derived only from readable journals"
+        );
+        assert_eq!(
+            damaged.diagnostic_issues.len(),
+            2,
+            "both unreadable journals must be reported so the count is not \
+             mistaken for a complete one: {damaged:?}"
+        );
+        assert!(
+            fixture.path().join("one").is_dir() && fixture.path().join("two").is_dir(),
+            "both worktrees still exist and still depend on the base"
+        );
+    }
+
     #[test]
     fn status_reports_malformed_journals_without_changing_them() {
         let fixture = tempdir().expect("fixture");

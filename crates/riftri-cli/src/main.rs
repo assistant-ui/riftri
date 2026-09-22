@@ -2298,6 +2298,10 @@ fn print_storage_accounting(
     report: &riftri_core::StorageAccountingReport,
     json: bool,
 ) -> Result<()> {
+    // Every count below is derived only from journals that parsed. A journal
+    // that could not be read still holds a claim, so when any are unreadable
+    // the counts are a lower bound rather than the truth.
+    let counts_are_complete = report.diagnostic_issues.is_empty();
     if json {
         let bases = report
             .bases
@@ -2307,7 +2311,9 @@ fn print_storage_accounting(
                     "path": base.path.display().to_string(),
                     "path_native_hex": native_path_hex(&base.path),
                     "reference_count": base.reference_count,
-                    "in_use": base.reference_count > 0,
+                    // Never claim a base is unused on an incomplete inventory.
+                    "in_use": base.reference_count > 0 || !counts_are_complete,
+                    "reference_count_complete": counts_are_complete,
                     "logical_bytes": base.logical_bytes,
                     "allocated_bytes": base.allocated_bytes,
                 })
@@ -2328,6 +2334,9 @@ fn print_storage_accounting(
             "state_directory": state_directory.display().to_string(),
             "state_directory_native_hex": native_path_hex(state_directory),
             "native_path_encoding": native_path_encoding(),
+            // False when any journal could not be read: every count in this
+            // document is then a lower bound, not the truth.
+            "counts_complete": counts_are_complete,
             "operations": {
                 "active_views": report.active_views,
                 "pending_adds": report.pending_adds,
@@ -2402,10 +2411,16 @@ fn print_storage_accounting(
     );
     outputln!("Retained bases: {}", report.bases.len());
     for base in &report.bases {
-        let state = if base.reference_count == 0 {
+        // Reference counts are derived only from journals that parsed. When
+        // some did not, a zero is "none that could be counted", not "none" —
+        // and a base a live worktree still uses must never be described as an
+        // unreferenced cache.
+        let state = if base.reference_count > 0 {
+            "in use"
+        } else if counts_are_complete {
             "retained cache; no active views"
         } else {
-            "in use"
+            "reference count unknown; unreadable journals may still claim it"
         };
         outputln!(
             "- {}: refs={}, logical={}, filesystem-accounted allocated={}, state={}",
