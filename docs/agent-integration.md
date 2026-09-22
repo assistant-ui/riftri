@@ -111,6 +111,13 @@ issue that no state directory owns carries both keys as explicit `null`.
 The hex sibling and the explicit nulls were added after `schema_version` 2
 first shipped, without a version bump: additive, null-consistent keys do not
 change the schema version.
+The `status` report counts only journals it could parse, so it carries a
+top-level `counts_complete` and a per-base `reference_count_complete`. Both are
+`false` when any journal is unreadable, which means every count in that
+document is a lower bound rather than the truth. A base whose count is
+incomplete reports `in_use: true`, because an unreadable journal may still
+claim it: never treat a base as unreferenced unless `reference_count_complete`
+is `true`. These keys are additive and do not change the schema version.
 On Unix, `native_path_encoding` is `unix-bytes-hex`. On Windows, it is
 `windows-utf16le-hex`.
 
