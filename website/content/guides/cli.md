@@ -45,7 +45,32 @@ riftri worktree remove ../app-login
 | `riftri gc` | Preview unused-base cleanup; apply with `riftri gc --apply` only after reviewing the plan |
 | `riftri worktree compact <path>` | Reclaim private storage in a pristine, full native-clone worktree; refuses untracked and ignored files |
 
+## Machine-readable output
+
+Every command that reports or changes state accepts `--json` and prints one
+versioned report on stdout — `doctor`, `backends`, `status`, `repair`, `gc`,
+and every `worktree` subcommand. Any command accepts `--json-errors`, which
+emits one failure receipt on stderr instead of human text.
+
+```sh
+riftri worktree add ../app-auth -b feature/auth --json
+```
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success |
+| `1` | Operational failure — Git, storage, journal, or I/O |
+| `2` | Usage error — bad flag or argument |
+| `3` | Policy refusal — Riftri declined; nothing changed |
+
+Code `3` is deterministic: the request was refused before anything was
+touched, so retrying the same command fails identically. Scripts can branch
+on the status alone without parsing JSON. See the
+[custom harness guide](custom-harness.md) for driving these from a runner.
+
 ## More options
 
-`--help` works with every command. Complete flag, JSON, exit-code, and
-recovery contracts: **View .md**.
+`--help` works with every command, and `riftri man <dir>` writes a man page
+per command. Complete flag, JSON, and recovery contracts: **View .md**.
