@@ -5833,10 +5833,16 @@ fn classify_active_destination(
     claimed: &HashSet<PathBuf>,
     journal: &DecodedJournal,
 ) -> Result<ActiveDestinationState, WorktreeError> {
-    if registered
-        .iter()
-        .any(|worktree| paths_match(&worktree.path, &journal.destination))
-    {
+    // A registration Git itself marks prunable is a leftover, not a live
+    // worktree: Git keeps the entry when the directory disappears rather than
+    // dropping it. Treating it as registered short-circuits the retire path,
+    // so the journal stays `Active` forever, `repair` reports nothing to do
+    // while `status` keeps flagging it, and the base can never be reclaimed.
+    // Falling through reuses the presence check below, which still classifies
+    // a destination that exists (including a dangling symlink) as `Present`.
+    if registered.iter().any(|worktree| {
+        paths_match(&worktree.path, &journal.destination) && worktree.prunable_reason.is_none()
+    }) {
         return Ok(ActiveDestinationState::Registered);
     }
     // `symlink_metadata` so a dangling symlink still counts as present.
@@ -5985,10 +5991,11 @@ fn retire_vanished_add_journal(
     let metadata_lock =
         acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
     let registered = git.list_worktrees(&journal.repository)?;
-    if registered
-        .iter()
-        .any(|worktree| paths_match(&worktree.path, &journal.destination))
-    {
+    // Same rule as `classify_active_destination`: an entry Git marks prunable
+    // is a leftover registration, not the worktree coming back.
+    if registered.iter().any(|worktree| {
+        paths_match(&worktree.path, &journal.destination) && worktree.prunable_reason.is_none()
+    }) {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination {} became registered again; Riftri preserved its journal",
             journal.destination.display()
@@ -11758,6 +11765,82 @@ mod tests {
         assert!(
             fixture.path().join("one").is_dir() && fixture.path().join("two").is_dir(),
             "both worktrees still exist and still depend on the base"
+        );
+    }
+
+    /// Git keeps a worktree's registration when its directory disappears and
+    /// marks the entry `prunable` rather than dropping it. Riftri treated any
+    /// registration as a live worktree, so the add journal was never retired:
+    /// `repair` reported nothing to do while `status` flagged the state
+    /// forever and `gc` could never reclaim the base. Since `riftri enable`
+    /// pins `gc.worktreePruneExpire=never`, Git never clears that entry on its
+    /// own either, so the state could not converge without manual surgery.
+    #[test]
+    fn repair_retires_an_add_journal_whose_worktree_git_marks_prunable() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("vanished");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/vanished")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+
+        // A live worktree is never retired.
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert_eq!(report.retired_adds, 0, "{report:?}");
+        assert_eq!(report.active, 1, "{report:?}");
+
+        // The directory disappears the way an external `rm -rf` or a cleared
+        // `/tmp` would. Git keeps the registration and marks it prunable.
+        fs::remove_dir_all(&destination).expect("remove the worktree directory");
+        // Git keeps the registration and annotates it instead of dropping it.
+        let canonical = fs::canonicalize(fixture.path())
+            .expect("canonical fixture")
+            .join("vanished");
+        assert!(
+            riftri_git::Git::default()
+                .list_worktrees(&repository)
+                .expect("list worktrees")
+                .iter()
+                .any(|worktree| super::paths_match(&worktree.path, &canonical)
+                    && worktree.prunable_reason.is_some()),
+            "Git must still register the vanished worktree as prunable"
+        );
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert_eq!(
+            report.retired_adds, 1,
+            "a prunable registration must not block retirement: {report:?}"
+        );
+        assert!(report.errors.is_empty(), "{report:?}");
+
+        // State converges: nothing left to report, and the base is collectable.
+        let report = storage_accounting(&state).expect("status");
+        assert!(report.diagnostic_issues.is_empty(), "{report:?}");
+        assert!(
+            report.bases.iter().all(|base| base.reference_count == 0),
+            "the retired journal must release its base: {report:?}"
         );
     }
 
