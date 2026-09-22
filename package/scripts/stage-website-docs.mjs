@@ -48,15 +48,18 @@ export function rewriteDocLinks(markdown, source, { audience = "human" } = {}) {
 export function renderWebsiteDoc(page, original) {
   const body = original.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
   const markdown = rewriteDocLinks(body, page.content).trim();
-  // Inject the "View .md / Copy .md" page actions as plain Markdown links that
-  // both open the page's `.md` (served with frontmatter). They sit as one row
-  // below the page's intro paragraph — the description leads — and are styled
-  // as compact links in docs-theme.css. The docs framework runs no custom
-  // JavaScript on rendered pages, so the actions are links, not a clipboard
-  // button; the native button is disabled in docs.config.ts.
+  // Inject the page actions as plain Markdown links that both open the page's
+  // `.md` (served with frontmatter). That `.md` is the complete canonical
+  // document, not a copy of this summary, so the first link says so — readers
+  // were treating "View .md" as a format toggle and never finding the full
+  // reference. They sit as one row below the page's intro paragraph — the
+  // description leads — and are styled as compact links in docs-theme.css. The
+  // docs framework runs no custom JavaScript on rendered pages, so the actions
+  // are links, not a clipboard button; the native button is disabled in
+  // docs.config.ts.
   const markdownUrl = `${pageUrl(page)}.md`;
   if (!/^# .+(?:\r?\n|$)/.test(markdown)) throw new Error(`Docs page needs a leading title: ${page.content}`);
-  const action = `[View .md](${markdownUrl} "View this page as Markdown") / [Copy .md](${markdownUrl} "Copy this page as Markdown")`;
+  const action = `[Read the full reference](${markdownUrl} "Read the complete document") / [Copy .md](${markdownUrl} "Copy this page as Markdown")`;
   const withAction = markdown.replace(
     /^(# .+(?:\r?\n)+(?:(?![#\r\n])[^\r\n]+(?:\r?\n|$))*)/,
     (intro) => `${intro.trimEnd()}\n\n${action}\n\n`,
