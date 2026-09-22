@@ -18,6 +18,8 @@ add it to that overview's documentation index — CI enforces the link.
 - [custom-harness.md](custom-harness.md) — building your own runner on the
   CLI: the lifecycle, exit codes, and using Riftri as a default workspace
   layer with a fallback.
+- [node-api.md](node-api.md) — the programmatic API shipped with the
+  `riftri` npm package, its methods, and its typed errors.
 - [linux-reflink.md](linux-reflink.md) — Btrfs and reflink-enabled XFS support
   and verification.
 - [linux-overlayfs.md](linux-overlayfs.md) — OverlayFS mount requirements,
@@ -30,6 +32,8 @@ add it to that overview's documentation index — CI enforces the link.
   worktree subset, its base-key rules, and refusal behavior.
 - [troubleshooting.md](troubleshooting.md) — symptom-first answers: refused
   operations, activation gaps, recovery, disk usage, and installation.
+- [backing-out.md](backing-out.md) — what survives if you stop using
+  Riftri, and how to remove it cleanly.
 - [build-caches.md](build-caches.md) — which dependency stores are safe to
   share across parallel worktrees, and which directories never are.
 

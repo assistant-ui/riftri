@@ -360,12 +360,14 @@ maps every document in one place.
 - [Shell and process activation](https://github.com/assistant-ui/riftri/blob/main/docs/global-activation.md): opt-in Git interception and shell compatibility.
 - [Agent integration](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md): harness setup, the JSON automation contract, and the parallel-agent lifecycle.
 - [Custom harness guide](https://github.com/assistant-ui/riftri/blob/main/docs/custom-harness.md): building your own runner on the CLI, including capability detection and fallback.
+- [Node API](https://github.com/assistant-ui/riftri/blob/main/docs/node-api.md): the programmatic API shipped with the npm package, its methods, and typed errors.
 - [Linux reflinks](https://github.com/assistant-ui/riftri/blob/main/docs/linux-reflink.md): Btrfs and XFS support and verification.
 - [Linux OverlayFS](https://github.com/assistant-ui/riftri/blob/main/docs/linux-overlayfs.md): mount requirements, helper setup, and recovery.
 - [Windows ReFS](https://github.com/assistant-ui/riftri/blob/main/docs/windows-refs.md): Windows backend requirements and testing.
 - [Git LFS](https://github.com/assistant-ui/riftri/blob/main/docs/git-lfs.md): accepted pointers, local object requirements, and limitations.
 - [Sparse checkout](https://github.com/assistant-ui/riftri/blob/main/docs/sparse-checkout.md): the supported cone-mode sparse worktree subset, base-key rules, and refusals.
 - [Troubleshooting and FAQ](https://github.com/assistant-ui/riftri/blob/main/docs/troubleshooting.md): symptom-first answers for refused operations, activation gaps, recovery, and disk usage.
+- [Backing out](https://github.com/assistant-ui/riftri/blob/main/docs/backing-out.md): what survives if you stop using Riftri, and how to remove it cleanly.
 - [Dependencies and build caches](https://github.com/assistant-ui/riftri/blob/main/docs/build-caches.md): which dependency stores are safe to share across parallel worktrees, and which directories never are.
 
 ### Architecture and guarantees

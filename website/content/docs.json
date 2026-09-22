@@ -5,8 +5,10 @@
     { "source": "docs/cli.md", "content": "website/content/guides/cli.md", "slug": "cli", "title": "CLI reference", "icon": "SquareTerminal" },
     { "source": "docs/agent-integration.md", "content": "website/content/guides/agents.md", "slug": "agents", "title": "Coding agents", "icon": "Bot" },
     { "source": "docs/custom-harness.md", "content": "website/content/guides/custom-harness.md", "slug": "custom-harness", "title": "Custom harness", "icon": "Workflow" },
+    { "source": "docs/node-api.md", "content": "website/content/guides/node-api.md", "slug": "node-api", "title": "Node API", "icon": "Braces" },
     { "source": "docs/global-activation.md", "content": "website/content/guides/activation.md", "slug": "activation", "title": "Shell activation", "icon": "Power" },
-    { "source": "docs/troubleshooting.md", "content": "website/content/guides/troubleshooting.md", "slug": "troubleshooting", "title": "Troubleshooting", "icon": "Wrench" }
+    { "source": "docs/troubleshooting.md", "content": "website/content/guides/troubleshooting.md", "slug": "troubleshooting", "title": "Troubleshooting", "icon": "Wrench" },
+    { "source": "docs/backing-out.md", "content": "website/content/guides/backing-out.md", "slug": "backing-out", "title": "Backing out", "icon": "DoorOpen" }
   ] },
   { "label": "02 / Storage & platforms", "pages": [
     { "source": "docs/linux-reflink.md", "content": "website/content/guides/linux-reflink.md", "slug": "linux-reflink", "title": "Linux reflinks", "icon": "Copy" },

@@ -277,16 +277,27 @@ partial bump or a hand edit is caught in CI rather than at install time. A
 scheduled workflow additionally compares the pinned checksums against the
 latest release's published `SHA256SUMS` every day.
 
-## npm is a separate channel
+## npm
+
+```sh
+npm install --global riftri
+```
+
+The `riftri` package is a small launcher; npm resolves the matching native
+package for your platform through optional dependencies, so only one binary is
+downloaded. `npx riftri doctor` works without a global install.
+
+**Windows on ARM64 is the one exception.** `riftri-win32-arm64` is held in
+registry review, so npm there installs the launcher without a binary and the
+command fails at runtime. Use the [PowerShell installer](#windows-powershell)
+on that platform until the package is published. macOS, Linux, and Windows
+x64 all install normally.
 
 GitHub downloads and npm packages contain the same native CLI for a given tag,
-but publication status is independent. The `riftri` launcher is not currently
-available because the initial npm publication is incomplete. Use a standalone
-installer or GitHub release asset until this notice is removed. A GitHub release
-does not by itself mean the corresponding npm launcher finished publishing.
-The remaining steps — resolving the registry's package-name rejection with npm
-support and explicitly re-enabling the paused publish job — require maintainer
-access and are documented in [RELEASING.md](../RELEASING.md).
+but publication status is independent: a GitHub release does not by itself mean
+the corresponding npm packages finished publishing, and the versions available
+on each channel can differ. The release process is documented in
+[RELEASING.md](../RELEASING.md).
 
 ## Updating and uninstalling
 
