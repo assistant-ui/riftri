@@ -1158,6 +1158,16 @@ fn failure_receipt(
             "unknown",
             recovery_for_operation(operation),
         ));
+    // Never answer a failure with the command that just produced it. `repair`
+    // is the standard remedy for `recovery: "required"`, but when `repair`
+    // itself is what failed that advice is a retry loop for any caller that
+    // follows `nextCommand`; point at `status`, which isolates and names the
+    // state that needs attention.
+    let recovery = if operation == "repair" && recovery == "required" {
+        "inspect"
+    } else {
+        recovery
+    };
     let next_command = recovery_next_command(recovery, worktree_error, context);
     // An error that names its own state directory outranks anything the
     // command line selected: that is where the state needing attention
@@ -3200,14 +3210,17 @@ mod tests {
     fn generic_receipts_repeat_the_selected_state_directory() {
         let selected = "My Projects/app/state";
         let expected = riftri_core::command_path(Path::new(selected));
-        let context = context_for(&["riftri", "repair", "--state-dir", selected]);
+        // Driven through `gc` rather than `repair`: a failing `repair` is the
+        // one operation that must not answer with `riftri repair`, which
+        // `repair_failures_do_not_advise_running_repair_again` covers.
+        let context = context_for(&["riftri", "gc", "--state-dir", selected]);
         let error = anyhow::Error::new(riftri_core::WorktreeError::JournalTransition(
             riftri_core::JournalTransitionError {
                 current: riftri_core::AddWorktreePhase::IntentRecorded,
                 requested: riftri_core::AddWorktreePhase::Active,
             },
         ));
-        let receipt = failure_receipt("repair", &error, &context);
+        let receipt = failure_receipt("garbage-collection", &error, &context);
 
         assert_eq!(receipt["recovery"], "required");
         let next_command = receipt["nextCommand"].as_str().expect("next command");
@@ -3220,6 +3233,46 @@ mod tests {
             "{next_command}"
         );
         assert_eq!(receipt["stateDirectory"], expected.display().to_string());
+    }
+
+    /// `repair` is the standard answer to `recovery: "required"`, but when
+    /// `repair` is what failed that advice is a retry loop for any caller that
+    /// follows `nextCommand`. It must point at `status`, which isolates and
+    /// names the state needing attention instead of failing the same way.
+    #[test]
+    fn repair_failures_do_not_advise_running_repair_again() {
+        let selected = "My Projects/app/state";
+        let expected = riftri_core::command_path(Path::new(selected));
+        let context = context_for(&["riftri", "repair", "--state-dir", selected]);
+        let error = anyhow::Error::new(riftri_core::WorktreeError::JournalTransition(
+            riftri_core::JournalTransitionError {
+                current: riftri_core::AddWorktreePhase::IntentRecorded,
+                requested: riftri_core::AddWorktreePhase::Active,
+            },
+        ));
+
+        let receipt = failure_receipt("repair", &error, &context);
+        assert_eq!(receipt["recovery"], "inspect");
+        let next_command = receipt["nextCommand"].as_str().expect("next command");
+        assert!(
+            !next_command.starts_with("riftri repair"),
+            "a failed repair must not advise repair: {next_command}"
+        );
+        let quoted = next_command
+            .strip_prefix("riftri status --state-dir ")
+            .expect("next command inspects the selected state directory");
+        assert_eq!(shell_split(quoted), vec![expected], "{next_command}");
+
+        // Every other operation still routes to repair.
+        let receipt = failure_receipt("garbage-collection", &error, &context);
+        assert_eq!(receipt["recovery"], "required");
+        assert!(
+            receipt["nextCommand"]
+                .as_str()
+                .expect("next command")
+                .starts_with("riftri repair"),
+            "{receipt:?}"
+        );
     }
 
     /// A repository chosen with `--repository` resolves a different default
