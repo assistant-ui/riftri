@@ -7,6 +7,14 @@ const { test } = require("node:test");
 const root = path.resolve(__dirname, "../..");
 const { Riftri, RiftriError, EXIT_POLICY } = require("../lib/client.js");
 
+// The stand-in below is a shell script, which Windows cannot execute directly:
+// spawn() rejects an extensionless file, and Node refuses a .cmd without a
+// shell. Real riftri is always riftri.exe there, so the gap is in the fixture
+// rather than in the client, and the parsing these tests cover is identical on
+// every platform. `resolves the native executable name per platform` keeps the
+// one genuinely Windows-specific path covered.
+const onWindows = process.platform === "win32";
+
 /** A stand-in riftri that echoes a fixed report or receipt. */
 function fakeBinary(directory, { stdout = "", stderr = "", code = 0 }) {
   const file = path.join(directory, "fake-riftri");
@@ -17,6 +25,13 @@ function fakeBinary(directory, { stdout = "", stderr = "", code = 0 }) {
   fs.chmodSync(file, 0o755);
   return file;
 }
+
+test("resolves the native executable name per platform", () => {
+  const { binaryName } = require("../lib/platform.js");
+  assert.equal(binaryName("win32"), "riftri.exe");
+  assert.equal(binaryName("darwin"), "riftri");
+  assert.equal(binaryName("linux"), "riftri");
+});
 
 test("the package exposes the client as its main entry point", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
@@ -45,7 +60,7 @@ test("release staging rewrites entry points to the tarball layout", async () => 
   }
 });
 
-test("reports are parsed and returned", async () => {
+test("reports are parsed and returned", { skip: onWindows }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
   const binary = fakeBinary(directory, {
     stdout: JSON.stringify({ schema_version: 1, cow_backend_active: true }),
@@ -57,7 +72,7 @@ test("reports are parsed and returned", async () => {
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("a policy refusal becomes a typed error carrying its receipt", async () => {
+test("a policy refusal becomes a typed error carrying its receipt", { skip: onWindows }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
   const receipt = {
     schemaVersion: 1,
@@ -90,7 +105,7 @@ test("a policy refusal becomes a typed error carrying its receipt", async () => 
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("a busy worktree is distinguished from a refusal", async () => {
+test("a busy worktree is distinguished from a refusal", { skip: onWindows }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
   const binary = fakeBinary(directory, {
     stderr: JSON.stringify({ code: "worktree-busy", recovery: "retry", message: "busy" }),
@@ -108,7 +123,7 @@ test("a busy worktree is distinguished from a refusal", async () => {
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("a usage error carries no receipt and is never retryable", async () => {
+test("a usage error carries no receipt and is never retryable", { skip: onWindows }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
   const binary = fakeBinary(directory, { stderr: "error: unexpected argument", code: 2 });
   const riftri = new Riftri({ repository: directory, binary });
@@ -124,7 +139,7 @@ test("a usage error carries no receipt and is never retryable", async () => {
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("commands without --json are not parsed as JSON", async () => {
+test("commands without --json are not parsed as JSON", { skip: onWindows }, async () => {
   // `enable` prints human text; parsing it would throw on success.
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
   const binary = fakeBinary(directory, { stdout: "Enabled Riftri for /somewhere\n" });
