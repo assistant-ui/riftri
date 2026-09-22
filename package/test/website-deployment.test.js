@@ -42,7 +42,7 @@ function fetchFixture(files) {
 test("deployment check validates the revision and every public entry point", async () => {
   const { verifyWebsite } = await import("../scripts/verify-website.mjs");
   const checked = await verifyWebsite({ revision, fetchImpl: fetchFixture(await fixture()) });
-  assert.equal(checked.length, 29);
+  assert.equal(checked.length, 30);
 });
 
 for (const [name, mutate, error] of [

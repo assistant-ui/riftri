@@ -15,6 +15,9 @@ add it to that overview's documentation index — CI enforces the link.
 - [agent-integration.md](agent-integration.md) — harness setup (Claude Code,
   Codex, containers), the JSON automation contract, and the parallel-agent
   lifecycle.
+- [custom-harness.md](custom-harness.md) — building your own runner on the
+  CLI: the lifecycle, exit codes, and using Riftri as a default workspace
+  layer with a fallback.
 - [linux-reflink.md](linux-reflink.md) — Btrfs and reflink-enabled XFS support
   and verification.
 - [linux-overlayfs.md](linux-overlayfs.md) — OverlayFS mount requirements,

@@ -359,6 +359,7 @@ maps every document in one place.
 - [Installation](https://github.com/assistant-ui/riftri/blob/main/docs/install.md): standalone installers, manual downloads, updates, and uninstalling.
 - [Shell and process activation](https://github.com/assistant-ui/riftri/blob/main/docs/global-activation.md): opt-in Git interception and shell compatibility.
 - [Agent integration](https://github.com/assistant-ui/riftri/blob/main/docs/agent-integration.md): harness setup, the JSON automation contract, and the parallel-agent lifecycle.
+- [Custom harness guide](https://github.com/assistant-ui/riftri/blob/main/docs/custom-harness.md): building your own runner on the CLI, including capability detection and fallback.
 - [Linux reflinks](https://github.com/assistant-ui/riftri/blob/main/docs/linux-reflink.md): Btrfs and XFS support and verification.
 - [Linux OverlayFS](https://github.com/assistant-ui/riftri/blob/main/docs/linux-overlayfs.md): mount requirements, helper setup, and recovery.
 - [Windows ReFS](https://github.com/assistant-ui/riftri/blob/main/docs/windows-refs.md): Windows backend requirements and testing.
