@@ -270,29 +270,56 @@ impl Git {
 
     /// Inspect a normal, linked, unborn, detached, or bare repository.
     pub fn inspect_repository(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
-        let is_bare = match self
-            .run_text(
-                Some(path),
-                &["rev-parse", "--is-bare-repository"],
-                "bare repository flag",
-            )?
-            .as_str()
-        {
-            "true" => true,
-            "false" => false,
+        // One invocation answers both identity questions; each Git subprocess
+        // costs more in spawn and startup than in work. The bare flag is a
+        // fixed `true`/`false` first line, so everything after it stays
+        // parseable as one path even when that path contains newlines — which
+        // is also why no second path query may join this call: two variable
+        // paths in newline-separated output cannot be told apart.
+        let output = self.run(
+            Some(path),
+            &[
+                "rev-parse",
+                "--is-bare-repository",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+        )?;
+        let (flag, remainder) = {
+            let bytes = &output.stdout;
+            let newline = bytes
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .ok_or_else(|| GitError::InvalidOutput {
+                    context: "repository identity",
+                    detail: "expected a bare flag line and the common Git directory".to_owned(),
+                })?;
+            (&bytes[..newline], &bytes[newline + 1..])
+        };
+        let is_bare = match flag {
+            b"true" => true,
+            b"false" => false,
             value => {
                 return Err(GitError::InvalidOutput {
                     context: "bare repository flag",
-                    detail: format!("expected true or false, got {value:?}"),
+                    detail: format!(
+                        "expected true or false, got {:?}",
+                        String::from_utf8_lossy(value)
+                    ),
                 });
             }
         };
-
-        let common_git_dir = self.run_path(
-            Some(path),
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            "common Git directory",
-        )?;
+        // Mirror `run_path`: exactly one trailing newline belongs to Git, the
+        // rest of the bytes belong to the path.
+        let common_git_dir = remainder.strip_suffix(b"\n").unwrap_or(remainder);
+        if common_git_dir.is_empty() {
+            return Err(GitError::InvalidOutput {
+                context: "common Git directory",
+                detail: "path was empty".to_owned(),
+            });
+        }
+        let common_git_dir =
+            PathBuf::from(os_string_from_git(common_git_dir, "common Git directory")?);
         let root = if is_bare {
             None
         } else {
@@ -3403,6 +3430,45 @@ mod tests {
 
         assert!(!attributes);
         assert_eq!(git.process_attempts() - attempts_before, 1);
+    }
+
+    /// The identity probe reads a bare flag and the common Git directory from
+    /// one invocation, split at the first newline. A repository path that
+    /// itself contains a newline is the case that split must not corrupt —
+    /// and the reason no second path query may ever join that invocation.
+    #[cfg(unix)]
+    #[test]
+    fn inspects_a_repository_whose_path_contains_a_newline() {
+        let parent = tempdir().expect("temporary directory");
+        let repository = parent.path().join("line one\nline two");
+        fs::create_dir(&repository).expect("create repository directory");
+        git(&repository, &["init", "--quiet"]);
+
+        let inspected = Git::default()
+            .inspect_repository(&repository)
+            .expect("inspect repository with newline in its path");
+
+        assert!(!inspected.is_bare);
+        assert_eq!(
+            inspected
+                .identity
+                .common_git_dir
+                .canonicalize()
+                .expect("canonical common directory"),
+            repository
+                .join(".git")
+                .canonicalize()
+                .expect("canonical .git")
+        );
+        assert_eq!(
+            inspected
+                .root
+                .as_deref()
+                .expect("working-tree root")
+                .canonicalize()
+                .expect("canonical root"),
+            repository.canonicalize().expect("canonical repository")
+        );
     }
 
     #[test]
