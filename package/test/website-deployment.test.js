@@ -41,8 +41,12 @@ function fetchFixture(files) {
 
 test("deployment check validates the revision and every public entry point", async () => {
   const { verifyWebsite } = await import("../scripts/verify-website.mjs");
-  const checked = await verifyWebsite({ revision, fetchImpl: fetchFixture(await fixture()) });
-  assert.equal(checked.length, 31);
+  // Derived from the fixture rather than hardcoded: the count is the number of
+  // public entry points, which grows whenever a docs page is added. A literal
+  // here goes stale silently and fails the next unrelated pull request.
+  const files = await fixture();
+  const checked = await verifyWebsite({ revision, fetchImpl: fetchFixture(files) });
+  assert.equal(checked.length, files.size);
 });
 
 for (const [name, mutate, error] of [
