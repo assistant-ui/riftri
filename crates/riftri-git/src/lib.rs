@@ -305,29 +305,37 @@ impl Git {
 
         let head_commit = self.resolve_optional_object(path, "HEAD^{commit}")?;
         let head_tree = self.resolve_optional_object(path, "HEAD^{tree}")?;
-        let clean = if is_bare {
-            None
-        } else {
-            // `--untracked-files=all` overrides `status.showUntrackedFiles`,
-            // which a repository or the user's global configuration may set to
-            // `no`. Without it this probe reports a working tree with
-            // untracked content as clean. The sibling cleanliness checks
-            // (`worktree_is_clean`, `worktree_is_pristine`) already pass it.
-            let status = self.run(
-                Some(path),
-                &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-            )?;
-            Some(status.stdout.is_empty())
-        };
-
         Ok(RepositoryInfo {
             root,
             identity: RepositoryIdentity { common_git_dir },
             is_bare,
             head_commit,
             head_tree,
-            clean,
+            // Deliberately not probed here: cleanliness costs a full
+            // `git status` traversal, this runs on the path of every lifecycle
+            // operation, and only `doctor` ever reads it. Callers that need it
+            // ask through `inspect_repository_with_cleanliness`.
+            clean: None,
         })
+    }
+
+    /// Inspect a repository and additionally probe working-tree cleanliness.
+    ///
+    /// Separate from [`Self::inspect_repository`] because that probe is a full
+    /// `git status` traversal which every lifecycle operation would otherwise
+    /// pay for and discard.
+    pub fn inspect_repository_with_cleanliness(
+        &self,
+        path: &Path,
+    ) -> Result<RepositoryInfo, GitError> {
+        let mut info = self.inspect_repository(path)?;
+        if !info.is_bare {
+            // `worktree_is_clean` passes `--untracked-files=all`, which
+            // overrides a `status.showUntrackedFiles=no` that would otherwise
+            // hide untracked content.
+            info.clean = Some(self.worktree_is_clean(path)?);
+        }
+        Ok(info)
     }
 
     /// Resolve `revision` to exact commit and tree IDs using Git's semantics.
@@ -2309,7 +2317,14 @@ mod tests {
         assert!(!repository.is_bare);
         assert!(repository.head_commit.is_none());
         assert!(repository.head_tree.is_none());
-        assert_eq!(repository.clean, Some(true));
+        // `inspect_repository` leaves cleanliness unprobed; ask for it.
+        assert_eq!(
+            Git::default()
+                .inspect_repository_with_cleanliness(fixture.path())
+                .expect("inspect with cleanliness")
+                .clean,
+            Some(true)
+        );
     }
 
     /// `git status --porcelain` honours `status.showUntrackedFiles`, which is
@@ -2330,7 +2345,7 @@ mod tests {
             )
             .expect("configure untracked-file reporting");
             assert_eq!(
-                git.inspect_repository(fixture.path())
+                git.inspect_repository_with_cleanliness(fixture.path())
                     .expect("inspect repository")
                     .clean,
                 Some(false),
@@ -2473,7 +2488,12 @@ mod tests {
 
         assert_eq!(repository.head_commit, Some(resolved.commit));
         assert_eq!(repository.head_tree, Some(resolved.tree));
-        assert_eq!(repository.clean, Some(true));
+        assert_eq!(
+            git.inspect_repository_with_cleanliness(fixture.path())
+                .expect("inspect with cleanliness")
+                .clean,
+            Some(true)
+        );
     }
 
     /// Spawning a freshly written script can fail with ETXTBSY when a
