@@ -63,10 +63,16 @@ repositories. Do not disable a required hook just to enable optimization.
 
 ### Creation fails on a repository with sparse checkout, submodules, or custom filters
 
-These checkout configurations are not yet supported and fail closed with an
-explanation rather than producing an inexact worktree. Sparse-checkout
-profiles and submodule support are tracked in the
-[roadmap](../ROADMAP.md).
+A repository that already carries its own sparse-checkout profile, submodules,
+or custom filters fails closed with an explanation rather than producing an
+inexact worktree.
+
+Sparse worktrees themselves are supported, but only when requested explicitly:
+pass `--sparse-dir <DIR>` to `riftri worktree add` for cone-mode selection.
+Inheriting the repository's sparse configuration, non-cone patterns, sparse
+plus Git LFS, and compacting a sparse worktree all still refuse. See
+[sparse checkout](sparse-checkout.md). Submodules and broader sparse support
+are tracked in the [roadmap](../ROADMAP.md).
 
 ### Git LFS paths are rejected
 

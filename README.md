@@ -162,9 +162,11 @@ $ sudo riftri overlayfs install-helper
 ```
 
 **Riftri fails closed.** When a checkout cannot be reproduced exactly — custom
-filters, sparse checkout, submodules, external attributes, checkout hooks, or non-canonical
-[Git LFS](docs/git-lfs.md) setups — it stops before changing anything rather
-than silently falling back to a full copy. See
+filters, a repository's own sparse-checkout profile, submodules, external
+attributes, checkout hooks, or non-canonical [Git LFS](docs/git-lfs.md) setups
+— it stops before changing anything rather than silently falling back to a full
+copy. Sparse worktrees are supported when you ask for them explicitly, with
+[`--sparse-dir` cone selection](docs/sparse-checkout.md). See
 [how Riftri stays safe](docs/safety.md).
 
 ## Common commands

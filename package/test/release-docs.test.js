@@ -34,6 +34,27 @@ test("release-facing documentation matches current guarantees", () => {
   assert.doesNotMatch(guarantees, /Riftri has no forced managed removal/);
 });
 
+test("public docs do not call sparse checkout unsupported", () => {
+  // `riftri worktree add --sparse-dir` ships. README, the agent reference, and
+  // troubleshooting all grouped sparse checkout with submodules and custom
+  // filters, which told readers a working feature did not exist.
+  for (const doc of ["README.md", "website/public/index.md", "docs/troubleshooting.md"]) {
+    const text = read(doc);
+    assert.match(text, /--sparse-dir/, `${doc} must point at the supported interface`);
+    // The unsupported half is the repository's own profile, not the feature.
+    assert.doesNotMatch(
+      text,
+      /(?:filters, |attributes, )sparse checkout(?:,| and)/,
+      `${doc} still lists sparse checkout as an unsupported checkout feature`,
+    );
+  }
+  assert.doesNotMatch(
+    read("docs/troubleshooting.md"),
+    /not yet supported and fail closed/,
+    "troubleshooting still says sparse checkout is unsupported",
+  );
+});
+
 test("both Node API guides describe npm availability the same way", () => {
   // The rendered page and the canonical Markdown are separate files, so they
   // drifted: riftri.dev/docs/node-api still told readers npm was blocked long
