@@ -67,7 +67,10 @@ export async function publishPackages({
   repositoryRoot = defaultRepositoryRoot,
   runNpm = defaultRunNpm,
   wait = defaultWait,
-  verificationAttempts = 5,
+  // Ten attempts with the step below give roughly a four-minute budget.
+  // Five attempts (15 seconds total) flunked two fully-successful publishes
+  // for v0.4.0: npm's read API takes minutes to reflect a fresh publish.
+  verificationAttempts = 10,
 } = {}) {
   if (!Number.isInteger(verificationAttempts) || verificationAttempts < 1) {
     throw new Error("verificationAttempts must be a positive integer");
@@ -153,7 +156,9 @@ async function verifyVersions(expected, { runNpm, wait, verificationAttempts }) 
     }
     if (missing.length === 0) break;
     if (attempt < verificationAttempts) {
-      await wait(2 ** (attempt - 1) * 1_000);
+      // Exponential, capped so late attempts probe once a minute instead of
+      // doubling past the propagation window they exist to ride out.
+      await wait(Math.min(2 ** (attempt - 1), 60) * 1_000);
     }
   }
   if (missing.length > 0) {

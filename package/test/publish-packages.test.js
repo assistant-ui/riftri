@@ -126,6 +126,33 @@ test("does not publish the launcher if a platform publish never becomes visible"
   );
 });
 
+test("verification rides out registry propagation before giving up", async (t) => {
+  // Five attempts waited 15 seconds in total, and npm's read API takes
+  // minutes: the first workflow-published release flunked two successful
+  // publishes in one evening (#370). Pin the schedule so the budget cannot
+  // quietly shrink again: exponential, capped at a minute, ~4 minutes total.
+  const repositoryRoot = await releaseFixture(t);
+  const registry = fakeRegistry({
+    omitAfterPublish: `riftri-win32-x64@${packageVersion}`,
+  });
+  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+  const waits = [];
+  await assert.rejects(
+    publishPackages({
+      repositoryRoot,
+      runNpm: registry.runNpm,
+      wait: async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+    }),
+    /still missing/,
+  );
+  assert.deepEqual(
+    waits,
+    [1, 2, 4, 8, 16, 32, 60, 60, 60].map((seconds) => seconds * 1_000),
+  );
+});
+
 test("still verifies launcher visibility after publication", async (t) => {
   const repositoryRoot = await releaseFixture(t);
   const missing = `riftri@${packageVersion}`;
