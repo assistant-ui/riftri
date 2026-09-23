@@ -63,11 +63,17 @@ branches that matter; `error.receipt` has `code`, `category`, `phase`,
 
 ## Availability
 
-npm publication is still blocked pending registry review, so
-`npm install riftri` does not work yet. Until it does, install the binary
-with the [standard installer](installation.md) and copy
-`package/lib/client.js` into your project — the API is identical, and
-switching to the package later is a one-line import change.
+`npm install riftri` works on macOS, Linux, and Windows x64. The matching
+native binary arrives as an optional dependency, so the client and the CLI
+install together.
+
+Windows on ARM64 is the exception: its native package is not on npm yet.
+Install with the [PowerShell installer](installation.md) and point the client
+at that binary:
+
+```js
+const riftri = new Riftri({ repository, binary: "C:\\riftri\\riftri.exe" });
+```
 
 See the [custom harness guide](custom-harness.md) for the lifecycle a runner
 should drive, and [`examples/`](https://github.com/assistant-ui/riftri/tree/main/examples)
