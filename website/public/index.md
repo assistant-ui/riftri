@@ -295,8 +295,10 @@ Deterministic in-tree text, line-ending, and binary attributes are supported,
 along with an allowlist of checkout-neutral GitHub linguist hints. Canonical
 Git LFS paths need verified objects already present in the default local LFS
 store; Riftri does not fetch them during creation. Custom filters, custom LFS
-storage or pointer extensions, external attributes, sparse checkout, and
-submodules remain outside the supported checkout profile.
+storage or pointer extensions, external attributes, a repository's own
+sparse-checkout profile, and submodules remain outside the supported checkout
+profile. Sparse worktrees are supported only as an explicit cone-mode request
+through `riftri worktree add --sparse-dir <DIR>`.
 
 See the backend and compatibility guides below for exact requirements.
 
