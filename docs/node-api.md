@@ -61,6 +61,29 @@ try {
 branches that matter; `error.receipt` has `code`, `category`, `phase`,
 `cleanup`, `recovery`, and `nextCommand`.
 
+`error.exitCode` is always a number. A process killed by a signal reports
+`128 +` the signal number, the same convention native `riftri exec` uses, and
+sets `error.signal` and `error.wasSignalled`.
+
+### When `isOptimizable()` returns false
+
+`false` means Riftri answered the question: either the report says no
+copy-on-write backend is active here, or Riftri refused this destination
+outright (exit 3).
+
+It does not mean "something went wrong". A missing or non-executable binary,
+an unreadable repository, and output that is not JSON all reject, so a broken
+installation cannot be mistaken for an unsupported repository:
+
+```js
+try {
+  if (await riftri.isOptimizable("../task-1")) { /* optimized path */ }
+  else { /* supported answer: fall back to plain Git */ }
+} catch (error) {
+  // The client could not run at all — surface this, do not fall back silently.
+}
+```
+
 ## Constructor options
 
 ```js
