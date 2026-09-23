@@ -9,9 +9,12 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { pathToFileURL } = require("node:url");
 
 const root = path.resolve(__dirname, "../..");
-const client = () => import(path.join(root, "examples/lib/riftri.mjs"));
+// Windows rejects a bare absolute path here: the ESM loader reads "D:\\..." as
+// a URL scheme. Every dynamic import of a local file needs a file:// URL.
+const client = () => import(pathToFileURL(path.join(root, "examples/lib/riftri.mjs")).href);
 const onWindows = process.platform === "win32";
 
 function scratch(t) {
