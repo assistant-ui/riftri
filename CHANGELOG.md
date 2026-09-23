@@ -5,6 +5,114 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.4.0] - 2026-09-22
+
+### Added
+
+- The npm package ships a programmatic API alongside the CLI launcher, so
+  Node.js tooling can drive Riftri without shelling out to the binary by hand.
+  (#344)
+- New guides: what survives when you stop using Riftri (#334), building a
+  custom harness on Riftri with runnable examples (#327, #335), and expanded
+  page substance across the documentation (#338).
+
+### Changed
+
+- `riftri enable` now pins `gc.worktreePruneExpire=never` in the repository's
+  local Git configuration, and `riftri disable` removes it again when the value
+  is still the one Riftri wrote. `git gc` runs `git worktree prune` internally
+  and `gc.auto` fires it from ordinary commands, resolving `git` from Git's own
+  exec-path — those inner calls never reach the proxy, so Git could drop a
+  managed worktree's registration outside the journal, stranding its add
+  journal and pinning its retained base. With the expiry pinned, Git itself
+  declines. Plain `git worktree prune` becomes a no-op in enabled repositories;
+  the journaled `riftri worktree prune` remains the supported path. An expiry
+  the user already set is never overwritten. (#324)
+- A failed `riftri repair` no longer answers with `nextCommand: riftri repair`
+  — the command that just failed — which sent any harness following the receipt
+  into a retry loop. It now points at `riftri status`, which isolates and names
+  the state needing attention. Every other operation still routes to `repair`.
+  (#332)
+- Creating a worktree runs fewer Git subprocesses (17 → 15): the repository
+  cleanliness probe now runs only for `riftri doctor`, the one command that
+  reports it, instead of on every lifecycle operation (#340), and the
+  repository-identity questions share one `git rev-parse` invocation (#348).
+
+### Fixed
+
+- `worktree remove`, `force-remove`, and `move` now claim the same
+  per-worktree operation lock that `compact` already took, and every claimant
+  re-validates under the lock. Previously cross-operation exclusion rested on a
+  journal scan performed before the competing operation published its own
+  journal — a wide race window in which, for example, a `remove` could delete
+  the worktree a `compact` was still hashing. The loser then failed into a
+  journal shape no recovery branch could classify: `repair` errored on every
+  run, every later `prune` was refused, and both the old and new base stayed
+  pinned against `gc`, permanently. The loser of the race now receives a clean,
+  retryable "busy" refusal instead. No user data was at risk in either
+  ordering. (#323)
+- A `git` config alias that resolves to a worktree command (for example
+  `alias.wtp = worktree prune -v`) is now expanded and planned as the command
+  Git will actually run, so it takes the journaled path instead of bypassing
+  classification entirely. Shell aliases (`!command`) are deliberately left
+  alone: they re-enter the proxy on their own. (#326)
+- An unrecognized Git global option no longer bypasses the managed-worktree
+  guard. `git --attr-source=HEAD worktree remove <managed>` used to reach real
+  Git unclassified because the option parser failed open; unknown global
+  options are now treated as significant, matching how a recognized
+  `-c key=value` already behaved, and both the attached and separated option
+  spellings are covered. Ordinary commands, read-only subcommands, unmanaged
+  worktrees, and disabled repositories still delegate to Git unchanged. (#325)
+- An add journal whose worktree directory vanished (an external `rm -rf`, a
+  cleared `/tmp`) is retired again. Git keeps such a registration and marks it
+  `prunable` rather than dropping it; Riftri treated any registration as live,
+  so `repair` reported nothing to do while `status` flagged the state forever
+  and `gc` could never reclaim the base — permanent once #324 stopped Git's
+  own expiry from clearing the entry. A `prunable` registration whose
+  destination is gone now counts as vanished at both sites that assumed
+  otherwise. (#337)
+- `riftri shell deactivate` no longer strips an unrelated `PATH` entry that
+  merely embeds the shim prefix in a parent segment (for example
+  `/opt/riftri-git-shim-tools/bin`). The process-shim sweep now matches on
+  each entry's final path component, which still removes stacked shims left by
+  nested `riftri exec` sessions. (#322)
+- The `PATH` walk that records the real Git for `riftri exec` and the shell
+  hooks can no longer select a shim or the running Riftri executable itself.
+  A half-deactivated shell — durable shim still on `PATH`, marker variable
+  cleared — used to bake Riftri in as the real Git, after which every Git
+  command re-entered the shim forever. The walk now skips shim directories
+  (reading their baked real-Git marker instead) and never selects the current
+  executable, matching the hardened stripped-environment resolver. (#328)
+- `riftri status` no longer describes a base it cannot verify as an unused
+  cache. Reference counts are derived from the journals that parsed; when some
+  cannot be read, the count is a lower bound, and the previous output
+  (`refs=0`, `in_use: false`, "retained cache; no active views") invited
+  deleting storage that live worktrees still depended on. The JSON now carries
+  `counts_complete` and a per-base `reference_count_complete`, `in_use` stays
+  true on an incomplete inventory, and the human line says the count is
+  unknown. Healthy output is unchanged. (#333)
+- `status` no longer promises that `riftri repair` removes an interrupted
+  journal-write temporary in directories repair's reaper deliberately does not
+  cover; those are reported as preserved, and the advice and the reaper now
+  share one definition so they cannot drift apart. (#331)
+- The repository cleanliness probe passes `--untracked-files=all`, so
+  `status.showUntrackedFiles=no` in repository or global configuration can no
+  longer make `riftri doctor` report a working tree with untracked content as
+  clean. (#330)
+- `remove_worktree_force` passes `--` before the worktree path, matching its
+  non-force sibling, so a selector beginning with `-` cannot be parsed as
+  options on the one path that bypasses Git's dirty-worktree checks. (#329)
+- Unsupported-platform messages for garbage collection, removal, move, and
+  prune name macOS, Linux, and Windows instead of claiming the features
+  require macOS. (#321)
+- npm installation works again end to end, and one registry-blocked package
+  name no longer breaks the whole release: the publisher continues past a
+  repeat refusal so the remaining packages still reach npm. (#345)
+- Website: the hero install box stacks cleanly on mobile (#318), the install
+  reference links meet the 44px touch-target minimum with a guard test (#320),
+  and the copy controls drop a non-conformant `aria-label` and derive their
+  failure guidance from the document they actually copy (#319).
+
 ## [0.3.5] - 2026-09-21
 
 ### Fixed
