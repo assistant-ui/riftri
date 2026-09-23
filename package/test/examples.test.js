@@ -61,3 +61,65 @@ test("the shared client documents the exit codes it branches on", () => {
 test("the custom harness guide points at the runnable examples", () => {
   assert.match(read("docs/custom-harness.md"), /\.\.\/examples\/|examples\//);
 });
+
+const os = require("node:os");
+const clientUrl = "file://" + path.join(root, "examples/lib/riftri.mjs");
+const loadClient = () => import(clientUrl);
+
+/** Write an executable fake `riftri` that runs `body` (an sh script). */
+function fakeBinary(t, body) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-example-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const bin = path.join(dir, "riftri");
+  fs.writeFileSync(bin, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  return bin;
+}
+
+test("riftri exec keeps Riftri flags before the -- payload boundary", async (t) => {
+  const { riftri } = await loadClient();
+  // The fake records its own argv, one per line.
+  const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "riftri-argv-")), "argv");
+  const bin = fakeBinary(t, `printf '%s\\n' "$@" > '${record}'`);
+  await riftri(["exec", "--", "agent", "--agent-flag"], { bin, json: false });
+  const argv = fs.readFileSync(record, "utf8").trim().split("\n");
+  const boundary = argv.indexOf("--");
+  assert.equal(argv.indexOf("--json-errors") < boundary, true, argv.join(" "));
+  assert.deepEqual(argv.slice(boundary), ["--", "agent", "--agent-flag"]);
+});
+
+test("malformed success output rejects instead of crashing the host", async (t) => {
+  const { riftri, RiftriError } = await loadClient();
+  const bin = fakeBinary(t, "printf '{bad'; exit 0");
+  await assert.rejects(riftri(["status"], { bin }), (error) => {
+    assert.ok(error instanceof RiftriError);
+    assert.match(error.message, /not JSON/);
+    return true;
+  });
+});
+
+test("a silent non-zero exit still carries a useful message", async (t) => {
+  const { riftri } = await loadClient();
+  const bin = fakeBinary(t, "exit 7");
+  await assert.rejects(riftri(["status"], { bin }), (error) => {
+    assert.equal(error.code, 7);
+    assert.equal(error.message, "riftri exited 7");
+    return true;
+  });
+});
+
+test("a signalled riftri rejects with a translated exit code", async (t) => {
+  const { riftri } = await loadClient();
+  const bin = fakeBinary(t, "kill -TERM $$");
+  await assert.rejects(riftri(["status"], { bin }), (error) => {
+    assert.equal(error.signal, "SIGTERM");
+    assert.equal(error.wasSignalled, true);
+    assert.equal(error.code, 143); // 128 + 15
+    return true;
+  });
+});
+
+test("run resolves a signalled child as 128 + signal, never null", async (t) => {
+  const { run } = await loadClient();
+  const code = await run("/bin/sh", ["-c", "kill -TERM $$"]);
+  assert.equal(code, 143);
+});

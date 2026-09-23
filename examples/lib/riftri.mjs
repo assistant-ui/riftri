@@ -14,13 +14,39 @@ export const EXIT = {
   POLICY: 3, // Riftri refused. Nothing changed. Fall back or stop.
 };
 
+/**
+ * Exit code for a signalled process, following the shell convention native
+ * `riftri exec` itself uses: 128 plus the signal number. Kept inline so this
+ * file stays copyable with no imports.
+ */
+const SIGNAL_NUMBERS = {
+  SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9,
+  SIGSEGV: 11, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15,
+};
+export function signalExitCode(signal) {
+  const number = SIGNAL_NUMBERS[signal];
+  return number === undefined ? null : 128 + number;
+}
+
 /** Thrown for any non-zero exit, carrying the parsed receipt when present. */
 export class RiftriError extends Error {
-  constructor(code, receipt, stderr) {
-    super(receipt?.message ?? stderr.trim() ?? `riftri exited ${code}`);
+  constructor(code, receipt, stderr, signal = null) {
+    // `||`, not `??`: an empty stderr string is not nullish, so `??` would keep
+    // it and hide the exit code behind an empty message.
+    super(
+      receipt?.message ||
+        stderr.trim() ||
+        (signal ? `riftri terminated by ${signal}` : `riftri exited ${code}`),
+    );
     this.name = "RiftriError";
-    this.code = code; // process exit code
-    this.receipt = receipt; // parsed --json-errors receipt, or null
+    this.code = code; // process exit code (128 + signal number when signalled)
+    this.receipt = receipt ?? null; // parsed --json-errors receipt, or null
+    this.signal = signal; // POSIX signal name when killed, else null
+  }
+
+  /** The process was killed by a signal rather than exiting on its own. */
+  get wasSignalled() {
+    return this.signal !== null;
   }
 
   /** Riftri declined before touching anything: safe to fall back. */
@@ -50,7 +76,7 @@ export class RiftriError extends Error {
 export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
   return new Promise((resolve, reject) => {
     const flags = json ? ["--json", "--json-errors"] : ["--json-errors"];
-    const child = spawn(bin, [...args, ...flags], {
+    const child = spawn(bin, withRiftriFlags(args, flags), {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -61,10 +87,32 @@ export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
     child.stderr.on("data", (chunk) => (stderr += chunk));
 
     child.on("error", reject); // riftri is not installed or not on PATH
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
+      // A signalled child reports a null exit code. Translate it so callers
+      // always see a number, matching native `riftri exec`.
+      if (signal) {
+        reject(new RiftriError(signalExitCode(signal) ?? EXIT.OPERATIONAL, null, stderr, signal));
+        return;
+      }
       if (code === EXIT.SUCCESS) {
         // Without --json the command prints human text, so do not parse it.
-        resolve(json && stdout.trim() ? JSON.parse(stdout) : null);
+        if (!json || !stdout.trim()) {
+          resolve(null);
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (error) {
+          // Throwing from a close handler is uncatchable and takes the host
+          // process down, so reject with a useful error instead.
+          reject(
+            new RiftriError(
+              EXIT.OPERATIONAL,
+              null,
+              `riftri ${args.join(" ")} returned output that is not JSON: ${error.message}\n${stdout.slice(0, 2000)}`,
+            ),
+          );
+        }
         return;
       }
       let receipt = null;
@@ -77,6 +125,17 @@ export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
       reject(new RiftriError(code, receipt, stderr));
     });
   });
+}
+
+/**
+ * Place Riftri's own flags before any `--`. Appending them puts them inside
+ * the payload `riftri exec` hands to the child, so they become the agent's
+ * arguments instead of Riftri's.
+ */
+function withRiftriFlags(args, flags) {
+  const boundary = args.indexOf("--");
+  if (boundary === -1) return [...args, ...flags];
+  return [...args.slice(0, boundary), ...flags, ...args.slice(boundary)];
 }
 
 /** True when this destination can actually get an optimized worktree. */
@@ -98,6 +157,10 @@ export function run(command, args, { cwd } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: "inherit" });
     child.on("error", reject);
-    child.on("close", (code) => resolve(code));
+    // A signalled child reports a null code; return 128 + signal number so the
+    // contract "resolves with an exit code" always holds.
+    child.on("close", (code, signal) =>
+      resolve(signal ? (signalExitCode(signal) ?? 1) : code),
+    );
   });
 }
