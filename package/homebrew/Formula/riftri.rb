@@ -2,28 +2,28 @@
 class Riftri < Formula
   desc "Lightweight Git workspaces for parallel development"
   homepage "https://riftri.dev"
-  version "0.3.5"
+  version "0.4.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/assistant-ui/riftri/releases/download/v0.3.5/riftri-darwin-arm64-v0.3.5.tar.gz"
-      sha256 "41fd6f799ffdcc9beb6b6edeccc91dc81ed0162f3213e1371809f626e350119c"
+      url "https://github.com/assistant-ui/riftri/releases/download/v0.4.0/riftri-darwin-arm64-v0.4.0.tar.gz"
+      sha256 "c58186077fdf4e0d672c75e7b1df77e0566f18e8bc06e8ec488d31666b56a237"
     end
     on_intel do
-      url "https://github.com/assistant-ui/riftri/releases/download/v0.3.5/riftri-darwin-x64-v0.3.5.tar.gz"
-      sha256 "e17efd032f2e83d2f5618288287a5b45155a0e5c3925ea5c632da55f5f497f36"
+      url "https://github.com/assistant-ui/riftri/releases/download/v0.4.0/riftri-darwin-x64-v0.4.0.tar.gz"
+      sha256 "52903844aa062c6a2d291378e006ea3b7693ff514b7de39075196f91b1173aff"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/assistant-ui/riftri/releases/download/v0.3.5/riftri-linux-arm64-gnu-v0.3.5.tar.gz"
-      sha256 "25597295a76e2262aed1af0afe62d3d6d4af22e7268cd804f29fee167fabe1ac"
+      url "https://github.com/assistant-ui/riftri/releases/download/v0.4.0/riftri-linux-arm64-gnu-v0.4.0.tar.gz"
+      sha256 "f3d65f6e4b2295d8305be858de26ae4c776d4a3867860852c4130aa4ce265d95"
     end
     on_intel do
-      url "https://github.com/assistant-ui/riftri/releases/download/v0.3.5/riftri-linux-x64-gnu-v0.3.5.tar.gz"
-      sha256 "1fa96dc8935d056b92a7116e3260cff5956e1aa0121221d8691596daed184154"
+      url "https://github.com/assistant-ui/riftri/releases/download/v0.4.0/riftri-linux-x64-gnu-v0.4.0.tar.gz"
+      sha256 "3e943bb2f6839b53df9c88f8f508aee92820f820e7e3ff9f8faa6303bea7b946"
     end
   end
 
