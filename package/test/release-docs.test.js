@@ -33,3 +33,23 @@ test("release-facing documentation matches current guarantees", () => {
   assert.match(guarantees, /Compact pristine view/);
   assert.doesNotMatch(guarantees, /Riftri has no forced managed removal/);
 });
+
+test("both Node API guides describe npm availability the same way", () => {
+  // The rendered page and the canonical Markdown are separate files, so they
+  // drifted: riftri.dev/docs/node-api still told readers npm was blocked long
+  // after 0.3.5 published. Guard both, not just the one that got edited.
+  for (const guide of ["docs/node-api.md", "website/content/guides/node-api.md"]) {
+    const text = read(guide);
+    assert.match(text, /npm install riftri/, `${guide} must show the install command`);
+    assert.match(text, /Windows on ARM64|Windows ARM64/, `${guide} must name the exception`);
+
+    assert.doesNotMatch(text, /blocked pending registry review/, `${guide} is stale`);
+    assert.doesNotMatch(text, /does not work yet/, `${guide} is stale`);
+    // client.js requires ./platform.js, so "copy this one file" never worked.
+    assert.doesNotMatch(
+      text,
+      /copy\s+`?package\/lib\/client\.js`?\s+into your project/,
+      `${guide} recommends an incomplete copy-only fallback`,
+    );
+  }
+});
