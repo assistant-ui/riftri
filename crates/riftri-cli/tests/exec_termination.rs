@@ -19,15 +19,140 @@ fn exec_propagates_normal_exit_status() {
 mod unix {
     use std::ffi::{OsStr, OsString};
     use std::fs::File;
-    use std::io::{BufRead, BufReader};
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::io::FromRawFd;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
     use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
+
+    /// Every blocking step in these fixtures is bounded by this. A hang here
+    /// used to block a whole `cargo test` run and leave the riftri proxy, the
+    /// Git shim, and the stand-in command alive after the interrupt.
+    fn fixture_timeout() -> Duration {
+        Duration::from_secs(
+            std::env::var("RIFTRI_TEST_TIMEOUT_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(60),
+        )
+    }
+
+    fn deadline() -> Instant {
+        Instant::now() + fixture_timeout()
+    }
+
+    /// Kill and reap a process, or a whole group when `group` is set. Safe to
+    /// call on an already-reaped child: ESRCH is the expected answer then.
+    fn terminate(child: &mut Child, group: bool) {
+        let pid = i32::try_from(child.id()).expect("child PID fits i32");
+        let target = if group { -pid } else { pid };
+        // SAFETY: the target is a process this fixture spawned.
+        unsafe { libc::kill(target, libc::SIGKILL) };
+        let _ = child.wait();
+    }
+
+    /// Block until `fd` has data or the deadline passes. Returns false on
+    /// timeout so the caller can report what it was waiting for.
+    fn wait_readable(fd: libc::c_int, deadline: Instant) -> bool {
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let mut poller = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let millis = libc::c_int::try_from(remaining.as_millis()).unwrap_or(libc::c_int::MAX);
+            // SAFETY: one initialized pollfd describing a descriptor we own.
+            let ready = unsafe { libc::poll(&mut poller, 1, millis) };
+            if ready > 0 {
+                return true;
+            }
+            if ready == 0 {
+                return false;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                panic!("poll for fixture output: {error}");
+            }
+        }
+    }
+
+    /// A line reader with a deadline. `BufReader::read_line` cannot be
+    /// interrupted, so a child that never writes the expected line blocks the
+    /// test forever.
+    struct BoundedLines<R> {
+        source: R,
+        fd: libc::c_int,
+        pending: Vec<u8>,
+    }
+
+    impl<R: std::io::Read> BoundedLines<R> {
+        fn new(source: R, fd: libc::c_int) -> Self {
+            BoundedLines {
+                source,
+                fd,
+                pending: Vec::new(),
+            }
+        }
+
+        /// The next line, or None at end of input. Panics on timeout, naming
+        /// `what` and dumping whatever arrived before the deadline.
+        fn next_line(&mut self, deadline: Instant, what: &str) -> Option<String> {
+            loop {
+                if let Some(index) = self.pending.iter().position(|&byte| byte == b'\n') {
+                    let line: Vec<u8> = self.pending.drain(..=index).collect();
+                    return Some(String::from_utf8_lossy(&line).into_owned());
+                }
+                if !wait_readable(self.fd, deadline) {
+                    panic!(
+                        "timed out after {:?} waiting for {what}; output so far: {:?}",
+                        fixture_timeout(),
+                        String::from_utf8_lossy(&self.pending),
+                    );
+                }
+                let mut chunk = [0u8; 4096];
+                match self.source.read(&mut chunk) {
+                    Ok(0) => return None,
+                    Ok(count) => self.pending.extend_from_slice(&chunk[..count]),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    // A pty master reports EIO once the last slave closes,
+                    // which is this reader's end of input.
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => return None,
+                    Err(error) => panic!("read fixture output while waiting for {what}: {error}"),
+                }
+            }
+        }
+    }
+
+    /// Wait for `child` to exit, killing its process group if it overruns.
+    fn bounded_exit_code(child: &mut Child, group: bool, what: &str) -> i32 {
+        let deadline = deadline();
+        loop {
+            match child.try_wait().expect("poll for fixture exit") {
+                Some(status) => {
+                    return status
+                        .code()
+                        .unwrap_or_else(|| panic!("{what} exited without a code: {status:?}"));
+                }
+                None if Instant::now() >= deadline => {
+                    let pid = child.id();
+                    terminate(child, group);
+                    panic!(
+                        "timed out after {:?} waiting for {what} (pid {pid}); \
+                         its process group was killed",
+                        fixture_timeout(),
+                    );
+                }
+                None => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+    }
 
     /// Install `SIG_IGN` for `signals` in a forked child before it execs,
     /// reproducing what `nohup` does for SIGHUP and what a shell without job
@@ -104,6 +229,19 @@ mod unix {
     struct SupervisedExec {
         riftri: Child,
         shim_root: TempDir,
+        reaped: bool,
+    }
+
+    impl Drop for SupervisedExec {
+        fn drop(&mut self) {
+            // Runs on the panic path too, so a failed assertion cannot leave
+            // riftri and its stand-in Git alive. This child did not setsid, so
+            // only the process itself may be signalled; killing its group
+            // would kill the test runner.
+            if !self.reaped {
+                terminate(&mut self.riftri, false);
+            }
+        }
     }
 
     impl SupervisedExec {
@@ -127,19 +265,24 @@ mod unix {
             let riftri = unsafe { ignore_before_exec(&mut command, ignored) }
                 .spawn()
                 .expect("start riftri exec");
-            SupervisedExec { riftri, shim_root }
+            SupervisedExec {
+                riftri,
+                shim_root,
+                reaped: false,
+            }
         }
 
         /// Read PIDs that the scoped script printed, one per line.
         fn read_pids(&mut self, count: usize) -> Vec<i32> {
             let stdout = self.riftri.stdout.take().expect("riftri stdout is piped");
-            let mut lines = BufReader::new(stdout).lines();
+            let fd = stdout.as_raw_fd();
+            let mut lines = BoundedLines::new(stdout, fd);
+            let deadline = deadline();
             (0..count)
                 .map(|index| {
                     lines
-                        .next()
+                        .next_line(deadline, &format!("scoped command PID {index}"))
                         .unwrap_or_else(|| panic!("scoped command printed PID {index}"))
-                        .expect("read scoped command PID")
                         .trim()
                         .parse()
                         .expect("scoped command PID is numeric")
@@ -148,8 +291,8 @@ mod unix {
         }
 
         fn wait_exit_code(mut self) -> i32 {
-            let status = self.riftri.wait().expect("wait for riftri exec");
-            let code = status.code().expect("riftri exec exits with a code");
+            let code = bounded_exit_code(&mut self.riftri, false, "riftri exec");
+            self.reaped = true;
             assert_shim_removed(self.shim_root.path());
             code
         }
@@ -273,8 +416,21 @@ mod unix {
     /// command shares riftri's foreground process group.
     struct InteractiveExec {
         riftri: Child,
-        output: BufReader<File>,
+        output: BoundedLines<File>,
         shim_root: TempDir,
+        reaped: bool,
+    }
+
+    impl Drop for InteractiveExec {
+        fn drop(&mut self) {
+            // This child is a session leader from setsid(), so its process
+            // group holds riftri, the Git shim, and the stand-in command.
+            // Killing the group on every path, panics included, is what stops
+            // a failed run from leaving them behind.
+            if !self.reaped {
+                terminate(&mut self.riftri, true);
+            }
+        }
     }
 
     impl InteractiveExec {
@@ -323,10 +479,12 @@ mod unix {
             let riftri = unsafe { ignore_before_exec(&mut command, ignored) }
                 .spawn()
                 .expect("start riftri exec on a pty");
+            let master_fd = master.as_raw_fd();
             InteractiveExec {
                 riftri,
-                output: BufReader::new(master),
+                output: BoundedLines::new(master, master_fd),
                 shim_root,
+                reaped: false,
             }
         }
 
@@ -336,10 +494,13 @@ mod unix {
 
         /// Read pty output lines until `marker` appears on its own line.
         fn await_marker(&mut self, marker: &str) {
+            let deadline = deadline();
+            let what = format!("marker {marker:?}");
             loop {
-                let mut line = String::new();
-                let read = self.output.read_line(&mut line).expect("read pty output");
-                assert!(read > 0, "pty closed before {marker:?} appeared");
+                let line = self
+                    .output
+                    .next_line(deadline, &what)
+                    .unwrap_or_else(|| panic!("pty closed before {marker:?} appeared"));
                 if line.trim() == marker {
                     return;
                 }
@@ -348,10 +509,12 @@ mod unix {
 
         /// Read pty output lines until one is a PID.
         fn read_pid(&mut self) -> i32 {
+            let deadline = deadline();
             loop {
-                let mut line = String::new();
-                let read = self.output.read_line(&mut line).expect("read pty output");
-                assert!(read > 0, "pty closed before a PID appeared");
+                let line = self
+                    .output
+                    .next_line(deadline, "a scoped command PID")
+                    .unwrap_or_else(|| panic!("pty closed before a PID appeared"));
                 if let Ok(pid) = line.trim().parse() {
                     return pid;
                 }
@@ -359,8 +522,8 @@ mod unix {
         }
 
         fn wait_exit_code(mut self) -> i32 {
-            let status = self.riftri.wait().expect("wait for riftri exec");
-            let code = status.code().expect("riftri exec exits with a code");
+            let code = bounded_exit_code(&mut self.riftri, true, "interactive riftri exec");
+            self.reaped = true;
             assert_shim_removed(self.shim_root.path());
             code
         }
@@ -488,7 +651,16 @@ mod unix {
             // artifact rather than from the SIGTERM forwarding under test.
             std::fs::write(
                 &executable,
-                "#!/bin/sh\ntrap '' HUP\necho \"$$\"\nexec /bin/sleep 300\n",
+                // riftri resolves Git aliases before planning, so the shim
+                // runs `git config --get alias.<command>` first. A stand-in
+                // that sleeps for every invocation never answers that probe
+                // and the fixture deadlocks on itself. Real Git exits 1 for an
+                // unset alias, so do that and sleep only for the real command.
+                "#!/bin/sh\n\
+                 case \"$1\" in config) exit 1 ;; esac\n\
+                 trap '' HUP\n\
+                 echo \"$$\"\n\
+                 exec /bin/sleep 300\n",
             )
             .expect("write real-Git stand-in");
             std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
