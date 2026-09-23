@@ -1623,6 +1623,25 @@ impl Git {
         self.output_os(path, &arguments)
     }
 
+    /// Whether `path` lies outside any Git repository, as opposed to inside
+    /// an unhealthy one. `rev-parse --git-dir` needs repository discovery but
+    /// no object reads, so it succeeds in a repository whose object store is
+    /// damaged and fails outside one. The C locale is forced so the
+    /// classification never depends on translated error text.
+    pub fn repository_absent(&self, path: &Path) -> Result<bool, GitError> {
+        let arguments = [OsString::from("rev-parse"), OsString::from("--git-dir")];
+        let output = self.output_os_with_env(
+            Some(path),
+            &arguments,
+            &[
+                (OsStr::new("LC_ALL"), OsStr::new("C")),
+                (OsStr::new("LANGUAGE"), OsStr::new("")),
+            ],
+        )?;
+        Ok(!output.status.success()
+            && String::from_utf8_lossy(&output.stderr).contains("not a git repository"))
+    }
+
     fn output_os(&self, path: Option<&Path>, arguments: &[OsString]) -> Result<Output, GitError> {
         self.output_os_with_env(path, arguments, &[])
     }

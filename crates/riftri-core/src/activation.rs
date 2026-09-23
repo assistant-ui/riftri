@@ -219,8 +219,23 @@ fn plan_git_command_inner(
             .unwrap_or(context.repository),
         None => context.repository,
     };
-    let Some(activation) = activation_for_proxy(&repository)? else {
-        return Ok(GitProxyPlan::Passthrough);
+    let activation = match activation_for_proxy(&repository)? {
+        ProxyRepository::Absent => return Ok(GitProxyPlan::Passthrough),
+        ProxyRepository::Inspected(activation) => activation,
+        ProxyRepository::Unhealthy { enabled, error } => {
+            let subcommand = arguments
+                .get(context.command_index + 1)
+                .map(|subcommand| subcommand.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if enabled && matches!(subcommand.as_str(), "add" | "remove" | "move" | "prune") {
+                return Err(unsupported(format!(
+                    "refusing `git worktree {subcommand}` because the repository could not be inspected ({error}); repair the repository first, or set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+                )));
+            }
+            // Read-only worktree commands, and repositories that never opted
+            // in, stay ordinary Git even when unhealthy.
+            return Ok(GitProxyPlan::Passthrough);
+        }
     };
     if !activation.enabled {
         return Ok(GitProxyPlan::Passthrough);
@@ -1051,19 +1066,45 @@ fn repository_identity_with_git(
     })
 }
 
-fn activation_for_proxy(path: &Path) -> Result<Option<RepositoryActivation>, ActivationError> {
+/// What the proxy is standing in when it plans a `git worktree` command.
+enum ProxyRepository {
+    /// No repository here at all: every command is ordinary Git.
+    Absent,
+    /// A healthy repository, inspected.
+    Inspected(RepositoryActivation),
+    /// A repository exists but could not be inspected. For an enabled
+    /// repository this must fail closed on lifecycle commands: treating the
+    /// error as "no repository" let `git worktree remove --force <managed>`
+    /// run against a corrupted repository outside the journal.
+    Unhealthy { enabled: bool, error: GitError },
+}
+
+fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError> {
     let git = Git::default();
     let repository = match git.inspect_repository(path) {
         Ok(repository) => repository,
-        Err(_) => return Ok(None),
+        Err(error) => {
+            if git.repository_absent(path)? {
+                return Ok(ProxyRepository::Absent);
+            }
+            // Repository discovery works even over a damaged object store, so
+            // the opt-in flag is still readable; a repository that never
+            // enabled Riftri stays ordinary Git. When even the flag cannot be
+            // read, claim enablement: an unprovable opt-out fails closed.
+            let enabled = git
+                .local_config_bool(path, ENABLED_CONFIG_KEY)
+                .map(|enabled| enabled.unwrap_or(false))
+                .unwrap_or(true);
+            return Ok(ProxyRepository::Unhealthy { enabled, error });
+        }
     };
     let Some(root) = repository.root else {
-        return Ok(None);
+        return Ok(ProxyRepository::Absent);
     };
     let enabled = git
         .local_config_bool(&root, ENABLED_CONFIG_KEY)?
         .unwrap_or(false);
-    Ok(Some(RepositoryActivation {
+    Ok(ProxyRepository::Inspected(RepositoryActivation {
         repository: root,
         common_git_dir: repository.identity.common_git_dir,
         enabled,
@@ -2704,6 +2745,105 @@ mod tests {
                 "{arguments:?} was not delegated to Git"
             );
         }
+    }
+
+    /// Delete the loose object behind `HEAD` so repository discovery still
+    /// works while inspection fails — the shape a damaged object store has.
+    fn corrupt_head_object(repository: &Path) {
+        let output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repository)
+            .output()
+            .expect("resolve HEAD");
+        let oid = String::from_utf8(output.stdout).expect("object id");
+        let oid = oid.trim();
+        let object = repository
+            .join(".git/objects")
+            .join(&oid[..2])
+            .join(&oid[2..]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&object)
+                .expect("object metadata")
+                .permissions();
+            permissions.set_mode(permissions.mode() | 0o200);
+            fs::set_permissions(&object, permissions).expect("make object writable");
+        }
+        fs::remove_file(&object).expect("remove loose object");
+    }
+
+    /// An inspection failure used to classify as "not a repository" and pass
+    /// every command through, so `git worktree remove --force <managed>` ran
+    /// against a corrupted repository outside the journal. An enabled but
+    /// unhealthy repository must refuse the lifecycle subcommands instead —
+    /// while read-only subcommands, repositories that never opted in, and
+    /// plain non-repository directories all stay ordinary Git.
+    #[test]
+    fn unhealthy_repositories_fail_closed_for_lifecycle_commands() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        corrupt_head_object(fixture.path());
+
+        for subcommand in ["add", "remove", "move", "prune"] {
+            let arguments = [
+                OsString::from(super::WORKTREE_SUBCOMMAND),
+                OsString::from(subcommand),
+                OsString::from("../somewhere"),
+            ];
+            let error = plan_git_command(fixture.path(), &arguments)
+                .expect_err("an unhealthy enabled repository must refuse lifecycle commands");
+            let message = error.to_string();
+            assert!(
+                message.contains("could not be inspected") && message.contains(BYPASS_ENV),
+                "{subcommand}: {message}"
+            );
+        }
+        assert!(
+            matches!(
+                plan_git_command(
+                    fixture.path(),
+                    &[
+                        OsString::from(super::WORKTREE_SUBCOMMAND),
+                        OsString::from("list")
+                    ],
+                )
+                .expect("plan read-only subcommand"),
+                GitProxyPlan::Passthrough
+            ),
+            "read-only worktree commands stay ordinary Git"
+        );
+
+        // A repository that never opted in stays ordinary Git even unhealthy.
+        let unenabled = repository_fixture();
+        corrupt_head_object(unenabled.path());
+        assert!(matches!(
+            plan_git_command(
+                unenabled.path(),
+                &[
+                    OsString::from(super::WORKTREE_SUBCOMMAND),
+                    OsString::from("remove"),
+                    OsString::from("../view"),
+                ],
+            )
+            .expect("plan in an unenabled unhealthy repository"),
+            GitProxyPlan::Passthrough
+        ));
+
+        // Outside any repository, everything is ordinary Git.
+        let elsewhere = tempdir().expect("plain directory");
+        assert!(matches!(
+            plan_git_command(
+                elsewhere.path(),
+                &[
+                    OsString::from(super::WORKTREE_SUBCOMMAND),
+                    OsString::from("remove"),
+                    OsString::from("../view"),
+                ],
+            )
+            .expect("plan outside a repository"),
+            GitProxyPlan::Passthrough
+        ));
     }
 
     #[test]
