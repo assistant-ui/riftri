@@ -54,10 +54,18 @@ main() (
   case "$system" in
     Darwin) platform="darwin-$architecture" ;;
     Linux)
+      # The GNU build is compiled against glibc $glibc_floor. An older host
+      # would install it and then fail to start, so it gets the static musl
+      # build instead, which has no libc requirement at all.
+      glibc_floor=2.34
+      platform="linux-$architecture-musl"
       if libc=$(getconf GNU_LIBC_VERSION 2>/dev/null) && [[ $libc == glibc\ * ]]; then
-        platform="linux-$architecture-gnu"
-      else
-        platform="linux-$architecture-musl"
+        if printf '%s\n%s\n' "$glibc_floor" "${libc#glibc }" | sort --check=silent --version-sort; then
+          platform="linux-$architecture-gnu"
+        else
+          printf 'Detected %s, older than the glibc %s build; installing the static musl build.\n' \
+            "$libc" "$glibc_floor" >&2
+        fi
       fi
       ;;
     *) fail "Unsupported system: $system. Windows users: use the PowerShell direct-download guide."

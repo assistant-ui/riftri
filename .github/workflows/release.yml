@@ -26,18 +26,23 @@ jobs:
             target: x86_64-apple-darwin
             package: riftri-darwin-x64
             executable: riftri
-          - os: ubuntu-24.04-arm
+          # GNU builds pin the oldest supported glibc. Building on a newer
+          # image makes std link symbols that image happens to have, which is
+          # how v0.4.0 shipped needing GLIBC_2.39. See docs/install.md.
+          - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             package: riftri-linux-arm64-gnu
             executable: riftri
+            glibc: true
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             package: riftri-linux-arm64-musl
             executable: riftri
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             package: riftri-linux-x64-gnu
             executable: riftri
+            glibc: true
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             package: riftri-linux-x64-musl
@@ -68,6 +73,21 @@ jobs:
       - name: Smoke-test native binary
         shell: bash
         run: '"target/${{ matrix.target }}/release/${{ matrix.executable }}" --version'
+
+      # A GNU binary that needs a newer glibc than the floor installs cleanly
+      # and then cannot start, so the release must fail here instead.
+      - name: Verify glibc compatibility floor
+        if: matrix.glibc
+        run: node package/scripts/check-glibc-floor.mjs "target/${{ matrix.target }}/release/${{ matrix.executable }}"
+
+      # Symbol versions prove what the loader will accept; this proves the
+      # binary actually runs on the oldest distribution we claim to support.
+      - name: Run on the oldest supported glibc
+        if: matrix.glibc
+        run: |
+          docker run --rm \
+            --volume "$PWD/target/${{ matrix.target }}/release:/riftri:ro" \
+            rockylinux:9 /riftri/${{ matrix.executable }} --version
 
       - name: Upload native binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
