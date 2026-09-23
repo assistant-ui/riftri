@@ -74,6 +74,26 @@ plus Git LFS, and compacting a sparse worktree all still refuse. See
 [sparse checkout](sparse-checkout.md). Submodules and broader sparse support
 are tracked in the [roadmap](../ROADMAP.md).
 
+### `riftri` fails to start with a GLIBC version error
+
+```
+riftri: /lib64/libc.so.6: version `GLIBC_2.39' not found (required by riftri)
+```
+
+The GNU build requires glibc 2.34 or newer and this host is older. Nothing is
+wrong with the download; the binary cannot be loaded at all.
+
+Use the statically linked musl archive instead, which has no libc requirement:
+
+```sh
+curl -fsSL https://riftri.dev/install.sh | bash
+```
+
+Current `install.sh` detects the host glibc and picks musl automatically below
+the floor. If you downloaded an archive by hand, take the
+`riftri-linux-<arch>-musl` one. See
+[the glibc requirement](install.md#linux-glibc-requirement).
+
 ### Git LFS paths are rejected
 
 Riftri accepts a deliberately narrow, deterministic LFS profile: canonical

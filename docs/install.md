@@ -82,6 +82,19 @@ Linux downloads select separate GNU/glibc and musl builds. If the executable
 reports a missing or incompatible runtime, choose the matching libc archive or
 build from source instead of treating it as a filesystem capability failure.
 
+### Linux glibc requirement
+
+The GNU archives require **glibc 2.34 or newer**, which covers RHEL 9,
+Debian 12, Ubuntu 22.04, and anything later. Release CI both checks the
+binaries' ELF symbol requirements against that floor and runs each one on a
+glibc 2.34 image, so the number is measured rather than assumed.
+
+On an older host, use the musl archive. It is statically linked and has no
+libc requirement, and `install.sh` selects it automatically when it detects a
+glibc below the floor. A GNU binary on a host below the floor does not
+degrade gracefully: it fails at load with
+`version 'GLIBC_2.xx' not found`.
+
 The checksum detects corrupted or mismatched downloads; it is not a separate
 signature or a notarization claim. Obtain both files over HTTPS from the
 expected repository. Stop if checksum verification fails.

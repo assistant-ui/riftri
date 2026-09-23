@@ -61,8 +61,8 @@ const tool = path.basename(process.argv[1]);
 if (tool === 'uname') {
   process.stdout.write(args[0] === '-s' ? process.env.TEST_OS : process.env.TEST_ARCH);
 } else if (tool === 'getconf') {
-  if (process.env.TEST_MUSL) process.exit(1);
-  process.stdout.write('glibc 2.31');
+  if (process.env.TEST_MUSL && !process.env.TEST_GLIBC) process.exit(1);
+  process.stdout.write(process.env.TEST_GLIBC || 'glibc 2.39');
 } else {
   fs.appendFileSync(process.env.TEST_REQUESTS, JSON.stringify(args) + '\\n');
   if (!args.includes('--fail') || !args.includes('--location') || !args.includes('--proto') || !args.includes('--proto-redir') || !args.includes('=https')) process.exit(90);
@@ -90,6 +90,9 @@ if (tool === 'uname') {
     TEST_ARCH: options.arch || "arm64",
     TEST_LATEST: options.latest || `${release}/tag/v${version}`,
     TEST_MUSL: options.musl ? "1" : "",
+    // A host at or above the floor gets the GNU build; below it, install.sh
+    // must fall back to the static musl archive on its own.
+    TEST_GLIBC: options.glibc ? `glibc ${options.glibc}` : "",
     TEST_NETWORK_FAIL: options.networkFail ? "1" : "",
   };
   return {
@@ -106,6 +109,35 @@ if (tool === 'uname') {
       assert.deepEqual(fs.readdirSync(installDir), ["riftri"]);
     },
   };
+}
+
+// v0.4.0's GNU build needed GLIBC_2.39, so it installed cleanly on RHEL 9,
+// Debian 12, and Ubuntu 22.04 and then failed at load. The installer must not
+// hand a host a binary it cannot start.
+for (const [arch, platform, glibc] of [
+  ["x86_64", "linux-x64-musl", "2.31"],
+  ["aarch64", "linux-arm64-musl", "2.28"],
+]) {
+  test(`piped installer takes musl when glibc ${glibc} is below the floor`, { skip: !unix }, (t) => {
+    const f = fixture(t, { os: "Linux", arch, platform, musl: true, glibc });
+    const result = f.run();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(f.requests(), new RegExp(platform), "must download the static build");
+    assert.doesNotMatch(f.requests(), /-gnu-/, "must not download the GNU build");
+    assert.match(result.stderr, new RegExp(`older than the glibc .* build`), "must say why");
+  });
+}
+
+for (const [arch, platform] of [
+  ["x86_64", "linux-x64-gnu"],
+  ["aarch64", "linux-arm64-gnu"],
+]) {
+  test(`piped installer keeps GNU exactly at the floor on ${arch}`, { skip: !unix }, (t) => {
+    // 2.34 is RHEL 9. An off-by-one in the comparison would push it to musl.
+    const f = fixture(t, { os: "Linux", arch, platform, glibc: "2.34" });
+    assert.equal(f.run().status, 0);
+    assert.match(f.requests(), new RegExp(platform));
+  });
 }
 
 test("Bash installer is syntactically valid", { skip: !unix }, () => {
