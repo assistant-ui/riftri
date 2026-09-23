@@ -19,7 +19,6 @@ fn exec_propagates_normal_exit_status() {
 mod unix {
     use std::ffi::{OsStr, OsString};
     use std::fs::File;
-    use std::io::{BufRead, BufReader};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::io::FromRawFd;
     use std::os::unix::process::CommandExt;
@@ -28,6 +27,114 @@ mod unix {
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
+
+    /// Longest any single fixture step may block. The interactive fixtures
+    /// read a pty and wait on children; without a bound, one wedged child
+    /// hangs the whole test run and an interrupted run leaves the process
+    /// tree orphaned (#366). Generous against loaded CI: normal steps finish
+    /// in milliseconds.
+    const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
+
+    /// Line reader with a deadline on every read, for pty masters and pipes.
+    ///
+    /// A pty master read reports `EIO` on Linux once the child side is gone —
+    /// the pty's spelling of end-of-file — so both that and a zero-length
+    /// read end the stream instead of failing it.
+    struct BoundedLines {
+        source: File,
+        buffered: Vec<u8>,
+    }
+
+    impl BoundedLines {
+        fn new(source: File) -> Self {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: fcntl on an owned, open descriptor.
+            unsafe {
+                let flags = libc::fcntl(source.as_raw_fd(), libc::F_GETFL);
+                assert!(flags != -1, "F_GETFL: {}", std::io::Error::last_os_error());
+                assert!(
+                    libc::fcntl(source.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) != -1,
+                    "F_SETFL: {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+            BoundedLines {
+                source,
+                buffered: Vec::new(),
+            }
+        }
+
+        /// Next full line within the deadline; `None` once the stream ends.
+        /// Panics — instead of hanging — when nothing arrives in time.
+        fn next_line(&mut self, waiting_for: &str) -> Option<String> {
+            use std::io::Read;
+            use std::os::unix::io::AsRawFd;
+            let deadline = Instant::now() + FIXTURE_DEADLINE;
+            loop {
+                if let Some(newline) = self.buffered.iter().position(|byte| *byte == b'\n') {
+                    let line: Vec<u8> = self.buffered.drain(..=newline).collect();
+                    return Some(String::from_utf8_lossy(&line).trim_end().to_owned());
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    remaining > Duration::ZERO,
+                    "no output within {FIXTURE_DEADLINE:?} while waiting for {waiting_for}; \
+                     partial output: {:?}",
+                    String::from_utf8_lossy(&self.buffered)
+                );
+                let mut poll = libc::pollfd {
+                    fd: self.source.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let timeout =
+                    libc::c_int::try_from(remaining.as_millis().min(1_000)).expect("poll timeout");
+                // SAFETY: polls one valid descriptor owned by this struct.
+                let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
+                if ready == 0 {
+                    continue;
+                }
+                assert!(ready > 0, "poll: {}", std::io::Error::last_os_error());
+                let mut chunk = [0_u8; 512];
+                match self.source.read(&mut chunk) {
+                    Ok(0) => return self.trailing_line(),
+                    Ok(count) => self.buffered.extend_from_slice(&chunk[..count]),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) if error.raw_os_error() == Some(libc::EIO) => {
+                        return self.trailing_line();
+                    }
+                    Err(error) => panic!("read fixture output: {error}"),
+                }
+            }
+        }
+
+        fn trailing_line(&mut self) -> Option<String> {
+            if self.buffered.is_empty() {
+                return None;
+            }
+            let line = String::from_utf8_lossy(&self.buffered)
+                .trim_end()
+                .to_owned();
+            self.buffered.clear();
+            Some(line)
+        }
+    }
+
+    /// Wait for `child` within the deadline; panic — instead of hanging — when
+    /// it never exits. The caller's `Drop` then kills the process tree.
+    fn wait_bounded(child: &mut Child, what: &str) -> std::process::ExitStatus {
+        let deadline = Instant::now() + FIXTURE_DEADLINE;
+        loop {
+            if let Some(status) = child.try_wait().expect("poll child status") {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{what} still running after {FIXTURE_DEADLINE:?}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
 
     /// Install `SIG_IGN` for `signals` in a forked child before it execs,
     /// reproducing what `nohup` does for SIGHUP and what a shell without job
@@ -133,13 +240,12 @@ mod unix {
         /// Read PIDs that the scoped script printed, one per line.
         fn read_pids(&mut self, count: usize) -> Vec<i32> {
             let stdout = self.riftri.stdout.take().expect("riftri stdout is piped");
-            let mut lines = BufReader::new(stdout).lines();
+            let mut lines = BoundedLines::new(File::from(std::os::fd::OwnedFd::from(stdout)));
             (0..count)
                 .map(|index| {
                     lines
-                        .next()
+                        .next_line("a scoped command PID")
                         .unwrap_or_else(|| panic!("scoped command printed PID {index}"))
-                        .expect("read scoped command PID")
                         .trim()
                         .parse()
                         .expect("scoped command PID is numeric")
@@ -148,10 +254,21 @@ mod unix {
         }
 
         fn wait_exit_code(mut self) -> i32 {
-            let status = self.riftri.wait().expect("wait for riftri exec");
+            let status = wait_bounded(&mut self.riftri, "supervised riftri exec");
             let code = status.code().expect("riftri exec exits with a code");
             assert_shim_removed(self.shim_root.path());
             code
+        }
+    }
+
+    impl Drop for SupervisedExec {
+        /// A panicking or interrupted test must not leave the supervised
+        /// riftri (and through it the scoped command) running.
+        fn drop(&mut self) {
+            if let Ok(None) = self.riftri.try_wait() {
+                let _ = self.riftri.kill();
+                let _ = self.riftri.wait();
+            }
         }
     }
 
@@ -273,8 +390,21 @@ mod unix {
     /// command shares riftri's foreground process group.
     struct InteractiveExec {
         riftri: Child,
-        output: BufReader<File>,
+        output: BoundedLines,
         shim_root: TempDir,
+    }
+
+    impl Drop for InteractiveExec {
+        /// The fixture runs riftri as its own session leader, so a panicking
+        /// or interrupted test can reap the entire interactive process tree
+        /// by signalling that group — this is what previously stayed behind
+        /// as orphans when the unbounded reads were interrupted.
+        fn drop(&mut self) {
+            if let Ok(None) = self.riftri.try_wait() {
+                signal(-self.pid(), libc::SIGKILL);
+                let _ = self.riftri.wait();
+            }
+        }
     }
 
     impl InteractiveExec {
@@ -325,7 +455,7 @@ mod unix {
                 .expect("start riftri exec on a pty");
             InteractiveExec {
                 riftri,
-                output: BufReader::new(master),
+                output: BoundedLines::new(master),
                 shim_root,
             }
         }
@@ -337,9 +467,10 @@ mod unix {
         /// Read pty output lines until `marker` appears on its own line.
         fn await_marker(&mut self, marker: &str) {
             loop {
-                let mut line = String::new();
-                let read = self.output.read_line(&mut line).expect("read pty output");
-                assert!(read > 0, "pty closed before {marker:?} appeared");
+                let line = self
+                    .output
+                    .next_line(marker)
+                    .unwrap_or_else(|| panic!("pty closed before {marker:?} appeared"));
                 if line.trim() == marker {
                     return;
                 }
@@ -349,9 +480,10 @@ mod unix {
         /// Read pty output lines until one is a PID.
         fn read_pid(&mut self) -> i32 {
             loop {
-                let mut line = String::new();
-                let read = self.output.read_line(&mut line).expect("read pty output");
-                assert!(read > 0, "pty closed before a PID appeared");
+                let line = self
+                    .output
+                    .next_line("a PID")
+                    .expect("pty closed before a PID appeared");
                 if let Ok(pid) = line.trim().parse() {
                     return pid;
                 }
@@ -359,7 +491,7 @@ mod unix {
         }
 
         fn wait_exit_code(mut self) -> i32 {
-            let status = self.riftri.wait().expect("wait for riftri exec");
+            let status = wait_bounded(&mut self.riftri, "interactive riftri exec");
             let code = status.code().expect("riftri exec exits with a code");
             assert_shim_removed(self.shim_root.path());
             code
