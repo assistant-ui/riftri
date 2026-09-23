@@ -9,6 +9,7 @@
 
 const { spawn } = require("node:child_process");
 const { resolveBinary } = require("./platform.js");
+const { signalExitCode } = require("./signals.js");
 
 /** Process exit codes. Documented in docs/cli.md. */
 const EXIT_SUCCESS = 0;
@@ -27,11 +28,23 @@ const REPORTING = new Set([
 ]);
 
 class RiftriError extends Error {
-  constructor(exitCode, receipt, stderr) {
-    super(receipt?.message || stderr.trim() || `riftri exited ${exitCode}`);
+  constructor(exitCode, receipt, stderr, signal = null) {
+    super(
+      receipt?.message ||
+        stderr.trim() ||
+        (signal ? `riftri terminated by ${signal}` : `riftri exited ${exitCode}`),
+    );
     this.name = "RiftriError";
+    // Always a number. A signalled process reports 128 + the signal number,
+    // the convention native `riftri exec` already uses for its own children.
     this.exitCode = exitCode;
+    this.signal = signal;
     this.receipt = receipt ?? null;
+  }
+
+  /** The process was killed rather than exiting on its own. */
+  get wasSignalled() {
+    return this.signal !== null;
   }
 
   /** Riftri declined before touching anything. Falling back is safe. */
@@ -53,6 +66,18 @@ class RiftriError extends Error {
   get needsRepair() {
     return this.receipt?.recovery === "required";
   }
+}
+
+/**
+ * Place Riftri's own flags before any `--`. Appending them instead puts them
+ * inside the payload `riftri exec` hands to the child, which then fails on a
+ * flag meant for Riftri.
+ */
+function withRiftriFlags(args, flags) {
+  if (flags.length === 0) return [...args];
+  const boundary = args.indexOf("--");
+  if (boundary === -1) return [...args, ...flags];
+  return [...args.slice(0, boundary), ...flags, ...args.slice(boundary)];
 }
 
 function flagsFor(options) {
@@ -104,7 +129,7 @@ class Riftri {
     return new Promise((resolve, reject) => {
       let child;
       try {
-        child = spawn(this.#executable(), [...args, ...flags], {
+        child = spawn(this.#executable(), withRiftriFlags(args, flags), {
           cwd,
           stdio: ["ignore", "pipe", "pipe"],
         });
@@ -117,9 +142,33 @@ class Riftri {
       child.stdout.on("data", (chunk) => (stdout += chunk));
       child.stderr.on("data", (chunk) => (stderr += chunk));
       child.on("error", reject);
-      child.on("close", (exitCode) => {
+      child.on("close", (exitCode, signal) => {
+        // A signalled child reports a null exit code. Translate it rather than
+        // letting `null` reach callers through a field typed as a number.
+        if (signal) {
+          const code = signalExitCode(signal) ?? EXIT_OPERATIONAL;
+          reject(new RiftriError(code, null, stderr, signal));
+          return;
+        }
         if (exitCode === EXIT_SUCCESS) {
-          resolve(json && stdout.trim() ? JSON.parse(stdout) : null);
+          if (!json || !stdout.trim()) {
+            resolve(null);
+            return;
+          }
+          try {
+            resolve(JSON.parse(stdout));
+          } catch (error) {
+            // Thrown from a close handler this would be uncatchable and would
+            // take the host process down, so it has to reject instead.
+            reject(
+              new RiftriError(
+                EXIT_OPERATIONAL,
+                null,
+                `riftri ${args.join(" ")} returned output that is not JSON: ` +
+                  `${error.message}\n${stdout.slice(0, 2000)}`,
+              ),
+            );
+          }
           return;
         }
         let receipt = null;
@@ -148,13 +197,21 @@ class Riftri {
     return this.run(["backends", ...target]);
   }
 
-  /** True when this destination can get an optimized worktree. */
+  /**
+   * True when this destination can get an optimized worktree.
+   *
+   * `false` is an answer from Riftri: either the report says no backend is
+   * active, or Riftri refused this destination outright. A broken
+   * installation, an unreadable repository, or any other unexpected failure
+   * rejects instead, so a caller can tell "not supported here" apart from
+   * "this client cannot run at all".
+   */
   async isOptimizable(destination) {
     try {
       const report = await this.doctor(destination ? { destination } : {});
       return Boolean(report?.cow_backend_active);
     } catch (error) {
-      if (error.code === "ENOENT" || error instanceof RiftriError === false) return false;
+      if (error instanceof RiftriError && error.isPolicyRefusal) return false;
       throw error;
     }
   }
