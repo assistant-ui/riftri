@@ -1103,6 +1103,38 @@ struct CommandContext {
     git_directory: Option<PathBuf>,
     command_index: usize,
     global_options: GlobalOptionScope,
+    /// Aliases defined for this one invocation via `-c alias.<name>=<body>`
+    /// or `--config-env=alias.<name>=<variable>`. Git gives these the highest
+    /// configuration precedence, so an alias planner that only reads the
+    /// repository's stored configuration never sees them — which let
+    /// `git -c 'alias.x=worktree remove --force' x <managed>` reach real Git
+    /// unclassified. Names are lowercased (configuration keys are
+    /// ASCII-case-insensitive) and later entries win at lookup time.
+    invocation_aliases: Vec<(String, String)>,
+}
+
+/// Record a `key=value` invocation-configuration assignment when the key
+/// names an alias. Entries Git would refuse to use — a missing `=`, an empty
+/// name, an empty body — are skipped: Git errors on them at lookup, so
+/// passthrough stays safe.
+fn record_invocation_alias(aliases: &mut Vec<(String, String)>, assignment: &OsStr) {
+    let Some(text) = assignment.to_str() else {
+        return;
+    };
+    let Some((key, body)) = text.split_once('=') else {
+        return;
+    };
+    let key = key.as_bytes();
+    if key.len() <= 6 || !key[..6].eq_ignore_ascii_case(b"alias.") {
+        return;
+    }
+    let Ok(name) = std::str::from_utf8(&key[6..]) else {
+        return;
+    };
+    if name.is_empty() || body.is_empty() {
+        return;
+    }
+    aliases.push((name.to_ascii_lowercase(), body.to_owned()));
 }
 
 /// Git commands common enough that resolving an alias for them would add a
@@ -1162,12 +1194,27 @@ fn expand_worktree_alias(
     if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name) {
         return Ok(None);
     }
-    let Some(value) = Git::default().config_value(&context.repository, &format!("alias.{name}"))?
-    else {
-        return Ok(None);
-    };
-    let Ok(value) = String::from_utf8(value) else {
-        return Ok(None);
+    // Invocation configuration outranks every stored scope, and the typed
+    // token matches its alias ASCII-case-insensitively, exactly as Git treats
+    // configuration keys. Later `-c` occurrences win.
+    let lowered = name.to_ascii_lowercase();
+    let value = if let Some((_, body)) = context
+        .invocation_aliases
+        .iter()
+        .rev()
+        .find(|(alias, _)| *alias == lowered)
+    {
+        body.clone()
+    } else {
+        let Some(value) =
+            Git::default().config_value(&context.repository, &format!("alias.{name}"))?
+        else {
+            return Ok(None);
+        };
+        let Ok(value) = String::from_utf8(value) else {
+            return Ok(None);
+        };
+        value
     };
     let value = value.trim();
     if value.starts_with('!') {
@@ -1227,6 +1274,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
     let mut work_tree = None;
     let mut git_directory = None;
     let mut global_options = GlobalOptionScope::None;
+    let mut invocation_aliases = Vec::new();
     let mut unrecognized_global_option = false;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
@@ -1263,10 +1311,25 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
         {
             index += 1;
         } else if argument == "-c" {
-            arguments.get(index + 1)?;
+            let assignment = arguments.get(index + 1)?;
+            record_invocation_alias(&mut invocation_aliases, assignment);
             global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if argument.to_string_lossy().starts_with("--config-env=") {
+            // `--config-env=alias.<name>=<variable>` takes the alias body from
+            // the named environment variable. An unset or unparseable variable
+            // is skipped: Git itself errors on it at lookup.
+            if let Some(assignment) = argument
+                .to_str()
+                .and_then(|argument| argument.strip_prefix("--config-env="))
+                && let Some((key, variable)) = assignment.split_once('=')
+                && let Ok(body) = std::env::var(variable)
+            {
+                record_invocation_alias(
+                    &mut invocation_aliases,
+                    OsStr::new(&format!("{key}={body}")),
+                );
+            }
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument == "--namespace" {
@@ -1329,6 +1392,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
                 git_directory,
                 command_index: index,
                 global_options,
+                invocation_aliases,
             });
         }
     }
@@ -2512,6 +2576,132 @@ mod tests {
                     GitProxyPlan::Passthrough
                 ),
                 "`git {argument}` was not delegated to Git"
+            );
+        }
+    }
+
+    /// `record_invocation_alias` mirrors what Git accepts: entries Git would
+    /// refuse at lookup are skipped so passthrough stays safe, and key case
+    /// never matters.
+    #[test]
+    fn invocation_alias_recording_skips_what_git_refuses() {
+        let mut aliases = Vec::new();
+        for rejected in [
+            "alias.noequals",  // Git: missing value
+            "alias.=worktree", // empty name
+            "alias.empty=",    // Git: empty alias refused at use
+            "core.editor=vim", // not an alias
+            "alias=worktree",  // no name segment at all
+        ] {
+            super::record_invocation_alias(&mut aliases, OsStr::new(rejected));
+        }
+        assert!(aliases.is_empty(), "{aliases:?}");
+
+        super::record_invocation_alias(&mut aliases, OsStr::new("ALIAS.WtRm=worktree remove"));
+        super::record_invocation_alias(&mut aliases, OsStr::new("alias.keep=log --oneline"));
+        assert_eq!(
+            aliases,
+            [
+                ("wtrm".to_owned(), "worktree remove".to_owned()),
+                ("keep".to_owned(), "log --oneline".to_owned()),
+            ]
+        );
+    }
+
+    /// A one-shot alias supplied with `-c alias.<name>=…` (or `--config-env=`)
+    /// outranks every stored configuration scope, so the planner must read it
+    /// from the invocation itself. Before it did,
+    /// `git -c 'alias.wtrm=worktree remove --force' wtrm <managed>` reached
+    /// real Git unclassified and removed the view outside the journal.
+    // Creating a managed worktree needs a native copy-on-write backend, so
+    // this runs where `worktree.rs`'s own tests run.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn invocation_aliases_cannot_bypass_the_lifecycle_guard() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("one-shot-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/one-shot")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let destination = destination.into_os_string();
+
+        let refused = |arguments: &[OsString]| {
+            let error = plan_git_command(fixture.path(), arguments)
+                .expect_err("a one-shot worktree alias must not bypass the guard");
+            assert!(
+                error.to_string().contains("managed Riftri worktree"),
+                "{arguments:?}: {error}"
+            );
+        };
+
+        refused(&[
+            OsString::from("-c"),
+            OsString::from("alias.wtrm=worktree remove --force"),
+            OsString::from("wtrm"),
+            destination.clone(),
+        ]);
+        // Configuration keys and the typed token are ASCII-case-insensitive.
+        refused(&[
+            OsString::from("-c"),
+            OsString::from("ALIAS.WTRM=worktree remove --force"),
+            OsString::from("WtRm"),
+            destination.clone(),
+        ]);
+        // The last occurrence wins, exactly as Git resolves configuration.
+        refused(&[
+            OsString::from("-c"),
+            OsString::from("alias.z=log --oneline"),
+            OsString::from("-c"),
+            OsString::from("alias.z=worktree remove --force"),
+            OsString::from("z"),
+            destination.clone(),
+        ]);
+        // `--config-env` takes the body from the named environment variable.
+        // SAFETY: test-only, and the variable name is unique to this test.
+        unsafe {
+            std::env::set_var("RIFTRI_TEST_INVOCATION_ALIAS", "worktree remove --force");
+        }
+        refused(&[
+            OsString::from("--config-env=alias.ce=RIFTRI_TEST_INVOCATION_ALIAS"),
+            OsString::from("ce"),
+            destination.clone(),
+        ]);
+
+        // Shell aliases and non-worktree aliases still delegate to Git.
+        for arguments in [
+            vec![
+                OsString::from("-c"),
+                OsString::from("alias.sh=!git worktree prune"),
+                OsString::from("sh"),
+            ],
+            vec![
+                OsString::from("-c"),
+                OsString::from("alias.st2=status --porcelain"),
+                OsString::from("st2"),
+            ],
+        ] {
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan ordinary command"),
+                    GitProxyPlan::Passthrough
+                ),
+                "{arguments:?} was not delegated to Git"
             );
         }
     }
