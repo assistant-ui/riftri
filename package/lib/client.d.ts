@@ -20,7 +20,15 @@ export interface FailureReceipt {
 }
 
 export class RiftriError extends Error {
+  /**
+   * Always a number. A process killed by a signal reports 128 plus the signal
+   * number, the convention native `riftri exec` uses for its own children.
+   */
   readonly exitCode: number;
+  /** The signal that killed the process, or null if it exited on its own. */
+  readonly signal: NodeJS.Signals | null;
+  /** The process was killed rather than exiting on its own. */
+  readonly wasSignalled: boolean;
   readonly receipt: FailureReceipt | null;
   /** Riftri declined before touching anything; falling back is safe. */
   readonly isPolicyRefusal: boolean;
@@ -136,7 +144,14 @@ export class Riftri {
   /** Inspect Git and storage. Creates nothing. */
   doctor(options?: { destination?: string }): Promise<DoctorReport>;
   backends(path?: string): Promise<unknown>;
-  /** Convenience: true when this destination can be optimized. */
+  /**
+   * True when this destination can be optimized.
+   *
+   * Resolves `false` only when Riftri answers the question: no active
+   * copy-on-write backend, or an outright refusal of this destination. A
+   * missing or non-executable binary, an unreadable repository, or output
+   * that is not JSON rejects instead.
+   */
   isOptimizable(destination?: string): Promise<boolean>;
 
   enable(): Promise<null>;
