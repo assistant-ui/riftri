@@ -152,7 +152,10 @@ export async function isOptimizable(repository, destination, options = {}) {
       cwd: repository,
       ...options,
     });
-    return Boolean(report?.cow_backend_active);
+    if (!report?.cow_backend_active) return false;
+    // A COW-capable volume is not the same as a usable destination: outside a
+    // Git repository this stays true while `worktree add` cannot succeed.
+    return report.destination_readiness?.status !== "blocked";
   } catch (error) {
     if (error instanceof RiftriError && error.isPolicyRefusal) return false;
     throw error;
