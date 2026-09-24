@@ -2192,7 +2192,7 @@ fn remove_worktree_with_mode(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
+    let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
             "{} is not an active Riftri-managed worktree in {}",
@@ -2332,7 +2332,7 @@ fn move_worktree_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
+    let state_directory = existing_state_directory_for_worktree(&requested_state, &source)?;
     let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
             "{} is not an active Riftri-managed worktree in {}",
@@ -2436,7 +2436,7 @@ fn compact_worktree_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
+    let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
             "{} is not an active Riftri-managed worktree in {}",
@@ -4757,6 +4757,32 @@ fn resolve_real_state_directory(path: &Path) -> Result<PathBuf, WorktreeError> {
         .into());
     }
     fs::canonicalize(path).map_err(|source| io("resolve state directory", path, source))
+}
+
+/// Resolve the state directory for an operation on an existing managed
+/// worktree.
+///
+/// A repository that has never completed a managed add has no state directory,
+/// and that is not a filesystem failure worth inspecting: it means nothing in
+/// this repository is managed, so the worktree the caller named cannot be
+/// either. Reporting the absent directory as `filesystem-io-failed` told a
+/// harness to investigate a healthy repository and left `cleanup` unknown,
+/// while the identical request against a repository that had completed one add
+/// reported a plain policy error (#396). An existing directory that cannot be
+/// read still fails as the I/O error it is.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn existing_state_directory_for_worktree(
+    requested_state: &Path,
+    target: &Path,
+) -> Result<PathBuf, WorktreeError> {
+    let requested_state = absolute_path(requested_state)?;
+    resolve_real_state_directory_if_present(&requested_state)?.ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "{} is not an active Riftri-managed worktree in {}",
+            target.display(),
+            requested_state.display()
+        ))
+    })
 }
 
 fn resolve_real_state_directory_if_present(path: &Path) -> Result<Option<PathBuf>, WorktreeError> {

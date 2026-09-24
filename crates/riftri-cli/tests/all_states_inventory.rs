@@ -370,3 +370,69 @@ fn worktree_prune_succeeds_before_any_managed_add_and_still_prunes_git_metadata(
         "the stale registration survived the prune: {listed}"
     );
 }
+
+// `remove`, `move`, and `compact` operate on an existing managed worktree, so
+// a repository with no state directory simply manages nothing and the worktree
+// named cannot be managed either. That is a policy error, and it is the one
+// these commands already report once any managed add has run. Before the fix
+// they reported the absent directory as `filesystem-io-failed` with a recovery
+// of `inspect` and an unknown `cleanup`, so the same request was classified
+// two different ways depending on whether an unrelated add had happened.
+//
+// Unlike `worktree prune`, these must not create a state directory as a side
+// effect of failing: they have no work to do.
+#[test]
+fn lifecycle_commands_report_an_unmanaged_worktree_as_policy_without_a_state_directory() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    init_repository(&repository);
+    assert!(
+        git(
+            &repository,
+            &["commit", "--quiet", "--allow-empty", "-m", "initial"]
+        )
+        .status
+        .success()
+    );
+    let unmanaged = fixture.path().join("unmanaged");
+    let moved = fixture.path().join("moved");
+    assert!(
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/unmanaged",
+                unmanaged.to_str().expect("UTF-8 worktree path"),
+            ],
+        )
+        .status
+        .success()
+    );
+    let state = repository.join(".git/riftri");
+    assert!(!state.exists(), "no managed add has run");
+
+    let unmanaged = unmanaged.to_str().expect("UTF-8 worktree path");
+    let moved = moved.to_str().expect("UTF-8 destination path");
+    for arguments in [
+        &["--json-errors", "worktree", "remove", unmanaged][..],
+        &["--json-errors", "worktree", "compact", unmanaged][..],
+        &["--json-errors", "worktree", "move", unmanaged, moved][..],
+    ] {
+        let output = riftri(&repository, arguments);
+        assert!(!output.status.success(), "{arguments:?} must fail");
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .or_else(|_| serde_json::from_slice(&output.stderr))
+            .unwrap_or_else(|error| panic!("{arguments:?} receipt is not JSON: {error}"));
+        assert_eq!(receipt["code"], "invalid-request", "{arguments:?}");
+        assert_eq!(receipt["category"], "policy", "{arguments:?}");
+        assert_eq!(receipt["recovery"], "not-required", "{arguments:?}");
+        assert_eq!(receipt["cleanup"], "not-needed", "{arguments:?}");
+        assert!(
+            !state.exists(),
+            "{arguments:?} must not create a state directory just to fail"
+        );
+    }
+}
