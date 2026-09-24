@@ -209,7 +209,14 @@ class Riftri {
   async isOptimizable(destination) {
     try {
       const report = await this.doctor(destination ? { destination } : {});
-      return Boolean(report?.cow_backend_active);
+      if (!report?.cow_backend_active) return false;
+      // cow_backend_active is a fact about the volume, not about this
+      // destination. Outside a Git repository it is still true while
+      // `worktree add` cannot possibly succeed, so the readiness verdict
+      // decides. `needs-activation` stays optimizable: the explicit interface
+      // works without `enable`, which only gates Git interception.
+      const readiness = report.destination_readiness?.status;
+      return readiness === undefined || readiness !== "blocked";
     } catch (error) {
       if (error instanceof RiftriError && error.isPolicyRefusal) return false;
       throw error;

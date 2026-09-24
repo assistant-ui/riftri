@@ -308,3 +308,42 @@ test("isOptimizable rejects a broken installation instead of answering false", {
     /not JSON/,
   );
 });
+
+test("isOptimizable trusts readiness, not just the volume", { skip: onWindows }, async (t) => {
+  // cow_backend_active describes the volume. Outside a Git repository it is
+  // still true while `worktree add` cannot succeed, so reading it alone told
+  // a harness to take the optimized path straight into a failure.
+  const directory = scratch(t);
+  const report = (status) =>
+    JSON.stringify({ cow_backend_active: true, destination_readiness: { status } });
+
+  const blocked = fakeBinary(directory, { stdout: report("blocked") });
+  assert.equal(
+    await new Riftri({ repository: directory, binary: blocked }).isOptimizable("t"),
+    false,
+    "a blocked destination is not optimizable",
+  );
+
+  // Activation only gates Git interception; the explicit interface works
+  // without it, so this destination is optimizable.
+  const needsActivation = fakeBinary(directory, { stdout: report("needs-activation") });
+  assert.equal(
+    await new Riftri({ repository: directory, binary: needsActivation }).isOptimizable("t"),
+    true,
+    "needs-activation is still optimizable",
+  );
+
+  const ready = fakeBinary(directory, { stdout: report("ready") });
+  assert.equal(
+    await new Riftri({ repository: directory, binary: ready }).isOptimizable("t"),
+    true,
+  );
+
+  // A report without the field at all must not become silently unusable.
+  const legacy = fakeBinary(directory, { stdout: JSON.stringify({ cow_backend_active: true }) });
+  assert.equal(
+    await new Riftri({ repository: directory, binary: legacy }).isOptimizable("t"),
+    true,
+    "a report lacking destination_readiness keeps the old answer",
+  );
+});
