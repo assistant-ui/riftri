@@ -7,7 +7,7 @@
 // Start here. The other examples add one idea each on top of this shape.
 
 import path from "node:path";
-import { EXIT, riftri, run } from "../lib/riftri.mjs";
+import { riftri, run } from "../lib/riftri.mjs";
 
 const repository = path.resolve(process.argv[2] ?? ".");
 const tasks = process.argv.slice(3);
@@ -71,7 +71,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  if (error.code === EXIT.USAGE) console.error("usage error:", error.message);
+  if (error.isUsageError) console.error("usage error:", error.message);
   else if (error.needsRepair) console.error("run riftri repair:", error.message);
   else console.error(error.message);
   process.exit(1);

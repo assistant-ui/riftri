@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { once } = require("node:events");
-const { mkdtemp, rm, writeFile } = require("node:fs/promises");
+const { mkdtemp, readFile, rm, writeFile } = require("node:fs/promises");
 const { setTimeout: delay } = require("node:timers/promises");
 const { test } = require("node:test");
 
@@ -247,3 +247,28 @@ test(
     assert.equal(code, 128 + os.constants.signals.SIGUSR1);
   },
 );
+
+// Removing the last listener for a signal restores its default disposition.
+// The launcher used to do that in its exit handler, before `process.exit`,
+// which left a window where a SIGINT still in flight — the usual case, since
+// a terminal sends it to the whole foreground group — killed the launcher and
+// the command's real exit code was never reported.
+//
+// Measured against the previous launcher by releasing a command that exits 37
+// and bursting SIGINT across that moment: 10 of 10 runs returned 1 instead of
+// 37. With the handlers left installed, 10 of 10 returned 37. That race is not
+// reproducible inside this runner on every platform, so the contract is
+// pinned structurally instead of by timing.
+test("the launcher keeps its signal handlers until it exits", async () => {
+  const source = await readFile(launcher, "utf8");
+  assert.doesNotMatch(
+    source,
+    /removeListener\s*\(/,
+    "removing a signal listener restores its default disposition and reopens the window",
+  );
+  assert.match(source, /process\.on\(signal, ignoreSignal\)/);
+  assert.match(source, /process\.on\(signal, forwardSignal\)/);
+  // The handlers must outlive the exit handler that reports the child.
+  const exitHandler = source.slice(source.indexOf('child.on("exit"'));
+  assert.doesNotMatch(exitHandler, /release|removeListener/);
+});

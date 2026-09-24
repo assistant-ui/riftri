@@ -5,6 +5,7 @@
 // exit code. Copy this file next to your runner and adapt it.
 
 import { spawn } from "node:child_process";
+import os from "node:os";
 
 /** Exit codes documented in docs/cli.md. */
 export const EXIT = {
@@ -16,16 +17,35 @@ export const EXIT = {
 
 /** Thrown for any non-zero exit, carrying the parsed receipt when present. */
 export class RiftriError extends Error {
-  constructor(code, receipt, stderr) {
-    super(receipt?.message ?? stderr.trim() ?? `riftri exited ${code}`);
+  constructor(exitCode, receipt, stderr, signal = null) {
+    // `??` would keep an empty string, so a silent failure had no message.
+    super(
+      receipt?.message ||
+        stderr.trim() ||
+        (signal ? `riftri terminated by ${signal}` : `riftri exited ${exitCode}`),
+    );
     this.name = "RiftriError";
-    this.code = code; // process exit code
+    // Named exitCode, not code: Node puts strings like "ENOENT" on error.code,
+    // and one field meaning both is how a spawn failure gets mistaken for an
+    // exit status. Always a number; a signalled process reports 128 + signal.
+    this.exitCode = exitCode;
+    this.signal = signal;
     this.receipt = receipt; // parsed --json-errors receipt, or null
+  }
+
+  /** The process was killed rather than exiting on its own. */
+  get wasSignalled() {
+    return this.signal !== null;
   }
 
   /** Riftri declined before touching anything: safe to fall back. */
   get isPolicyRefusal() {
-    return this.code === EXIT.POLICY;
+    return this.exitCode === EXIT.POLICY;
+  }
+
+  /** The request itself was malformed. Never retry unchanged. */
+  get isUsageError() {
+    return this.exitCode === EXIT.USAGE;
   }
 
   /** A live process holds the lock. Unlike a refusal, waiting helps. */
@@ -50,7 +70,15 @@ export class RiftriError extends Error {
 export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
   return new Promise((resolve, reject) => {
     const flags = json ? ["--json", "--json-errors"] : ["--json-errors"];
-    const child = spawn(bin, [...args, ...flags], {
+    // Riftri's flags must precede any `--`. Appended, they end up in the
+    // payload `riftri exec` hands to the child, which then fails on a flag
+    // that was never meant for it.
+    const boundary = args.indexOf("--");
+    const argv =
+      boundary === -1
+        ? [...args, ...flags]
+        : [...args.slice(0, boundary), ...flags, ...args.slice(boundary)];
+    const child = spawn(bin, argv, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -61,10 +89,41 @@ export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
     child.stderr.on("data", (chunk) => (stderr += chunk));
 
     child.on("error", reject); // riftri is not installed or not on PATH
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
+      // A signalled child reports a null exit code; report the signal rather
+      // than letting null pass for a status.
+      if (signal) {
+        const number = os.constants.signals[signal];
+        reject(
+          new RiftriError(
+            Number.isInteger(number) ? 128 + number : EXIT.OPERATIONAL,
+            null,
+            stderr,
+            signal,
+          ),
+        );
+        return;
+      }
       if (code === EXIT.SUCCESS) {
         // Without --json the command prints human text, so do not parse it.
-        resolve(json && stdout.trim() ? JSON.parse(stdout) : null);
+        if (!json || !stdout.trim()) {
+          resolve(null);
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (error) {
+          // Throwing here is uncatchable by the caller and kills the host
+          // process, so this has to reject.
+          reject(
+            new RiftriError(
+              EXIT.OPERATIONAL,
+              null,
+              `riftri ${args.join(" ")} returned output that is not JSON: ` +
+                `${error.message}\n${stdout.slice(0, 2000)}`,
+            ),
+          );
+        }
         return;
       }
       let receipt = null;
@@ -79,7 +138,14 @@ export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
   });
 }
 
-/** True when this destination can actually get an optimized worktree. */
+/**
+ * True when this destination can actually get an optimized worktree.
+ *
+ * `false` means Riftri answered: no backend here, or it refused this
+ * destination. A missing binary or a broken setup throws, so a harness does
+ * not read "riftri is not installed" as "this repository is unsupported".
+ * See fallback-detection for handling that case deliberately.
+ */
 export async function isOptimizable(repository, destination, options = {}) {
   try {
     const report = await riftri(["doctor", "--destination", destination], {
@@ -88,16 +154,28 @@ export async function isOptimizable(repository, destination, options = {}) {
     });
     return Boolean(report?.cow_backend_active);
   } catch (error) {
-    if (error.code === "ENOENT") return false; // riftri not installed
+    if (error instanceof RiftriError && error.isPolicyRefusal) return false;
     throw error;
   }
 }
 
-/** Run any command and resolve with its exit code. Used to call plain git. */
+/**
+ * Run any command and resolve with its exit code. Used to call plain git.
+ *
+ * A signalled child resolves 128 + the signal number, the shell convention,
+ * so the result is always a number a caller can compare against zero.
+ */
 export function run(command, args, { cwd } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, stdio: "inherit" });
     child.on("error", reject);
-    child.on("close", (code) => resolve(code));
+    child.on("close", (code, signal) => {
+      if (signal) {
+        const number = os.constants.signals[signal];
+        resolve(Number.isInteger(number) ? 128 + number : EXIT.OPERATIONAL);
+        return;
+      }
+      resolve(code);
+    });
   });
 }
