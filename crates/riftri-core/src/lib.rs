@@ -467,7 +467,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
     };
     // `doctor` is the only consumer of working-tree cleanliness, so it is the
     // only caller that pays for the `git status` traversal behind it.
-    let repository_check = match git.inspect_repository_with_cleanliness(repository_path) {
+    let repository_check = match git.inspect_repository_for_report(repository_path) {
         Ok(info) => Diagnostic::success(info),
         Err(error) => Diagnostic::failure(error.to_string()),
     };
