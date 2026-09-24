@@ -148,9 +148,12 @@ export class Riftri {
    * True when this destination can be optimized.
    *
    * Resolves `false` only when Riftri answers the question: no active
-   * copy-on-write backend, or an outright refusal of this destination. A
-   * missing or non-executable binary, an unreadable repository, or output
-   * that is not JSON rejects instead.
+   * copy-on-write backend, a destination Riftri reports as `blocked`, or an
+   * outright refusal. A missing or non-executable binary, an unreadable
+   * repository, or output that is not JSON rejects instead.
+   *
+   * A `needs-activation` destination is optimizable: `worktree.add` works
+   * without `enable()`, which only gates Git interception.
    */
   isOptimizable(destination?: string): Promise<boolean>;
 

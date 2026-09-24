@@ -67,9 +67,14 @@ sets `error.signal` and `error.wasSignalled`.
 
 ### When `isOptimizable()` returns false
 
-`false` means Riftri answered the question: either the report says no
-copy-on-write backend is active here, or Riftri refused this destination
+`false` means Riftri answered the question: no copy-on-write backend is active
+here, the report marks this destination `blocked`, or Riftri refused it
 outright (exit 3).
+
+The backend check alone is not enough. `cow_backend_active` describes the
+volume, so outside a Git repository it stays `true` while `worktree.add` cannot
+succeed; the destination's readiness decides. A `needs-activation` destination
+is optimizable, since `worktree.add` works without `enable()`.
 
 It does not mean "something went wrong". A missing or non-executable binary,
 an unreadable repository, and output that is not JSON all reject, so a broken
