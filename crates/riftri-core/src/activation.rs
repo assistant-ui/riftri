@@ -1022,7 +1022,7 @@ fn posix_quote_path(path: &Path) -> Result<String, ActivationError> {
             path.display()
         )));
     }
-    Ok(format!("'{}'", value.replace('\'', "'\"'\"'")))
+    Ok(super::quote_shell_argument(value))
 }
 
 #[cfg(target_os = "windows")]
@@ -1039,7 +1039,7 @@ fn powershell_quote_path(path: &Path) -> Result<String, ActivationError> {
             path.display()
         )));
     }
-    Ok(format!("'{}'", value.replace('\'', "''")))
+    Ok(super::quote_shell_argument(value))
 }
 
 fn activation_with_git(git: &Git, path: &Path) -> Result<RepositoryActivation, ActivationError> {
@@ -1232,82 +1232,134 @@ fn expand_worktree_alias(
     let Some(name) = token.to_str() else {
         return Ok(None);
     };
-    if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name) {
-        return Ok(None);
-    }
-    // Invocation configuration outranks every stored scope, and the typed
-    // token matches its alias ASCII-case-insensitively, exactly as Git treats
-    // configuration keys. Later `-c` occurrences win.
-    let lowered = name.to_ascii_lowercase();
-    let value = if let Some((_, body)) = context
-        .invocation_aliases
-        .iter()
-        .rev()
-        .find(|(alias, _)| *alias == lowered)
-    {
-        body.clone()
-    } else {
-        let Some(value) =
-            Git::default().config_value(&context.repository, &format!("alias.{name}"))?
-        else {
+    // Git chains alias-to-alias expansions itself (with its own loop
+    // detection), and each inner body's arguments run before the outer
+    // body's remainder. Follow the chain the same way; on a cycle or an
+    // implausible depth, pass through — Git fatals on the loop itself, so
+    // nothing reaches a worktree command. Every stop that is not the
+    // `worktree` token is equally safe to pass through: Git either runs a
+    // builtin, errors on an unknown name, or executes a shell alias that
+    // re-enters the proxy on its own.
+    let mut name = name.to_owned();
+    let mut pending: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..24 {
+        if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name.as_str()) {
+            return Ok(None);
+        }
+        let lowered = name.to_ascii_lowercase();
+        if !seen.insert(lowered.clone()) {
+            return Ok(None);
+        }
+        let value = if let Some((_, body)) = context
+            .invocation_aliases
+            .iter()
+            .rev()
+            .find(|(alias, _)| *alias == lowered)
+        {
+            body.clone()
+        } else {
+            let Some(value) =
+                Git::default().config_value(&context.repository, &format!("alias.{name}"))?
+            else {
+                return Ok(None);
+            };
+            let Ok(value) = String::from_utf8(value) else {
+                return Ok(None);
+            };
+            value
+        };
+        let value = value.trim();
+        if value.starts_with('!') {
+            return Ok(None);
+        }
+        let Ok(words) = split_alias_words(value) else {
+            // Git refuses the same body ("bad alias string"), so passthrough
+            // dies in Git with nothing executed.
             return Ok(None);
         };
-        let Ok(value) = String::from_utf8(value) else {
+        let mut words = words.into_iter();
+        let Some(first) = words.next() else {
             return Ok(None);
         };
-        value
-    };
-    let value = value.trim();
-    if value.starts_with('!') {
-        return Ok(None);
+        let mut tail: Vec<String> = words.collect();
+        tail.append(&mut pending);
+        pending = tail;
+        if first == WORKTREE_SUBCOMMAND {
+            let mut expanded = arguments[..context.command_index].to_vec();
+            expanded.push(OsString::from(WORKTREE_SUBCOMMAND));
+            expanded.extend(pending.into_iter().map(OsString::from));
+            expanded.extend_from_slice(&arguments[context.command_index + 1..]);
+            return Ok(Some(expanded));
+        }
+        name = first;
     }
-    let mut words = split_alias_words(value).into_iter();
-    if words.next().as_deref() != Some(WORKTREE_SUBCOMMAND) {
-        return Ok(None);
-    }
-
-    // Rebuild the command Git will run: the global options as given, then the
-    // alias body, then the arguments that followed the alias name.
-    let mut expanded = arguments[..context.command_index].to_vec();
-    expanded.push(OsString::from(WORKTREE_SUBCOMMAND));
-    expanded.extend(words.map(OsString::from));
-    expanded.extend_from_slice(&arguments[context.command_index + 1..]);
-    Ok(Some(expanded))
+    Ok(None)
 }
 
-/// Split an alias body the way Git's own command-line splitter does for the
-/// forms that can reach a worktree command: whitespace separated, with single
-/// or double quotes grouping a word. A quote Git would reject leaves the word
-/// as written, which can only make the result fail to match `worktree`.
-fn split_alias_words(value: &str) -> Vec<String> {
+/// Split an alias body exactly the way Git's own `split_cmdline` does,
+/// verified against git 2.50.1: whitespace separates; single quotes are fully
+/// literal; inside double quotes and in the open, a backslash makes the next
+/// character literal (`l\og` is `log`, `"a\tb"` is `atb`). `Err` mirrors the
+/// inputs Git itself refuses — an unclosed quote or a trailing backslash — so
+/// the caller can pass the command through and let Git fail it identically,
+/// with no room for a parse that Git accepts and Riftri reads differently.
+fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
+    #[derive(PartialEq)]
+    enum State {
+        Open,
+        SingleQuoted,
+        DoubleQuoted,
+    }
+    let mut state = State::Open;
     let mut words = Vec::new();
     let mut word = String::new();
-    let mut quote = None;
     let mut started = false;
-    for character in value.chars() {
-        match quote {
-            Some(open) if character == open => quote = None,
-            Some(_) => word.push(character),
-            None if character == '\'' || character == '"' => {
-                quote = Some(character);
-                started = true;
-            }
-            None if character.is_whitespace() => {
-                if started {
-                    words.push(std::mem::take(&mut word));
-                    started = false;
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        match state {
+            State::SingleQuoted => match character {
+                '\'' => state = State::Open,
+                other => word.push(other),
+            },
+            State::DoubleQuoted => match character {
+                '"' => state = State::Open,
+                '\\' => word.push(characters.next().ok_or(())?),
+                other => word.push(other),
+            },
+            State::Open => match character {
+                '\'' => {
+                    state = State::SingleQuoted;
+                    started = true;
                 }
-            }
-            None => {
-                word.push(character);
-                started = true;
-            }
+                '"' => {
+                    state = State::DoubleQuoted;
+                    started = true;
+                }
+                '\\' => {
+                    word.push(characters.next().ok_or(())?);
+                    started = true;
+                }
+                character if character.is_whitespace() => {
+                    if started {
+                        words.push(std::mem::take(&mut word));
+                        started = false;
+                    }
+                }
+                other => {
+                    word.push(other);
+                    started = true;
+                }
+            },
         }
+    }
+    if state != State::Open {
+        return Err(());
     }
     if started {
         words.push(word);
     }
-    words
+    Ok(words)
 }
 
 fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
@@ -2846,25 +2898,133 @@ mod tests {
         ));
     }
 
+    /// Git's alias grammar accepts backslash escapes and chains alias to
+    /// alias, so `alias.h = w\orktree remove` and a two-hop chain both reach
+    /// a worktree lifecycle command. The planner used to read neither and
+    /// passed them to real Git unclassified.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn escaped_and_chained_aliases_cannot_bypass_the_lifecycle_guard() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("grammar-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/grammar")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let destination = destination.into_os_string();
+
+        git(
+            fixture.path(),
+            &["config", "alias.esc", r"w\orktree remove --force"],
+        );
+        git(fixture.path(), &["config", "alias.hop1", "hop2"]);
+        git(
+            fixture.path(),
+            &["config", "alias.hop2", "worktree remove --force"],
+        );
+
+        // With no invocation-level options these plan as the journaled
+        // removal — the same outcome a spelled-out `worktree remove --force`
+        // gets — instead of slipping to real Git unclassified.
+        for name in ["esc", "hop1"] {
+            let arguments = [OsString::from(name), destination.clone()];
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan hidden alias"),
+                    GitProxyPlan::OptimizedForceRemove(_)
+                ),
+                "`git {name}` was not planned as the journaled removal"
+            );
+        }
+
+        // A body Git itself refuses still delegates: Git fatals on it, so
+        // nothing executes.
+        git(fixture.path(), &["config", "alias.badq", "worktree 'oops"]);
+        assert!(matches!(
+            plan_git_command(fixture.path(), &[OsString::from("badq")])
+                .expect("plan refused-by-git alias"),
+            GitProxyPlan::Passthrough
+        ),);
+    }
+
+    /// Every row was probed against git 2.50.1 (its error text echoes the
+    /// parsed word verbatim), not derived from documentation.
     #[test]
     fn alias_bodies_split_the_way_git_splits_them() {
+        let split = |value: &str| super::split_alias_words(value).expect(value);
+        assert_eq!(split("worktree prune -v"), ["worktree", "prune", "-v"]);
+        assert_eq!(split("  worktree   prune  "), ["worktree", "prune"]);
         assert_eq!(
-            super::split_alias_words("worktree prune -v"),
-            ["worktree", "prune", "-v"]
-        );
-        assert_eq!(
-            super::split_alias_words("  worktree   prune  "),
-            ["worktree", "prune"]
-        );
-        assert_eq!(
-            super::split_alias_words("worktree 'remove' \"--force\""),
+            split("worktree 'remove' \"--force\""),
             ["worktree", "remove", "--force"]
         );
         assert_eq!(
-            super::split_alias_words("worktree add 'my dir'"),
+            split("worktree add 'my dir'"),
             ["worktree", "add", "my dir"]
         );
-        assert!(super::split_alias_words("   ").is_empty());
+        // A backslash makes the next character literal, in the open and inside
+        // double quotes; single quotes are fully literal.
+        assert_eq!(split(r"w\orktree l\ist"), ["worktree", "list"]);
+        assert_eq!(split(r"log A\ B"), ["log", "A B"]);
+        assert_eq!(
+            split(r#"log "a\tb" "a\"b" "a\\b""#),
+            ["log", "atb", "a\"b", r"a\b"]
+        );
+        assert_eq!(split(r"log 'a\tb'"), ["log", r"a\tb"]);
+        assert!(split("   ").is_empty());
+        // Git refuses these ("bad alias string"), so the caller passes them
+        // through and Git fails them identically.
+        assert!(super::split_alias_words("log 'oops").is_err());
+        assert!(super::split_alias_words(r#"log "oops"#).is_err());
+        assert!(super::split_alias_words(r"log ends\").is_err());
+    }
+
+    /// Chained expansion follows Git: each inner body's arguments run before
+    /// the outer body's remainder, and a cycle stops expansion (Git fatals on
+    /// the loop itself, so passthrough executes nothing).
+    #[test]
+    fn alias_chains_expand_in_git_order_and_cycles_stop() {
+        let context = super::CommandContext {
+            repository: std::path::PathBuf::from("."),
+            git_directory: None,
+            command_index: 0,
+            global_options: super::GlobalOptionScope::Significant,
+            invocation_aliases: vec![
+                ("inner".to_owned(), "worktree remove".to_owned()),
+                ("outer".to_owned(), "inner --force".to_owned()),
+                ("loop1".to_owned(), "loop2".to_owned()),
+                ("loop2".to_owned(), "loop1".to_owned()),
+            ],
+        };
+        let arguments = [OsString::from("outer"), OsString::from("view")];
+        let expanded = super::expand_worktree_alias(&context, &arguments)
+            .expect("expand")
+            .expect("outer resolves to a worktree command");
+        assert_eq!(
+            expanded,
+            ["worktree", "remove", "--force", "view"].map(OsString::from)
+        );
+
+        let arguments = [OsString::from("loop1")];
+        assert_eq!(
+            super::expand_worktree_alias(&context, &arguments).expect("expand"),
+            None
+        );
     }
 
     /// IDE Git integrations pass `--no-optional-locks` on every invocation.
