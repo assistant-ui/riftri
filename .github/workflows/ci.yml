@@ -301,9 +301,35 @@ jobs:
       - name: Unmount disposable test volume
         if: always()
         run: |
-          if mountpoint --quiet "$RUNNER_TEMP/riftri-reflink"; then
-            sudo umount "$RUNNER_TEMP/riftri-reflink"
+          volume="$RUNNER_TEMP/riftri-reflink"
+          mountpoint --quiet "$volume" || exit 0
+          if sudo umount "$volume"; then
+            exit 0
           fi
+          # "target is busy" means something from the test steps outlived them
+          # and still holds the volume: TMPDIR points inside it, so any leaked
+          # process keeps a working directory or descriptor open here. GitHub's
+          # post-job cleanup does list the orphans it kills, but only after this
+          # step has already failed, which shows something survived without
+          # showing what held the mount (#385). Name the holder while it is
+          # still there instead of inferring it afterwards.
+          echo "::group::Processes holding $volume"
+          echo "-- working directories inside the volume --"
+          # Needs no package, so this is the one probe guaranteed to run.
+          sudo ls -l /proc/[0-9]*/cwd 2>/dev/null | grep -F "$volume" || echo "(none)"
+          if command -v fuser >/dev/null 2>&1; then
+            echo "-- fuser --"
+            sudo fuser -vm "$volume" 2>&1 || true
+          fi
+          if command -v lsof >/dev/null 2>&1; then
+            echo "-- lsof --"
+            sudo lsof +f -- "$volume" 2>&1 || true
+          fi
+          echo "-- process tree --"
+          ps -ef || true
+          echo "::endgroup::"
+          echo "::error::Could not unmount $volume: still busy. The holder is listed above (#385)."
+          exit 1
 
   linux-overlayfs:
     name: Linux OverlayFS capability integration
@@ -393,9 +419,35 @@ jobs:
       - name: Unmount disposable test volume
         if: always()
         run: |
-          if mountpoint --quiet "$RUNNER_TEMP/riftri-overlayfs"; then
-            sudo umount "$RUNNER_TEMP/riftri-overlayfs"
+          volume="$RUNNER_TEMP/riftri-overlayfs"
+          mountpoint --quiet "$volume" || exit 0
+          if sudo umount "$volume"; then
+            exit 0
           fi
+          # "target is busy" means something from the test steps outlived them
+          # and still holds the volume: TMPDIR points inside it, so any leaked
+          # process keeps a working directory or descriptor open here. GitHub's
+          # post-job cleanup does list the orphans it kills, but only after this
+          # step has already failed, which shows something survived without
+          # showing what held the mount (#385). Name the holder while it is
+          # still there instead of inferring it afterwards.
+          echo "::group::Processes holding $volume"
+          echo "-- working directories inside the volume --"
+          # Needs no package, so this is the one probe guaranteed to run.
+          sudo ls -l /proc/[0-9]*/cwd 2>/dev/null | grep -F "$volume" || echo "(none)"
+          if command -v fuser >/dev/null 2>&1; then
+            echo "-- fuser --"
+            sudo fuser -vm "$volume" 2>&1 || true
+          fi
+          if command -v lsof >/dev/null 2>&1; then
+            echo "-- lsof --"
+            sudo lsof +f -- "$volume" 2>&1 || true
+          fi
+          echo "-- process tree --"
+          ps -ef || true
+          echo "::endgroup::"
+          echo "::error::Could not unmount $volume: still busy. The holder is listed above (#385)."
+          exit 1
 
   windows-refs:
     name: Windows ReFS block-clone integration
