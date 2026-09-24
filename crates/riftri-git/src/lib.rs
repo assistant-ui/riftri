@@ -122,6 +122,17 @@ pub struct ConfigValues {
     pub has_conditional_includes: bool,
 }
 
+/// Sparse-checkout state of an existing worktree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SparseCheckoutState {
+    /// `core.sparseCheckout` is on, so the worktree materializes a subset.
+    pub enabled: bool,
+    /// `core.sparseCheckoutCone` is on, so the selection is a directory list.
+    pub cone: bool,
+    /// The cone directory list, empty unless `cone` is set.
+    pub directories: Vec<String>,
+}
+
 /// Branch behavior for a new linked worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeHead<'a> {
@@ -1438,6 +1449,61 @@ impl Git {
     /// configuration, exactly as running the command by hand would, and
     /// `sparse-checkout reapply` restores the skip-worktree bits after the
     /// index is rebuilt.
+    /// Read the sparse-checkout state Git would copy into a new worktree.
+    ///
+    /// `git worktree add` inherits the current worktree's sparse cone, so an
+    /// add issued from inside a sparse worktree produces a sparse worktree
+    /// even though nothing on the command line asked for one. Riftri reads the
+    /// same state in order to reproduce that behavior deliberately, with an
+    /// immutable-base key that matches what it actually materializes.
+    ///
+    /// Only cone mode reports directories. Non-cone sparse checkouts are
+    /// reported as enabled without a directory list, leaving the caller to
+    /// refuse rather than guess at pattern semantics.
+    pub fn sparse_checkout_state(&self, worktree: &Path) -> Result<SparseCheckoutState, GitError> {
+        let config = self.config_values(
+            worktree,
+            &["core.sparsecheckout", "core.sparsecheckoutcone"],
+        )?;
+        let enabled_value = |key: &str| {
+            config
+                .values
+                .get(key)
+                .is_some_and(|value| value.eq_ignore_ascii_case(b"true"))
+        };
+        if !enabled_value("core.sparsecheckout") {
+            return Ok(SparseCheckoutState::default());
+        }
+        if !enabled_value("core.sparsecheckoutcone") {
+            return Ok(SparseCheckoutState {
+                enabled: true,
+                cone: false,
+                directories: Vec::new(),
+            });
+        }
+        let output = self.run(Some(worktree), &["sparse-checkout", "list"])?;
+        let mut directories = Vec::new();
+        for line in output.stdout.split(|byte| *byte == b'\n') {
+            let line = trim_line_endings(line);
+            if line.is_empty() {
+                continue;
+            }
+            directories.push(
+                std::str::from_utf8(line)
+                    .map_err(|error| GitError::InvalidOutput {
+                        context: "git sparse-checkout list",
+                        detail: error.to_string(),
+                    })?
+                    .to_owned(),
+            );
+        }
+        Ok(SparseCheckoutState {
+            enabled: true,
+            cone: true,
+            directories,
+        })
+    }
+
     pub fn synchronize_sparse_worktree_index(
         &self,
         worktree: &Path,

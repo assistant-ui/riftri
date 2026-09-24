@@ -7,6 +7,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- An optimized add from inside a cone-mode sparse worktree now inherits that
+  worktree's cone instead of being refused. `git worktree add` copies the
+  current worktree's sparse selection into the new worktree, so Riftri
+  reproduces that and keys the immutable base by the inherited profile.
+  Previously a Riftri sparse worktree was a dead end: Riftri set
+  `core.sparseCheckout` in the worktree it created, and every later add from
+  inside it was rejected for configuration Riftri itself had written. Sparse
+  checkout that is enabled outside cone mode is still refused.
+
 - Doctor's suggested add and activation commands keep the inspected repository
   when doctor runs from a different directory. Repository and destination paths
   use shell quotes to preserve spaces and shell metacharacters.

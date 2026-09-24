@@ -393,3 +393,76 @@ fn refuses_repository_configured_sparse_checkout_before_creating_state() {
         assert!(!state.exists());
     }
 }
+
+// `git worktree add` copies the current worktree's sparse cone into the new
+// worktree, so an add issued from inside a sparse worktree is sparse with no
+// sparse argument anywhere. Riftri must reproduce that rather than refuse it:
+// it sets core.sparseCheckout in the worktrees it creates, so refusing left
+// every Riftri sparse worktree a dead end where no further add could be made,
+// rejected for configuration Riftri itself had written.
+#[test]
+fn an_add_from_inside_a_sparse_worktree_inherits_its_cone() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = sparse_fixture_repository(fixture.path());
+    let state = fixture.path().join("state");
+    let sparse = fixture.path().join("sparse");
+    add(&repository, &sparse, &state, "feature/sparse", &["a"]).expect("create sparse worktree");
+
+    // No sparse argument: the cone comes from the worktree the add runs in.
+    let inherited = fixture.path().join("inherited");
+    let result = add(&sparse, &inherited, &state, "feature/inherited", &[])
+        .expect("an add from inside a sparse worktree must be possible");
+
+    assert!(inherited.join("root.txt").is_file());
+    assert!(inherited.join("a/file.txt").is_file());
+    assert!(inherited.join("a/nested/deep.txt").is_file());
+    assert!(!inherited.join("b").exists());
+    assert!(!inherited.join("crates").exists());
+    assert_clean(&inherited);
+    assert_eq!(git(&inherited, &["sparse-checkout", "list"]), "a\n");
+
+    // Parity with Git: the same add performed by Git itself from the same
+    // sparse worktree selects the same paths.
+    let by_git = fixture.path().join("by-git");
+    git(
+        &sparse,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "feature/by-git",
+            by_git.to_str().expect("utf-8 path"),
+        ],
+    );
+    assert_eq!(
+        git(&by_git, &["sparse-checkout", "list"]),
+        git(&inherited, &["sparse-checkout", "list"])
+    );
+    assert!(!by_git.join("b").exists());
+
+    // The inherited profile is a real sparse profile, so it shares the base of
+    // an identical cone rather than allocating a full-tree base.
+    assert!(result.base_path.join("a/file.txt").is_file());
+    assert!(!result.base_path.join("b").exists());
+}
+
+// An explicit selection is a deliberate override, not a refinement of whatever
+// the surrounding worktree happens to select.
+#[test]
+fn an_explicit_selection_overrides_the_inherited_cone() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = sparse_fixture_repository(fixture.path());
+    let state = fixture.path().join("state");
+    let sparse = fixture.path().join("sparse");
+    add(&repository, &sparse, &state, "feature/sparse", &["a"]).expect("create sparse worktree");
+
+    let overridden = fixture.path().join("overridden");
+    add(&sparse, &overridden, &state, "feature/overridden", &["b"])
+        .expect("an explicit selection must be honored from inside a sparse worktree");
+
+    assert!(overridden.join("b/file.txt").is_file());
+    assert!(!overridden.join("a").exists());
+    assert_clean(&overridden);
+    assert_eq!(git(&overridden, &["sparse-checkout", "list"]), "b\n");
+}
