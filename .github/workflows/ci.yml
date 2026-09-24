@@ -13,10 +13,17 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job below sets `timeout-minutes`. Without it a hung step blocks the
+# pull request until GitHub's six-hour default expires and produces no
+# diagnostic at all: `npm test` on ubuntu has stalled this way, and the
+# cancel-and-rerun habit it encourages destroys the evidence each time
+# (#399). The slowest job here runs about five minutes, so 30 surfaces a
+# stall while leaving ample room for a slow runner.
 jobs:
   quality:
     name: Quality (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -102,6 +109,7 @@ jobs:
   supply-chain:
     name: Supply chain (cargo-deny)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Check out source
@@ -113,6 +121,7 @@ jobs:
   msrv:
     name: MSRV (Rust 1.88)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Check out source
@@ -127,6 +136,7 @@ jobs:
   coverage:
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     env:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
@@ -191,6 +201,7 @@ jobs:
   website:
     name: Website
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Check out source
@@ -235,6 +246,7 @@ jobs:
   linux-reflink:
     name: Linux reflink integration (${{ matrix.filesystem }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -334,6 +346,7 @@ jobs:
   linux-overlayfs:
     name: Linux OverlayFS capability integration
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Check out source
@@ -452,6 +465,7 @@ jobs:
   windows-refs:
     name: Windows ReFS block-clone integration
     runs-on: windows-2025
+    timeout-minutes: 30
 
     steps:
       - name: Check out source
