@@ -50,22 +50,18 @@ if (process.platform !== "win32") {
   }
 }
 
-function releaseSignals() {
-  for (const signal of ignoredSignals) {
-    process.removeListener(signal, ignoreSignal);
-  }
-  for (const signal of forwardedSignals) {
-    process.removeListener(signal, forwardSignal);
-  }
-}
+// The handlers deliberately stay installed until the process exits. Removing
+// the last listener for a signal restores its default disposition, so a SIGINT
+// still in flight — the common case, since the terminal sent it to the whole
+// foreground group — would kill the launcher in the window before
+// `process.exit`, losing the command's real status. `process.exit` does not
+// need them removed.
 
 child.on("error", (error) => {
-  releaseSignals();
   fail(`could not start the native executable at ${binary}: ${error.message}`);
 });
 
 child.on("exit", (code, signal) => {
-  releaseSignals();
   if (signal !== null) {
     const exitCode = signalExitCode(signal);
     if (exitCode === null) {
