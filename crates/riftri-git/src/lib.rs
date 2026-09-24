@@ -337,8 +337,14 @@ impl Git {
             )?)
         };
 
+        // Resolving HEAD's commit does double duty: it is the value `riftri
+        // doctor` reports and the probe that surfaces a corrupt object store
+        // as an inspection failure (relied on to fail lifecycle commands
+        // closed on an unhealthy repository). HEAD's tree, in contrast, is read
+        // only by doctor's JSON, so it is left for `inspect_repository_for_report`
+        // rather than resolved on every lifecycle operation's hot path.
         let head_commit = self.resolve_optional_object(path, "HEAD^{commit}")?;
-        let head_tree = self.resolve_optional_object(path, "HEAD^{tree}")?;
+        let head_tree = None;
         Ok(RepositoryInfo {
             root,
             identity: RepositoryIdentity { common_git_dir },
@@ -348,7 +354,7 @@ impl Git {
             // Deliberately not probed here: cleanliness costs a full
             // `git status` traversal, this runs on the path of every lifecycle
             // operation, and only `doctor` ever reads it. Callers that need it
-            // ask through `inspect_repository_with_cleanliness`.
+            // ask through `inspect_repository_for_report`.
             clean: None,
         })
     }
@@ -358,16 +364,18 @@ impl Git {
     /// Separate from [`Self::inspect_repository`] because that probe is a full
     /// `git status` traversal which every lifecycle operation would otherwise
     /// pay for and discard.
-    pub fn inspect_repository_with_cleanliness(
-        &self,
-        path: &Path,
-    ) -> Result<RepositoryInfo, GitError> {
+    /// Inspect a repository and additionally resolve the report-only fields
+    /// that `inspect_repository` skips — working-tree cleanliness and HEAD's
+    /// tree — each of which costs a `git` subprocess and is read only by
+    /// `riftri doctor`.
+    pub fn inspect_repository_for_report(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
         let mut info = self.inspect_repository(path)?;
         if !info.is_bare {
             // `worktree_is_clean` passes `--untracked-files=all`, which
             // overrides a `status.showUntrackedFiles=no` that would otherwise
             // hide untracked content.
             info.clean = Some(self.worktree_is_clean(path)?);
+            info.head_tree = self.resolve_optional_object(path, "HEAD^{tree}")?;
         }
         Ok(info)
     }
@@ -2441,16 +2449,14 @@ mod tests {
             fixture.path().canonicalize().expect("canonical fixture")
         );
         assert!(!repository.is_bare);
+        // An unborn HEAD leaves the commit unresolved; the tree is report-only.
         assert!(repository.head_commit.is_none());
         assert!(repository.head_tree.is_none());
-        // `inspect_repository` leaves cleanliness unprobed; ask for it.
-        assert_eq!(
-            Git::default()
-                .inspect_repository_with_cleanliness(fixture.path())
-                .expect("inspect with cleanliness")
-                .clean,
-            Some(true)
-        );
+        let reported = Git::default()
+            .inspect_repository_for_report(fixture.path())
+            .expect("inspect for report");
+        assert!(reported.head_tree.is_none());
+        assert_eq!(reported.clean, Some(true));
     }
 
     /// `git status --porcelain` honours `status.showUntrackedFiles`, which is
@@ -2471,7 +2477,7 @@ mod tests {
             )
             .expect("configure untracked-file reporting");
             assert_eq!(
-                git.inspect_repository_with_cleanliness(fixture.path())
+                git.inspect_repository_for_report(fixture.path())
                     .expect("inspect repository")
                     .clean,
                 Some(false),
@@ -2605,21 +2611,22 @@ mod tests {
         let fixture = RepositoryFixture::committed();
         let git = Git::default();
 
-        let repository = git
-            .inspect_repository(fixture.path())
-            .expect("inspect repository");
         let resolved = git
             .resolve_revision(fixture.path(), OsStr::new("HEAD"))
             .expect("resolve HEAD");
-
-        assert_eq!(repository.head_commit, Some(resolved.commit));
-        assert_eq!(repository.head_tree, Some(resolved.tree));
-        assert_eq!(
-            git.inspect_repository_with_cleanliness(fixture.path())
-                .expect("inspect with cleanliness")
-                .clean,
-            Some(true)
-        );
+        // `inspect_repository` resolves HEAD's commit; the tree comes from the
+        // report method.
+        let repository = git
+            .inspect_repository(fixture.path())
+            .expect("inspect repository");
+        assert_eq!(repository.head_commit, Some(resolved.commit.clone()));
+        assert!(repository.head_tree.is_none());
+        let reported = git
+            .inspect_repository_for_report(fixture.path())
+            .expect("inspect for report");
+        assert_eq!(reported.head_commit, Some(resolved.commit));
+        assert_eq!(reported.head_tree, Some(resolved.tree));
+        assert_eq!(reported.clean, Some(true));
     }
 
     /// Spawning a freshly written script can fail with ETXTBSY when a
