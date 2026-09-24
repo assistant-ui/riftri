@@ -340,6 +340,9 @@ fn repair_reports_scanning_and_recovery_of_an_interrupted_add() {
     .expect("write paused git wrapper");
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("mark executable");
 
+    // Armed before the pause can begin: the assertion below must not be able
+    // to leave `paused-git` spinning after the test binary exits.
+    let paused = support::PausedGit::new(&release);
     let mut add = riftri()
         .args(["worktree", "add"])
         .arg(fixture.path().join("view"))
@@ -361,7 +364,7 @@ fn repair_reports_scanning_and_recovery_of_an_interrupted_add() {
     assert!(ready.exists(), "add never reached its pause point");
     add.kill().expect("interrupt the paused add");
     add.wait().expect("collect the interrupted add");
-    fs::write(&release, "release").expect("release the wrapper");
+    paused.release();
 
     let repair = riftri()
         .arg("repair")
