@@ -86,9 +86,29 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP", "SIGUSR1", "SIGPIPE"]) {
 // process group. The launcher must survive it while the child runs — the
 // child alone decides whether the interrupt is fatal — and the child's later
 // exit code must still propagate through the launcher.
+//
+// QUARANTINED ON LINUX — see #382. This fails intermittently on
+// ubuntu-24.04 with `'SIGINT' !== null`: the launcher survives the group
+// SIGINT (the assertion 300 ms later passes) and then dies by signal as the
+// child exits. It has failed #338, #378, #183, and main, every time looking
+// like a defect in unrelated work.
+//
+// It is not the defect #380 fixed. That one was real and is fixed, but main
+// carries the fix and this still fails, so quarantining it is not hiding a
+// known bug — it is stopping an undiagnosed one from failing everyone else's
+// pull requests, which is how red CI stops being read at all.
+//
+// Coverage is not lost outright: the same contract still runs on macOS every
+// build, so a regression in the launcher's SIGINT handling is still caught.
+// Remove this skip with the fix for #382.
+const sigintGroupFlake =
+  process.platform === "linux"
+    ? "quarantined on Linux: intermittent, see issue #382"
+    : false;
+
 test(
   "launcher stays attached through foreground-group SIGINT that the child survives",
-  { skip: onWindows, timeout: 15_000 },
+  { skip: onWindows || sigintGroupFlake, timeout: 15_000 },
   async (t) => {
     const directory = await makeScratchDirectory(t);
     const release = path.join(directory, "release");
@@ -271,4 +291,27 @@ test("the launcher keeps its signal handlers until it exits", async () => {
   // The handlers must outlive the exit handler that reports the child.
   const exitHandler = source.slice(source.indexOf('child.on("exit"'));
   assert.doesNotMatch(exitHandler, /release|removeListener/);
+});
+
+// A quarantine that loses its reason becomes a permanently disabled test that
+// nobody revisits. Keep it narrow, and keep it pointing at its issue.
+test("the SIGINT quarantine stays scoped and traceable", async () => {
+  const whole = await readFile(__filename, "utf8");
+  // Scan only the code above this guard: its own patterns would match itself.
+  const source = whole.slice(0, whole.indexOf("// A quarantine that loses its reason"));
+  const quarantine = source.match(/const sigintGroupFlake =[\s\S]*?;\n/);
+  assert.ok(quarantine, "the quarantine must stay a named, greppable condition");
+  assert.match(quarantine[0], /process\.platform === "linux"/, "only Linux is affected");
+  assert.match(quarantine[0], /#382/, "the skip must name its tracking issue");
+
+  // Exactly one test may carry it, and only the known-flaky one.
+  const skips = [...source.matchAll(/skip: [^,}]*sigintGroupFlake/g)];
+  assert.equal(skips.length, 1, "the quarantine must not spread to other tests");
+  // The name precedes the options object, so look behind the skip.
+  const at = source.indexOf("skip: onWindows || sigintGroupFlake");
+  assert.match(
+    source.slice(Math.max(0, at - 200), at),
+    /foreground-group SIGINT/,
+    "only the foreground-group SIGINT test is quarantined",
+  );
 });
