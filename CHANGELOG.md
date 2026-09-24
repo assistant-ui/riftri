@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.4.1] - 2026-09-24
+
 ### Fixed
 
 - An optimized add from inside a cone-mode sparse worktree now inherits that
@@ -21,6 +23,49 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   use shell quotes to preserve spaces and shell metacharacters.
   Non-UTF-8 repository paths retain the `riftri enable` suggestion for use
   inside that repository.
+
+- Linux GNU builds no longer require a glibc newer than the distributions they
+  claim to support. `v0.4.0` needed `GLIBC_2.39`, so it installed cleanly on
+  RHEL 9, Debian 12, and Ubuntu 22.04 and then failed to start. GNU artifacts
+  now target glibc 2.34, release CI verifies each artifact's ELF requirements
+  and runs it on a glibc 2.34 image, and `install.sh` falls back to the static
+  musl archive on an older host.
+
+- A Git alias that resolves to a worktree command is matched with Git's own
+  grammar, including backslash escapes and chained aliases. Previously
+  `alias.wtrm = 'worktree remo\ve --force'` removed a managed worktree outside
+  Riftri's journal, and its immutable base stayed referenced forever, so
+  `riftri gc` could never reclaim it. An alias Riftri cannot resolve, such as
+  one supplied with `git -c`, now fails closed rather than bypassing the
+  journal.
+
+- `riftri exec` no longer loses the scoped command's exit status when an
+  interrupt arrives as the command finishes. The launcher released its SIGINT
+  handler before exiting, which restored the signal's default disposition, so
+  an in-flight Ctrl-C killed the launcher instead of propagating the command's
+  code.
+
+- The npm package's programmatic API no longer sends Riftri's own flags to the
+  child of `exec --`, crashes the host process on malformed output, reports a
+  signalled run as exit code `null`, or hides a broken installation behind
+  `isOptimizable() === false`.
+
+- `isOptimizable()` answers on the destination rather than the volume. It read
+  `cow_backend_active`, which stays true outside a Git repository, so the
+  documented check-then-add pattern took the optimized path into a failure.
+  A destination Riftri reports as `blocked` is no longer optimizable;
+  `needs-activation` still is, because the explicit interface works without
+  `enable`.
+
+- Conditional checkout configuration (`includeIf`) is rejected rather than
+  producing a worktree whose contents depend on where Git was run from.
+
+- A repository Riftri cannot inspect fails closed instead of proceeding.
+
+### Changed
+
+- `doctor` resolves HEAD's tree only when it needs it, so inspection runs
+  fewer Git subprocesses.
 
 ## [0.4.0] - 2026-09-22
 

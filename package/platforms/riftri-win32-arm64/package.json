@@ -1,6 +1,6 @@
 {
   "name": "riftri-win32-arm64",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Riftri native binary for Windows ARM64",
   "license": "MIT",
   "os": [
