@@ -22,8 +22,9 @@ artifact (retained for seven days). After all staging checks pass:
 
 - `publish` publishes npm packages with `contents: read` and `id-token: write`
   only when the repository variable `NPM_PUBLISH_ENABLED` is exactly `true`.
-  It stays off until a maintainer sets that variable, so tag pushes do not
-  publish to npm by default.
+  That variable is set, so a stable tag publishes npm alongside the GitHub
+  release. Unsetting it makes tag pushes skip npm without affecting direct
+  downloads.
 - `github-release` downloads the staged assets, verifies the exact eight-archive
   set and every checksum, and creates the GitHub release with `contents: write`.
   It has no npm token or OIDC publishing permission and does not depend on npm.
@@ -52,9 +53,9 @@ package renaming or blind retries.
 GitHub release availability does not imply that `npm install riftri` or
 `npx riftri` is available for the same version.
 
-As of September 22, 2026, `0.3.5` is published for the launcher and seven of
-the eight native packages. `npm install riftri` and `npx riftri` work on macOS,
-Linux, and Windows x64.
+As of September 24, 2026, `0.4.1` is published for the launcher and seven of
+the eight native packages, from the release workflow rather than by hand.
+`npm install riftri` and `npx riftri` work on macOS, Linux, and Windows x64.
 
 `riftri-win32-arm64` remains rejected with
 `E403: Package name triggered spam detection`. That one name is blocked at the
@@ -73,15 +74,17 @@ strands the launcher, which is how `v0.2.1` shipped with nothing installable.
 **When npm accepts the name, delete its entry**; the guard test in
 `package/test/platform.test.js` fails once the list is empty.
 
-Those `0.3.5` packages were published from a maintainer workstation and
-**carry no provenance attestation**. Every manifest sets
-`publishConfig.provenance: true`, which npm rejects outside a CI provider
-(`Automatic provenance generation not supported for provider: null`), so the
-publish used `--provenance=false`. The GitHub release assets for the same tag
-do carry build-provenance attestations. Restoring provenance on npm means
-publishing the next release through the workflow rather than by hand.
+`0.4.1` is the first release published through the workflow, and it carries
+npm provenance: `npm view riftri@0.4.1 dist.attestations` reports a
+`https://slsa.dev/provenance/v1` predicate.
 
-Resuming the channel is two concrete maintainer actions:
+`0.3.5` and `0.4.0` do not. Both were published from a maintainer workstation,
+where `publishConfig.provenance: true` is rejected
+(`Automatic provenance generation not supported for provider: null`) and the
+publish fell back to `--provenance=false`. Publishing by hand loses provenance;
+use the workflow.
+
+If the channel is ever disabled again, re-enabling it is one action:
 
 ```console
 $ gh variable set NPM_PUBLISH_ENABLED --repo assistant-ui/riftri --body true
