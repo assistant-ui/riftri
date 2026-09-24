@@ -26,7 +26,7 @@ are involved. Git is still needed to use Riftri.
 To pin a release:
 
 ```sh
-curl -fsSL https://riftri.dev/install.sh | bash -s -- v0.4.0
+curl -fsSL https://riftri.dev/install.sh | bash -s -- v0.4.1
 ```
 
 Piping a script to Bash executes code from that URL. To inspect it first,
@@ -39,7 +39,7 @@ curl --fail --location --proto '=https' --proto-redir '=https' \
   --output "$installer_dir/install.sh"
 less "$installer_dir/install.sh"
 # Run only after reviewing the downloaded script:
-bash "$installer_dir/install.sh" v0.4.0
+bash "$installer_dir/install.sh" v0.4.1
 ```
 
 The website serves the canonical `package/install.sh` from its deployed source;
@@ -64,18 +64,18 @@ requirements, installation stops without bypassing that policy.
 
 ## Choose a native archive
 
-For `v0.4.0`, the release assets are:
+For `v0.4.1`, the release assets are:
 
 | System | Architecture | Archive |
 | --- | --- | --- |
-| macOS | Apple Silicon / ARM64 | `riftri-darwin-arm64-v0.4.0.tar.gz` |
-| macOS | Intel / x64 | `riftri-darwin-x64-v0.4.0.tar.gz` |
-| Linux with glibc | ARM64 / aarch64 | `riftri-linux-arm64-gnu-v0.4.0.tar.gz` |
-| Linux with glibc | x64 / x86_64 | `riftri-linux-x64-gnu-v0.4.0.tar.gz` |
-| Linux with musl | ARM64 / aarch64 | `riftri-linux-arm64-musl-v0.4.0.tar.gz` |
-| Linux with musl | x64 / x86_64 | `riftri-linux-x64-musl-v0.4.0.tar.gz` |
-| Windows | ARM64 | `riftri-win32-arm64-v0.4.0.tar.gz` |
-| Windows | x64 | `riftri-win32-x64-v0.4.0.tar.gz` |
+| macOS | Apple Silicon / ARM64 | `riftri-darwin-arm64-v0.4.1.tar.gz` |
+| macOS | Intel / x64 | `riftri-darwin-x64-v0.4.1.tar.gz` |
+| Linux with glibc | ARM64 / aarch64 | `riftri-linux-arm64-gnu-v0.4.1.tar.gz` |
+| Linux with glibc | x64 / x86_64 | `riftri-linux-x64-gnu-v0.4.1.tar.gz` |
+| Linux with musl | ARM64 / aarch64 | `riftri-linux-arm64-musl-v0.4.1.tar.gz` |
+| Linux with musl | x64 / x86_64 | `riftri-linux-x64-musl-v0.4.1.tar.gz` |
+| Windows | ARM64 | `riftri-win32-arm64-v0.4.1.tar.gz` |
+| Windows | x64 | `riftri-win32-x64-v0.4.1.tar.gz` |
 
 Each archive contains only `riftri` on macOS/Linux or `riftri.exe` on Windows.
 Linux downloads select separate GNU/glibc and musl builds. If the executable
@@ -105,7 +105,7 @@ release workflow. With the [GitHub CLI](https://cli.github.com/) installed,
 verify a downloaded archive (or `SHA256SUMS`) before unpacking it:
 
 ```sh
-gh attestation verify riftri-darwin-arm64-v0.4.0.tar.gz --repo assistant-ui/riftri
+gh attestation verify riftri-darwin-arm64-v0.4.1.tar.gz --repo assistant-ui/riftri
 ```
 
 The command fails if the file was not produced by a tagged release build of
@@ -123,7 +123,7 @@ replace only your per-user `~/.local/bin/riftri` executable. They do not use
 ```sh
 (
   set -eu
-  version=0.4.0
+  version=0.4.1
   platform=riftri-darwin-arm64 # Change for your OS and architecture.
   archive="${platform}-v${version}.tar.gz"
   release_url="https://github.com/assistant-ui/riftri/releases/download/v${version}"
@@ -175,7 +175,7 @@ Get-Content $Installer
 & $Installer
 ```
 
-Pin a release with `& $Installer -Version v0.4.0`. Set an absolute
+Pin a release with `& $Installer -Version v0.4.1`. Set an absolute
 `RIFTRI_INSTALL_DIR` before running the script to choose another destination.
 It does not edit a PowerShell profile, persistently change `PATH`, enable a
 repository, or require administrator access. The website serves the canonical
@@ -192,7 +192,7 @@ administrator access or persistent `PATH` changes.
 ```powershell
 & {
   $ErrorActionPreference = 'Stop'
-  $Version = '0.4.0'
+  $Version = '0.4.1'
   $Platform = 'riftri-win32-x64' # Use riftri-win32-arm64 for Windows ARM64.
   $Archive = "$Platform-v$Version.tar.gz"
   $ReleaseUrl = "https://github.com/assistant-ui/riftri/releases/download/v$Version"
@@ -281,7 +281,7 @@ The formula is generated, not hand-written. After a release, regenerate every
 checked-in copy from that tag's published checksums:
 
 ```sh
-node package/scripts/sync-homebrew-tap.mjs v0.4.0
+node package/scripts/sync-homebrew-tap.mjs v0.4.1
 ```
 
 `package/test/homebrew-formula.test.js` fails if either checked-in formula
