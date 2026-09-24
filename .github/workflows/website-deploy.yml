@@ -1,9 +1,11 @@
 name: Website deploy
 
+# Deploys are manual: riftri.dev is published from a maintainer workstation and
+# this repository holds no VERCEL_* secrets. Running on every push to main
+# could therefore only ever fail, so this stays dispatch-only. Add the three
+# secrets and it works unchanged from the Actions tab, or on a push trigger
+# restored here.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
@@ -35,15 +37,15 @@ jobs:
           # Deploying needs all three values. Fail loudly when they are absent
           # rather than skipping every step and still reporting success: a
           # green "deploy" run that deployed nothing is exactly what let the
-          # unbranded 404 reach production unnoticed (#377). Production itself
-          # is verified independently by website-verify.yml, which needs no
-          # secrets, so disable this workflow if deploys stay manual.
+          # unbranded 404 reach production unnoticed (#377). Someone who
+          # dispatches this run means to deploy, so missing secrets are an
+          # error worth showing rather than a reason to report success.
           missing=""
           [ -n "${VERCEL_TOKEN}" ] || missing="${missing} VERCEL_TOKEN"
           [ -n "${VERCEL_ORG_ID}" ] || missing="${missing} VERCEL_ORG_ID"
           [ -n "${VERCEL_PROJECT_ID}" ] || missing="${missing} VERCEL_PROJECT_ID"
           if [ -n "${missing}" ]; then
-            echo "::error::Cannot deploy riftri.dev: missing secret(s)${missing}. Configure them, or disable this workflow if deploys are manual (website-verify.yml still checks production)."
+            echo "::error::Cannot deploy riftri.dev: missing secret(s)${missing}. Add them to the repository, or deploy from a workstation with the Vercel CLI."
             exit 1
           fi
 
