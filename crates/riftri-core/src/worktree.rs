@@ -2421,11 +2421,33 @@ fn compact_worktree_inner(
                 .to_owned(),
         ));
     }
-    if !managed.sparse_directories.is_empty() {
+    // Compaction rebuilds the view from its creation profile, so it can only
+    // run while the worktree still holds that profile. Ordinary Git owns later
+    // selection changes and Riftri never rewrites a worktree's immutable
+    // creation base, so a view that was widened, narrowed, or disabled since
+    // it was created no longer has a base that describes it. Compare the two
+    // and say which is which, instead of refusing every sparse worktree.
+    let sparse_state = git.sparse_checkout_state(&destination)?;
+    if sparse_state.enabled && !sparse_state.cone {
         return Err(WorktreeError::Unsupported(
-            "compacting a sparse worktree is not supported yet; remove and recreate the worktree to reset its storage"
+            "compacting a worktree whose sparse checkout is not in cone mode is not supported yet; Riftri does not model non-cone pattern semantics"
                 .to_owned(),
         ));
+    }
+    let sparse_directories = canonicalize_sparse_directories(&sparse_state.directories)?;
+    if sparse_directories != managed.sparse_directories {
+        let describe = |directories: &[String]| {
+            if directories.is_empty() {
+                "a full checkout".to_owned()
+            } else {
+                format!("cone {}", directories.join(", "))
+            }
+        };
+        return Err(WorktreeError::Unsupported(format!(
+            "worktree was created as {} but now holds {}; compaction rebuilds a view from its creation profile, so remove and recreate the worktree to reset its storage",
+            describe(&managed.sparse_directories),
+            describe(&sparse_directories)
+        )));
     }
     if CompactJournalStore::open(&state_directory)
         .load_all()?
@@ -2460,7 +2482,7 @@ fn compact_worktree_inner(
         &destination,
         &repository.identity.common_git_dir,
         &resolved,
-        &[],
+        &sparse_directories,
     )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
@@ -2536,7 +2558,7 @@ fn compact_worktree_inner(
         &temporary_index,
         &compatibility.checkout_config,
         &compatibility.lfs_objects,
-        &[],
+        &sparse_directories,
     )?;
     NativeCowCloner::clone_tree_owner_writable(&base_path, &replacement)?;
     copy_git_pointer(&destination, &replacement)?;
@@ -3899,7 +3921,7 @@ fn analyze_resolved_repository_compatibility(
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut profile = {
         let mut profile = Sha256::new();
-        profile.update(b"riftri-checkout-profile-v3-lfs\0");
+        profile.update(b"riftri-checkout-profile-v4-sparse\0");
         let git_version = git.detect()?.version;
         hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
         // The canonical cone directory list is part of the checkout profile,
@@ -4016,10 +4038,25 @@ fn analyze_resolved_repository_compatibility(
         config_is_true("core.sparsecheckout") && !config_is_true("core.sparsecheckoutcone");
     for (key, accepted, kind) in checked_config {
         let value = config_values.get(key).cloned();
+        // The sparse keys describe where the command ran, not what gets
+        // materialized: `core.sparseCheckout` is worktree-scoped, so the same
+        // cone reads differently from the repository root than from inside a
+        // sparse worktree. The canonical cone list hashed above already
+        // describes the materialization exactly, so hashing these too would
+        // split one profile across several base buckets — which made
+        // compacting a sparse worktree allocate a second base for identical
+        // content instead of reusing the one it already had (#391). They stay
+        // in `checked_config` because they still decide what is refused.
+        let describes_where_not_what =
+            matches!(kind, RepositoryCompatibilityBlockerKind::SparseCheckout);
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-        hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+        if !describes_where_not_what {
+            hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+        }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-        if let Some(value) = &value {
+        if let Some(value) = &value
+            && !describes_where_not_what
+        {
             checkout_config.push((key.to_owned(), value.clone()));
         }
         // A resolved cone list is materialized explicitly into the new
@@ -10533,12 +10570,20 @@ mod tests {
             .unwrap();
             // Reconstruct the previous, individual-read profile independently.
             let mut profile = Sha256::new();
-            profile.update(b"riftri-checkout-profile-v3-lfs\0");
+            profile.update(b"riftri-checkout-profile-v4-sparse\0");
             let version = git.detect().unwrap().version;
             super::hash_profile_input(&mut profile, b"git.version", Some(version.as_bytes()));
             let mut captured = Vec::new();
             for key in keys {
                 let value = git.config_value(repository, key).unwrap();
+                // The sparse keys are worktree-scoped and describe where the
+                // command ran rather than what is materialized, so they are
+                // deliberately outside both the profile and the replayed
+                // checkout configuration. The canonical cone list carries that
+                // information instead.
+                if matches!(key, "core.sparsecheckout" | "core.sparsecheckoutcone") {
+                    continue;
+                }
                 super::hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
                 if let Some(value) = value {
                     captured.push((key.to_owned(), value));

@@ -69,8 +69,13 @@ never partially materializes:
   as Git would.
 - Trees with Git LFS-managed paths cannot be combined with a sparse selection
   yet.
-- Compacting a sparse worktree is refused; remove and recreate the worktree to
-  reset its storage.
+- Compacting a sparse worktree rebuilds it from its creation profile, so it
+  works while the view still holds that profile and resolves to the base it
+  already had. A view whose selection changed since the add — widened,
+  narrowed, or disabled by ordinary Git — is refused, naming both profiles,
+  because Riftri never rewrites a worktree's immutable creation base and no
+  base describes the view any more. Remove and recreate it to reset its
+  storage. A sparse checkout outside cone mode is refused outright.
 
 ## Lifecycle
 
@@ -90,5 +95,6 @@ For a new COW-backed selection, remove the clean view and create a new one with
 the desired `--sparse-dir` arguments.
 
 Non-cone creation, file-level selection, explicit sparse options through Git
-interception, sparse compaction, and a Riftri-managed profile-change operation
-remain future work tracked in the roadmap.
+interception, compaction of a view whose selection changed since the add, and a
+Riftri-managed profile-change operation remain future work tracked in the
+roadmap.

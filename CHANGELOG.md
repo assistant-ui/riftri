@@ -5,6 +5,28 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- The checkout profile that keys immutable bases no longer includes
+  `core.sparseCheckout` and `core.sparseCheckoutCone`. Both are worktree-scoped,
+  so the same cone read from the repository root and from inside a sparse
+  worktree produced different base keys, splitting one profile across several
+  base buckets. The canonical cone list already describes the materialization
+  exactly. The profile version moves to `v4`. Existing worktrees keep working
+  and keep referencing the bases they were built from; new adds build a `v4`
+  base once per tree and profile. Superseded bases become unreferenced only
+  when the worktrees using them are removed, and `riftri gc --apply` reclaims
+  them then, so nothing accumulates silently and nothing needs removing by
+  hand.
+
+### Added
+
+- `riftri worktree compact` supports sparse worktrees. A pristine view rebuilds
+  at its creation profile and resolves to the base it already had, instead of
+  being refused outright with no way to reclaim its storage. A view whose
+  selection changed since the add is refused with both profiles named, since
+  Riftri never rewrites a worktree's immutable creation base.
+
 ## [0.4.1] - 2026-09-24
 
 ### Fixed
