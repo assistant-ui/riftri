@@ -105,6 +105,12 @@ export async function finalizeStaticWebsite(
       // Only documentation uses SSR. Installers, the landing page, and the raw
       // /index.md guide retain their static responses and existing headers.
       docs && { src: "^/(?:docs(?:/.*|\\.md)?|api/docs)$", dest: "/__nitro", headers: { "Cache-Control": "no-store", "Vary": "x-farm-docs-navigation, Accept" } },
+      // A static top-level miss never reaches the error phase, so without a
+      // `miss` catch-all Vercel answers it with its own generic plain-text
+      // 404. Route the miss to the prerendered branded page with a real 404.
+      { handle: "miss" },
+      notFoundRoute,
+      // The error phase still catches a 404 the docs SSR function returns.
       { handle: "error" },
       notFoundRoute,
     ].filter(Boolean),

@@ -65,9 +65,16 @@ test("website finalization preserves installers and Markdown without a server ru
   // The error phase must come after the filesystem handle, or every request
   // would fall through to the 404 page.
   const filesystemIndex = config.routes.findIndex((route) => route.handle === "filesystem");
+  const missIndex = config.routes.findIndex((route) => route.handle === "miss");
   const errorIndex = config.routes.findIndex((route) => route.handle === "error");
-  assert.ok(errorIndex > filesystemIndex);
-  assert.deepEqual(config.routes.at(-1), { src: "/.*", status: 404, dest: "/404" });
+  assert.ok(missIndex > filesystemIndex, "the miss phase runs after the filesystem check");
+  assert.ok(errorIndex > missIndex, "the error phase runs after the miss phase");
+  const notFound = { src: "/.*", status: 404, dest: "/404" };
+  // A static top-level miss reaches the branded page only through the miss
+  // phase; without it Vercel answers unknown paths with its own plain-text
+  // 404. The error-phase copy still catches a 404 the docs function returns.
+  assert.deepEqual(config.routes[missIndex + 1], notFound, "the miss phase serves the branded 404");
+  assert.deepEqual(config.routes.at(-1), notFound, "the error phase still serves the branded 404");
 });
 
 test("website finalization rejects a build missing its crawler files", async (t) => {
