@@ -115,6 +115,13 @@ pub struct TreeAttributeIndex {
     index: PathBuf,
 }
 
+/// Effective values and conditional includes discovered in one configuration read.
+#[derive(Debug, Default)]
+pub struct ConfigValues {
+    pub values: BTreeMap<String, Vec<u8>>,
+    pub has_conditional_includes: bool,
+}
+
 /// Branch behavior for a new linked worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorktreeHead<'a> {
@@ -532,6 +539,80 @@ impl Git {
         }
     }
 
+    /// Read every conditional target, including conditions that do not match.
+    /// Nested includes and unreadable targets cannot satisfy the key allowlist.
+    pub fn conditional_config_has_only(
+        &self,
+        path: &Path,
+        allowed_keys: &[&str],
+    ) -> Result<bool, GitError> {
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--null"),
+            OsString::from("--show-origin"),
+            OsString::from("--path"),
+            OsString::from("--get-regexp"),
+            OsString::from(r"^includeif\..*\.path$"),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.code() == Some(1) && output.stdout.is_empty() {
+            return Ok(true);
+        }
+        if !output.status.success() {
+            return Err(command_failed(&arguments, &output));
+        }
+        let mut records = output.stdout.split(|byte| *byte == 0);
+        while let Some(origin) = records.next().filter(|record| !record.is_empty()) {
+            let Some(value) = records
+                .next()
+                .and_then(|record| record.splitn(2, |byte| *byte == b'\n').nth(1))
+            else {
+                return Err(GitError::InvalidOutput {
+                    context: "conditional configuration",
+                    detail: "missing include path".to_owned(),
+                });
+            };
+            let mut target = PathBuf::from(os_string_from_git(value, "include path")?);
+            if !target.is_absolute() {
+                let Some(origin) = origin.strip_prefix(b"file:") else {
+                    return Ok(false);
+                };
+                let origin = PathBuf::from(os_string_from_git(origin, "configuration origin")?);
+                let Some(parent) = origin.parent() else {
+                    return Ok(false);
+                };
+                target = parent.join(target);
+            }
+            let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+                return Ok(false);
+            };
+            let arguments = [
+                OsString::from("config"),
+                OsString::from("--file"),
+                git_path_argument(&Path::new(".").join(name)),
+                OsString::from("--no-includes"),
+                OsString::from("--null"),
+                OsString::from("--name-only"),
+                OsString::from("--list"),
+            ];
+            let output = self.output_os(Some(&path.join(parent)), &arguments)?;
+            if !output.status.success()
+                || output
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|key| !key.is_empty())
+                    .any(|key| {
+                        !allowed_keys
+                            .iter()
+                            .any(|allowed| key.eq_ignore_ascii_case(allowed.as_bytes()))
+                    })
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Read one repository configuration value as raw Git bytes.
     pub fn config_value(&self, path: &Path, key: &str) -> Result<Option<Vec<u8>>, GitError> {
         let arguments = [
@@ -556,8 +637,8 @@ impl Git {
         }
     }
 
-    /// Read simple `section.variable` keys in one Git process, with normal
-    /// configuration precedence and the same raw values as `config_value`.
+    /// Read simple `section.variable` keys and detect conditional includes in one
+    /// Git process, with normal precedence and the same raw values as `config_value`.
     ///
     /// Section and variable names are case-insensitive and returned lowercase.
     /// Subsection names keep their case in selectors and returned keys.
@@ -565,13 +646,9 @@ impl Git {
     /// such as `filter.Mixed.clean`. Missing keys are absent. Empty values and
     /// implicit booleans are present with empty bytes, as with `--get`.
     /// The result is operation-local: no answers are cached between calls.
-    pub fn config_values(
-        &self,
-        path: &Path,
-        keys: &[&str],
-    ) -> Result<BTreeMap<String, Vec<u8>>, GitError> {
+    pub fn config_values(&self, path: &Path, keys: &[&str]) -> Result<ConfigValues, GitError> {
         if keys.is_empty() {
-            return Ok(BTreeMap::new());
+            return Ok(ConfigValues::default());
         }
         let keys = keys
             .iter()
@@ -604,7 +681,7 @@ impl Git {
         // Validation above excludes regexp metacharacters other than the one
         // separating dot. Anchor the allowlist so unrelated settings cannot match.
         let pattern = format!(
-            "^({})$",
+            r"^({}|includeif\..*\.path)$",
             keys.iter()
                 .map(|key| key.replace('.', r"\."))
                 .collect::<Vec<_>>()
@@ -620,7 +697,7 @@ impl Git {
         if output.status.success() {
             parse_config_values(&output.stdout, &keys)
         } else if output.status.code() == Some(1) && output.stdout.is_empty() {
-            Ok(BTreeMap::new())
+            Ok(ConfigValues::default())
         } else {
             Err(command_failed(&arguments, &output))
         }
@@ -1998,17 +2075,14 @@ fn os_string_from_git(bytes: &[u8], context: &'static str) -> Result<OsString, G
         })
 }
 
-fn parse_config_values(
-    output: &[u8],
-    keys: &[String],
-) -> Result<BTreeMap<String, Vec<u8>>, GitError> {
+fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, GitError> {
     let invalid = || GitError::InvalidOutput {
         context: "configuration values",
         detail: "expected NUL-terminated records for the requested keys".to_owned(),
     };
-    let mut values = BTreeMap::new();
+    let mut config = ConfigValues::default();
     if output.is_empty() {
-        return Ok(values);
+        return Ok(config);
     }
     let records = output.strip_suffix(&[0]).ok_or_else(invalid)?;
     for record in records.split(|byte| *byte == 0) {
@@ -2018,15 +2092,19 @@ fn parse_config_values(
             Some(index) => (&record[..index], &record[index + 1..]),
             None => (record, &[][..]),
         };
+        if name.starts_with(b"includeif.") && name.ends_with(b".path") {
+            config.has_conditional_includes = true;
+            continue;
+        }
         let key = keys
             .iter()
             .find(|key| key.as_bytes() == name)
             .ok_or_else(invalid)?;
         // --get-regexp returns all occurrences in Git's precedence order;
         // --get returns the last one. Preserve that exact behavior.
-        values.insert(key.clone(), value.to_vec());
+        config.values.insert(key.clone(), value.to_vec());
     }
-    Ok(values)
+    Ok(config)
 }
 
 fn display_arguments(arguments: &[OsString]) -> String {
@@ -2263,7 +2341,8 @@ mod tests {
         );
         let values = Git::default()
             .config_values(fixture.path(), &["filter.lfs.clean", "filter.lfs.process"])
-            .expect("read LFS configuration");
+            .expect("read LFS configuration")
+            .values;
 
         assert_eq!(
             values.get("filter.lfs.clean").map(Vec::as_slice),
@@ -2296,7 +2375,8 @@ mod tests {
                     "filter.MIXED.clean",
                 ],
             )
-            .unwrap();
+            .unwrap()
+            .values;
         assert_eq!(
             values,
             std::collections::BTreeMap::from([
@@ -2871,6 +2951,39 @@ mod tests {
     }
 
     #[test]
+    fn conditional_targets_preserve_native_paths_and_reject_missing_files() {
+        let fixture = RepositoryFixture::committed();
+        let included = fixture.path().join("identity-é");
+        fs::write(&included, "[user]\n email = work@example.invalid\n").unwrap();
+        let git = Git::default();
+        assert!(
+            !git.config_values(fixture.path(), &["user.email"])
+                .unwrap()
+                .has_conditional_includes
+        );
+        git.set_local_config(
+            fixture.path(),
+            "includeIf.gitdir:never.path",
+            included.canonicalize().unwrap().as_os_str(),
+        )
+        .unwrap();
+        assert!(
+            git.config_values(fixture.path(), &["user.email"])
+                .unwrap()
+                .has_conditional_includes
+        );
+        assert!(
+            git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+        fs::remove_file(included).unwrap();
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn batches_configuration_in_one_process_without_changing_values() {
         let fixture = RepositoryFixture::unborn();
         let keys = [
@@ -2893,7 +3006,8 @@ mod tests {
         let before = git.process_attempts();
         let values = git
             .config_values(fixture.path(), &keys)
-            .expect("batch config");
+            .expect("batch config")
+            .values;
         assert_eq!(git.process_attempts() - before, 1);
         for key in keys {
             assert_eq!(
@@ -2929,7 +3043,10 @@ mod tests {
                     .map(|value| (key.to_string(), value))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(git.config_values(fixture.path(), &keys).unwrap(), expected);
+        assert_eq!(
+            git.config_values(fixture.path(), &keys).unwrap().values,
+            expected
+        );
         let mut individual_seconds = Vec::new();
         let mut batched_seconds = Vec::new();
         for round in 0..30 {
@@ -2941,7 +3058,7 @@ mod tests {
                 let attempts = git.process_attempts();
                 let started = std::time::Instant::now();
                 let values = if batched {
-                    git.config_values(fixture.path(), &keys).unwrap()
+                    git.config_values(fixture.path(), &keys).unwrap().values
                 } else {
                     keys.iter()
                         .filter_map(|key| {
@@ -2987,7 +3104,7 @@ mod tests {
             "riftri-test.missing",
         ];
         let git = Git::default();
-        let values = git.config_values(fixture.path(), &keys).unwrap();
+        let values = git.config_values(fixture.path(), &keys).unwrap().values;
         for key in keys {
             assert_eq!(
                 values.get(&key.to_ascii_lowercase()).cloned(),
@@ -3013,7 +3130,12 @@ mod tests {
     fn batched_configuration_handles_missing_exact_keys_and_fresh_reads() {
         let fixture = RepositoryFixture::unborn();
         let git = Git::default();
-        assert!(git.config_values(fixture.path(), &[]).unwrap().is_empty());
+        assert!(
+            git.config_values(fixture.path(), &[])
+                .unwrap()
+                .values
+                .is_empty()
+        );
         assert_eq!(git.process_attempts(), 0);
         git.set_local_config(fixture.path(), "riftri-test.other", OsStr::new("unrelated"))
             .unwrap();
@@ -3025,18 +3147,21 @@ mod tests {
         .unwrap();
         let values = git
             .config_values(fixture.path(), &["riftri-test.value"])
-            .unwrap();
+            .unwrap()
+            .values;
         assert!(values.is_empty());
         git.set_local_config(fixture.path(), "riftri-test.value", OsStr::new("first"))
             .unwrap();
         let first = git
             .config_values(fixture.path(), &["riftri-test.value"])
-            .unwrap();
+            .unwrap()
+            .values;
         git.set_local_config(fixture.path(), "riftri-test.value", OsStr::new("changed"))
             .unwrap();
         let next = git
             .config_values(fixture.path(), &["riftri-test.value"])
-            .unwrap();
+            .unwrap()
+            .values;
         assert_eq!(first["riftri-test.value"], b"first");
         assert_eq!(next["riftri-test.value"], b"changed");
     }
@@ -3159,7 +3284,7 @@ mod tests {
             "riftri.enabled",
         ];
         for repository in [fixture.path(), linked.as_path()] {
-            let values = scoped.config_values(repository, &keys).unwrap();
+            let values = scoped.config_values(repository, &keys).unwrap().values;
             for key in keys {
                 assert_eq!(
                     values.get(key).cloned(),
@@ -3181,11 +3306,11 @@ mod tests {
             );
         }
         assert_eq!(
-            scoped.config_values(fixture.path(), &keys).unwrap()["riftri-test.scope"],
+            scoped.config_values(fixture.path(), &keys).unwrap().values["riftri-test.scope"],
             b"local"
         );
         assert_eq!(
-            scoped.config_values(&linked, &keys).unwrap()["riftri-test.scope"],
+            scoped.config_values(&linked, &keys).unwrap().values["riftri-test.scope"],
             b"worktree"
         );
         git(

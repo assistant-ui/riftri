@@ -21,6 +21,9 @@ impl RepositoryFixture {
             &["config", "user.name", "Riftri Tests"][..],
             &["config", "user.email", "riftri@example.invalid"][..],
             &["config", "core.autocrlf", "false"][..],
+            // Git for Windows writes core.symlinks=false at init when the
+            // system configuration is hidden, and doctor rejects that value.
+            &["config", "core.symlinks", "true"][..],
         ] {
             assert_git_success(&repository, arguments);
         }
@@ -48,15 +51,19 @@ enum UnsafeCheckoutCase {
     RepositoryAttributes,
     SparseCheckout,
     SubmoduleGitlink,
+    SourceBranchConfiguration,
+    LinkedWorktreeConfiguration,
 }
 
 impl UnsafeCheckoutCase {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 7] = [
         Self::NonCanonicalGitLfs,
         Self::NestedEncoding,
         Self::RepositoryAttributes,
         Self::SparseCheckout,
         Self::SubmoduleGitlink,
+        Self::SourceBranchConfiguration,
+        Self::LinkedWorktreeConfiguration,
     ];
 
     fn name(self) -> &'static str {
@@ -66,6 +73,8 @@ impl UnsafeCheckoutCase {
             Self::RepositoryAttributes => "repository-attributes",
             Self::SparseCheckout => "sparse-checkout",
             Self::SubmoduleGitlink => "submodule-gitlink",
+            Self::SourceBranchConfiguration => "source-branch-configuration",
+            Self::LinkedWorktreeConfiguration => "linked-worktree-configuration",
         }
     }
 
@@ -76,6 +85,9 @@ impl UnsafeCheckoutCase {
             Self::RepositoryAttributes => "effective-attributes",
             Self::SparseCheckout => "sparse-checkout",
             Self::SubmoduleGitlink => "submodules",
+            Self::SourceBranchConfiguration | Self::LinkedWorktreeConfiguration => {
+                "checkout-configuration"
+            }
         }
     }
 
@@ -142,6 +154,32 @@ impl UnsafeCheckoutCase {
                 )
                 .expect("write submodule metadata");
                 fixture.commit(&[".gitmodules"], "submodule gitlink");
+            }
+            Self::SourceBranchConfiguration | Self::LinkedWorktreeConfiguration => {
+                fs::write(fixture.repository.join(".gitattributes"), "*.txt text\n")
+                    .expect("write text attributes");
+                fixture.commit(&[".gitattributes"], "text attributes");
+                let (condition, common_eol, included_eol) = match self {
+                    Self::SourceBranchConfiguration => {
+                        let branch = git(&fixture.repository, &["symbolic-ref", "--short", "HEAD"]);
+                        assert!(branch.status.success());
+                        let branch = String::from_utf8(branch.stdout).expect("UTF-8 branch");
+                        (format!("onbranch:{}", branch.trim()), "crlf", "lf")
+                    }
+                    _ => ("gitdir:**/worktrees/**".to_owned(), "lf", "crlf"),
+                };
+                let included = fixture._directory.path().join("checkout-config");
+                fs::write(&included, format!("[core]\n eol = {included_eol}\n"))
+                    .expect("write conditional checkout configuration");
+                assert_git_success(&fixture.repository, &["config", "core.eol", common_eol]);
+                assert_git_success(
+                    &fixture.repository,
+                    &[
+                        "config",
+                        &format!("includeIf.{condition}.path"),
+                        included.to_str().expect("UTF-8 configuration path"),
+                    ],
+                );
             }
         }
     }
@@ -436,6 +474,81 @@ fn doctor_keeps_the_friendly_message_for_a_genuinely_unborn_head() {
         stdout.contains("repository HEAD is unborn; commit a tree first"),
         "{stdout}"
     );
+}
+
+#[test]
+fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
+    let fixture = RepositoryFixture::new();
+    let global = fixture._directory.path().join("global-config");
+    let included = fixture._directory.path().join("identity-config");
+    for condition in ["gitdir:**/repository/.git", "gitdir:**/worktrees/**"] {
+        fs::write(
+            &global,
+            format!("[includeIf \"{condition}\"]\n path = identity-config\n"),
+        )
+        .expect("write global configuration");
+        for (contents, compatible) in [
+            (
+                "[user]\n name = Work User\n email = work@example.invalid\n",
+                true,
+            ),
+            ("[core]\n eol = crlf\n", false),
+            ("[include]\n path = hidden-config\n", false),
+        ] {
+            fs::write(&included, contents).expect("write included configuration");
+            let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .args(["doctor", "--json"])
+                .current_dir(&fixture.repository)
+                .env("GIT_CONFIG_GLOBAL", &global)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("run doctor with global configuration");
+            assert!(doctor.status.success(), "{:?}", doctor);
+            let report: serde_json::Value =
+                serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+            assert_eq!(
+                report["repository_compatibility"]["value"]["compatible"], compatible,
+                "condition {condition}, configuration {contents}, report {report}",
+            );
+            #[cfg(target_os = "macos")]
+            if compatible {
+                let destination =
+                    fixture
+                        ._directory
+                        .path()
+                        .join(if condition.contains("worktrees") {
+                            "destination-identity"
+                        } else {
+                            "source-identity"
+                        });
+                let state = fixture._directory.path().join("state");
+                let add = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                    .args(["worktree", "add"])
+                    .arg(&destination)
+                    .args(["--detach", "HEAD", "--state-dir"])
+                    .arg(&state)
+                    .current_dir(&fixture.repository)
+                    .env("GIT_CONFIG_GLOBAL", &global)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()
+                    .expect("add with global identity configuration");
+                assert!(add.status.success(), "{add:?}");
+                assert_eq!(
+                    fs::read(destination.join("tracked.txt")).unwrap(),
+                    b"tracked\n"
+                );
+                let status = Command::new("git")
+                    .args(["status", "--porcelain"])
+                    .current_dir(&destination)
+                    .env("GIT_CONFIG_GLOBAL", &global)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()
+                    .expect("inspect worktree");
+                assert!(status.status.success(), "{status:?}");
+                assert!(status.stdout.is_empty(), "{status:?}");
+            }
+        }
+    }
 }
 
 #[test]
