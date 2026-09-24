@@ -2657,7 +2657,8 @@ fn add_worktree_inner(
             )));
         }
     }
-    let sparse_directories = canonicalize_sparse_directories(&request.sparse_directories)?;
+    let sparse_directories =
+        resolve_sparse_profile(&git, &repository_root, &request.sparse_directories)?;
     let compatibility = validate_resolved_compatibility(
         &git,
         &repository_root,
@@ -3456,6 +3457,35 @@ fn validate_resolved_compatibility(
     Ok(analysis)
 }
 
+/// Resolve the cone directory list the new worktree will actually materialize.
+///
+/// An explicit request always wins. Otherwise Riftri inherits the source
+/// worktree's cone, because that is what Git itself does: `git worktree add`
+/// copies the current worktree's sparse-checkout into the new one, so an add
+/// issued from inside a sparse worktree produces a sparse worktree with no
+/// sparse argument anywhere on the command line. Inheriting it here keeps Git
+/// the source of truth and keys the immutable base by the profile that is
+/// really materialized.
+///
+/// Sparse configuration outside the supported cone subset resolves to an empty
+/// list on purpose, leaving the repository compatibility blocker to refuse the
+/// add before any state exists rather than quietly materializing a full tree.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn resolve_sparse_profile(
+    git: &Git,
+    repository: &Path,
+    requested: &[String],
+) -> Result<Vec<String>, WorktreeError> {
+    if !requested.is_empty() {
+        return canonicalize_sparse_directories(requested);
+    }
+    let state = git.sparse_checkout_state(repository)?;
+    if !state.enabled || !state.cone || state.directories.is_empty() {
+        return Ok(Vec::new());
+    }
+    canonicalize_sparse_directories(&state.directories)
+}
+
 /// Canonicalize a requested cone-mode sparse directory list into the exact
 /// form that keys the immutable base: sorted, deduplicated, trailing-slash
 /// free, with nested cones collapsed into their listed ancestors so base
@@ -3975,6 +4005,15 @@ fn analyze_resolved_repository_compatibility(
             explanation,
         });
     }
+    let config_is_true = |key: &str| {
+        config_values
+            .get(key)
+            .is_some_and(|value| value.eq_ignore_ascii_case(b"true"))
+    };
+    // Sparse checkout that is on but not in cone mode, which Riftri cannot
+    // reproduce from a cone directory list.
+    let source_sparse_is_unsupported =
+        config_is_true("core.sparsecheckout") && !config_is_true("core.sparsecheckoutcone");
     for (key, accepted, kind) in checked_config {
         let value = config_values.get(key).cloned();
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -3983,7 +4022,23 @@ fn analyze_resolved_repository_compatibility(
         if let Some(value) = &value {
             checkout_config.push((key.to_owned(), value.clone()));
         }
+        // A resolved cone list is materialized explicitly into the new
+        // worktree, so a cone-mode source cannot change the bytes Riftri
+        // writes and must not block the add. Without this, a sparse worktree
+        // is a dead end: Riftri sets core.sparseCheckout in the worktree it
+        // creates, and every later add from inside it is refused for
+        // configuration Riftri itself wrote.
+        //
+        // A source outside cone mode still blocks even for an explicit
+        // request. Its settings are replayed into the materialization as
+        // checkout configuration, and Riftri does not model non-cone pattern
+        // semantics well enough to predict the result.
+        let superseded_by_resolved_cone =
+            matches!(kind, RepositoryCompatibilityBlockerKind::SparseCheckout)
+                && !sparse_directories.is_empty()
+                && !source_sparse_is_unsupported;
         if let Some(value) = value
+            && !superseded_by_resolved_cone
             && !accepted
                 .iter()
                 .any(|accepted| value.eq_ignore_ascii_case(accepted))
