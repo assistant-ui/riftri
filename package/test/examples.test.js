@@ -6,6 +6,10 @@ const { test } = require("node:test");
 const root = path.resolve(__dirname, "../..");
 const examples = path.join(root, "examples");
 const read = (file) => fs.readFileSync(path.join(root, file), "utf8");
+// The behavioural fakes below are shell scripts, which Windows cannot
+// execute directly; the client parsing they cover is identical on every
+// platform. Matches package/test/client.test.js.
+const onWindows = process.platform === "win32";
 
 const folders = ["basic-runner", "fallback-detection", "parallel-tasks", "wrapped-agent"];
 
@@ -75,7 +79,7 @@ function fakeBinary(t, body) {
   return bin;
 }
 
-test("riftri exec keeps Riftri flags before the -- payload boundary", async (t) => {
+test("riftri exec keeps Riftri flags before the -- payload boundary", { skip: onWindows }, async (t) => {
   const { riftri } = await loadClient();
   // The fake records its own argv, one per line.
   const record = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "riftri-argv-")), "argv");
@@ -87,7 +91,7 @@ test("riftri exec keeps Riftri flags before the -- payload boundary", async (t) 
   assert.deepEqual(argv.slice(boundary), ["--", "agent", "--agent-flag"]);
 });
 
-test("malformed success output rejects instead of crashing the host", async (t) => {
+test("malformed success output rejects instead of crashing the host", { skip: onWindows }, async (t) => {
   const { riftri, RiftriError } = await loadClient();
   const bin = fakeBinary(t, "printf '{bad'; exit 0");
   await assert.rejects(riftri(["status"], { bin }), (error) => {
@@ -97,7 +101,7 @@ test("malformed success output rejects instead of crashing the host", async (t) 
   });
 });
 
-test("a silent non-zero exit still carries a useful message", async (t) => {
+test("a silent non-zero exit still carries a useful message", { skip: onWindows }, async (t) => {
   const { riftri } = await loadClient();
   const bin = fakeBinary(t, "exit 7");
   await assert.rejects(riftri(["status"], { bin }), (error) => {
@@ -107,7 +111,7 @@ test("a silent non-zero exit still carries a useful message", async (t) => {
   });
 });
 
-test("a signalled riftri rejects with a translated exit code", async (t) => {
+test("a signalled riftri rejects with a translated exit code", { skip: onWindows }, async (t) => {
   const { riftri } = await loadClient();
   const bin = fakeBinary(t, "kill -TERM $$");
   await assert.rejects(riftri(["status"], { bin }), (error) => {
@@ -118,7 +122,7 @@ test("a signalled riftri rejects with a translated exit code", async (t) => {
   });
 });
 
-test("run resolves a signalled child as 128 + signal, never null", async (t) => {
+test("run resolves a signalled child as 128 + signal, never null", { skip: onWindows }, async (t) => {
   const { run } = await loadClient();
   const code = await run("/bin/sh", ["-c", "kill -TERM $$"]);
   assert.equal(code, 143);
