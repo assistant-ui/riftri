@@ -309,3 +309,64 @@ fn default_scope_ignores_registered_states_and_keeps_schema_version_one() {
         "default scope must not silently widen to registered states"
     );
 }
+
+// An enabled repository has no state directory until its first managed add.
+// `worktree prune` used to fail there with a `filesystem-io-failed` receipt,
+// telling a harness to inspect a repository that was perfectly healthy, while
+// `status`, `doctor`, `gc`, `repair`, and `worktree list` all reported success
+// at the same moment.
+//
+// Reporting success while skipping the prune would be a worse answer than the
+// error it replaces: `worktree prune` exists to run Git's own prune, and
+// ordinary Git worktrees can leave stale registrations long before Riftri
+// manages one. The prune must actually happen.
+#[test]
+fn worktree_prune_succeeds_before_any_managed_add_and_still_prunes_git_metadata() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    init_repository(&repository);
+    assert!(
+        git(
+            &repository,
+            &["commit", "--quiet", "--allow-empty", "-m", "initial"]
+        )
+        .status
+        .success()
+    );
+
+    let stale = fixture.path().join("stale");
+    assert!(
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/stale",
+                stale.to_str().expect("UTF-8 worktree path"),
+            ],
+        )
+        .status
+        .success()
+    );
+    fs::remove_dir_all(&stale).expect("remove the worktree directory behind Git's back");
+    assert!(
+        !repository.join(".git/riftri").exists(),
+        "no managed add has run, so there is no state directory yet"
+    );
+
+    let output = riftri(&repository, &["worktree", "prune"]);
+    assert!(
+        output.status.success(),
+        "prune must succeed before any managed add: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let listed =
+        String::from_utf8_lossy(&git(&repository, &["worktree", "list"]).stdout).to_string();
+    assert!(
+        !listed.contains("feature/stale"),
+        "the stale registration survived the prune: {listed}"
+    );
+}

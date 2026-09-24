@@ -26,6 +26,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   being refused outright with no way to reclaim its storage. A view whose
   selection changed since the add is refused with both profiles named, since
   Riftri never rewrites a worktree's immutable creation base.
+### Fixed
+
+- `riftri worktree prune` no longer fails on an enabled repository that has no
+  state directory yet, which is every repository until its first managed add.
+  It reported `filesystem-io-failed` with a recovery of `inspect`, telling a
+  harness to investigate a repository that `status`, `doctor`, `gc`, `repair`,
+  and `worktree list` all reported as healthy at the same moment. Prune now
+  creates its state layout the way an add does, so the Git prune it exists to
+  perform still runs: a stale registration left by an ordinary Git worktree is
+  removed even when Riftri has never managed one.
 
 ## [0.4.1] - 2026-09-24
 

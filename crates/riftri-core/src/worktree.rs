@@ -2616,7 +2616,16 @@ fn prune_worktrees_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
+    // An enabled repository has no state directory until its first managed
+    // add, and pruning is still meaningful there: `git worktree prune` removes
+    // stale registrations left by ordinary Git worktrees, which can exist long
+    // before Riftri manages one. Create the layout the way an add does rather
+    // than failing, and rather than reporting success while skipping the Git
+    // prune the command exists to perform. A state directory that exists but
+    // is not a real directory still fails here, as does any other I/O error.
+    let state_directory = absolute_path(&requested_state)?;
+    create_state_layout(&state_directory)?;
+    let state_directory = resolve_real_state_directory(&state_directory)?;
     verify_repository_prune_safe(&git, &state_directory, &repository_root, None)?;
 
     let store = PruneJournalStore::create(&state_directory)?;
