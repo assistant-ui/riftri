@@ -107,10 +107,12 @@ export async function finalizeStaticWebsite(
       docs && { src: "^/(?:docs(?:/.*|\\.md)?|api/docs)$", dest: "/__nitro", headers: { "Cache-Control": "no-store", "Vary": "x-farm-docs-navigation, Accept" } },
       // A static top-level miss never reaches the error phase, so without a
       // `miss` catch-all Vercel answers it with its own generic plain-text
-      // 404. Route the miss to the prerendered branded page with a real 404.
+      // 404. Route the miss to the prerendered branded page with a real 404;
+      // `/404` resolves to the static 404/index.html through the override, the
+      // same terminal rewrite the error phase already uses for function 404s.
       { handle: "miss" },
       notFoundRoute,
-      // The error phase still catches a 404 the docs SSR function returns.
+      // Keep the error-phase copy for a 404 the docs SSR function returns.
       { handle: "error" },
       notFoundRoute,
     ].filter(Boolean),
