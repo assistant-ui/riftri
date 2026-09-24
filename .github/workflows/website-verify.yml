@@ -1,0 +1,36 @@
+name: Website verify
+
+# Verify the live production site regardless of how it was deployed. The deploy
+# path is a maintainer workstation, so nothing in CI confirmed production until
+# this workflow: it caught the unbranded 404 that website-deploy.yml never ran
+# to detect (#377). Needs no deployment secrets — it only fetches the site.
+
+on:
+  schedule:
+    # Every six hours, so a bad or stale production deploy surfaces within one
+    # window rather than at the next manual check.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify riftri.dev
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Verify the public production deployment
+        # Confirms every public entry point, including that an unknown top-level
+        # path serves the branded 404 as text/html rather than Vercel's generic
+        # plain-text body.
+        run: node package/scripts/verify-website.mjs https://riftri.dev
