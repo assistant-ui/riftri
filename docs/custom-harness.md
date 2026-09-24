@@ -109,6 +109,11 @@ before parsing anything:
 | `2` | Usage — bad flag or argument | Fix the call; never retry |
 | `3` | **Policy refusal** | Riftri will not optimize this. Nothing changed. Fall back or stop |
 
+A killed process has no exit code of its own. Report `128 +` the signal
+number, as a shell does, rather than passing the null through: a runner
+comparing against zero would otherwise read a killed command as success.
+`examples/lib/riftri.mjs` does this in both `riftri()` and `run()`.
+
 Code `3` is the one that matters most. It means Riftri declined *before
 touching anything* — the request is intact, no cleanup is pending, and
 retrying the identical command will fail identically.
