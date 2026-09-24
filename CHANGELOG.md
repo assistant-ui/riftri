@@ -5,6 +5,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Doctor's suggested add and activation commands keep the inspected repository
+  when doctor runs from a different directory. Repository and destination paths
+  use shell quotes to preserve spaces and shell metacharacters.
+  Non-UTF-8 repository paths retain the `riftri enable` suggestion for use
+  inside that repository.
+
 ## [0.4.0] - 2026-09-22
 
 ### Added

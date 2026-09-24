@@ -294,12 +294,14 @@ Inspect Git and show the planned storage path without changing anything.
 | `--destination <DESTINATION>` | Proposed worktree destination whose volume should be probed |
 | `--json` | Emit machine-readable JSON |
 
-The suggested command uses POSIX shell quoting on every platform, so it runs as
-shown in `sh`, `bash`, and `zsh` — including the Git Bash, WSL, and MSYS
-environments common on Windows. If the destination is not valid Unicode or
-holds control characters, doctor omits the suggested command rather than
-substitute characters in the path; the exact path stays in the machine-readable
-native-path fields.
+The suggested commands retain the inspected repository and use POSIX shell
+quoting on every platform, so they run as shown in `sh`, `bash`, and `zsh` —
+including the Git Bash, WSL, and MSYS environments common on Windows. If the
+repository or destination is not valid Unicode or holds control characters,
+doctor omits the suggested add command rather than substitute characters in a
+path; the exact path stays in the machine-readable native-path fields. For an
+unrepresentable repository that needs activation, doctor suggests `riftri
+enable` for use inside that repository.
 
 With `--json`, `destination_readiness.backend` and
 `destination_readiness.next_command` are always present, explicitly `null`
