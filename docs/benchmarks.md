@@ -22,6 +22,12 @@ For a real-project, ten-agent run using the public direct-download CLI, see
 It records both allocation savings and slower creation, along with the
 repository compatibility adjustment and workload limitations.
 
+For the current cached-creation baseline on a real repository, see
+[the assistant-ui cached creation baseline](benchmarks/assistant-ui-cached-creation-2026-09-25.md).
+It records serial and ten-way concurrent latencies, reports the two physical
+allocation measurements separately, and retains an outlier rather than dropping
+it. It is a baseline for #211, not a comparison between versions.
+
 For the narrower checkout-configuration optimization, see
 [the batching comparison](benchmarks/checkout-config-batching-2026-09-13.md).
 It includes process counts, paired timings, correctness checks, and raw samples.

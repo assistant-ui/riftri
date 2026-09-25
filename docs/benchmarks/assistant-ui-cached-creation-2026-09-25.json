@@ -1,0 +1,233 @@
+{
+  "schema_version": 1,
+  "benchmark": "assistant-ui cached creation baseline",
+  "date": "2026-09-25",
+  "riftri_version": "0.5.0",
+  "build": "release",
+  "fixture": {
+    "source": "independent exact-tree export of assistant-ui",
+    "commit": "038cd9f82b418afe9e6d0080648738f78586fbca",
+    "tree": "c4de7922b24126e860cb77652f5d080e04c8c396",
+    "tracked_files": 5864,
+    "logical_bytes": 73235130,
+    "note": "The assistant-ui repository itself was not modified; the export was produced with git archive and its tree hash matches the source tree exactly."
+  },
+  "environment": {
+    "os": "macOS (Darwin 25.2.0)",
+    "arch": "arm64",
+    "filesystem": "host APFS",
+    "backend": "apfs-clone",
+    "checkout_profile": "full (no sparse directories)",
+    "quiet_volume": false,
+    "exclusions": "none; all samples retained including one 533.6 MB volume-delta outlier caused by unrelated activity on the machine"
+  },
+  "runs": [
+    {
+      "samples": {
+        "serial_cached": [
+          {
+            "seconds": 2.445264583,
+            "volume_delta_bytes": 3014656,
+            "total_allocated_bytes": 88268800,
+            "clean": true
+          },
+          {
+            "seconds": 2.526513957999999,
+            "volume_delta_bytes": 2801664,
+            "total_allocated_bytes": 88272896,
+            "clean": true
+          },
+          {
+            "seconds": 2.730842334000002,
+            "volume_delta_bytes": 3383296,
+            "total_allocated_bytes": 88276992,
+            "clean": true
+          },
+          {
+            "seconds": 2.5561605420000006,
+            "volume_delta_bytes": 2695168,
+            "total_allocated_bytes": 88281088,
+            "clean": true
+          },
+          {
+            "seconds": 2.511650957999997,
+            "volume_delta_bytes": 3813376,
+            "total_allocated_bytes": 88285184,
+            "clean": true
+          }
+        ]
+      },
+      "cold": {
+        "seconds": 3.4983505839999998,
+        "volume_delta_bytes": 91549696,
+        "base_allocated_bytes": 88260608,
+        "total_allocated_bytes": 88264704,
+        "clean": true
+      },
+      "concurrent": {
+        "views": 10,
+        "batch_seconds": 6.817978499999995,
+        "latencies_seconds": [
+          6.6827392089999975,
+          6.572693332999997,
+          6.629988249999997,
+          6.789553790999996,
+          6.457883082999999,
+          6.811356874999994,
+          6.469229749999997,
+          6.458090583999997,
+          6.7556941670000015,
+          6.619349
+        ],
+        "min_seconds": 6.457883082999999,
+        "median_seconds": 6.624668624999998,
+        "max_seconds": 6.811356874999994,
+        "volume_delta_bytes": 34787328,
+        "total_allocated_bytes": 88326144,
+        "all_clean": true
+      }
+    },
+    {
+      "samples": {
+        "serial_cached": [
+          {
+            "seconds": 2.433333708000001,
+            "volume_delta_bytes": 3018752,
+            "total_allocated_bytes": 88268800,
+            "clean": true
+          },
+          {
+            "seconds": 2.506281459,
+            "volume_delta_bytes": 3198976,
+            "total_allocated_bytes": 88272896,
+            "clean": true
+          },
+          {
+            "seconds": 2.4704672909999985,
+            "volume_delta_bytes": 3186688,
+            "total_allocated_bytes": 88276992,
+            "clean": true
+          },
+          {
+            "seconds": 5.026814082999998,
+            "volume_delta_bytes": 559566848,
+            "total_allocated_bytes": 88281088,
+            "clean": true
+          },
+          {
+            "seconds": 3.0412878749999948,
+            "volume_delta_bytes": 2957312,
+            "total_allocated_bytes": 88285184,
+            "clean": true
+          }
+        ]
+      },
+      "cold": {
+        "seconds": 4.033631,
+        "volume_delta_bytes": 88289280,
+        "base_allocated_bytes": 88260608,
+        "total_allocated_bytes": 88264704,
+        "clean": true
+      },
+      "concurrent": {
+        "views": 10,
+        "batch_seconds": 7.360446707999998,
+        "latencies_seconds": [
+          6.5793281250000035,
+          6.887019374999994,
+          7.357371749999999,
+          6.9180810409999935,
+          7.266714624999992,
+          7.275990250000007,
+          7.247476709000011,
+          6.554830749999994,
+          7.126606209000002,
+          6.853454583000001
+        ],
+        "min_seconds": 6.554830749999994,
+        "median_seconds": 7.022343624999998,
+        "max_seconds": 7.357371749999999,
+        "volume_delta_bytes": 37101568,
+        "total_allocated_bytes": 88326144,
+        "all_clean": true
+      },
+      "final_accounting": {
+        "total_allocated_bytes": 88326144,
+        "base_allocated_bytes": 88260608,
+        "views": 16,
+        "marginal_allocated_bytes_per_view": 4096.0
+      }
+    },
+    {
+      "samples": {
+        "serial_cached": [
+          {
+            "seconds": 2.4105068339999995,
+            "volume_delta_bytes": 2940928,
+            "total_allocated_bytes": 88268800,
+            "clean": true
+          },
+          {
+            "seconds": 2.405013499999999,
+            "volume_delta_bytes": 3551232,
+            "total_allocated_bytes": 88272896,
+            "clean": true
+          },
+          {
+            "seconds": 2.525136666999998,
+            "volume_delta_bytes": 2994176,
+            "total_allocated_bytes": 88276992,
+            "clean": true
+          },
+          {
+            "seconds": 2.430717125000001,
+            "volume_delta_bytes": 2916352,
+            "total_allocated_bytes": 88281088,
+            "clean": true
+          },
+          {
+            "seconds": 2.491617667,
+            "volume_delta_bytes": 2998272,
+            "total_allocated_bytes": 88285184,
+            "clean": true
+          }
+        ]
+      },
+      "cold": {
+        "seconds": 3.6291086669999997,
+        "volume_delta_bytes": 97210368,
+        "base_allocated_bytes": 88260608,
+        "total_allocated_bytes": 88264704,
+        "clean": true
+      },
+      "concurrent": {
+        "views": 10,
+        "batch_seconds": 7.894185666999995,
+        "latencies_seconds": [
+          7.094360916999996,
+          7.3975757500000014,
+          7.096266750000005,
+          7.872312708999999,
+          7.737391040999995,
+          7.628626665999995,
+          7.874813666000001,
+          7.877178624999999,
+          7.307521000000001,
+          7.626948083999999
+        ],
+        "min_seconds": 7.094360916999996,
+        "median_seconds": 7.627787374999997,
+        "max_seconds": 7.877178624999999,
+        "volume_delta_bytes": 36257792,
+        "total_allocated_bytes": 88326144,
+        "all_clean": true
+      },
+      "final_accounting": {
+        "total_allocated_bytes": 88326144,
+        "base_allocated_bytes": 88260608,
+        "views": 16,
+        "marginal_allocated_bytes_per_view": 4096.0
+      }
+    }
+  ]
+}
