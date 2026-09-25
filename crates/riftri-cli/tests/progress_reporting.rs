@@ -335,7 +335,7 @@ fn repair_reports_scanning_and_recovery_of_an_interrupted_add() {
     let wrapper = fixture.path().join("paused-git");
     fs::write(
         &wrapper,
-        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then\n  touch \"$RIFTRI_TEST_READY\"\n  attempt=0\n  while [ ! -e \"$RIFTRI_TEST_RELEASE\" ] && [ \"$attempt\" -lt 600 ]; do sleep 0.05; attempt=$((attempt + 1)); done\n  exit 70\n fi\ndone\nexec git \"$@\"\n",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then\n  touch \"$RIFTRI_TEST_READY\"\n  cd / || exit 1\n  attempt=0\n  while [ ! -e \"$RIFTRI_TEST_RELEASE\" ] && [ \"$attempt\" -lt 600 ]; do sleep 0.05; attempt=$((attempt + 1)); done\n  exit 70\n fi\ndone\nexec git \"$@\"\n",
     )
     .expect("write paused git wrapper");
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("mark executable");
