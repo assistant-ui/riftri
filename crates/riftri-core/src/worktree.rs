@@ -83,6 +83,10 @@ struct CompatibilityAnalysis {
     checkout_config: Vec<(String, Vec<u8>)>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     lfs_objects: Vec<GitLfsObject>,
+    /// `core.hooksPath` from the same batched read the blockers use, so
+    /// running the hook costs no extra Git invocation.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    hooks_path: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2870,12 +2874,6 @@ fn add_worktree_inner(
         )
     });
 
-    // Read once here: the hook runs only on the success path below, and the
-    // compatibility profile deliberately excludes hook configuration.
-    let hooks_path = git
-        .config_value(&repository_root, "core.hooksPath")
-        .unwrap_or(None);
-
     match operation {
         Ok(reused_base) => {
             // Git runs post-checkout after creating a worktree. Riftri builds
@@ -2886,7 +2884,7 @@ fn add_worktree_inner(
             let post_checkout = post_checkout_hook_path(
                 &repository_root,
                 &repository.identity.common_git_dir,
-                hooks_path.as_deref(),
+                compatibility.hooks_path.as_deref(),
             )
             .filter(|hook| hook_is_executable(hook))
             .map(|hook| run_post_checkout_hook(&hook, &destination, &resolved.commit));
@@ -4309,6 +4307,8 @@ fn analyze_resolved_repository_compatibility(
         checkout_paths: paths,
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_config,
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        hooks_path: config_values.get("core.hookspath").cloned(),
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         lfs_objects,
     })
