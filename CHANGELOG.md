@@ -7,6 +7,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- A cached-creation baseline on a real repository:
+  `docs/benchmarks/assistant-ui-cached-creation-2026-09-25.md` records serial and
+  ten-way concurrent latencies against an exact-tree assistant-ui export,
+  reports riftri's allocation accounting separately from whole-volume deltas, and
+  retains its outliers. It also records that the unmodified repository is now
+  accepted, which the 2026-09-12 experiment could not certify.
+
+### Added
+
 - A cached-creation baseline benchmark records serial and ten-way concurrent
   creation latencies against one warm base, for #211. CI uploads it as
   `cached-creation-baseline-macos-apfs`.
