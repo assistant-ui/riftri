@@ -1012,6 +1012,17 @@ fn run(cli: Cli) -> Result<()> {
                     sparse_directories: sparse_dir,
                 })?;
                 print_add_result(&result, json)?;
+                // Git reports a failing post-checkout through its own exit
+                // code and leaves the worktree in place. Match that: the
+                // worktree is created and registered either way, so this is a
+                // status, not a rollback.
+                if let Some(hook) = result
+                    .post_checkout
+                    .as_ref()
+                    .filter(|hook| !hook.succeeded())
+                {
+                    std::process::exit(hook.exit_code.unwrap_or(1));
+                }
             }
             WorktreeCommand::Remove {
                 path,
@@ -1876,6 +1887,11 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
             "base_path": result.base_path.display().to_string(),
             "base_path_native_hex": native_path_hex(&result.base_path),
             "reused_base": result.reused_base,
+            "post_checkout": result.post_checkout.as_ref().map(|hook| serde_json::json!({
+                "hook": hook.hook.display().to_string(),
+                "started": hook.started,
+                "exit_code": hook.exit_code,
+            })),
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
         });
@@ -1903,7 +1919,26 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
         }
     );
     outputln!("Journal: {}", result.journal_path.display());
+    if let Some(hook) = &result.post_checkout {
+        outputln!(
+            "post-checkout hook: {} ({})",
+            hook.hook.display(),
+            describe_hook_outcome(hook)
+        );
+    }
     Ok(())
+}
+
+/// How the repository's post-checkout hook finished, for humans.
+fn describe_hook_outcome(hook: &riftri_core::PostCheckoutOutcome) -> String {
+    if !hook.started {
+        return "could not be started".to_owned();
+    }
+    match hook.exit_code {
+        Some(0) => "ran".to_owned(),
+        Some(code) => format!("exited {code}"),
+        None => "terminated by a signal".to_owned(),
+    }
 }
 
 fn print_remove_result(

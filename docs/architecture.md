@@ -112,13 +112,18 @@ external input, it must reject optimized creation rather than reuse an
 ambiguous base.
 
 Optimized creation suppresses Git's checkout, which also suppresses its
-`post-checkout` hook. Until hook execution has a recoverable transaction design,
-Riftri refuses creation before mutation when an executable default
-`post-checkout` hook is present. Custom `core.hooksPath` configurations are also
-refused: relative paths can refer to hooks in the destination tree rather than
-the invoking worktree. Doctor reports the same blocker. Use ordinary
-`git worktree add` when checkout hooks are required; Riftri never silently
-skips them or automatically falls back to a full checkout.
+`post-checkout` hook, so Riftri runs that hook itself once the worktree is
+active. It uses Git's contract: the null object id, the new HEAD, and `1` for a
+branch checkout, executed from inside the new worktree without Riftri's own
+`GIT_DIR` exported into it. `core.hooksPath` is honored, resolved against the
+invoking worktree the way Git resolves it.
+
+The hook runs after activation rather than inside the creation transaction,
+because Git does not treat it as part of the checkout either: a failing
+`post-checkout` leaves the worktree in place and reports through the exit
+status. Riftri matches that, reporting the outcome on the result and exiting
+with the hook's code, so a hook cannot roll back a worktree Git would have
+kept. Riftri never silently skips a hook.
 
 The current native COW policy asks Git to resolve attributes from the exact
 requested tree through an isolated temporary index. Built-in `text`, `eol`, and

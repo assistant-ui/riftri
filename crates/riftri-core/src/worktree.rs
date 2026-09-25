@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -145,6 +146,31 @@ pub struct AddWorktreeResult {
     pub journal_path: PathBuf,
     pub reused_base: bool,
     pub backend: BackendKind,
+    /// The repository's `post-checkout` hook run, when it has one Git would
+    /// execute. None means there was no such hook.
+    pub post_checkout: Option<PostCheckoutOutcome>,
+}
+
+/// What Riftri's `post-checkout` hook run did.
+///
+/// `git worktree add` runs this hook and reports a failure without undoing the
+/// worktree, so Riftri matches that: the caller decides what a non-zero hook
+/// means, and the worktree exists either way.
+#[derive(Debug, Clone)]
+pub struct PostCheckoutOutcome {
+    /// The hook Git would have run.
+    pub hook: PathBuf,
+    /// Its exit code, or None when it was killed by a signal.
+    pub exit_code: Option<i32>,
+    /// False when the hook could not be started at all.
+    pub started: bool,
+}
+
+impl PostCheckoutOutcome {
+    /// Whether the hook ran and reported success.
+    pub fn succeeded(&self) -> bool {
+        self.started && self.exit_code == Some(0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2844,16 +2870,37 @@ fn add_worktree_inner(
         )
     });
 
+    // Read once here: the hook runs only on the success path below, and the
+    // compatibility profile deliberately excludes hook configuration.
+    let hooks_path = git
+        .config_value(&repository_root, "core.hooksPath")
+        .unwrap_or(None);
+
     match operation {
-        Ok(reused_base) => Ok(AddWorktreeResult {
-            destination,
-            commit: resolved.commit,
-            tree: resolved.tree,
-            base_path,
-            journal_path,
-            reused_base,
-            backend,
-        }),
+        Ok(reused_base) => {
+            // Git runs post-checkout after creating a worktree. Riftri builds
+            // the worktree by cloning a base instead of checking out, so Git
+            // never fires it; run it here so the result matches `git worktree
+            // add`. A failing hook is reported, not rolled back, exactly as
+            // Git leaves the worktree in place.
+            let post_checkout = post_checkout_hook_path(
+                &repository_root,
+                &repository.identity.common_git_dir,
+                hooks_path.as_deref(),
+            )
+            .filter(|hook| hook_is_executable(hook))
+            .map(|hook| run_post_checkout_hook(&hook, &destination, &resolved.commit));
+            Ok(AddWorktreeResult {
+                destination,
+                commit: resolved.commit,
+                tree: resolved.tree,
+                base_path,
+                journal_path,
+                reused_base,
+                backend,
+                post_checkout,
+            })
+        }
         Err(operation_error) => {
             if !rollback_on_error {
                 return Err(operation_error);
@@ -3774,51 +3821,121 @@ fn analyze_repository_compatibility(
     analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[])
 }
 
-fn checkout_hook_blocker(common_git_dir: &Path, custom_hooks_path: bool) -> Option<String> {
-    if custom_hooks_path {
-        // Relative paths are interpreted from the new worktree, not necessarily
-        // the invoking worktree. Do not declare them safe by inspecting here.
-        return Some(
-            "core.hooksPath is configured; Riftri cannot safely reproduce custom post-checkout hook behavior yet; use ordinary git worktree add"
-                .to_owned(),
-        );
-    }
-    // Git already resolved the common directory for this operation. Without
-    // hooksPath, linked worktrees share its hooks directory.
-    let hook = common_git_dir.join("hooks/post-checkout");
-    // Git for Windows can discover executable hooks with an .exe suffix.
-    #[cfg(windows)]
-    let candidates = [hook.clone(), hook.with_extension("exe")];
-    #[cfg(not(windows))]
-    let candidates = [hook];
-    for path in candidates {
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Some(format!(
-                    "post-checkout hook {} could not be inspected safely: {error}; use ordinary git worktree add",
-                    path.display()
-                ));
+/// Where Git would look for `post-checkout` when invoked from `repository`.
+///
+/// A relative `core.hooksPath` resolves against the working tree the command
+/// runs in, which for `git worktree add` is the invoking worktree rather than
+/// the one being created. Verified against Git rather than assumed: a hook
+/// under a relative `core.hooksPath` fires even when that directory does not
+/// exist in the new worktree.
+fn post_checkout_hook_path(
+    repository: &Path,
+    common_git_dir: &Path,
+    hooks_path: Option<&[u8]>,
+) -> Option<PathBuf> {
+    let directory = match hooks_path {
+        Some(configured) => {
+            let configured = configured_hooks_path(configured)?;
+            if configured.as_os_str().is_empty() {
+                return None;
             }
-        };
-        #[cfg(unix)]
-        let executable = {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode() & 0o111 != 0
-        };
-        #[cfg(not(unix))]
-        let executable = true;
-        if executable {
-            return Some(format!(
-                "post-checkout hook {} is present; optimized creation cannot run checkout hooks safely yet; use ordinary git worktree add",
-                path.display()
-            ));
+            if configured.is_absolute() {
+                configured
+            } else {
+                repository.join(configured)
+            }
         }
-        // A non-executable Unix hook is ignored by Git as well.
-        let _ = metadata;
+        None => common_git_dir.join("hooks"),
+    };
+    Some(directory.join("post-checkout"))
+}
+
+/// `core.hooksPath` as a path. Git stores configuration as bytes; Windows
+/// paths are UTF-16, so a non-UTF-8 value there is left undecidable.
+#[cfg(unix)]
+fn configured_hooks_path(value: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(OsStr::from_bytes(value).to_os_string()))
+}
+
+#[cfg(not(unix))]
+fn configured_hooks_path(value: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(value).ok().map(PathBuf::from)
+}
+
+/// Whether Git would execute this hook: present, and on Unix executable.
+fn hook_is_executable(hook: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(hook) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
     }
-    None
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Run `post-checkout` exactly as `git worktree add` does.
+///
+/// Git passes the null object id, the new HEAD, and `1` for a branch
+/// checkout, runs the hook from the new worktree, and does not export its own
+/// `GIT_DIR` into it. A failing hook does not undo the worktree; Git reports
+/// the failure and leaves the worktree in place, so Riftri does the same.
+fn run_post_checkout_hook(
+    hook: &Path,
+    destination: &Path,
+    commit: &ObjectId,
+) -> PostCheckoutOutcome {
+    let mut command = Command::new(hook);
+    command
+        .current_dir(destination)
+        // Git passes the null object id for a new worktree. Match the
+        // repository's hash width so SHA-256 repositories get 64 zeroes.
+        .arg("0".repeat(commit.as_str().len()))
+        .arg(commit.as_str())
+        .arg("1");
+    for leaked in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+    ] {
+        command.env_remove(leaked);
+    }
+    match command.status() {
+        Ok(status) => PostCheckoutOutcome {
+            hook: hook.to_path_buf(),
+            exit_code: status.code(),
+            started: true,
+        },
+        Err(_) => PostCheckoutOutcome {
+            hook: hook.to_path_buf(),
+            exit_code: None,
+            started: false,
+        },
+    }
+}
+
+/// Riftri runs `post-checkout` itself after creating a worktree, so a hook is
+/// no longer a reason to refuse the repository. What remains a blocker is a
+/// hook Riftri cannot decide about: a `core.hooksPath` value this platform
+/// cannot interpret as a path.
+fn checkout_hook_blocker(hooks_path: Option<&[u8]>) -> Option<String> {
+    let configured = hooks_path?;
+    if configured.is_empty() || configured_hooks_path(configured).is_some() {
+        return None;
+    }
+    Some(
+        "core.hooksPath is set to a value Riftri cannot interpret as a path, so the post-checkout hook it names cannot be run; use ordinary git worktree add"
+            .to_owned(),
+    )
 }
 
 fn analyze_resolved_repository_compatibility(
@@ -4029,7 +4146,7 @@ fn analyze_resolved_repository_compatibility(
     }
     let config_values = config.values;
     if let Some(explanation) =
-        checkout_hook_blocker(common_git_dir, config_values.contains_key("core.hookspath"))
+        checkout_hook_blocker(config_values.get("core.hookspath").map(Vec::as_slice))
     {
         blockers.push(RepositoryCompatibilityBlocker {
             kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
