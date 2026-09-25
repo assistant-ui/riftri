@@ -4707,9 +4707,7 @@ fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeErro
             destination.display()
         ))
     })?;
-    let parent = absolute.expect_parent()?;
-    let parent =
-        fs::canonicalize(parent).map_err(|source| io("resolve worktree parent", parent, source))?;
+    let parent = resolve_destination_parent(&absolute)?;
     let normalized = parent.join(file_name);
     if normalized
         .try_exists()
@@ -4721,6 +4719,22 @@ fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeErro
         )));
     }
     Ok(normalized)
+}
+
+pub(crate) fn resolve_destination_parent(destination: &Path) -> Result<PathBuf, WorktreeError> {
+    let absolute = absolute_path(destination)?;
+    let parent = absolute.parent().unwrap_or(&absolute);
+    let resolved =
+        fs::canonicalize(parent).map_err(|source| io("resolve worktree parent", parent, source))?;
+    let metadata = fs::metadata(&resolved)
+        .map_err(|source| io("inspect worktree parent", &resolved, source))?;
+    if !metadata.is_dir() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
