@@ -76,10 +76,14 @@ strands the launcher, which is how `v0.2.1` shipped with nothing installable.
 
 Releases published through the workflow carry npm provenance:
 `npm view riftri@0.5.0 dist.attestations` reports a
-`https://slsa.dev/provenance/v1` predicate. `0.4.1` was the first.
+`https://slsa.dev/provenance/v1` predicate. `0.4.0` was the first. Its tag push
+predated `NPM_PUBLISH_ENABLED`, so the publish job was skipped and only the
+GitHub release went out; npm followed from a re-run of the same workflow once
+the variable was set, which is why its npm publish timestamp trails its release
+by about seventeen hours.
 
-`0.3.5` and `0.4.0` do not. Both were published from a maintainer workstation,
-where `publishConfig.provenance: true` is rejected
+`0.3.5` does not. It was published from a maintainer workstation, where
+`publishConfig.provenance: true` is rejected
 (`Automatic provenance generation not supported for provider: null`) and the
 publish fell back to `--provenance=false`. Publishing by hand loses provenance;
 use the workflow.
