@@ -14,6 +14,19 @@ fn git(repository: &Path, args: &[&str]) {
     assert!(output.status.success(), "{output:?}");
 }
 
+/// Ordinary CI runners need not provide a native copy-on-write filesystem, and
+/// these tests assert a worktree is created rather than refused.
+fn native_cow_available(probe: &Path) -> bool {
+    riftri_storage::probe_backends(probe).iter().any(|backend| {
+        matches!(
+            backend.kind,
+            riftri_storage::BackendKind::ApfsClone
+                | riftri_storage::BackendKind::Reflink
+                | riftri_storage::BackendKind::RefsBlockClone
+        ) && backend.status == riftri_storage::CapabilityStatus::Supported
+    })
+}
+
 /// Riftri clones a base instead of checking out, so Git never fires
 /// `post-checkout` for it. Riftri runs the hook itself afterwards, with the
 /// arguments and working directory Git uses, so an optimized worktree matches
@@ -26,6 +39,9 @@ fn optimized_creation_runs_the_post_checkout_hook_git_would_run() {
     for configuration in ["default", "relative", "absolute", "empty-custom", "linked"] {
         let custom = !matches!(configuration, "default" | "linked");
         let fixture = tempfile::tempdir().unwrap();
+        if !native_cow_available(fixture.path()) {
+            return;
+        }
         let repository = fixture.path().join("repository");
         fs::create_dir(&repository).unwrap();
         git(&repository, &["init", "--quiet"]);
@@ -145,6 +161,9 @@ fn optimized_creation_runs_the_post_checkout_hook_git_would_run() {
 #[test]
 fn a_failing_post_checkout_hook_is_reported_without_discarding_the_worktree() {
     let fixture = tempfile::tempdir().unwrap();
+    if !native_cow_available(fixture.path()) {
+        return;
+    }
     let repository = fixture.path().join("repository");
     fs::create_dir(&repository).unwrap();
     git(&repository, &["init", "--quiet"]);
@@ -153,6 +172,8 @@ fn a_failing_post_checkout_hook_is_reported_without_discarding_the_worktree() {
         &repository,
         &["config", "user.email", "riftri@example.invalid"],
     );
+    // Git for Windows defaults core.autocrlf=true, which Riftri refuses.
+    git(&repository, &["config", "core.autocrlf", "false"]);
     fs::write(repository.join("tracked.txt"), "base\n").unwrap();
     git(&repository, &["add", "tracked.txt"]);
     git(&repository, &["commit", "--quiet", "-m", "initial"]);
