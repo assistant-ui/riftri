@@ -43,6 +43,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Riftri never rewrites a worktree's immutable creation base.
 ### Fixed
 
+- `riftri worktree remove`, `worktree move`, and `worktree compact` report an
+  unmanaged worktree as a policy error whether or not the repository has a
+  state directory yet. They previously surfaced the absent directory as
+  `filesystem-io-failed` with a recovery of `inspect` and an unknown `cleanup`,
+  so the same request was classified two different ways depending on whether an
+  unrelated managed add had ever run. None of them creates a state directory in
+  order to fail.
+
 - `riftri worktree prune` no longer fails on an enabled repository that has no
   state directory yet, which is every repository until its first managed add.
   It reported `filesystem-io-failed` with a recovery of `inspect`, telling a
