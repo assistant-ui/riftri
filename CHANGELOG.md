@@ -5,6 +5,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- A sparse monorepo benchmark measures allocation and creation costs for a cone
+  against the full tree, closing Milestone 6's outstanding measurement for
+  sparse-checkout profiles. CI records it on a disposable APFS volume and
+  uploads it as `sparse-monorepo-benchmark-macos-apfs`.
+
 ### Fixed
 
 - Running a command outside a Git repository is reported as a policy refusal —
