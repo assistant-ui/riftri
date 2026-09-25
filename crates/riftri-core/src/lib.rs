@@ -45,8 +45,8 @@ pub use shell::{command_path, repair_command, shell_quoted_path, status_command}
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
     CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,
-    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, ProtectedBase,
-    PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
+    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PostCheckoutOutcome,
+    ProtectedBase, PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
     RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue, StateDirectorySource,
     StateWorktreeInventory, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
     WorktreeMode, add_worktree, compact_worktree, force_remove_worktree,

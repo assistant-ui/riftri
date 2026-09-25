@@ -305,23 +305,49 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
     .env("PATH", &child_path)
     .env("GIT_CONFIG_GLOBAL", "/dev/null")
     .env("GIT_CONFIG_NOSYSTEM", "1");
-    // Verified LFS objects must not bypass the checkout-hook policy. Install
-    // a disposable fixture hook, prove preflight refuses it, then exercise the
-    // supported hook-free profile without weakening the production guard.
+    // An LFS repository with a checkout hook is no longer refused: Riftri runs
+    // the hook after creation, as `git worktree add` does. A marker hook keeps
+    // this independent of whether git-lfs is on the restricted test PATH.
     let hook = fixture.repository.join(".git/hooks/post-checkout");
     assert!(
         !hook.exists(),
         "host configuration installed a fixture hook"
     );
-    fs::write(&hook, "#!/bin/sh\ngit lfs post-checkout \"$@\"\n").expect("write fixture LFS hook");
+    fs::write(&hook, "#!/bin/sh\n: > \"$(pwd)/hook-ran\"\n").expect("write fixture hook");
     fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
-        .expect("make fixture LFS hook executable");
-    let refused = add.output().expect("try LFS add with a checkout hook");
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("post-checkout"));
-    assert!(!destination.exists());
-    assert!(!state.exists());
-    fs::remove_file(hook).expect("remove only the disposable fixture hook");
+        .expect("make fixture hook executable");
+    // Use a separate destination so the hook-free profile below still starts
+    // from an untouched state directory; Riftri's bases are read-only, so a
+    // hooked run cannot simply be deleted afterwards.
+    let parent = fixture.repository.parent().expect("repository parent");
+    let hooked_destination = parent.join("lfs-hooked");
+    let hooked_state = parent.join("lfs-hooked-state");
+    let with_hook = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "worktree",
+            "add",
+            hooked_destination.to_str().expect("UTF-8 destination"),
+            "--detach",
+            "HEAD",
+            "--state-dir",
+            hooked_state.to_str().expect("UTF-8 state"),
+        ])
+        .current_dir(&fixture.repository)
+        .env("PATH", &child_path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run LFS add with a checkout hook");
+    assert!(
+        with_hook.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with_hook.stderr)
+    );
+    assert!(
+        hooked_destination.join("hook-ran").exists(),
+        "the repository's post-checkout hook must run"
+    );
+    fs::remove_file(&hook).expect("remove only the disposable fixture hook");
     let output = add.output().expect("run Riftri LFS add");
     assert!(
         output.status.success(),
