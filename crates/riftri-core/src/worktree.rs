@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 #[cfg(unix)]
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -82,6 +83,10 @@ struct CompatibilityAnalysis {
     checkout_config: Vec<(String, Vec<u8>)>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     lfs_objects: Vec<GitLfsObject>,
+    /// `core.hooksPath` from the same batched read the blockers use, so
+    /// running the hook costs no extra Git invocation.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    hooks_path: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +150,31 @@ pub struct AddWorktreeResult {
     pub journal_path: PathBuf,
     pub reused_base: bool,
     pub backend: BackendKind,
+    /// The repository's `post-checkout` hook run, when it has one Git would
+    /// execute. None means there was no such hook.
+    pub post_checkout: Option<PostCheckoutOutcome>,
+}
+
+/// What Riftri's `post-checkout` hook run did.
+///
+/// `git worktree add` runs this hook and reports a failure without undoing the
+/// worktree, so Riftri matches that: the caller decides what a non-zero hook
+/// means, and the worktree exists either way.
+#[derive(Debug, Clone)]
+pub struct PostCheckoutOutcome {
+    /// The hook Git would have run.
+    pub hook: PathBuf,
+    /// Its exit code, or None when it was killed by a signal.
+    pub exit_code: Option<i32>,
+    /// False when the hook could not be started at all.
+    pub started: bool,
+}
+
+impl PostCheckoutOutcome {
+    /// Whether the hook ran and reported success.
+    pub fn succeeded(&self) -> bool {
+        self.started && self.exit_code == Some(0)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2421,11 +2451,33 @@ fn compact_worktree_inner(
                 .to_owned(),
         ));
     }
-    if !managed.sparse_directories.is_empty() {
+    // Compaction rebuilds the view from its creation profile, so it can only
+    // run while the worktree still holds that profile. Ordinary Git owns later
+    // selection changes and Riftri never rewrites a worktree's immutable
+    // creation base, so a view that was widened, narrowed, or disabled since
+    // it was created no longer has a base that describes it. Compare the two
+    // and say which is which, instead of refusing every sparse worktree.
+    let sparse_state = git.sparse_checkout_state(&destination)?;
+    if sparse_state.enabled && !sparse_state.cone {
         return Err(WorktreeError::Unsupported(
-            "compacting a sparse worktree is not supported yet; remove and recreate the worktree to reset its storage"
+            "compacting a worktree whose sparse checkout is not in cone mode is not supported yet; Riftri does not model non-cone pattern semantics"
                 .to_owned(),
         ));
+    }
+    let sparse_directories = canonicalize_sparse_directories(&sparse_state.directories)?;
+    if sparse_directories != managed.sparse_directories {
+        let describe = |directories: &[String]| {
+            if directories.is_empty() {
+                "a full checkout".to_owned()
+            } else {
+                format!("cone {}", directories.join(", "))
+            }
+        };
+        return Err(WorktreeError::Unsupported(format!(
+            "worktree was created as {} but now holds {}; compaction rebuilds a view from its creation profile, so remove and recreate the worktree to reset its storage",
+            describe(&managed.sparse_directories),
+            describe(&sparse_directories)
+        )));
     }
     if CompactJournalStore::open(&state_directory)
         .load_all()?
@@ -2460,7 +2512,7 @@ fn compact_worktree_inner(
         &destination,
         &repository.identity.common_git_dir,
         &resolved,
-        &[],
+        &sparse_directories,
     )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
@@ -2536,7 +2588,7 @@ fn compact_worktree_inner(
         &temporary_index,
         &compatibility.checkout_config,
         &compatibility.lfs_objects,
-        &[],
+        &sparse_directories,
     )?;
     NativeCowCloner::clone_tree_owner_writable(&base_path, &replacement)?;
     copy_git_pointer(&destination, &replacement)?;
@@ -2594,7 +2646,16 @@ fn prune_worktrees_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = resolve_real_state_directory(&absolute_path(&requested_state)?)?;
+    // An enabled repository has no state directory until its first managed
+    // add, and pruning is still meaningful there: `git worktree prune` removes
+    // stale registrations left by ordinary Git worktrees, which can exist long
+    // before Riftri manages one. Create the layout the way an add does rather
+    // than failing, and rather than reporting success while skipping the Git
+    // prune the command exists to perform. A state directory that exists but
+    // is not a real directory still fails here, as does any other I/O error.
+    let state_directory = absolute_path(&requested_state)?;
+    create_state_layout(&state_directory)?;
+    let state_directory = resolve_real_state_directory(&state_directory)?;
     verify_repository_prune_safe(&git, &state_directory, &repository_root, None)?;
 
     let store = PruneJournalStore::create(&state_directory)?;
@@ -2814,15 +2875,30 @@ fn add_worktree_inner(
     });
 
     match operation {
-        Ok(reused_base) => Ok(AddWorktreeResult {
-            destination,
-            commit: resolved.commit,
-            tree: resolved.tree,
-            base_path,
-            journal_path,
-            reused_base,
-            backend,
-        }),
+        Ok(reused_base) => {
+            // Git runs post-checkout after creating a worktree. Riftri builds
+            // the worktree by cloning a base instead of checking out, so Git
+            // never fires it; run it here so the result matches `git worktree
+            // add`. A failing hook is reported, not rolled back, exactly as
+            // Git leaves the worktree in place.
+            let post_checkout = post_checkout_hook_path(
+                &repository_root,
+                &repository.identity.common_git_dir,
+                compatibility.hooks_path.as_deref(),
+            )
+            .filter(|hook| hook_is_executable(hook))
+            .map(|hook| run_post_checkout_hook(&hook, &destination, &resolved.commit));
+            Ok(AddWorktreeResult {
+                destination,
+                commit: resolved.commit,
+                tree: resolved.tree,
+                base_path,
+                journal_path,
+                reused_base,
+                backend,
+                post_checkout,
+            })
+        }
         Err(operation_error) => {
             if !rollback_on_error {
                 return Err(operation_error);
@@ -3743,51 +3819,121 @@ fn analyze_repository_compatibility(
     analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[])
 }
 
-fn checkout_hook_blocker(common_git_dir: &Path, custom_hooks_path: bool) -> Option<String> {
-    if custom_hooks_path {
-        // Relative paths are interpreted from the new worktree, not necessarily
-        // the invoking worktree. Do not declare them safe by inspecting here.
-        return Some(
-            "core.hooksPath is configured; Riftri cannot safely reproduce custom post-checkout hook behavior yet; use ordinary git worktree add"
-                .to_owned(),
-        );
-    }
-    // Git already resolved the common directory for this operation. Without
-    // hooksPath, linked worktrees share its hooks directory.
-    let hook = common_git_dir.join("hooks/post-checkout");
-    // Git for Windows can discover executable hooks with an .exe suffix.
-    #[cfg(windows)]
-    let candidates = [hook.clone(), hook.with_extension("exe")];
-    #[cfg(not(windows))]
-    let candidates = [hook];
-    for path in candidates {
-        let metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Some(format!(
-                    "post-checkout hook {} could not be inspected safely: {error}; use ordinary git worktree add",
-                    path.display()
-                ));
+/// Where Git would look for `post-checkout` when invoked from `repository`.
+///
+/// A relative `core.hooksPath` resolves against the working tree the command
+/// runs in, which for `git worktree add` is the invoking worktree rather than
+/// the one being created. Verified against Git rather than assumed: a hook
+/// under a relative `core.hooksPath` fires even when that directory does not
+/// exist in the new worktree.
+fn post_checkout_hook_path(
+    repository: &Path,
+    common_git_dir: &Path,
+    hooks_path: Option<&[u8]>,
+) -> Option<PathBuf> {
+    let directory = match hooks_path {
+        Some(configured) => {
+            let configured = configured_hooks_path(configured)?;
+            if configured.as_os_str().is_empty() {
+                return None;
             }
-        };
-        #[cfg(unix)]
-        let executable = {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode() & 0o111 != 0
-        };
-        #[cfg(not(unix))]
-        let executable = true;
-        if executable {
-            return Some(format!(
-                "post-checkout hook {} is present; optimized creation cannot run checkout hooks safely yet; use ordinary git worktree add",
-                path.display()
-            ));
+            if configured.is_absolute() {
+                configured
+            } else {
+                repository.join(configured)
+            }
         }
-        // A non-executable Unix hook is ignored by Git as well.
-        let _ = metadata;
+        None => common_git_dir.join("hooks"),
+    };
+    Some(directory.join("post-checkout"))
+}
+
+/// `core.hooksPath` as a path. Git stores configuration as bytes; Windows
+/// paths are UTF-16, so a non-UTF-8 value there is left undecidable.
+#[cfg(unix)]
+fn configured_hooks_path(value: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(OsStr::from_bytes(value).to_os_string()))
+}
+
+#[cfg(not(unix))]
+fn configured_hooks_path(value: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(value).ok().map(PathBuf::from)
+}
+
+/// Whether Git would execute this hook: present, and on Unix executable.
+fn hook_is_executable(hook: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(hook) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
     }
-    None
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Run `post-checkout` exactly as `git worktree add` does.
+///
+/// Git passes the null object id, the new HEAD, and `1` for a branch
+/// checkout, runs the hook from the new worktree, and does not export its own
+/// `GIT_DIR` into it. A failing hook does not undo the worktree; Git reports
+/// the failure and leaves the worktree in place, so Riftri does the same.
+fn run_post_checkout_hook(
+    hook: &Path,
+    destination: &Path,
+    commit: &ObjectId,
+) -> PostCheckoutOutcome {
+    let mut command = Command::new(hook);
+    command
+        .current_dir(destination)
+        // Git passes the null object id for a new worktree. Match the
+        // repository's hash width so SHA-256 repositories get 64 zeroes.
+        .arg("0".repeat(commit.as_str().len()))
+        .arg(commit.as_str())
+        .arg("1");
+    for leaked in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_PREFIX",
+    ] {
+        command.env_remove(leaked);
+    }
+    match command.status() {
+        Ok(status) => PostCheckoutOutcome {
+            hook: hook.to_path_buf(),
+            exit_code: status.code(),
+            started: true,
+        },
+        Err(_) => PostCheckoutOutcome {
+            hook: hook.to_path_buf(),
+            exit_code: None,
+            started: false,
+        },
+    }
+}
+
+/// Riftri runs `post-checkout` itself after creating a worktree, so a hook is
+/// no longer a reason to refuse the repository. What remains a blocker is a
+/// hook Riftri cannot decide about: a `core.hooksPath` value this platform
+/// cannot interpret as a path.
+fn checkout_hook_blocker(hooks_path: Option<&[u8]>) -> Option<String> {
+    let configured = hooks_path?;
+    if configured.is_empty() || configured_hooks_path(configured).is_some() {
+        return None;
+    }
+    Some(
+        "core.hooksPath is set to a value Riftri cannot interpret as a path, so the post-checkout hook it names cannot be run; use ordinary git worktree add"
+            .to_owned(),
+    )
 }
 
 fn analyze_resolved_repository_compatibility(
@@ -3899,7 +4045,7 @@ fn analyze_resolved_repository_compatibility(
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let mut profile = {
         let mut profile = Sha256::new();
-        profile.update(b"riftri-checkout-profile-v3-lfs\0");
+        profile.update(b"riftri-checkout-profile-v4-sparse\0");
         let git_version = git.detect()?.version;
         hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
         // The canonical cone directory list is part of the checkout profile,
@@ -3998,7 +4144,7 @@ fn analyze_resolved_repository_compatibility(
     }
     let config_values = config.values;
     if let Some(explanation) =
-        checkout_hook_blocker(common_git_dir, config_values.contains_key("core.hookspath"))
+        checkout_hook_blocker(config_values.get("core.hookspath").map(Vec::as_slice))
     {
         blockers.push(RepositoryCompatibilityBlocker {
             kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
@@ -4016,10 +4162,25 @@ fn analyze_resolved_repository_compatibility(
         config_is_true("core.sparsecheckout") && !config_is_true("core.sparsecheckoutcone");
     for (key, accepted, kind) in checked_config {
         let value = config_values.get(key).cloned();
+        // The sparse keys describe where the command ran, not what gets
+        // materialized: `core.sparseCheckout` is worktree-scoped, so the same
+        // cone reads differently from the repository root than from inside a
+        // sparse worktree. The canonical cone list hashed above already
+        // describes the materialization exactly, so hashing these too would
+        // split one profile across several base buckets — which made
+        // compacting a sparse worktree allocate a second base for identical
+        // content instead of reusing the one it already had (#391). They stay
+        // in `checked_config` because they still decide what is refused.
+        let describes_where_not_what =
+            matches!(kind, RepositoryCompatibilityBlockerKind::SparseCheckout);
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-        hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+        if !describes_where_not_what {
+            hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
+        }
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-        if let Some(value) = &value {
+        if let Some(value) = &value
+            && !describes_where_not_what
+        {
             checkout_config.push((key.to_owned(), value.clone()));
         }
         // A resolved cone list is materialized explicitly into the new
@@ -4146,6 +4307,8 @@ fn analyze_resolved_repository_compatibility(
         checkout_paths: paths,
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_config,
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        hooks_path: config_values.get("core.hookspath").cloned(),
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         lfs_objects,
     })
@@ -4544,9 +4707,7 @@ fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeErro
             destination.display()
         ))
     })?;
-    let parent = absolute.expect_parent()?;
-    let parent =
-        fs::canonicalize(parent).map_err(|source| io("resolve worktree parent", parent, source))?;
+    let parent = resolve_destination_parent(&absolute)?;
     let normalized = parent.join(file_name);
     if normalized
         .try_exists()
@@ -4558,6 +4719,22 @@ fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeErro
         )));
     }
     Ok(normalized)
+}
+
+pub(crate) fn resolve_destination_parent(destination: &Path) -> Result<PathBuf, WorktreeError> {
+    let absolute = absolute_path(destination)?;
+    let parent = absolute.parent().unwrap_or(&absolute);
+    let resolved =
+        fs::canonicalize(parent).map_err(|source| io("resolve worktree parent", parent, source))?;
+    let metadata = fs::metadata(&resolved)
+        .map_err(|source| io("inspect worktree parent", &resolved, source))?;
+    if !metadata.is_dir() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
@@ -10533,12 +10710,20 @@ mod tests {
             .unwrap();
             // Reconstruct the previous, individual-read profile independently.
             let mut profile = Sha256::new();
-            profile.update(b"riftri-checkout-profile-v3-lfs\0");
+            profile.update(b"riftri-checkout-profile-v4-sparse\0");
             let version = git.detect().unwrap().version;
             super::hash_profile_input(&mut profile, b"git.version", Some(version.as_bytes()));
             let mut captured = Vec::new();
             for key in keys {
                 let value = git.config_value(repository, key).unwrap();
+                // The sparse keys are worktree-scoped and describe where the
+                // command ran rather than what is materialized, so they are
+                // deliberately outside both the profile and the replayed
+                // checkout configuration. The canonical cone list carries that
+                // information instead.
+                if matches!(key, "core.sparsecheckout" | "core.sparsecheckoutcone") {
+                    continue;
+                }
                 super::hash_profile_input(&mut profile, key.as_bytes(), value.as_deref());
                 if let Some(value) = value {
                     captured.push((key.to_owned(), value));

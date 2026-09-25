@@ -11,7 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use riftri_core::{AddWorktreeRequest, WorktreeMode, add_worktree};
+use riftri_core::{
+    AddWorktreeRequest, CompactWorktreeRequest, WorktreeMode, add_worktree, compact_worktree,
+};
 
 mod support;
 use support::writable_tempdir as tempdir;
@@ -136,20 +138,24 @@ fn creates_a_clean_sparse_cone_view_with_real_git_semantics() {
     assert!(!main_config.status.success());
     assert_clean(&repository);
 
-    // Compaction of a sparse view is refused until it is supported, and the
-    // ordinary clean-removal lifecycle applies unchanged.
+    // A pristine sparse view compacts, and the rebuilt view resolves to the
+    // very base it already had. The sparse configuration keys are deliberately
+    // left out of the checkout profile: they are worktree-scoped, so hashing
+    // them would put the add (run from the repository root) and the compaction
+    // (run against the worktree) in different base buckets and allocate a
+    // second base for identical content.
     let compaction = riftri_core::compact_worktree(riftri_core::CompactWorktreeRequest {
         repository: repository.clone(),
         destination: destination.clone(),
         state_dir: Some(state.clone()),
     })
-    .expect_err("sparse compaction must be refused");
-    assert!(
-        compaction
-            .to_string()
-            .contains("compacting a sparse worktree is not supported yet"),
-        "unexpected diagnostic: {compaction}"
-    );
+    .expect("a pristine sparse view must be compactable");
+    assert_eq!(compaction.base_path, result.base_path);
+    assert_eq!(compaction.old_base_path, result.base_path);
+    assert!(compaction.reused_base);
+    assert_clean(&destination);
+    assert_eq!(git(&destination, &["sparse-checkout", "list"]), "a\n");
+    assert!(!destination.join("b").exists());
     riftri_core::remove_worktree(riftri_core::RemoveWorktreeRequest {
         repository: repository.clone(),
         destination: destination.clone(),
@@ -465,4 +471,79 @@ fn an_explicit_selection_overrides_the_inherited_cone() {
     assert!(!overridden.join("a").exists());
     assert_clean(&overridden);
     assert_eq!(git(&overridden, &["sparse-checkout", "list"]), "b\n");
+}
+
+fn compact(repository: &Path, destination: &Path, state: &Path) -> Result<(), String> {
+    compact_worktree(CompactWorktreeRequest {
+        repository: repository.to_path_buf(),
+        destination: destination.to_path_buf(),
+        state_dir: Some(state.to_path_buf()),
+    })
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+// Compaction rebuilds a view from the profile it was created with, so it can
+// run for a sparse worktree that still holds that profile. It used to refuse
+// every sparse worktree outright, leaving no way to reclaim their storage.
+#[test]
+fn compaction_rebuilds_a_sparse_view_at_its_creation_profile() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = sparse_fixture_repository(fixture.path());
+    let state = fixture.path().join("state");
+    let worktree = fixture.path().join("sparse");
+    add(&repository, &worktree, &state, "feature/sparse", &["a"]).expect("create sparse worktree");
+    let pointer = fs::read(worktree.join(".git")).expect("read Git pointer");
+
+    compact(&repository, &worktree, &state).expect("a pristine sparse view must be compactable");
+
+    // The rebuilt view is the same sparse shape, with Git identity intact.
+    assert!(worktree.join("root.txt").is_file());
+    assert!(worktree.join("a/file.txt").is_file());
+    assert!(worktree.join("a/nested/deep.txt").is_file());
+    assert!(!worktree.join("b").exists());
+    assert!(!worktree.join("crates").exists());
+    assert_clean(&worktree);
+    assert_eq!(git(&worktree, &["sparse-checkout", "list"]), "a\n");
+    assert_eq!(
+        fs::read(worktree.join(".git")).expect("read Git pointer after compaction"),
+        pointer
+    );
+}
+
+// Git owns selection changes made after the add, and Riftri never rewrites a
+// worktree's immutable creation base. A view that no longer holds its creation
+// profile therefore has no base describing it, and compaction says which
+// profile is which rather than reporting raw configuration back at the user.
+#[test]
+fn compaction_refuses_a_view_that_no_longer_holds_its_creation_profile() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = sparse_fixture_repository(fixture.path());
+    let state = fixture.path().join("state");
+
+    // Narrowed to a different cone since the add.
+    let changed = fixture.path().join("changed");
+    add(&repository, &changed, &state, "feature/changed", &["a"]).expect("create sparse worktree");
+    git(&changed, &["sparse-checkout", "set", "--cone", "b"]);
+    let error = compact(&repository, &changed, &state).expect_err("a changed cone must refuse");
+    assert!(error.contains("created as cone a"), "{error}");
+    assert!(error.contains("now holds cone b"), "{error}");
+
+    // Expanded back to a full checkout since the add.
+    let disabled = fixture.path().join("disabled");
+    add(&repository, &disabled, &state, "feature/disabled", &["a"])
+        .expect("create sparse worktree");
+    git(&disabled, &["sparse-checkout", "disable"]);
+    let error = compact(&repository, &disabled, &state).expect_err("a disabled cone must refuse");
+    assert!(error.contains("created as cone a"), "{error}");
+    assert!(error.contains("now holds a full checkout"), "{error}");
+
+    // Created full, made sparse afterwards. This used to report
+    // `core.sparsecheckout=true` as an unsupported checkout profile.
+    let narrowed = fixture.path().join("narrowed");
+    add(&repository, &narrowed, &state, "feature/narrowed", &[]).expect("create full worktree");
+    git(&narrowed, &["sparse-checkout", "set", "--cone", "a"]);
+    let error = compact(&repository, &narrowed, &state).expect_err("a new cone must refuse");
+    assert!(error.contains("created as a full checkout"), "{error}");
+    assert!(error.contains("now holds cone a"), "{error}");
 }

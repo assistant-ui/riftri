@@ -52,14 +52,19 @@ silently substitutes a full checkout; if no backend qualifies, use plain
 [windows-refs.md](windows-refs.md), and
 [filesystem-compatibility.md](filesystem-compatibility.md).
 
-### Creation fails because of a checkout hook
+### A `post-checkout` hook reported a failure
 
-Git normally runs `post-checkout` after creating a worktree. Riftri cannot yet
-run that hook safely within its recoverable creation transaction, so it refuses
-an executable default hook or any custom `core.hooksPath` configuration before
-creating a branch, worktree, or state directory. This includes custom hook paths
-that currently contain no hook. Use ordinary `git worktree add` for these
-repositories. Do not disable a required hook just to enable optimization.
+Riftri runs your `post-checkout` hook after creating a worktree, exactly as
+`git worktree add` does, and reports its exit status the same way: the worktree
+is created and kept, and the command exits with the hook's code. That is Git's
+behavior, not a partial creation, so the worktree is usable and
+`riftri worktree list` shows it.
+
+Read the hook's own output to see what failed. Nothing needs repairing on
+Riftri's side.
+
+A hook is no longer a reason for Riftri to refuse a repository, so hook
+managers that set `core.hooksPath`, such as husky, work normally.
 
 ### Creation fails on a repository with sparse checkout, submodules, or custom filters
 

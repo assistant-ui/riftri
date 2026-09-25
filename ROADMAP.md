@@ -211,9 +211,10 @@ Outcome: cover real-world repositories and long-lived worktrees.
   `riftri worktree add --sparse-dir` are complete, keyed into the checkout
   profile and immutable-base identity; an add from inside a cone-mode sparse
   worktree inherits that cone as Git does, so explicit and intercepted adds
-  both work there; explicit sparse options on the interception path, non-cone
-  forms, sparse plus Git LFS, sparse compaction, and representative monorepo
-  measurements remain fail-closed or open)
+  both work there; a pristine sparse view compacts at its creation profile;
+  explicit sparse options on the interception path, non-cone forms, sparse plus
+  Git LFS, compacting a view whose selection changed since the add, and
+  representative monorepo measurements remain fail-closed or open)
 - Submodule policy and support.
 - Symlinks, executable modes, xattrs, and case-sensitivity testing. (native
   Unix metadata-isolation matrix complete; the preflight replays ASCII

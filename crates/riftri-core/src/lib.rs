@@ -45,8 +45,8 @@ pub use shell::{command_path, repair_command, shell_quoted_path, status_command}
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
     CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,
-    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, ProtectedBase,
-    PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
+    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PostCheckoutOutcome,
+    ProtectedBase, PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
     RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue, StateDirectorySource,
     StateWorktreeInventory, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
     WorktreeMode, add_worktree, compact_worktree, force_remove_worktree,
@@ -594,6 +594,15 @@ fn destination_readiness(
             kind: "storage-backend",
             explanation: error.to_string(),
             remedy: storage_remedy(&error.to_string()).to_owned(),
+        });
+    }
+
+    if let Err(error) = worktree::resolve_destination_parent(destination) {
+        blockers.push(DestinationReadinessBlocker {
+            kind: "destination-parent",
+            explanation: error.to_string(),
+            remedy: "Create the destination's parent directory or choose an existing accessible directory, then rerun `riftri doctor --destination <path>`."
+                .to_owned(),
         });
     }
 

@@ -4,11 +4,9 @@ Riftri supports a deliberately narrow, deterministic Git LFS profile. It does
 not run an LFS download as part of worktree creation and it does not treat an
 arbitrary Git filter as trusted checkout logic.
 
-The repository must also pass Riftri's checkout-hook check. An executable
-`post-checkout` hook, including one installed by Git LFS, or a custom
-`core.hooksPath` currently blocks optimized creation. Use ordinary
-`git worktree add` when that setup is required; do not disable a needed hook
-just to enable optimization. Verified local LFS objects do not bypass this check.
+An executable `post-checkout` hook, including one installed by Git LFS, runs
+after creation exactly as it would under `git worktree add`, so it no longer
+blocks optimized creation.
 
 An LFS-managed path is eligible when all of these checks pass:
 

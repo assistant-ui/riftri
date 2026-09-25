@@ -5,6 +5,53 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.5.0] - 2026-09-25
+
+### Added
+
+- Riftri runs the repository's `post-checkout` hook after creating a worktree,
+  on Git's own contract: the null object id, the new HEAD, and `1` for a branch
+  checkout, executed from inside the new worktree. `core.hooksPath` is honored
+  and resolved where Git resolves it. A hook is no longer a reason to refuse a
+  repository, which previously excluded every repository using a hook manager:
+  husky sets `core.hooksPath` and generates a `post-checkout` entry whether or
+  not the project defines one. A failing hook is reported through the exit code
+  and leaves the worktree in place, exactly as `git worktree add` does, so a
+  hook cannot roll back a worktree Git would have kept. The outcome appears on
+  the add result, in human output, and in `--json`. (#402)
+
+### Changed
+
+- The checkout profile that keys immutable bases no longer includes
+  `core.sparseCheckout` and `core.sparseCheckoutCone`. Both are worktree-scoped,
+  so the same cone read from the repository root and from inside a sparse
+  worktree produced different base keys, splitting one profile across several
+  base buckets. The canonical cone list already describes the materialization
+  exactly. The profile version moves to `v4`. Existing worktrees keep working
+  and keep referencing the bases they were built from; new adds build a `v4`
+  base once per tree and profile. Superseded bases become unreferenced only
+  when the worktrees using them are removed, and `riftri gc --apply` reclaims
+  them then, so nothing accumulates silently and nothing needs removing by
+  hand.
+
+### Added
+
+- `riftri worktree compact` supports sparse worktrees. A pristine view rebuilds
+  at its creation profile and resolves to the base it already had, instead of
+  being refused outright with no way to reclaim its storage. A view whose
+  selection changed since the add is refused with both profiles named, since
+  Riftri never rewrites a worktree's immutable creation base.
+### Fixed
+
+- `riftri worktree prune` no longer fails on an enabled repository that has no
+  state directory yet, which is every repository until its first managed add.
+  It reported `filesystem-io-failed` with a recovery of `inspect`, telling a
+  harness to investigate a repository that `status`, `doctor`, `gc`, `repair`,
+  and `worktree list` all reported as healthy at the same moment. Prune now
+  creates its state layout the way an add does, so the Git prune it exists to
+  perform still runs: a stale registration left by an ordinary Git worktree is
+  removed even when Riftri has never managed one.
+
 ## [0.4.1] - 2026-09-24
 
 ### Fixed
