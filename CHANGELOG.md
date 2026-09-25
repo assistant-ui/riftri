@@ -5,6 +5,21 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.5.0] - 2026-09-25
+
+### Added
+
+- Riftri runs the repository's `post-checkout` hook after creating a worktree,
+  on Git's own contract: the null object id, the new HEAD, and `1` for a branch
+  checkout, executed from inside the new worktree. `core.hooksPath` is honored
+  and resolved where Git resolves it. A hook is no longer a reason to refuse a
+  repository, which previously excluded every repository using a hook manager:
+  husky sets `core.hooksPath` and generates a `post-checkout` entry whether or
+  not the project defines one. A failing hook is reported through the exit code
+  and leaves the worktree in place, exactly as `git worktree add` does, so a
+  hook cannot roll back a worktree Git would have kept. The outcome appears on
+  the add result, in human output, and in `--json`. (#402)
+
 ### Changed
 
 - The checkout profile that keys immutable bases no longer includes
