@@ -114,3 +114,29 @@ CI uploads one JSON artifact for APFS, Btrfs, reflink-enabled XFS,
 helper-backed OverlayFS, and ReFS. Artifact names start with
 `native-cow-benchmark-`, making runs directly comparable without treating one
 shared hosted runner as a permanent performance baseline.
+
+## Cached creation baseline
+
+`reports_cached_creation_baseline_serial_and_concurrent` in
+`crates/riftri-core/tests/native_cow_benchmark.rs` records what a cached
+creation costs, serially and with ten views released together against one
+already-verified base. It exists for #211, whose first requirement is a current
+baseline before anything is optimized.
+
+The concurrent phase is the interesting one: a barrier releases all ten threads
+at once so they overlap rather than queue, every per-view latency is reported
+rather than a mean, and the run asserts that all ten reused the single base
+instead of rebuilding it.
+
+**This harness is not itself a published baseline.** It runs under `cargo test`
+with debug binaries, unlike the records in `docs/benchmarks/`, which use release
+binaries, alternating pairs, and a real repository fixture. Two runs on a busy
+laptop moved every absolute number by a factor of two to four, so figures taken
+that way are worth nothing as a baseline. CI records it on the disposable APFS
+volume and uploads `cached-creation-baseline-macos-apfs`; a baseline worth
+optimizing against should come from there, or from a run following the
+methodology the `docs/benchmarks/` records already use.
+
+The Git invocation counts the issue also asks about are a hard contract
+elsewhere: `crates/riftri-cli/tests/git_invocation_budget.rs` caps a cold add at
+24 invocations and a cached add at 18, and fails when either grows.

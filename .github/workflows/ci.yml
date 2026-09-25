@@ -85,6 +85,24 @@ jobs:
           reports_cold_cached_and_private_write_costs
           -- --ignored --exact --nocapture
 
+      - name: Record cached creation baseline
+        if: matrix.os == 'macos-15'
+        env:
+          RIFTRI_CACHED_BASELINE_OUTPUT: ${{ runner.temp }}/riftri-cached-baseline-macos.json
+          TMPDIR: ${{ runner.temp }}/riftri-apfs
+        run: >-
+          cargo test -p riftri-core --test native_cow_benchmark
+          reports_cached_creation_baseline_serial_and_concurrent
+          -- --ignored --exact --nocapture
+
+      - name: Upload cached creation baseline
+        if: always() && matrix.os == 'macos-15'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cached-creation-baseline-macos-apfs
+          path: ${{ runner.temp }}/riftri-cached-baseline-macos.json
+          if-no-files-found: error
+
       - name: Record sparse monorepo benchmark
         if: matrix.os == 'macos-15'
         env:
