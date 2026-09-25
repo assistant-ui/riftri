@@ -53,7 +53,7 @@ package renaming or blind retries.
 GitHub release availability does not imply that `npm install riftri` or
 `npx riftri` is available for the same version.
 
-As of September 24, 2026, `0.4.1` is published for the launcher and seven of
+As of September 25, 2026, `0.5.0` is published for the launcher and seven of
 the eight native packages, from the release workflow rather than by hand.
 `npm install riftri` and `npx riftri` work on macOS, Linux, and Windows x64.
 
@@ -74,9 +74,9 @@ strands the launcher, which is how `v0.2.1` shipped with nothing installable.
 **When npm accepts the name, delete its entry**; the guard test in
 `package/test/platform.test.js` fails once the list is empty.
 
-`0.4.1` is the first release published through the workflow, and it carries
-npm provenance: `npm view riftri@0.4.1 dist.attestations` reports a
-`https://slsa.dev/provenance/v1` predicate.
+Releases published through the workflow carry npm provenance:
+`npm view riftri@0.5.0 dist.attestations` reports a
+`https://slsa.dev/provenance/v1` predicate. `0.4.1` was the first.
 
 `0.3.5` and `0.4.0` do not. Both were published from a maintainer workstation,
 where `publishConfig.provenance: true` is rejected
