@@ -12,6 +12,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Barrier};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use riftri_core::{
@@ -30,6 +32,28 @@ const PRIVATE_WRITE_BYTES: usize = 4 * 1024 * 1024;
 const MONOREPO_PACKAGES: usize = 8;
 const MONOREPO_FILES_PER_PACKAGE: usize = 8;
 const MONOREPO_FILE_BYTES: usize = 512 * 1024;
+/// #211 asks for ten concurrent creations against one warm base.
+const CONCURRENT_VIEWS: usize = 10;
+
+#[derive(Serialize)]
+struct CachedCreationBenchmark {
+    schema_version: u8,
+    operating_system: &'static str,
+    architecture: &'static str,
+    backend: BackendKind,
+    logical_payload_bytes: u64,
+    serial_cold_microseconds: u64,
+    serial_cached_microseconds: u64,
+    concurrent_views: usize,
+    /// Wall clock for the whole batch, from release of the barrier to the last
+    /// thread joining: what a caller creating ten views at once actually waits.
+    concurrent_batch_microseconds: u64,
+    /// Per-view latencies, so the distribution is reported rather than a mean.
+    concurrent_min_microseconds: u64,
+    concurrent_median_microseconds: u64,
+    concurrent_max_microseconds: u64,
+    concurrent_latencies_microseconds: Vec<u64>,
+}
 
 #[derive(Serialize)]
 struct SparseMonorepoBenchmark {
@@ -441,5 +465,147 @@ fn reports_sparse_cone_costs_on_a_monorepo_shape() {
             state_dir: Some(state.clone()),
         })
         .expect("remove benchmark view");
+    }
+}
+
+/// #211's first acceptance criterion: a current, reproducible baseline for
+/// cached creation, serial and concurrent, before anything is optimized.
+///
+/// The concurrent phase is what the issue actually asks about — ten views
+/// created at once against one already-verified base, which is where base
+/// verification and the per-view metadata traversal contend. A barrier releases
+/// all ten together so they overlap rather than queue behind each other, and
+/// every latency is reported so the distribution is visible instead of a mean
+/// that hides the tail.
+///
+/// Git invocation counts are already a hard contract elsewhere —
+/// `crates/riftri-cli/tests/git_invocation_budget.rs` caps a cold add at 24 and
+/// a cached add at 18 — so this measures time and leaves the counts to the test
+/// that fails when they grow.
+#[test]
+#[ignore = "repeatable cached-creation baseline; run on a supported quiet volume"]
+fn reports_cached_creation_baseline_serial_and_concurrent() {
+    let fixture = tempdir().expect("benchmark fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create benchmark repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Benchmark"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    write_payload(&repository.join("payload.bin"));
+    git(&repository, &["add", "--", "payload.bin"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "-m", "benchmark payload"],
+    );
+
+    // Cold: the base does not exist yet.
+    let cold_started = Instant::now();
+    let cold = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: fixture.path().join("cold-view"),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("benchmark/baseline-cold")),
+        state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
+    })
+    .expect("create cold baseline view");
+    let cold_duration = cold_started.elapsed();
+    assert!(!cold.reused_base);
+
+    // Cached, serial: the base exists and is verified on reuse.
+    let cached_started = Instant::now();
+    let cached = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: fixture.path().join("cached-view"),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("benchmark/baseline-cached")),
+        state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
+    })
+    .expect("create cached baseline view");
+    let cached_duration = cached_started.elapsed();
+    assert!(cached.reused_base);
+
+    // Cached, concurrent: ten views released together against that same base.
+    let barrier = Arc::new(Barrier::new(CONCURRENT_VIEWS + 1));
+    let mut handles = Vec::with_capacity(CONCURRENT_VIEWS);
+    for view in 0..CONCURRENT_VIEWS {
+        let barrier = Arc::clone(&barrier);
+        let repository = repository.clone();
+        let state = state.clone();
+        let destination = fixture.path().join(format!("concurrent-view-{view:02}"));
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            let started = Instant::now();
+            let result = add_worktree(AddWorktreeRequest {
+                repository,
+                destination,
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from(format!(
+                    "benchmark/baseline-concurrent-{view:02}"
+                ))),
+                state_dir: Some(state),
+                sparse_directories: Vec::new(),
+            })
+            .expect("create concurrent baseline view");
+            (started.elapsed(), result)
+        }));
+    }
+    let batch_started = Instant::now();
+    barrier.wait();
+    let mut latencies = Vec::with_capacity(CONCURRENT_VIEWS);
+    let mut destinations = Vec::with_capacity(CONCURRENT_VIEWS);
+    for handle in handles {
+        let (duration, result) = handle.join().expect("join concurrent benchmark view");
+        assert!(result.reused_base, "a concurrent view rebuilt the base");
+        assert_eq!(result.base_path, cold.base_path);
+        latencies.push(elapsed_microseconds(duration));
+        destinations.push(result.destination);
+    }
+    let batch_duration = batch_started.elapsed();
+
+    let mut sorted = latencies.clone();
+    sorted.sort_unstable();
+    let report = CachedCreationBenchmark {
+        schema_version: 1,
+        operating_system: env::consts::OS,
+        architecture: env::consts::ARCH,
+        backend: cold.backend,
+        logical_payload_bytes: LOGICAL_PAYLOAD_BYTES as u64,
+        serial_cold_microseconds: elapsed_microseconds(cold_duration),
+        serial_cached_microseconds: elapsed_microseconds(cached_duration),
+        concurrent_views: CONCURRENT_VIEWS,
+        concurrent_batch_microseconds: elapsed_microseconds(batch_duration),
+        concurrent_min_microseconds: sorted[0],
+        concurrent_median_microseconds: sorted[sorted.len() / 2],
+        concurrent_max_microseconds: sorted[sorted.len() - 1],
+        concurrent_latencies_microseconds: latencies,
+    };
+    let compact = serde_json::to_string(&report).expect("serialize baseline report");
+    println!("RIFTRI_CACHED_BASELINE {compact}");
+    if let Some(output) = env::var_os("RIFTRI_CACHED_BASELINE_OUTPUT") {
+        let pretty = serde_json::to_vec_pretty(&report).expect("format baseline report");
+        fs::write(output, pretty).expect("write baseline report");
+    }
+
+    // A baseline asserts only that it measured the thing it claims to: every
+    // concurrent view reused the one base, and each stayed clean. Timing
+    // thresholds belong to the optimization that follows, not to the
+    // measurement of where it starts.
+    for destination in &destinations {
+        assert!(git(destination, &["status", "--porcelain=v1"]).is_empty());
+    }
+    for destination in destinations {
+        remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination,
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove concurrent benchmark view");
     }
 }

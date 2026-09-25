@@ -7,6 +7,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- A cached-creation baseline benchmark records serial and ten-way concurrent
+  creation latencies against one warm base, for #211. CI uploads it as
+  `cached-creation-baseline-macos-apfs`.
+
+### Added
+
 - A sparse monorepo benchmark measures allocation and creation costs for a cone
   against the full tree, closing Milestone 6's outstanding measurement for
   sparse-checkout profiles. CI records it on a disposable APFS volume and
