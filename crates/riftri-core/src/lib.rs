@@ -40,7 +40,36 @@ pub use activation::{
     proxy_git_command, repository_activation, shell_activation_status, shim_environment_complete,
     stripped_shim_scope_detected,
 };
-pub use riftri_git::REAL_GIT_ENV;
+pub use riftri_git::{GitError, REAL_GIT_ENV};
+
+/// Whether a failure means the caller is not inside a Git repository.
+///
+/// The cause is the same everywhere, but each entry point wraps it
+/// differently: `WorktreeError` from the worktree commands, `ActivationError`
+/// from `status`, `gc`, and `repair`. Both wrap it with
+/// `#[error(transparent)]`, which forwards `source()` to the inner error's
+/// *source* rather than exposing the inner error itself — so walking an error
+/// chain never observes the `GitError`. Keeping the list of wrappers here
+/// means a caller classifying failures cannot see one route and miss another,
+/// which is exactly how the two diverged before (#398).
+pub fn is_absent_repository(error: &(dyn std::error::Error + 'static)) -> bool {
+    if matches!(
+        error.downcast_ref::<GitError>(),
+        Some(GitError::RepositoryAbsent { .. })
+    ) {
+        return true;
+    }
+    if matches!(
+        error.downcast_ref::<WorktreeError>(),
+        Some(WorktreeError::Git(GitError::RepositoryAbsent { .. }))
+    ) {
+        return true;
+    }
+    matches!(
+        error.downcast_ref::<ActivationError>(),
+        Some(ActivationError::Git(GitError::RepositoryAbsent { .. }))
+    )
+}
 pub use shell::{command_path, repair_command, shell_quoted_path, status_command};
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,

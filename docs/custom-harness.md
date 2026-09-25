@@ -118,6 +118,11 @@ Code `3` is the one that matters most. It means Riftri declined *before
 touching anything* — the request is intact, no cleanup is pending, and
 retrying the identical command will fail identically.
 
+Running outside a Git repository is one of these. Every command that inspects
+a repository reports `"code": "not-a-repository"` with `category` `policy` and
+exit code `3`, so a runner in the wrong working directory is told to fix the
+call rather than to retry or inspect.
+
 With `--json-errors`, the failure arrives as one receipt on stderr:
 
 ```json

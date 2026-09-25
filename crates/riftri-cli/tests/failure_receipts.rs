@@ -16,27 +16,22 @@ fn json_errors_emit_one_parseable_lifecycle_receipt_on_stderr() {
         .output()
         .expect("run Riftri with JSON failures enabled");
 
-    assert_eq!(output.status.code(), Some(1));
+    // Policy refusal: exit 3, mirroring the receipt's category.
+    assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     let receipt: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("stderr is one JSON receipt");
     assert_eq!(receipt["schemaVersion"], 1);
     assert_eq!(receipt["outcome"], "failed");
     assert_eq!(receipt["operation"], "worktree-add");
-    assert_eq!(receipt["code"], "git-failed");
-    assert_eq!(receipt["category"], "operational");
-    assert_eq!(receipt["cleanup"], "unknown");
-    assert_eq!(receipt["recovery"], "inspect");
-    // The suggestion inspects the repository this command selected, not
-    // whatever the caller's working directory would resolve to.
-    assert_eq!(
-        receipt["nextCommand"],
-        format!(
-            "riftri status --repository {}",
-            riftri_core::shell_quoted_path(outside_repository.path())
-                .expect("the fixture path is representable")
-        )
-    );
+    // Standing outside a repository is the caller's mistake, not an
+    // operational failure: nothing was attempted, retrying cannot help, and
+    // there is no command Riftri could suggest that would change the answer.
+    assert_eq!(receipt["code"], "not-a-repository");
+    assert_eq!(receipt["category"], "policy");
+    assert_eq!(receipt["cleanup"], "not-needed");
+    assert_eq!(receipt["recovery"], "not-required");
+    assert_eq!(receipt["nextCommand"], serde_json::Value::Null);
     assert_eq!(
         receipt["repository"],
         outside_repository.path().display().to_string()
@@ -591,4 +586,97 @@ fn riftri_json_error(
         )
     });
     (receipt, output.status.code())
+}
+
+/// Every command that inspects a repository must classify "there is no
+/// repository here" the same way. They did not: the worktree commands wrapped
+/// the cause in a `WorktreeError`, while `status`, `gc`, and `repair` wrapped
+/// it in an `ActivationError` that never reached the receipt mapping and fell
+/// through to an operational default with an unknown cleanup. A harness
+/// following that receipt retries a command whose answer cannot change.
+#[test]
+fn an_absent_repository_is_a_policy_failure_for_every_command() {
+    let outside_repository = tempfile::tempdir().expect("temporary non-repository");
+    let moved = outside_repository.path().join("moved");
+    let view = outside_repository.path().join("view");
+    let view = view.to_str().expect("UTF-8 fixture path");
+    let moved = moved.to_str().expect("UTF-8 fixture path");
+
+    for arguments in [
+        &["status"][..],
+        &["gc"][..],
+        &["repair"][..],
+        &["worktree", "list"][..],
+        &["worktree", "prune"][..],
+        &["worktree", "add", view, "-b", "feature/absent"][..],
+        &["worktree", "remove", view][..],
+        &["worktree", "compact", view][..],
+        &["worktree", "move", view, moved][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .arg("--json-errors")
+            .args(arguments)
+            .current_dir(outside_repository.path())
+            .output()
+            .expect("run Riftri with JSON failures enabled");
+        // `custom-harness.md` tells a runner to branch on the exit code before
+        // parsing anything, so a policy receipt delivered with exit 1 would
+        // still be retried. The code and the category must agree.
+        assert_eq!(output.status.code(), Some(3), "{arguments:?}");
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stderr)
+            .unwrap_or_else(|error| panic!("{arguments:?} receipt is not JSON: {error}"));
+        assert_eq!(receipt["code"], "not-a-repository", "{arguments:?}");
+        assert_eq!(receipt["category"], "policy", "{arguments:?}");
+        assert_eq!(receipt["cleanup"], "not-needed", "{arguments:?}");
+        assert_eq!(receipt["recovery"], "not-required", "{arguments:?}");
+    }
+}
+
+/// The counterpart: a repository Git accepts, where a Git command fails for a
+/// real reason, must stay operational. Only Git's own "not a git repository"
+/// verdict becomes a policy refusal — a damaged object store is still
+/// something worth inspecting.
+#[test]
+fn a_git_failure_inside_a_real_repository_stays_operational() {
+    let fixture = tempfile::tempdir().expect("temporary repository");
+    let repository = fixture.path().join("repository");
+    std::fs::create_dir_all(&repository).expect("create repository directory");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["commit", "--quiet", "--allow-empty", "-m", "initial"][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(&repository)
+                .status()
+                .expect("run git")
+                .success(),
+            "git {arguments:?} failed"
+        );
+    }
+    // Git still discovers the repository; its objects are simply gone.
+    for entry in std::fs::read_dir(repository.join(".git/objects")).expect("read object store") {
+        let entry = entry.expect("read object store entry");
+        if entry.file_type().expect("stat object entry").is_dir() {
+            std::fs::remove_dir_all(entry.path()).expect("gut the object store");
+        }
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .arg("--json-errors")
+        .args(["worktree", "add"])
+        .arg(fixture.path().join("view"))
+        .args(["-b", "feature/damaged"])
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri with JSON failures enabled");
+
+    assert_eq!(output.status.code(), Some(1));
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("stderr is one JSON receipt");
+    assert_eq!(receipt["code"], "git-failed");
+    assert_eq!(receipt["category"], "operational");
 }

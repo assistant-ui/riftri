@@ -729,6 +729,9 @@ fn failure_exit_code(error: &anyhow::Error) -> i32 {
     if let Some(interrupted) = error.downcast_ref::<ui::Interrupted>() {
         return interrupted.0;
     }
+    if absent_repository(error) {
+        return 3;
+    }
     match error
         .downcast_ref::<riftri_core::WorktreeError>()
         .map(worktree_failure_fields)
@@ -736,6 +739,18 @@ fn failure_exit_code(error: &anyhow::Error) -> i32 {
         Some((_, "policy", ..)) => 3,
         _ => 1,
     }
+}
+
+/// Whether the failure is simply that the caller is not inside a Git
+/// repository.
+///
+/// The exit code and the receipt must agree — `custom-harness.md` tells a
+/// runner to branch on the exit code *before* parsing the receipt, so a
+/// `policy` receipt delivered with exit 1 would be read as operational and
+/// retried, which is the defect this answers. One predicate serves both so
+/// they cannot drift.
+fn absent_repository(error: &anyhow::Error) -> bool {
+    error.chain().any(riftri_core::is_absent_repository)
 }
 
 /// Ask before a destructive action when running interactively. Non-interactive
@@ -1161,14 +1176,31 @@ fn failure_receipt(
     context: &InvocationContext,
 ) -> serde_json::Value {
     let worktree_error = error.downcast_ref::<riftri_core::WorktreeError>();
-    let (code, category, phase, cleanup, recovery) =
+    // Standing outside a repository is a caller mistake, not an operational
+    // failure: retrying never helps, nothing was attempted, and the fix is the
+    // caller's. It reaches this function by two routes — wrapped in a
+    // `WorktreeError` from the worktree commands, and in an `ActivationError`
+    // from `status`, `gc`, and `repair`, which does not downcast here and so
+    // used to land on the operational fallback below. Matching on the chain
+    // classifies both identically, so the commands cannot drift apart again.
+    let absent_repository = absent_repository(error);
+    let (code, category, phase, cleanup, recovery) = if absent_repository {
+        (
+            "not-a-repository",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        )
+    } else {
         worktree_error.map(worktree_failure_fields).unwrap_or((
             "command-failed",
             "operational",
             None,
             "unknown",
             recovery_for_operation(operation),
-        ));
+        ))
+    };
     // Never answer a failure with the command that just produced it. `repair`
     // is the standard remedy for `recovery: "required"`, but when `repair`
     // itself is what failed that advice is a retry loop for any caller that
