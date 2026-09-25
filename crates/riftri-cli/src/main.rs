@@ -133,13 +133,6 @@ enum Command {
         #[command(subcommand)]
         command: WorktreeCommand,
     },
-
-    /// Repair operations in an explicitly selected Riftri state directory.
-    Recover {
-        /// Riftri state directory containing operation journals.
-        #[arg(long)]
-        state_dir: PathBuf,
-    },
 }
 
 impl Command {
@@ -153,7 +146,7 @@ impl Command {
             Self::Doctor { .. } => "doctor",
             Self::Backends { .. } => "backends",
             Self::Status { .. } => "status",
-            Self::Repair { .. } | Self::Recover { .. } => "repair",
+            Self::Repair { .. } => "repair",
             Self::Gc { .. } => "garbage-collection",
             Self::State { .. } => "state",
             Self::Worktree { command } => match command {
@@ -431,8 +424,10 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Storage capabilities for {}:", path.display());
                 for backend in backends {
                     println!(
-                        "- {:?} ({:?}): {}",
-                        backend.kind, backend.status, backend.explanation
+                        "- {} ({}): {}",
+                        backend.kind.display_name(),
+                        capability_status_label(backend.status),
+                        backend.explanation
                     );
                 }
                 println!("\nCapability support does not mean a backend is active yet.");
@@ -567,10 +562,6 @@ fn run(cli: Cli) -> Result<()> {
                 println!("Journal: {}", result.journal_path.display());
             }
         },
-        Command::Recover { state_dir } => {
-            let report = riftri_core::recover_incomplete_operations(&state_dir)?;
-            print_recovery_report(&state_dir, &report)?;
-        }
     }
 
     Ok(())
@@ -1295,9 +1286,19 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
     println!("Destination storage capabilities:");
     for backend in &report.storage_capabilities {
         println!(
-            "- {:?} ({:?}): {}",
-            backend.kind, backend.status, backend.explanation
+            "- {} ({}): {}",
+            backend.kind.display_name(),
+            capability_status_label(backend.status),
+            backend.explanation
         );
+    }
+}
+
+fn capability_status_label(status: riftri_storage::CapabilityStatus) -> &'static str {
+    match status {
+        riftri_storage::CapabilityStatus::Supported => "supported",
+        riftri_storage::CapabilityStatus::Unsupported => "unsupported",
+        riftri_storage::CapabilityStatus::Unavailable => "unavailable",
     }
 }
 

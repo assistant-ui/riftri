@@ -295,4 +295,4 @@ an isolated global prefix without registry access, and exercises the resulting
 `riftri` command. Native-backend CI also runs the complete add, edit, remove,
 status, and collection workflow from that installed command.
 
-Riftri is licensed under the [Apache License 2.0](LICENSE).
+Riftri is licensed under the [MIT License](LICENSE).

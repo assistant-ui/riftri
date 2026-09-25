@@ -11,6 +11,28 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   repository-gated normal Git interception as sh, bash, and zsh without editing
   PowerShell profiles or persistent `PATH`.
 
+### Changed
+
+- `riftri backends` and `riftri doctor` render backend kinds and capability
+  statuses as stable human-readable labels instead of Rust debug formatting.
+- The redundant `riftri recover --state-dir <dir>` command is removed.
+  `riftri repair --state-dir <dir>` performs the same journal recovery and is
+  already the form every error message, status hint, and document recommends.
+
+### Documentation
+
+- README records the project's actual MIT license instead of Apache License 2.0.
+- SECURITY.md and SUPPORT.md describe the supported macOS APFS, Linux
+  Btrfs/reflink-XFS/OverlayFS, and Windows ReFS backends instead of macOS alone.
+- The website README describes the current single-page structure, and the
+  Windows install link tracks `docs/install.md` on `main` instead of a pinned
+  pre-merge commit.
+
+### Release
+
+- Dependabot covers the root npm launcher package and the pnpm-based website
+  alongside the existing Cargo and GitHub Actions ecosystems.
+
 ## 0.2.1 - 2026-09-13
 
 ### Fixed

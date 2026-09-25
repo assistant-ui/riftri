@@ -1,16 +1,16 @@
 # Riftri website
 
-The Riftri product site is a single-page Farm.js application. Product concepts, installation,
-transparent Git usage, safety, storage lifecycle, and compatibility all live at `/`.
+The Riftri product site is a single-page Farm.js application. It has a hero,
+a storage-model overview, and a three-step get-started section, and links to
+the repository documentation for everything else.
 
 Development and production builds copy the canonical `../package/install.sh`
 and `../package/install.ps1` to `public/`, serving them at `/install.sh` and
 `/install.ps1`. Do not edit those generated
-copy. Deploy from the repository with `website` as the app directory so the
+copies. Deploy from the repository with `website` as the app directory so the
 staging script can access `package/`. The public site and copyable installation
 command use `https://riftri.vercel.app` on the existing `assistant-ui/riftri`
-Vercel project. The Windows/manual guide links to a reviewed source commit so
-it remains accessible even before the installation PR is merged.
+Vercel project. The Windows/manual guide links to `docs/install.md` on `main`.
 
 ```console
 $ pnpm install

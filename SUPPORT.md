@@ -1,8 +1,10 @@
 # Support
 
-Riftri is experimental, pre-release software. The optimized mutation backend
-currently supports macOS on writable APFS volumes; Linux and Windows mutation
-backends are not implemented yet.
+Riftri is experimental, pre-release software. Optimized mutation backends
+currently support macOS on writable APFS volumes, Linux on Btrfs,
+reflink-enabled XFS, and caller-visible OverlayFS mounts, and Windows on ReFS
+volumes with block cloning. Other filesystems, including ordinary NTFS, are
+not supported yet.
 
 - For a reproducible bug, open a [bug report](https://github.com/assistant-ui/riftri/issues/new?template=bug_report.yml).
 - For a scoped capability proposal, open a [feature request](https://github.com/assistant-ui/riftri/issues/new?template=feature_request.yml).
