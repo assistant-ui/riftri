@@ -94,6 +94,43 @@ or disabling sparse checkout, and dirty changes still prevent clean removal.
 For a new COW-backed selection, remove the clean view and create a new one with
 the desired `--sparse-dir` arguments.
 
+## Measured cost
+
+`reports_sparse_cone_costs_on_a_monorepo_shape` in
+`crates/riftri-core/tests/native_cow_benchmark.rs` measures a monorepo shape —
+eight sibling packages, one of which a task needs. The full and sparse adds
+each start from their own state directory, so both are genuinely cold and
+neither can reuse the other's base: the comparison is base construction
+against base construction, which is where a sparse profile saves.
+
+Two runs on macOS 15, Apple silicon, APFS clones, 33.5 MB logical tree of
+eight packages:
+
+| add | view allocation | volume growth | wall clock |
+| --- | ---: | ---: | ---: |
+| full tree, cold | 33.56 MB | 34.3 – 39.6 MB | 3.8 – 4.9 s |
+| one package (1 of 8), cold | 4.20 MB | 3.0 – 5.5 MB | 1.8 – 3.4 s |
+| same cone, cached base | — | 1.8 – 4.5 MB | 1.4 – 1.7 s |
+
+The two measurements differ in kind, and it is worth keeping them apart. **View
+allocation is exact and reproducible**: 33,558,528 bytes full against
+4,198,400 bytes sparse, byte-identical across both runs and tracking the cone's
+4,194,304 bytes of logical content almost exactly. **Volume growth is
+whole-disk free-space delta**, so it also catches whatever else the machine is
+doing; the ranges above are the spread between two runs minutes apart on an
+otherwise busy laptop.
+
+Read together: a one-package cone allocates an eighth of what the full tree
+does, and builds in roughly half the wall clock.
+
+These are one machine's numbers, not a guarantee. CI records the same benchmark
+on a disposable APFS volume and uploads it as the
+`sparse-monorepo-benchmark-macos-apfs` artifact; the test asserts only the
+structural claim — that a cone costs materially less than the tree, and that
+reusing a cone's base costs less than building it — deliberately with a loose
+bound, because the volume-growth figures move between runs while the structural
+saving does not.
+
 Non-cone creation, file-level selection, explicit sparse options through Git
 interception, compaction of a view whose selection changed since the add, and a
 Riftri-managed profile-change operation remain future work tracked in the
