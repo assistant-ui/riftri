@@ -386,6 +386,7 @@ maps every document in one place.
 - [Benchmark guide](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks.md): running and interpreting native-COW benchmarks.
 - [APFS allocation evidence](https://github.com/assistant-ui/riftri/blob/main/docs/allocation-evidence.md): physical-sharing measurements.
 - [Assistant-ui ten-agent experiment](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md): real-project allocation and timing.
+- [Assistant-ui cached creation baseline](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-cached-creation-2026-09-25.md): current serial and ten-way concurrent creation costs.
 - [Checkout configuration batching](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/checkout-config-batching-2026-09-13.md): reducing repeated Git commands.
 - [Shared base readers](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/shared-base-readers-2026-09-13.md): concurrent base verification and lock contention.
 - [APFS bulk directory clone evaluation](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/apfs-bulk-directory-clone-2026-09-13.md): a test-only candidate, not the production path.
