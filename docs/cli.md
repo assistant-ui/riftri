@@ -294,6 +294,11 @@ Inspect Git and show the planned storage path without changing anything.
 | `--destination <DESTINATION>` | Proposed worktree destination whose volume should be probed |
 | `--json` | Emit machine-readable JSON |
 
+The destination's immediate parent must be an existing, accessible directory.
+If it is missing or is a file, doctor reports a `destination-parent` blocker
+instead of suggesting an add command. Create the parent directory and rerun
+doctor; inspection never creates it for you.
+
 The suggested commands retain the inspected repository and use POSIX shell
 quoting on every platform, so they run as shown in `sh`, `bash`, and `zsh` —
 including the Git Bash, WSL, and MSYS environments common on Windows. If the

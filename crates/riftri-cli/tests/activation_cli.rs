@@ -455,6 +455,108 @@ fn doctor_json_preserves_non_utf8_destination_paths() {
 }
 
 #[test]
+fn doctor_blocks_missing_destination_parents_until_they_are_created() {
+    for relative in [true, false] {
+        let fixture = RepositoryFixture::new();
+        assert!(riftri(&fixture.repository, &["enable"]).status.success());
+        let path = Path::new("missing/nested/view");
+        let absolute = fixture.repository.join(path);
+        let destination = if relative { path } else { absolute.as_path() };
+        let parent = absolute.parent().unwrap();
+
+        let inspect = || {
+            let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .args(["doctor", "--destination"])
+                .arg(destination)
+                .arg("--json")
+                .current_dir(&fixture.repository)
+                .output()
+                .expect("inspect destination");
+            assert!(output.status.success());
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("parse doctor JSON")
+        };
+
+        let report = inspect();
+        let readiness = &report["destination_readiness"];
+        assert_eq!(readiness["status"], "blocked");
+        assert!(
+            readiness["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| {
+                    blocker["kind"] == "destination-parent"
+                        && blocker["explanation"]
+                            .as_str()
+                            .unwrap()
+                            .contains("resolve worktree parent")
+                        && blocker["remedy"].as_str().unwrap().contains("Create")
+                })
+        );
+        assert!(
+            !readiness["next_command"]
+                .as_str()
+                .is_some_and(|command| command.contains("worktree add"))
+        );
+        assert!(!fixture.repository.join("missing").exists());
+        assert!(!fixture.repository.join(".git/riftri").exists());
+
+        fs::create_dir_all(parent).expect("create destination parent");
+        let report = inspect();
+        let readiness = &report["destination_readiness"];
+        assert!(
+            !readiness["blockers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|blocker| blocker["kind"] == "destination-parent")
+        );
+        if readiness["backend"].is_string() {
+            assert_eq!(readiness["status"], "ready");
+            assert!(
+                readiness["next_command"]
+                    .as_str()
+                    .unwrap()
+                    .contains("worktree add")
+            );
+        }
+        assert!(!absolute.exists());
+        assert!(!fixture.repository.join(".git/riftri").exists());
+    }
+}
+
+#[test]
+fn doctor_blocks_a_file_as_the_destination_parent() {
+    let fixture = RepositoryFixture::new();
+    let doctor = riftri(
+        &fixture.repository,
+        &["doctor", "--destination", "tracked.txt/view", "--json"],
+    );
+    assert!(doctor.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    let readiness = &report["destination_readiness"];
+    assert_eq!(readiness["status"], "blocked");
+    assert!(
+        readiness["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blocker| {
+                blocker["kind"] == "destination-parent"
+                    && blocker["explanation"]
+                        .as_str()
+                        .unwrap()
+                        .contains("not a directory")
+            })
+    );
+    assert_eq!(
+        fs::read(fixture.repository.join("tracked.txt")).unwrap(),
+        b"tracked\n"
+    );
+    assert!(!fixture.repository.join(".git/riftri").exists());
+}
+
+#[test]
 fn doctor_human_output_leads_with_a_decisive_destination_summary() {
     let fixture = RepositoryFixture::new();
     let destination = fixture.directory.path().join("human-summary");

@@ -597,6 +597,15 @@ fn destination_readiness(
         });
     }
 
+    if let Err(error) = worktree::resolve_destination_parent(destination) {
+        blockers.push(DestinationReadinessBlocker {
+            kind: "destination-parent",
+            explanation: error.to_string(),
+            remedy: "Create the destination's parent directory or choose an existing accessible directory, then rerun `riftri doctor --destination <path>`."
+                .to_owned(),
+        });
+    }
+
     let only_activation_blocks = !blockers.is_empty()
         && blockers
             .iter()
