@@ -87,6 +87,23 @@ and quoting only the 2.88 MB would hide that the tracked content itself is
 genuinely shared. The 2.88 MB median independently reproduces the ~2.7 MB
 measured for assistant-ui in the earlier clean-room comparison.
 
+## Why `du` must not be used for this
+
+After the measurements, the sixteen view directories were removed and the
+free-space change recorded:
+
+| | |
+| --- | ---: |
+| `du -sk` reports for the sixteen views | 1,347 MB |
+| Free space actually recovered | 12.4 MB |
+| Overstatement | **109x** |
+
+`du` sums each file's apparent size and cannot see that a clone shares its blocks
+with the base, so it reports sixteen full checkouts where the filesystem holds
+roughly one. Any savings figure derived from `du`, `ls -l`, or Git's own object
+sizes is meaningless for copy-on-write views. That is why this record quotes
+Riftri's own accounting and whole-volume deltas and never a directory walk.
+
 ## Retained outlier
 
 One serial sample in run 2 recorded a 533.6 MB volume delta and a 5.03 s
