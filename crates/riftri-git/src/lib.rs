@@ -171,6 +171,9 @@ pub enum GitError {
         source: std::io::Error,
     },
 
+    #[error("{} is not a Git repository", path.display())]
+    RepositoryAbsent { path: PathBuf },
+
     #[error("Git command failed ({arguments}): {}", command_failure_detail(.disposition, .stderr))]
     CommandFailed {
         arguments: String,
@@ -294,7 +297,7 @@ impl Git {
         // parseable as one path even when that path contains newlines — which
         // is also why no second path query may join this call: two variable
         // paths in newline-separated output cannot be told apart.
-        let output = self.run(
+        let output = match self.run(
             Some(path),
             &[
                 "rev-parse",
@@ -302,7 +305,24 @@ impl Git {
                 "--path-format=absolute",
                 "--git-common-dir",
             ],
-        )?;
+        ) {
+            Ok(output) => output,
+            Err(error) => {
+                // Standing outside any repository is a caller mistake, usually
+                // the wrong working directory, not a Git failure to inspect.
+                // `repository_absent` forces the C locale, so the distinction
+                // never depends on translated error text, and it deliberately
+                // separates "no repository here" from "inside an unhealthy
+                // one" — the latter must keep its original diagnostic. The
+                // extra subprocess runs only on the failure path.
+                if self.repository_absent(path).unwrap_or(false) {
+                    return Err(GitError::RepositoryAbsent {
+                        path: path.to_path_buf(),
+                    });
+                }
+                return Err(error);
+            }
+        };
         let (flag, remainder) = {
             let bytes = &output.stdout;
             let newline = bytes

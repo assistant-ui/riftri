@@ -5,6 +5,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Running a command outside a Git repository is reported as a policy refusal —
+  `not-a-repository`, exit code `3` — instead of an operational failure with an
+  unknown cleanup. The cause reached the receipt by two routes that classified
+  it differently: the worktree commands wrapped it in a `WorktreeError` and
+  reported `git-failed`, while `status`, `gc`, and `repair` wrapped it in an
+  `ActivationError` that never reached the mapping at all and reported
+  `command-failed` with `recovery: unknown`. Both now resolve through one
+  predicate, and the exit code agrees with the receipt. A Git failure inside a
+  repository Git accepts, such as a damaged object store, stays operational.
+
 ## [0.5.0] - 2026-09-25
 
 ### Added
