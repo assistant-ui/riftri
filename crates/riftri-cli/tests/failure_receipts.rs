@@ -986,3 +986,143 @@ fn an_unreadable_revision_stays_operational() {
     assert_eq!(receipt["category"], "operational");
     assert_ne!(receipt["code"], "invalid-request");
 }
+
+/// Make every entry under `root` writable, so a managed view — whose files
+/// are write-protected clones — can be deleted the way a caller would.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn make_writable(root: &std::path::Path) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            let mut permissions = metadata.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(&path, permissions);
+            if metadata.is_dir()
+                && let Ok(entries) = std::fs::read_dir(&path)
+            {
+                stack.extend(entries.flatten().map(|entry| entry.path()));
+            }
+        }
+    }
+}
+
+/// A managed worktree deleted outside Riftri — agents commonly `rm -rf` one —
+/// leaves an active add journal that keeps its immutable base in use, so `gc`
+/// can never reclaim it. `riftri repair` retires that journal (#336), but
+/// `remove`, `move`, and `compact` reported the missing path as an
+/// operational `filesystem-io-failed` pointing at `riftri status`, so nothing
+/// led a caller to the fix.
+///
+/// Each now refuses with a `recovery-pending` receipt naming `riftri repair`,
+/// and following it frees the base. A path that was never managed is a plain
+/// policy refusal instead.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_managed_worktree_deleted_outside_riftri_points_at_repair() {
+    let fixture = support::writable_tempdir().expect("fixture directory");
+    if !native_cow_supported(fixture.path()) {
+        return;
+    }
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    init_repository_with_commit(&repository);
+    let state_arg = state.to_str().unwrap();
+
+    let views = ["removed", "moved", "compacted"].map(|name| fixture.path().join(name));
+    for view in &views {
+        add_managed_worktree(&repository, view, &state);
+    }
+    for view in &views {
+        make_writable(view);
+        std::fs::remove_dir_all(view).expect("delete the managed view outside Riftri");
+    }
+    let elsewhere = fixture.path().join("elsewhere");
+
+    let requests: [Vec<&str>; 3] = [
+        vec![
+            "worktree",
+            "remove",
+            views[0].to_str().unwrap(),
+            "--state-dir",
+            state_arg,
+        ],
+        vec![
+            "worktree",
+            "move",
+            views[1].to_str().unwrap(),
+            elsewhere.to_str().unwrap(),
+            "--state-dir",
+            state_arg,
+        ],
+        vec![
+            "worktree",
+            "compact",
+            views[2].to_str().unwrap(),
+            "--state-dir",
+            state_arg,
+        ],
+    ];
+    for arguments in &requests {
+        let (receipt, exit_code) = riftri_json_error(&repository, arguments);
+        assert_eq!(exit_code, Some(1), "{arguments:?}");
+        assert_eq!(receipt["code"], "recovery-pending", "{arguments:?}");
+        assert_eq!(receipt["recovery"], "required", "{arguments:?}");
+        let next = receipt["nextCommand"].as_str().expect("next command");
+        assert!(
+            next.starts_with("riftri repair --state-dir"),
+            "{arguments:?}: {next}"
+        );
+    }
+
+    // A path that was never a managed worktree is a caller mistake.
+    let never = fixture.path().join("never-existed");
+    let (receipt, exit_code) = riftri_json_error(
+        &repository,
+        &[
+            "worktree",
+            "remove",
+            never.to_str().unwrap(),
+            "--state-dir",
+            state_arg,
+        ],
+    );
+    assert_eq!(exit_code, Some(3));
+    assert_eq!(receipt["code"], "invalid-request");
+    assert_eq!(receipt["category"], "policy");
+    assert_eq!(receipt["cleanup"], "not-needed");
+
+    // Following the receipt retires the journals and frees the base for gc.
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["repair", "--state-dir", state_arg])
+        .current_dir(&repository)
+        .output()
+        .expect("run riftri repair");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["gc", "--json", "--state-dir", state_arg])
+        .current_dir(&repository)
+        .output()
+        .expect("run riftri gc");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).expect("gc JSON");
+    let eligible = plan["candidates"]
+        .as_array()
+        .map(Vec::len)
+        .unwrap_or_else(|| panic!("gc report has no candidates array: {plan}"));
+    assert_eq!(
+        eligible, 1,
+        "the base the deleted views held must become collectable: {plan}"
+    );
+}

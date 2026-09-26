@@ -2283,10 +2283,10 @@ fn remove_worktree_with_mode(
     let repository_root = repository.root.ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
-    let destination = normalize_existing_destination(&request.destination)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
+    let destination = existing_managed_destination(&request.destination, &requested_state)?;
     let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
@@ -2422,11 +2422,11 @@ fn move_worktree_inner(
     let repository_root = repository.root.ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
-    let source = normalize_existing_destination(&request.source)?;
-    let destination = normalize_new_destination(&request.destination)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
+    let source = existing_managed_destination(&request.source, &requested_state)?;
+    let destination = normalize_new_destination(&request.destination)?;
     let state_directory = existing_state_directory_for_worktree(&requested_state, &source)?;
     let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
@@ -2527,10 +2527,10 @@ fn compact_worktree_inner(
     let repository_root = repository.root.ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
-    let destination = normalize_existing_destination(&request.destination)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
+    let destination = existing_managed_destination(&request.destination, &requested_state)?;
     let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
@@ -5142,6 +5142,63 @@ fn normalize_existing_destination(destination: &Path) -> Result<PathBuf, Worktre
     }
     fs::canonicalize(destination)
         .map_err(|source| io("resolve worktree destination", destination, source))
+}
+
+/// Resolve the path of an existing managed worktree the caller named, telling
+/// apart the two things a missing path can mean.
+///
+/// A path that no longer exists used to fail as `filesystem-io-failed`, an
+/// operational error with nothing to act on. It is either a request for a
+/// worktree that is not managed — a typo, or one already removed, which is a
+/// policy refusal — or a managed worktree whose directory was deleted outside
+/// Riftri, commonly with `rm -rf`. The second leaves an active add journal that
+/// keeps its immutable base in use, so `gc` can never reclaim it; `riftri
+/// repair` retires that journal (#336), so the refusal names it.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn existing_managed_destination(
+    destination: &Path,
+    requested_state: &Path,
+) -> Result<PathBuf, WorktreeError> {
+    match normalize_existing_destination(destination) {
+        Err(WorktreeError::Io { ref source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            Err(vanished_destination_error(destination, requested_state)?)
+        }
+        other => other,
+    }
+}
+
+/// The refusal for a named worktree whose path does not exist. Errors met
+/// while deciding — an unreadable journal, say — propagate as themselves
+/// rather than being folded into "not managed".
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn vanished_destination_error(
+    destination: &Path,
+    requested_state: &Path,
+) -> Result<WorktreeError, WorktreeError> {
+    let not_managed = || {
+        WorktreeError::InvalidRequest(format!(
+            "{} does not exist and is not an active Riftri-managed worktree",
+            destination.display()
+        ))
+    };
+    let requested_state = absolute_path(requested_state)?;
+    let Some(state_directory) = resolve_real_state_directory_if_present(&requested_state)? else {
+        return Ok(not_managed());
+    };
+    for candidate in managed_destination_candidates(destination)? {
+        if find_managed_add_journal(&state_directory, &candidate)?.is_some() {
+            return Ok(recovery_pending_error(
+                format!(
+                    "{} no longer exists, but its Riftri add is still recorded as active and keeps its immutable base in use",
+                    destination.display()
+                ),
+                &state_directory,
+            ));
+        }
+    }
+    Ok(not_managed())
 }
 
 fn find_managed_add_journal(

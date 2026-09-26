@@ -1688,10 +1688,13 @@ fn enabled_forced_removal_of_a_missing_managed_view_fails_closed() {
         .expect("guard forced removal of missing managed worktree");
 
     assert!(!removal.status.success());
+    // The refusal must lead somewhere: the view's add journal is still active
+    // and holds its immutable base, and `riftri repair` is what retires it.
+    // This used to be a bare `resolve worktree destination` I/O error.
+    let stderr = String::from_utf8_lossy(&removal.stderr);
     assert!(
-        String::from_utf8_lossy(&removal.stderr).contains("resolve worktree destination"),
-        "{}",
-        String::from_utf8_lossy(&removal.stderr)
+        stderr.contains("no longer exists") && stderr.contains("riftri repair"),
+        "{stderr}"
     );
     let inventory = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
     assert!(inventory.status.success());
