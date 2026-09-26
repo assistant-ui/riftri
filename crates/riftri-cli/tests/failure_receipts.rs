@@ -736,6 +736,64 @@ fn an_absent_repository_is_a_policy_failure_for_every_command() {
     }
 }
 
+/// A repository path that does not exist, or names a file, is the same caller
+/// mistake as standing outside a repository — usually a typo. It used to be
+/// reported as `could not start Git command "git"`, because the operating
+/// system blames the program when a spawn's working directory is bad, which
+/// sent people looking for a broken Git installation (#422).
+#[test]
+fn a_missing_or_file_repository_path_is_not_a_repository() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let missing = fixture.path().join("no-such-repository");
+    let file = fixture.path().join("a-file");
+    std::fs::write(&file, "not a repository\n").expect("write file");
+
+    for path in [&missing, &file] {
+        let path = path.to_str().expect("UTF-8 fixture path");
+        let view = fixture.path().join("view");
+        let view = view.to_str().expect("UTF-8 fixture path");
+        for arguments in [
+            &["status", "--repository", path][..],
+            &["worktree", "list", "--repository", path][..],
+            &[
+                "worktree",
+                "add",
+                view,
+                "-b",
+                "feature/typo",
+                "--repository",
+                path,
+            ][..],
+            &["gc", path][..],
+            &["repair", path][..],
+            &["enable", path][..],
+            &["disable", path][..],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .arg("--json-errors")
+                .args(arguments)
+                .current_dir(fixture.path())
+                .output()
+                .expect("run Riftri with JSON failures enabled");
+            assert_eq!(output.status.code(), Some(3), "{arguments:?}");
+            let receipt: serde_json::Value = serde_json::from_slice(&output.stderr)
+                .unwrap_or_else(|error| panic!("{arguments:?} receipt is not JSON: {error}"));
+            assert_eq!(receipt["code"], "not-a-repository", "{arguments:?}");
+            assert_eq!(receipt["category"], "policy", "{arguments:?}");
+            assert_eq!(receipt["cleanup"], "not-needed", "{arguments:?}");
+            let message = receipt["message"].as_str().expect("message");
+            assert!(
+                !message.contains("could not start Git"),
+                "{arguments:?} must not blame Git for a bad path: {message}"
+            );
+            assert!(
+                message.contains(path),
+                "{arguments:?} must name the path the caller gave: {message}"
+            );
+        }
+    }
+}
+
 /// The counterpart: a repository Git accepts, where a Git command fails for a
 /// real reason, must stay operational. Only Git's own "not a git repository"
 /// verdict becomes a policy refusal — a damaged object store is still

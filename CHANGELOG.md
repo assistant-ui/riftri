@@ -29,6 +29,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A repository path that does not exist or names a file is reported as
+  `not-a-repository` (policy, exit 3) naming the path, instead of
+  `could not start Git command "git"`. The operating system reports a bad
+  working directory as the program being missing, so a mistyped
+  `--repository` looked like a broken Git installation. Git genuinely missing
+  from `PATH` is still reported as before.
 - Running a command outside a Git repository is reported as a policy refusal —
   `not-a-repository`, exit code `3` — instead of an operational failure with an
   unknown cleanup. The cause reached the receipt by two routes that classified

@@ -1827,6 +1827,15 @@ impl Git {
     /// damaged and fails outside one. The C locale is forced so the
     /// classification never depends on translated error text.
     pub fn repository_absent(&self, path: &Path) -> Result<bool, GitError> {
+        // A path that does not exist, or is not a directory, cannot lie inside
+        // a repository — and Git cannot even be started there. The operating
+        // system reports a bad working directory as the *program* being
+        // missing, so without this check a mistyped repository path surfaced
+        // as "could not start Git command" and sent people looking for a
+        // broken Git installation (#422).
+        if !path.is_dir() {
+            return Ok(true);
+        }
         let arguments = [OsString::from("rev-parse"), OsString::from("--git-dir")];
         let output = self.output_os_with_env(
             Some(path),
