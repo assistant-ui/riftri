@@ -70,7 +70,9 @@ pub fn is_absent_repository(error: &(dyn std::error::Error + 'static)) -> bool {
         Some(ActivationError::Git(GitError::RepositoryAbsent { .. }))
     )
 }
-pub use shell::{command_path, repair_command, shell_quoted_path, status_command};
+pub use shell::{
+    command_path, repair_command, shell_quoted_path, status_command, unregister_state_command,
+};
 pub use worktree::{
     AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
     CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,

@@ -421,6 +421,110 @@ fn an_explicitly_named_missing_state_directory_never_reports_an_all_clear() {
     }
 }
 
+/// A missing registered state directory blocks cross-state safety checks, but
+/// retrying or inspecting the explicitly selected healthy state cannot fix
+/// it. The receipt must identify the stale registration and advertise the
+/// existing non-destructive unregister command that clears the blocker.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_stale_state_registration_has_an_actionable_policy_receipt() {
+    let fixture = support::writable_tempdir().expect("fixture directory");
+    if !native_cow_supported(fixture.path()) {
+        return;
+    }
+    let repository = fixture.path().join("repository");
+    let selected_state = fixture.path().join("current state");
+    let missing_state = fixture.path().join("removed 'state'");
+    let destination = fixture.path().join("view");
+    init_repository_with_commit(&repository);
+    std::fs::create_dir(&selected_state).expect("create selected state directory");
+    git(
+        &repository,
+        &[
+            "config",
+            "--local",
+            "--add",
+            "riftri.stateDirectory",
+            missing_state.to_str().expect("UTF-8 missing state path"),
+        ],
+    );
+
+    let (receipt, exit_code) = riftri_json_error(
+        fixture.path(),
+        &[
+            "worktree",
+            "add",
+            destination.to_str().expect("UTF-8 destination"),
+            "-b",
+            "stale-state-receipt",
+            "--repository",
+            repository.to_str().expect("UTF-8 repository"),
+            "--state-dir",
+            selected_state.to_str().expect("UTF-8 selected state"),
+        ],
+    );
+
+    assert_eq!(exit_code, Some(3));
+    assert_eq!(receipt["operation"], "worktree-add");
+    assert_eq!(receipt["code"], "stale-state-registration");
+    assert_eq!(receipt["category"], "policy");
+    assert_eq!(receipt["cleanup"], "not-needed");
+    assert_eq!(receipt["recovery"], "required");
+    assert_eq!(
+        receipt["stateDirectory"],
+        missing_state.display().to_string()
+    );
+    assert_eq!(
+        receipt["repository"],
+        std::fs::canonicalize(&repository)
+            .expect("canonical repository")
+            .display()
+            .to_string()
+    );
+    assert!(!destination.exists(), "the refusal must precede mutation");
+
+    let next_command = receipt["nextCommand"].as_str().expect("next command");
+    assert!(
+        receipt["message"]
+            .as_str()
+            .expect("message")
+            .contains(next_command),
+        "human and machine guidance must agree: {receipt:?}"
+    );
+    let program = next_command
+        .strip_prefix("riftri ")
+        .expect("nextCommand invokes riftri");
+    let quoted_binary =
+        riftri_core::shell_quoted_path(std::path::Path::new(env!("CARGO_BIN_EXE_riftri")))
+            .expect("the test binary path is representable");
+    let unregister = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{quoted_binary} {program}"))
+        .current_dir(fixture.path())
+        .output()
+        .expect("run advertised unregister command");
+    assert!(
+        unregister.status.success(),
+        "advertised command failed: {}",
+        String::from_utf8_lossy(&unregister.stderr)
+    );
+
+    let retry = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&destination)
+        .args(["-b", "stale-state-receipt", "--repository"])
+        .arg(&repository)
+        .arg("--state-dir")
+        .arg(&selected_state)
+        .output()
+        .expect("retry add after unregistering stale state");
+    assert!(
+        retry.status.success(),
+        "the advertised command did not clear the blocker: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+}
+
 /// The legitimate case must keep working: a repository that has simply never
 /// created Riftri state reports an all-clear and exits zero.
 #[test]

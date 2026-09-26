@@ -434,6 +434,16 @@ pub enum WorktreeError {
         state_directory: PathBuf,
     },
 
+    /// A repository-local locator names a state directory that no longer
+    /// exists. Cross-state lifecycle checks must remain fail-closed, but the
+    /// registration can be removed explicitly without touching files.
+    #[error("{message}")]
+    StaleStateRegistration {
+        message: String,
+        repository: PathBuf,
+        state_directory: PathBuf,
+    },
+
     /// Another live process holds the operation lock right now. Nothing needs
     /// repair; the caller should wait for the concurrent operation to finish
     /// and retry.
@@ -734,17 +744,51 @@ fn repository_state_directories_with_git(
         directories.push(default);
     }
     for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
-        if !configured.is_absolute() {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "registered Riftri state directory is not absolute: {}",
-                configured.display()
-            )));
-        }
-        directories.push(resolve_real_state_directory(&configured)?);
+        directories.push(resolve_registered_state_directory(
+            repository_root,
+            &configured,
+        )?);
     }
     directories.sort_unstable();
     directories.dedup();
     Ok(directories)
+}
+
+fn resolve_registered_state_directory(
+    repository: &Path,
+    state_directory: &Path,
+) -> Result<PathBuf, WorktreeError> {
+    if !state_directory.is_absolute() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "registered Riftri state directory is not absolute: {}",
+            state_directory.display()
+        )));
+    }
+    match resolve_real_state_directory(state_directory) {
+        Ok(resolved) => Ok(resolved),
+        Err(WorktreeError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Err(stale_state_registration_error(repository, state_directory))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn stale_state_registration_error(repository: &Path, state_directory: &Path) -> WorktreeError {
+    let message = match crate::unregister_state_command(repository, state_directory) {
+        Some(command) => format!(
+            "registered Riftri state directory is missing: {}; run {command} before retrying",
+            state_directory.display()
+        ),
+        None => format!(
+            "registered Riftri state directory is missing: {}; unregister this exact path with `riftri state unregister <path> --repository <repository>` before retrying",
+            state_directory.display()
+        ),
+    };
+    WorktreeError::StaleStateRegistration {
+        message,
+        repository: repository.to_path_buf(),
+        state_directory: state_directory.to_path_buf(),
+    }
 }
 
 /// Origin of one discovered state directory in an all-states inventory.
@@ -943,7 +987,7 @@ fn register_state_directory(
     let registered = git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?;
     for registered in registered {
         if registered == state_directory
-            || resolve_real_state_directory(&registered)? == state_directory
+            || resolve_registered_state_directory(repository_root, &registered)? == state_directory
         {
             return Ok(());
         }
