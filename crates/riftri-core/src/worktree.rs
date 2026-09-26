@@ -564,7 +564,7 @@ pub fn validate_new_worktree_destination(
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
     let destination = normalize_new_destination(destination)?;
-    let resolved = git.resolve_revision(&repository_root, revision)?;
+    let resolved = resolve_requested_revision(&git, &repository_root, revision)?;
     let compatibility = validate_resolved_compatibility(
         &git,
         &repository_root,
@@ -2795,7 +2795,20 @@ fn add_worktree_inner(
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
     let destination = normalize_new_destination(&request.destination)?;
-    let resolved = git.resolve_revision(&repository_root, &request.revision)?;
+    let resolved = resolve_requested_revision(&git, &repository_root, &request.revision)?;
+    // The mirror of the existing-branch check below. Git enforces this too,
+    // but only after Riftri has journaled the add, so the refusal arrived as
+    // an operational `git-failed` with unknown cleanup — and re-running a task
+    // with the same branch name is one of the commonest agent mistakes
+    // (#425). Checking here refuses before anything is written.
+    if let WorktreeMode::NewBranch(branch) = &request.mode
+        && git.local_branch_target(&repository_root, branch)?.is_some()
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "a branch named {} already exists; choose another name or check it out with an existing-branch add",
+            branch.to_string_lossy()
+        )));
+    }
     if let WorktreeMode::ExistingBranch(branch) = &request.mode {
         let target = git
             .local_branch_target(&repository_root, branch)?
@@ -3905,13 +3918,33 @@ pub(crate) fn inspect_repository_compatibility(
     Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
+/// Resolve a revision the caller supplied, reporting a name that resolves to
+/// nothing as the request error it is rather than a Git failure (#425).
+fn resolve_requested_revision(
+    git: &Git,
+    repository: &Path,
+    revision: &OsStr,
+) -> Result<ResolvedRevision, WorktreeError> {
+    git.resolve_requested_revision(repository, revision)?
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(if revision == OsStr::new("HEAD") {
+                "HEAD does not name a commit: the repository has no commits yet".to_owned()
+            } else {
+                format!(
+                    "revision does not name a commit in this repository: {}",
+                    revision.to_string_lossy()
+                )
+            })
+        })
+}
+
 fn analyze_repository_compatibility(
     git: &Git,
     repository: &Path,
     common_git_dir: &Path,
     revision: &OsStr,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
-    let resolved = git.resolve_revision(repository, revision)?;
+    let resolved = resolve_requested_revision(git, repository, revision)?;
     analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[])
 }
 

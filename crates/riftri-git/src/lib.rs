@@ -422,6 +422,48 @@ impl Git {
         Ok(ResolvedRevision { commit, tree })
     }
 
+    /// Resolve a revision the *caller* named, returning `Ok(None)` when that
+    /// name resolves to nothing.
+    ///
+    /// `resolve_revision` reports every failure as a Git command failure, so a
+    /// misspelled branch, or `HEAD` in a repository with no commits, reached
+    /// the caller as an operational error that retrying might fix (#425).
+    /// Telling the two apart follows `resolve_optional_object`: on the failure
+    /// path only, probe the unpeeled name with `--verify --quiet`, which exits
+    /// `1` with no output when the name resolves to nothing. If the name *does*
+    /// resolve, peeling failed for another reason — it names a tree or blob, or
+    /// its object is unreadable in a damaged store — and the original error is
+    /// kept, so corruption is never reported as a caller mistake.
+    ///
+    /// Only for revisions the caller supplied. `HEAD` inside an existing
+    /// worktree failing to resolve is a crash shape, not a typo, and keeps
+    /// going through `resolve_revision`.
+    pub fn resolve_requested_revision(
+        &self,
+        path: &Path,
+        revision: &OsStr,
+    ) -> Result<Option<ResolvedRevision>, GitError> {
+        match self.resolve_revision(path, revision) {
+            Ok(resolved) => Ok(Some(resolved)),
+            Err(error @ GitError::CommandFailed { .. }) => {
+                let arguments = [
+                    OsString::from("rev-parse"),
+                    OsString::from("--verify"),
+                    OsString::from("--quiet"),
+                    OsString::from("--end-of-options"),
+                    revision.to_os_string(),
+                ];
+                let probe = self.output_os(Some(path), &arguments)?;
+                if probe.status.code() == Some(1) {
+                    Ok(None)
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Return Git's stable, NUL-delimited worktree inventory.
     pub fn list_worktrees(&self, path: &Path) -> Result<Vec<WorktreeInfo>, GitError> {
         let output = self.run(Some(path), &["worktree", "list", "--porcelain", "-z"])?;

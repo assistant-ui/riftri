@@ -842,3 +842,147 @@ fn a_git_failure_inside_a_real_repository_stays_operational() {
     assert_eq!(receipt["code"], "git-failed");
     assert_eq!(receipt["category"], "operational");
 }
+
+fn git_in(directory: &std::path::Path, arguments: &[&str]) {
+    let status = Command::new("git")
+        .args(arguments)
+        .current_dir(directory)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git {arguments:?} failed");
+}
+
+fn repository_fixture(path: &std::path::Path, with_commit: bool) {
+    std::fs::create_dir_all(path).expect("create repository directory");
+    git_in(path, &["init", "--quiet"]);
+    git_in(path, &["config", "user.name", "Riftri Tests"]);
+    git_in(path, &["config", "user.email", "riftri@example.invalid"]);
+    if with_commit {
+        git_in(
+            path,
+            &["commit", "--quiet", "--allow-empty", "-m", "initial"],
+        );
+    }
+}
+
+/// Requests that cannot succeed as written — a branch name that is already
+/// taken, a revision that names nothing, a repository with no commits — are
+/// caller mistakes, and retrying cannot help. They used to surface as Git
+/// command failures: `git-failed`, operational, unknown cleanup (#425). An
+/// agent re-running a task with the same branch name, or misspelling a ref,
+/// was told to retry.
+///
+/// Each is now refused before anything is written, so the refusal is a policy
+/// failure whose cleanup genuinely is not needed — no destination, no state
+/// directory, no registration.
+#[test]
+fn requests_git_would_reject_are_refused_as_policy_before_anything_is_written() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    repository_fixture(&repository, true);
+    git_in(&repository, &["branch", "taken"]);
+    let unborn = fixture.path().join("unborn");
+    repository_fixture(&unborn, false);
+
+    let cases: [(&str, &std::path::Path, &[&str], &str); 3] = [
+        (
+            "branch-exists",
+            &repository,
+            &["-b", "taken"],
+            "already exists",
+        ),
+        (
+            "missing-revision",
+            &repository,
+            &["-b", "fresh", "no-such-revision"],
+            "does not name a commit",
+        ),
+        ("no-commits", &unborn, &["-b", "fresh"], "no commits yet"),
+    ];
+    for (name, repo, extra, expected_message) in cases {
+        let destination = fixture.path().join(format!("view-{name}"));
+        let state = fixture.path().join(format!("state-{name}"));
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["--json-errors", "worktree", "add"])
+            .arg(&destination)
+            .args(extra)
+            .arg("--repository")
+            .arg(repo)
+            .arg("--state-dir")
+            .arg(&state)
+            .output()
+            .expect("run Riftri");
+        assert_eq!(output.status.code(), Some(3), "{name}");
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stderr)
+            .unwrap_or_else(|error| panic!("{name} receipt is not JSON: {error}"));
+        assert_eq!(receipt["code"], "invalid-request", "{name}");
+        assert_eq!(receipt["category"], "policy", "{name}");
+        assert_eq!(receipt["cleanup"], "not-needed", "{name}");
+        let message = receipt["message"].as_str().expect("message");
+        assert!(message.contains(expected_message), "{name}: {message}");
+        assert!(!destination.exists(), "{name} created its destination");
+        assert!(!state.exists(), "{name} created a state directory");
+    }
+    let registrations = Command::new("git")
+        .args(["config", "--local", "--get-all", "riftri.stateDirectory"])
+        .current_dir(&repository)
+        .output()
+        .expect("read registrations");
+    assert!(
+        registrations.stdout.is_empty(),
+        "a refused add must not register a state directory"
+    );
+}
+
+/// The guard on the change above: a branch whose ref exists but whose commit
+/// object is gone is repository damage, not a typo, and must stay an
+/// operational failure worth inspecting. Only a name that resolves to nothing
+/// at all may be called a caller mistake.
+#[test]
+fn an_unreadable_revision_stays_operational() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    repository_fixture(&repository, true);
+    git_in(&repository, &["checkout", "--quiet", "-b", "side"]);
+    git_in(
+        &repository,
+        &["commit", "--quiet", "--allow-empty", "-m", "side"],
+    );
+    git_in(&repository, &["checkout", "--quiet", "-"]);
+    let side = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "side"])
+            .current_dir(&repository)
+            .output()
+            .expect("resolve side")
+            .stdout,
+    )
+    .expect("UTF-8 object id");
+    let side = side.trim();
+    let object = repository
+        .join(".git/objects")
+        .join(&side[..2])
+        .join(&side[2..]);
+    let mut permissions = std::fs::metadata(&object)
+        .expect("loose object")
+        .permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    permissions.set_readonly(false);
+    std::fs::set_permissions(&object, permissions).expect("make object removable");
+    std::fs::remove_file(&object).expect("remove the side commit object");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["--json-errors", "worktree", "add"])
+        .arg(fixture.path().join("view"))
+        .args(["-b", "from-side", "side", "--repository"])
+        .arg(&repository)
+        .arg("--state-dir")
+        .arg(fixture.path().join("state"))
+        .output()
+        .expect("run Riftri");
+    assert_eq!(output.status.code(), Some(1));
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("stderr is one JSON receipt");
+    assert_eq!(receipt["category"], "operational");
+    assert_ne!(receipt["code"], "invalid-request");
+}
