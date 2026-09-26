@@ -62,6 +62,11 @@ class RiftriError extends Error {
     return this.receipt?.code === "worktree-busy";
   }
 
+  /** The affected volume needs free space before recovery can proceed. */
+  get isStorageFull() {
+    return this.receipt?.code === "storage-full";
+  }
+
   /** Run `nextCommand` (usually `riftri repair`) before continuing. */
   get needsRepair() {
     return this.receipt?.recovery === "required";

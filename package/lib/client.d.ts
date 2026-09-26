@@ -36,6 +36,8 @@ export class RiftriError extends Error {
   readonly isUsageError: boolean;
   /** A live process holds the lock; waiting and retrying is correct. */
   readonly isBusy: boolean;
+  /** Free space on the affected volume before following recovery guidance. */
+  readonly isStorageFull: boolean;
   /** Run `receipt.nextCommand` before continuing. */
   readonly needsRepair: boolean;
 }

@@ -134,6 +134,11 @@ Receipts also carry the context the failing invocation used: `repository` and
 targets that same context rather than the caller's working directory, so
 running it inspects or repairs the state that actually failed.
 
+`"code": "storage-full"` is the exception that requires operator action
+before `nextCommand`: free space on the affected volume first, then follow the
+receipt's unchanged lifecycle recovery guidance. The code is derived from the
+typed operating-system error rather than matching human-readable text.
+
 `nextCommand` is a **shell string**, with every path quoted for the platform
 shell: run it through a shell rather than splitting it on whitespace. It is
 `null` when no command applies and also when a path cannot be written as a

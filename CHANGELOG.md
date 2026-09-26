@@ -82,6 +82,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   receipt identifies the stale directory, reports that no cleanup is needed,
   and provides the exact non-destructive `riftri state unregister` command;
   running that command clears the blocker for the next add.
+- Disk-full failures now report the stable `storage-full` receipt code on
+  macOS, Linux, and Windows, including when both an operation and its rollback
+  fail. Combined failures retain their typed causes instead of stringifying
+  them, so automation can ask an operator to free space before following the
+  unchanged lifecycle recovery command without matching localized error text.
 
 - `riftri worktree remove`, `worktree move`, and `worktree compact` report an
   unmanaged worktree as a policy error whether or not the repository has a

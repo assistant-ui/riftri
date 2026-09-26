@@ -128,7 +128,17 @@ test("the example client matches the package client's error contract", async () 
   const pkg = require(path.join(root, "package/lib/client.js"));
   const error = new RiftriError(3, null, "");
   const packaged = new pkg.RiftriError(3, null, "");
-  for (const field of ["exitCode", "signal", "receipt", "wasSignalled", "isPolicyRefusal", "isUsageError", "isBusy", "needsRepair"]) {
+  for (const field of [
+    "exitCode",
+    "signal",
+    "receipt",
+    "wasSignalled",
+    "isPolicyRefusal",
+    "isUsageError",
+    "isBusy",
+    "isStorageFull",
+    "needsRepair",
+  ]) {
     assert.equal(field in error || error[field] !== undefined, true, `example client is missing ${field}`);
     assert.equal(
       typeof error[field],

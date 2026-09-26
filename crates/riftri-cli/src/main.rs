@@ -1184,6 +1184,7 @@ fn failure_receipt(
     // used to land on the operational fallback below. Matching on the chain
     // classifies both identically, so the commands cannot drift apart again.
     let absent_repository = absent_repository(error);
+    let storage_full = error.chain().any(riftri_core::is_storage_full);
     let (code, category, phase, cleanup, recovery) = if absent_repository {
         (
             "not-a-repository",
@@ -1200,6 +1201,11 @@ fn failure_receipt(
             "unknown",
             recovery_for_operation(operation),
         ))
+    };
+    let code = if category == "operational" && storage_full {
+        "storage-full"
+    } else {
+        code
     };
     // Never answer a failure with the command that just produced it. `repair`
     // is the standard remedy for `recovery: "required"`, but when `repair`
@@ -3161,6 +3167,54 @@ mod tests {
         assert!(receipt["phase"].is_null());
         assert!(receipt["nextCommand"].is_null());
         assert_eq!(receipt["nativePathEncoding"], native_path_encoding());
+    }
+
+    /// Disk exhaustion is actionable by the caller, but localized operating
+    /// system text is not a stable automation contract. Preserve it as a
+    /// distinct receipt code while retaining the lifecycle-specific recovery
+    /// disposition.
+    #[cfg(unix)]
+    #[test]
+    fn storage_full_receipts_have_a_machine_readable_code() {
+        let error = anyhow::Error::new(riftri_core::WorktreeError::Io {
+            operation: "flush operation journal",
+            path: PathBuf::from("/tmp/riftri-state/operations/add.json"),
+            source: std::io::Error::from_raw_os_error(libc::ENOSPC),
+        });
+        let receipt = receipt("worktree-add", &error);
+
+        assert_eq!(receipt["code"], "storage-full");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["recovery"], "inspect");
+    }
+
+    /// Combined failures used to stringify both causes, making the typed
+    /// ENOSPC impossible to recognize by the time the CLI built a receipt.
+    /// The rollback disposition must remain intact while the cause gets its
+    /// machine-readable code.
+    #[cfg(unix)]
+    #[test]
+    fn storage_full_survives_a_failed_rollback() {
+        let error = anyhow::Error::new(riftri_core::WorktreeError::OperationAndRollback {
+            operation: Box::new(riftri_core::WorktreeError::Io {
+                operation: "flush operation journal",
+                path: PathBuf::from("/tmp/riftri-state/operations/add.json"),
+                source: std::io::Error::from_raw_os_error(libc::ENOSPC),
+            }),
+            rollback: Box::new(riftri_core::WorktreeError::Io {
+                operation: "flush rollback journal",
+                path: PathBuf::from("/tmp/riftri-state/operations/add.json"),
+                source: std::io::Error::from_raw_os_error(libc::ENOSPC),
+            }),
+        });
+        let receipt = receipt("worktree-add", &error);
+
+        assert_eq!(receipt["code"], "storage-full");
+        assert_eq!(receipt["category"], "operational");
+        assert_eq!(receipt["phase"], "rollback");
+        assert_eq!(receipt["cleanup"], "unknown");
+        assert_eq!(receipt["recovery"], "required");
+        assert_eq!(receipt["nextCommand"], "riftri repair");
     }
 
     /// The repair command a receipt advertises is a shell string. It must be
