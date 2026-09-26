@@ -18,11 +18,6 @@ try {
   fail(error instanceof Error ? error.message : String(error));
 }
 
-const child = spawn(binary, process.argv.slice(2), {
-  stdio: "inherit",
-  windowsHide: false,
-});
-
 // Mirror the termination contract of native `riftri exec` (docs/cli.md) while
 // the native process runs. The launcher survives SIGINT (Ctrl-C) and SIGQUIT
 // (Ctrl-\): a terminal delivers both to the whole foreground process group,
@@ -37,10 +32,21 @@ const child = spawn(binary, process.argv.slice(2), {
 const ignoredSignals = ["SIGINT", "SIGQUIT"];
 const forwardedSignals = ["SIGTERM", "SIGHUP"];
 const ignoreSignal = () => {};
+let child;
+const pendingForwardedSignals = [];
 const forwardSignal = (signal) => {
+  if (child === undefined) {
+    pendingForwardedSignals.push(signal);
+    return;
+  }
   child.kill(signal);
 };
 
+// Arm the policy before starting the child. A fast child can write to the
+// inherited terminal before `spawn` returns in the launcher process; callers
+// commonly treat that output as readiness and may immediately signal the
+// foreground process group. Installing these handlers after `spawn` left a
+// window where that SIGINT still had its default, fatal disposition.
 if (process.platform !== "win32") {
   for (const signal of ignoredSignals) {
     process.on(signal, ignoreSignal);
@@ -49,6 +55,15 @@ if (process.platform !== "win32") {
     process.on(signal, forwardSignal);
   }
 }
+
+child = spawn(binary, process.argv.slice(2), {
+  stdio: "inherit",
+  windowsHide: false,
+});
+for (const signal of pendingForwardedSignals) {
+  child.kill(signal);
+}
+pendingForwardedSignals.length = 0;
 
 // The handlers deliberately stay installed until the process exits. Removing
 // the last listener for a signal restores its default disposition, so a SIGINT
