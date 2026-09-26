@@ -8,10 +8,17 @@ on:
       - "Formula/riftri.rb"
       - "package/homebrew/Formula/riftri.rb"
       - ".github/workflows/homebrew-freshness.yml"
+  release:
+    # The formula can only be regenerated once the release exists, because the
+    # generator pins what that release's SHA256SUMS publishes. Reacting to the
+    # published release closes the gap the daily sweep would otherwise leave.
+    types:
+      - published
   schedule:
-    # Daily, because the formula goes stale the moment a release publishes and
-    # the drift guard in package/test/homebrew-formula.test.js cannot see a
-    # newer tag — it only proves the formula is self-consistent.
+    # Daily, as a backstop for a release that published while this workflow was
+    # failing, and for a formula edited by hand. The drift guard in
+    # package/test/homebrew-formula.test.js cannot see a newer tag — it only
+    # proves the formula is self-consistent.
     - cron: "19 7 * * *"
   workflow_dispatch:
 
@@ -19,59 +26,81 @@ permissions:
   contents: read
 
 concurrency:
-  group: homebrew-freshness-${{ github.ref }}
-  cancel-in-progress: true
+  # One group for the whole workflow, not one per ref: the sync job force-pushes
+  # a shared branch, so a scheduled run and a release run must not interleave.
+  # Queue rather than cancel, so a run is never killed between its push and its
+  # pull request.
+  group: homebrew-freshness
+  cancel-in-progress: false
 
 jobs:
-  formula-tracks-latest-release:
+  check:
     name: Formula tracks the latest release
     runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    outputs:
+      drift: ${{ steps.compare.outputs.drift }}
+      latest-tag: ${{ steps.compare.outputs.latest-tag }}
+      reason: ${{ steps.compare.outputs.reason }}
 
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - name: Check out source
+      - name: Check out main
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A release event would otherwise check out the tag, whose formula is
+          # the pre-release one. The question is always whether main tracks the
+          # latest release.
+          ref: main
 
-      - name: Confirm the staged tap copy matches the canonical formula
+      - name: Compare the checked-in formula against the latest release
+        id: compare
         run: |
           set -euo pipefail
+
+          drift=false
+          reason=""
+
+          note_drift() {
+            drift=true
+            if [ -n "${reason}" ]; then
+              reason="${reason}; $1"
+            else
+              reason="$1"
+            fi
+            echo "::warning file=Formula/riftri.rb::$1"
+          }
+
           # The staged copy under package/homebrew mirrors the future
           # assistant-ui/homebrew-riftri tap; both are generated together by
           # package/scripts/sync-homebrew-tap.mjs and must never diverge.
           if ! diff -u Formula/riftri.rb package/homebrew/Formula/riftri.rb; then
-            echo "::error file=package/homebrew/Formula/riftri.rb::The staged tap formula differs from Formula/riftri.rb." \
-              "Regenerate both: node package/scripts/sync-homebrew-tap.mjs"
-            exit 1
+            note_drift "the staged tap copy differs from Formula/riftri.rb"
           fi
 
-      - name: Compare the formula version against the latest release
-        run: |
-          set -euo pipefail
           formula_version="$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/riftri.rb)"
           if [ -z "${formula_version}" ]; then
             echo "::error file=Formula/riftri.rb::Could not read a version from the formula."
             exit 1
           fi
+
           latest_tag="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)"
           latest_version="${latest_tag#v}"
           echo "formula: ${formula_version}"
           echo "latest release: ${latest_version} (${latest_tag})"
           if [ "${formula_version}" != "${latest_version}" ]; then
-            echo "::error file=Formula/riftri.rb::The Homebrew formula pins ${formula_version} but the latest release is ${latest_version}." \
-              "Regenerate every copy: node package/scripts/sync-homebrew-tap.mjs ${latest_tag}"
-            exit 1
+            note_drift "the formula pins ${formula_version} but the latest release is ${latest_version}"
           fi
-          echo "LATEST_TAG=${latest_tag}" >> "${GITHUB_ENV}"
 
-      - name: Verify the pinned checksums against the published manifest
-        run: |
-          set -euo pipefail
           # The formula is only trustworthy if its pins still match what the
           # release actually publishes, so compare every archive it references
           # rather than trusting that the generator was run.
-          gh release download "${LATEST_TAG}" --repo "${GITHUB_REPOSITORY}" \
+          gh release download "${latest_tag}" --repo "${GITHUB_REPOSITORY}" \
             --pattern SHA256SUMS --dir release --clobber
           awk '
             /^ *url "/ {
@@ -85,18 +114,146 @@ jobs:
             echo "::error file=Formula/riftri.rb::No pinned archives were found in the formula."
             exit 1
           fi
-          failed=0
+
+          # Redirect rather than pipe, so note_drift runs in this shell and its
+          # assignments survive the loop.
           while read -r archive pinned; do
             published="$(awk -v name="${archive}" '$2 == name { print $1 }' release/SHA256SUMS)"
             if [ -z "${published}" ]; then
-              failed=1
-              echo "::error file=Formula/riftri.rb::${archive} is pinned by the formula but absent from the ${LATEST_TAG} SHA256SUMS."
+              note_drift "${archive} is pinned but absent from the ${latest_tag} SHA256SUMS"
             elif [ "${published}" != "${pinned}" ]; then
-              failed=1
-              echo "::error file=Formula/riftri.rb::${archive} pins ${pinned} but the release publishes ${published}." \
-                "Regenerate every copy: node package/scripts/sync-homebrew-tap.mjs"
+              note_drift "${archive} pins ${pinned} but the release publishes ${published}"
             else
               echo "${archive}: matches the published checksum."
             fi
           done < pinned.txt
-          exit "${failed}"
+
+          {
+            echo "drift=${drift}"
+            echo "latest-tag=${latest_tag}"
+            echo "reason=${reason}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Report a formula that already tracks the release
+        if: steps.compare.outputs.drift == 'false'
+        run: |
+          set -euo pipefail
+          echo "The formula tracks ${LATEST_TAG} and every pinned checksum matches." \
+            >> "${GITHUB_STEP_SUMMARY}"
+        env:
+          LATEST_TAG: ${{ steps.compare.outputs.latest-tag }}
+
+  sync:
+    name: Open a formula sync pull request
+    needs: check
+    if: needs.check.outputs.drift == 'true'
+    runs-on: ubuntu-24.04
+
+    # Only this job mutates anything, so only this job is trusted to write.
+    permissions:
+      contents: write
+      pull-requests: write
+
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LATEST_TAG: ${{ needs.check.outputs.latest-tag }}
+      DRIFT_REASON: ${{ needs.check.outputs.reason }}
+      SYNC_BRANCH: automation/homebrew-formula-sync
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Regenerate every formula copy
+        run: node package/scripts/sync-homebrew-tap.mjs "${LATEST_TAG}"
+
+      - name: Verify the regenerated formula against the release
+        # No version argument: the generator resolves the latest release itself,
+        # so this fails if the regeneration did not actually resolve the drift.
+        run: node package/scripts/sync-homebrew-tap.mjs --check
+
+      - name: Push the sync branch
+        id: push
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet; then
+            echo "::notice::The formula already matches ${LATEST_TAG}; nothing to propose."
+            echo "pushed=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/riftri.rb package/homebrew/Formula/riftri.rb
+          git commit \
+            --message "fix(homebrew): sync the formula to ${LATEST_TAG}" \
+            --message "Regenerated by the Homebrew freshness workflow from the ${LATEST_TAG} SHA256SUMS, which pins what that release publishes."
+
+          # A dedicated automation branch, rebuilt from main every run, so a
+          # force push only ever discards a superseded proposal.
+          git push --force origin "HEAD:${SYNC_BRANCH}"
+          echo "pushed=true" >> "${GITHUB_OUTPUT}"
+
+      - name: Open or update the pull request
+        if: steps.push.outputs.pushed == 'true'
+        run: |
+          set -euo pipefail
+
+          existing="$(gh pr list --repo "${GITHUB_REPOSITORY}" \
+            --head "${SYNC_BRANCH}" --state open --json number -q '.[0].number // empty')"
+
+          # A quoted heredoc: no expansion, so the Markdown below cannot be
+          # reinterpreted as shell. The two values are substituted afterwards by
+          # env-var lookup rather than by the shell parsing this text.
+          cat <<'TEMPLATE' > body.md
+          The Homebrew freshness workflow found the checked-in formula out of date
+          and regenerated it.
+
+          Drift it found: __DRIFT_REASON__.
+
+          Regenerated with `node package/scripts/sync-homebrew-tap.mjs __LATEST_TAG__`,
+          which pins what the `__LATEST_TAG__` release publishes by downloading that
+          release's `SHA256SUMS` rather than computing sums locally. The workflow then
+          re-ran the generator in `--check` mode, resolving the latest release on its
+          own, and every copy matched.
+
+          This branch is rebuilt from `main` on every run, so a later run replaces
+          this pull request's contents rather than stacking onto them.
+          TEMPLATE
+
+          # Substitute with Python rather than sed: the drift reason is free text
+          # and may contain slashes, ampersands or other sed metacharacters.
+          python3 - <<'SUBSTITUTE'
+          import os, pathlib
+          body = pathlib.Path("body.md")
+          body.write_text(
+              body.read_text()
+              .replace("__DRIFT_REASON__", os.environ["DRIFT_REASON"])
+              .replace("__LATEST_TAG__", os.environ["LATEST_TAG"])
+          )
+          SUBSTITUTE
+
+          if [ -n "${existing}" ]; then
+            gh pr edit "${existing}" --repo "${GITHUB_REPOSITORY}" \
+              --title "fix(homebrew): sync the formula to ${LATEST_TAG}" \
+              --body-file body.md
+            echo "::notice::Updated pull request #${existing}."
+            echo "Updated [#${existing}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/pull/${existing}) to ${LATEST_TAG}." \
+              >> "${GITHUB_STEP_SUMMARY}"
+          else
+            url="$(gh pr create --repo "${GITHUB_REPOSITORY}" \
+              --base main --head "${SYNC_BRANCH}" \
+              --title "fix(homebrew): sync the formula to ${LATEST_TAG}" \
+              --body-file body.md)"
+            echo "::notice::Opened ${url}."
+            echo "Opened ${url} to sync the formula to ${LATEST_TAG}." \
+              >> "${GITHUB_STEP_SUMMARY}"
+          fi
