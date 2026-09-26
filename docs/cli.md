@@ -294,10 +294,12 @@ Inspect Git and show the planned storage path without changing anything.
 | `--destination <DESTINATION>` | Proposed worktree destination whose volume should be probed |
 | `--json` | Emit machine-readable JSON |
 
-The destination's immediate parent must be an existing, accessible directory.
-If it is missing or is a file, doctor reports a `destination-parent` blocker
-instead of suggesting an add command. Create the parent directory and rerun
-doctor; inspection never creates it for you.
+Missing leading directories are not a blocker: `riftri worktree add` creates
+them, as `git worktree add` does. Doctor reports a `destination-parent`
+blocker only for a path Git could not create either — an existing ancestor
+that is a regular file, or a dangling symbolic link along the way — and in
+that case does not suggest an add command. Inspection never creates any
+directory itself.
 
 The suggested commands retain the inspected repository and use POSIX shell
 quoting on every platform, so they run as shown in `sh`, `bash`, and `zsh` —
@@ -420,6 +422,13 @@ version.
 Create a real linked worktree at `PATH` using the platform's native
 copy-on-write backend. `REVISION` is the commit-ish to use for the new
 worktree.
+
+Missing leading directories of `PATH` are created, as `git worktree add`
+does, but only once the request has passed validation — a refused add creates
+nothing. If the add fails after that, the worktree is rolled back and the
+created directories are left in place, which is also what Git does.
+`riftri worktree move` does not create a missing parent, matching
+`git worktree move`.
 
 | Flag | Effect |
 | --- | --- |

@@ -49,12 +49,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   never reclaim it. They now refuse with `recovery-pending` and a
   `nextCommand` of `riftri repair`, which retires the journal and frees the
   base. A path that was never managed is a plain policy refusal.
-- `worktree add` to a destination whose parent directory does not exist is an
-  `invalid-request` policy refusal (exit 3) that says to create the parent,
-  matching the `destination-parent` blocker `riftri doctor` already reports.
-  It was `filesystem-io-failed`, operational with unknown cleanup. Whether an
-  intercepted `git worktree add` should create missing parents the way Git
-  does is tracked in #423.
+- `worktree add` creates missing leading directories of its destination, as
+  `git worktree add` does, so enabling Riftri no longer makes an ordinary
+  `git worktree add .worktrees/task-1 -b task-1` fail when `.worktrees` does
+  not exist yet (#423). Directories are created only after the request passes
+  validation, so a refused add creates nothing; a later failure rolls back the
+  worktree and leaves the directories, as Git does. `riftri doctor` no longer
+  reports a missing parent as a blocker, and a path Git could not create
+  either — an existing ancestor that is a file, or a dangling symbolic link —
+  is an `invalid-request` policy refusal instead of `filesystem-io-failed`.
+  `worktree move` still requires the parent to exist, like `git worktree move`.
 - Running a command outside a Git repository is reported as a policy refusal —
   `not-a-repository`, exit code `3` — instead of an operational failure with an
   unknown cleanup. The cause reached the receipt by two routes that classified

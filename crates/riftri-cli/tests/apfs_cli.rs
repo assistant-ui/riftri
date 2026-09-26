@@ -716,3 +716,58 @@ fn all_states_inventory_discovers_worktrees_across_registered_states() {
         "the other repository's worktree must be filtered out"
     );
 }
+
+/// `riftri worktree add` creates missing leading directories the way
+/// `git worktree add` does (#423), and the result is an ordinary clean
+/// worktree.
+#[test]
+fn explicit_worktree_add_creates_missing_parent_directories() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
+    assert!(
+        git(&repository, &["add", "--", "tracked.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "initial"])
+            .status
+            .success()
+    );
+
+    let destination = fixture.path().join("a").join("b").join("c").join("wt");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&destination)
+        .args(["-b", "feature/nested", "HEAD", "--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI");
+    assert!(
+        output.status.success(),
+        "riftri failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fixture.path().join("a/b/c").is_dir());
+    assert_eq!(
+        fs::read_to_string(destination.join("tracked.txt")).expect("read checkout"),
+        "tracked\n"
+    );
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+}
