@@ -151,6 +151,14 @@ retrying cannot help and the attempted lifecycle mutation never started. Its
 `nextCommand` is the exact non-destructive `riftri state unregister …` command
 that removes the missing locator before a retry.
 
+One precondition outranks that command: `code: "storage-full"` means the
+affected volume must have space freed before recovery can make progress. The
+receipt keeps the lifecycle-specific `cleanup`, `recovery`, and `nextCommand`
+values, so after freeing space a harness can follow the same recovery path it
+would for the underlying failure. The code comes from the typed operating
+system error on macOS, Linux, and Windows; it never depends on localized error
+text.
+
 `--json-errors` implies `--no-progress`, so stderr stays exactly one JSON
 document.
 

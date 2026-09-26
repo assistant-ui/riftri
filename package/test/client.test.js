@@ -139,9 +139,34 @@ test("a policy refusal becomes a typed error carrying its receipt", { skip: onWi
       assert.equal(error.exitCode, EXIT_POLICY);
       assert.equal(error.isPolicyRefusal, true);
       assert.equal(error.isBusy, false);
+      assert.equal(error.isStorageFull, false);
       assert.equal(error.needsRepair, false);
       assert.equal(error.receipt.code, "invalid-request");
       assert.equal(error.message, "destination already exists");
+      return true;
+    },
+  );
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a full volume is distinguished before recovery", { skip: onWindows }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
+  const binary = fakeBinary(directory, {
+    stderr: JSON.stringify({
+      code: "storage-full",
+      recovery: "required",
+      nextCommand: "riftri repair",
+      message: "No space left on device",
+    }),
+    code: 1,
+  });
+  const riftri = new Riftri({ repository: directory, binary });
+  await assert.rejects(
+    () => riftri.status(),
+    (error) => {
+      assert.equal(error.isStorageFull, true);
+      assert.equal(error.needsRepair, true);
+      assert.equal(error.isBusy, false);
       return true;
     },
   );

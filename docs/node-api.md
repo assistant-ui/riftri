@@ -51,15 +51,17 @@ try {
     // Exit 3. Riftri declined and changed nothing — fall back to plain Git.
   } else if (error.isBusy) {
     // A live process holds the lock; waiting and retrying is correct.
+  } else if (error.isStorageFull) {
+    // Free space on the affected volume before running recovery.nextCommand.
   } else if (error.needsRepair) {
     await riftri.repair();
   }
 }
 ```
 
-`isPolicyRefusal`, `isUsageError`, `isBusy`, and `needsRepair` cover the
-branches that matter; `error.receipt` has `code`, `category`, `phase`,
-`cleanup`, `recovery`, and `nextCommand`.
+`isPolicyRefusal`, `isUsageError`, `isBusy`, `isStorageFull`, and
+`needsRepair` cover the branches that matter; `error.receipt` has `code`,
+`category`, `phase`, `cleanup`, `recovery`, and `nextCommand`.
 
 `error.exitCode` is always a number. A process killed by a signal reports
 `128 +` the signal number, the same convention native `riftri exec` uses, and

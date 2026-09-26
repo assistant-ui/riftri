@@ -70,6 +70,29 @@ pub fn is_absent_repository(error: &(dyn std::error::Error + 'static)) -> bool {
         Some(ActivationError::Git(GitError::RepositoryAbsent { .. }))
     )
 }
+/// Whether one typed failure means the underlying volume is out of storage.
+///
+/// Callers should apply this to every error in their wrapper's source chain.
+/// The explicit wrapper cases preserve failures that contain more than one
+/// cause, such as an add whose operation and rollback both failed.
+pub fn is_storage_full(error: &(dyn std::error::Error + 'static)) -> bool {
+    if error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(worktree::io_error_is_storage_full)
+    {
+        return true;
+    }
+    if error
+        .downcast_ref::<WorktreeError>()
+        .is_some_and(WorktreeError::contains_storage_full)
+    {
+        return true;
+    }
+    matches!(
+        error.downcast_ref::<ActivationError>(),
+        Some(ActivationError::Worktree(worktree)) if worktree.contains_storage_full()
+    )
+}
 pub use shell::{
     command_path, repair_command, shell_quoted_path, status_command, unregister_state_command,
 };
@@ -767,7 +790,35 @@ mod tests {
     use super::{
         AddWorktreeJournal, AddWorktreePhase, BaseKey, CheckoutProfile, CheckoutProfileInput,
         CompactWorktreePhase, MoveWorktreePhase, PruneWorktreesPhase, RemoveWorktreePhase,
+        WorktreeError,
     };
+
+    #[cfg(unix)]
+    fn storage_full_io_error() -> std::io::Error {
+        std::io::Error::from_raw_os_error(libc::ENOSPC)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn storage_full_io_error() -> std::io::Error {
+        std::io::Error::from_raw_os_error(windows_sys::Win32::Foundation::ERROR_DISK_FULL as i32)
+    }
+
+    #[cfg(any(unix, target_os = "windows"))]
+    #[test]
+    fn storage_full_detection_reaches_both_sides_of_a_failed_rollback() {
+        let error = WorktreeError::OperationAndRollback {
+            operation: Box::new(WorktreeError::InvalidRequest(
+                "operation failed for another reason".to_owned(),
+            )),
+            rollback: Box::new(WorktreeError::Io {
+                operation: "flush rollback journal",
+                path: PathBuf::from("state/operations/add.json"),
+                source: storage_full_io_error(),
+            }),
+        };
+
+        assert!(super::is_storage_full(&error));
+    }
 
     #[cfg(unix)]
     #[test]

@@ -72,6 +72,7 @@ async function main() {
 
 main().catch((error) => {
   if (error.isUsageError) console.error("usage error:", error.message);
+  else if (error.isStorageFull) console.error("free disk space, then recover:", error.message);
   else if (error.needsRepair) console.error("run riftri repair:", error.message);
   else console.error(error.message);
   process.exit(1);

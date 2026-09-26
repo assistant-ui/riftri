@@ -459,7 +459,11 @@ pub enum WorktreeError {
     },
 
     #[error("creation failed: {operation}; rollback also needs attention: {rollback}")]
-    OperationAndRollback { operation: String, rollback: String },
+    OperationAndRollback {
+        #[source]
+        operation: Box<WorktreeError>,
+        rollback: Box<WorktreeError>,
+    },
 
     #[error("injected failure after {0:?}")]
     InjectedFailure(AddWorktreePhase),
@@ -478,6 +482,53 @@ pub enum WorktreeError {
 
     #[error("injected compaction failure after {0:?}")]
     InjectedCompactionFailure(CompactWorktreePhase),
+}
+
+impl WorktreeError {
+    /// Whether this failure, including both sides of a failed rollback, was
+    /// caused by the destination volume running out of storage.
+    pub(crate) fn contains_storage_full(&self) -> bool {
+        if let Self::OperationAndRollback {
+            operation,
+            rollback,
+        } = self
+        {
+            return operation.contains_storage_full() || rollback.contains_storage_full();
+        }
+
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(error) = current {
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(io_error_is_storage_full)
+            {
+                return true;
+            }
+            current = error.source();
+        }
+        false
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn io_error_is_storage_full(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ENOSPC)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn io_error_is_storage_full(error: &std::io::Error) -> bool {
+    use windows_sys::Win32::Foundation::{ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL};
+
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == ERROR_DISK_FULL as i32 || code == ERROR_HANDLE_DISK_FULL as i32
+    )
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+pub(crate) fn io_error_is_storage_full(_error: &std::io::Error) -> bool {
+    false
 }
 
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
@@ -2979,8 +3030,8 @@ fn add_worktree_inner(
             match rollback {
                 Ok(()) => Err(operation_error),
                 Err(rollback_error) => Err(WorktreeError::OperationAndRollback {
-                    operation: operation_error.to_string(),
-                    rollback: rollback_error.to_string(),
+                    operation: Box::new(operation_error),
+                    rollback: Box::new(rollback_error),
                 }),
             }
         }
@@ -7375,10 +7426,16 @@ fn resume_compaction(
                         source,
                     )),
                     Err(rollback) => Err(WorktreeError::OperationAndRollback {
-                        operation: io("activate compacted worktree", &journal.destination, source)
-                            .to_string(),
-                        rollback: io("restore original worktree", &journal.destination, rollback)
-                            .to_string(),
+                        operation: Box::new(io(
+                            "activate compacted worktree",
+                            &journal.destination,
+                            source,
+                        )),
+                        rollback: Box::new(io(
+                            "restore original worktree",
+                            &journal.destination,
+                            rollback,
+                        )),
                     }),
                 };
             }

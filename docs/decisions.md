@@ -519,6 +519,14 @@ empty. A missing default state directory still means "this repository has no
 Riftri state yet" and reports an all-clear; a missing directory the caller
 named means "Riftri did not find what you pointed at" and must not.
 
+### D039: machine codes come from typed causes
+
+Machine-readable failure codes come from typed causes, never localized display
+strings. A combined operation-and-rollback failure therefore retains both
+typed errors even though its human rendering includes both messages. This lets
+`storage-full` survive rollback wrapping on macOS, Linux, and Windows while the
+receipt keeps the underlying lifecycle's cleanup and recovery disposition.
+
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 
 Pointer-only worktree cleanup stages the real `.git` pointer at a journal-derived
