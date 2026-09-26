@@ -35,6 +35,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   working directory as the program being missing, so a mistyped
   `--repository` looked like a broken Git installation. Git genuinely missing
   from `PATH` is still reported as before.
+- `worktree add` refuses three requests that cannot succeed as written — a
+  `-b` branch name that already exists, a revision that names no commit, and
+  `HEAD` in a repository with no commits — as `invalid-request` policy
+  failures (exit 3) before writing anything. They were reported as Git command
+  failures, operational with unknown cleanup, so an agent re-running a task
+  with the same branch name was told to retry. A revision whose object is
+  unreadable in a damaged repository stays an operational failure.
 - Running a command outside a Git repository is reported as a policy refusal —
   `not-a-repository`, exit code `3` — instead of an operational failure with an
   unknown cleanup. The cause reached the receipt by two routes that classified
