@@ -77,6 +77,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Riftri never rewrites a worktree's immutable creation base.
 ### Fixed
 
+- A missing repository-registered state directory now produces an actionable
+  policy refusal instead of an operational filesystem error. The failure
+  receipt identifies the stale directory, reports that no cleanup is needed,
+  and provides the exact non-destructive `riftri state unregister` command;
+  running that command clears the blocker for the next add.
+
 - `riftri worktree remove`, `worktree move`, and `worktree compact` report an
   unmanaged worktree as a policy error whether or not the repository has a
   state directory yet. They previously surfaced the absent directory as

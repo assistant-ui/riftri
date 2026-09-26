@@ -145,6 +145,12 @@ can branch on either. `recovery` and `nextCommand` tell you whether a
 follow-up is required — a `recovery` of `required` with a `nextCommand` of
 `riftri repair …` means do that before continuing.
 
+A stale `riftri.stateDirectory` registration is also a policy refusal because
+retrying cannot help and the attempted lifecycle mutation never started. Its
+`code` is `stale-state-registration`, `cleanup` is `not-needed`, and its
+`nextCommand` is the exact non-destructive `riftri state unregister …` command
+that removes the missing locator before a retry.
+
 `--json-errors` implies `--no-progress`, so stderr stays exactly one JSON
 document.
 

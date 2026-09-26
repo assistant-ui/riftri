@@ -1222,6 +1222,9 @@ fn failure_receipt(
             }
             | riftri_core::WorktreeError::SymlinkedBaseParent {
                 state_directory, ..
+            }
+            | riftri_core::WorktreeError::StaleStateRegistration {
+                state_directory, ..
             },
         ) => Some(state_directory.clone()),
         _ => context
@@ -1229,7 +1232,12 @@ fn failure_receipt(
             .as_deref()
             .map(riftri_core::command_path),
     };
-    let repository = context.repository.as_deref().map(riftri_core::command_path);
+    let repository = match worktree_error {
+        Some(riftri_core::WorktreeError::StaleStateRegistration { repository, .. }) => {
+            Some(repository.clone())
+        }
+        _ => context.repository.as_deref().map(riftri_core::command_path),
+    };
 
     serde_json::json!({
         "schemaVersion": 1,
@@ -1280,6 +1288,14 @@ fn recovery_next_command(
         // Same guarantee for the symlinked-base safety stop: its message
         // names exactly this status command.
         return riftri_core::status_command(state_directory);
+    }
+    if let Some(riftri_core::WorktreeError::StaleStateRegistration {
+        repository,
+        state_directory,
+        ..
+    }) = worktree_error
+    {
+        return riftri_core::unregister_state_command(repository, state_directory);
     }
     let subcommand = match recovery {
         "required" => "repair",
@@ -1343,6 +1359,13 @@ fn worktree_failure_fields(
         WorktreeError::SymlinkedBaseParent { .. } => {
             ("invalid-request", "policy", None, "not-needed", "inspect")
         }
+        WorktreeError::StaleStateRegistration { .. } => (
+            "stale-state-registration",
+            "policy",
+            None,
+            "not-needed",
+            "required",
+        ),
         // An interrupted lifecycle operation left a durable journal behind:
         // nothing was changed by this command, but the caller must run the
         // repair command echoed in `nextCommand` before retrying.

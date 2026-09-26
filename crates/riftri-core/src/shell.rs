@@ -59,6 +59,18 @@ pub fn status_command(state_directory: &Path) -> Option<String> {
     shell_quoted_path(state_directory).map(|quoted| format!("riftri status --state-dir {quoted}"))
 }
 
+/// Render the command that removes one missing state-directory registration.
+///
+/// Both paths are explicit so the command remains correct when it is run from
+/// a different directory than the failed lifecycle operation.
+pub fn unregister_state_command(repository: &Path, state_directory: &Path) -> Option<String> {
+    let state = shell_quoted_path(state_directory)?;
+    let repository = shell_quoted_path(repository)?;
+    Some(format!(
+        "riftri state unregister {state} --repository {repository}"
+    ))
+}
+
 /// Absolute form of a caller-supplied path, so a suggested command targets the
 /// same directory regardless of where the caller runs it.
 ///
@@ -144,6 +156,19 @@ mod tests {
         assert_eq!(
             status_command(Path::new("/tmp/riftri-state")).expect("representable"),
             "riftri status --state-dir '/tmp/riftri-state'"
+        );
+    }
+
+    #[test]
+    fn the_unregister_command_names_the_state_and_repository() {
+        let command = unregister_state_command(
+            Path::new("/tmp/My Repository"),
+            Path::new("/tmp/removed state's data"),
+        )
+        .expect("representable paths");
+        assert_eq!(
+            command,
+            "riftri state unregister '/tmp/removed state'\"'\"'s data' --repository '/tmp/My Repository'"
         );
     }
 
