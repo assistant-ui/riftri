@@ -77,6 +77,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Riftri never rewrites a worktree's immutable creation base.
 ### Fixed
 
+- Unix launcher-signal tests now own and clean up an isolated process group, so
+  a native `riftri` process that outlives a timed-out launcher cannot keep the
+  test worker's output pipe open and stall Ubuntu CI until the job-level limit.
 - A missing repository-registered state directory now produces an actionable
   policy refusal instead of an operational filesystem error. The failure
   receipt identifies the stale directory, reports that no cleanup is needed,
