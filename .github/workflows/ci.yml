@@ -132,9 +132,28 @@ jobs:
       - name: Detach disposable APFS benchmark volume
         if: always() && matrix.os == 'macos-15'
         run: |
-          if mount | grep -q "on $RUNNER_TEMP/riftri-apfs "; then
-            hdiutil detach "$RUNNER_TEMP/riftri-apfs"
+          volume="$RUNNER_TEMP/riftri-apfs"
+          mount | grep -q "on $volume " || exit 0
+          if hdiutil detach "$volume"; then
+            exit 0
           fi
+          # "Resource busy" means something still holds the volume. As on the
+          # Linux unmount below (#385), name the holder while it is still
+          # there: rerunning the job destroys the evidence (#431). A process
+          # leaked by the test steps shows up here, since TMPDIR points inside
+          # the volume — and so would a system daemon such as Spotlight
+          # indexing the freshly created volume.
+          echo "::group::Processes holding $volume"
+          echo "-- working directories inside the volume --"
+          sudo lsof -d cwd 2>/dev/null | grep -F "$volume" || echo "(none)"
+          echo "-- open files on the volume --"
+          # Given a mount point, lsof lists every open file on that filesystem.
+          sudo lsof "$volume" 2>&1 || true
+          echo "-- process tree --"
+          ps -axo pid,ppid,user,command || true
+          echo "::endgroup::"
+          echo "::error::Could not detach $volume: still busy. The holder is listed above (#431)."
+          exit 1
 
       - name: Run npm launcher tests
         run: npm test
