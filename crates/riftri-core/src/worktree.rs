@@ -4877,8 +4877,22 @@ fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeErro
 pub(crate) fn resolve_destination_parent(destination: &Path) -> Result<PathBuf, WorktreeError> {
     let absolute = absolute_path(destination)?;
     let parent = absolute.parent().unwrap_or(&absolute);
-    let resolved =
-        fs::canonicalize(parent).map_err(|source| io("resolve worktree parent", parent, source))?;
+    // A missing parent is a precondition the caller has to satisfy, not an
+    // operational failure: `riftri doctor` already reports it as a
+    // `destination-parent` blocker, and nothing has been attempted yet. It was
+    // reported as `filesystem-io-failed` with unknown cleanup, telling a
+    // harness that retrying might help (#423). The parent-is-a-file case just
+    // below was already this refusal.
+    let resolved = match fs::canonicalize(parent) {
+        Ok(resolved) => resolved,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "worktree parent does not exist: {}; create it first",
+                parent.display()
+            )));
+        }
+        Err(source) => return Err(io("resolve worktree parent", parent, source)),
+    };
     let metadata = fs::metadata(&resolved)
         .map_err(|source| io("inspect worktree parent", &resolved, source))?;
     if !metadata.is_dir() {

@@ -1126,3 +1126,47 @@ fn a_managed_worktree_deleted_outside_riftri_points_at_repair() {
         "the base the deleted views held must become collectable: {plan}"
     );
 }
+
+/// A destination whose parent directory does not exist is a precondition the
+/// caller has to satisfy — `riftri doctor` already reports it as a
+/// `destination-parent` blocker — and nothing has been attempted when it is
+/// found. It was reported as `filesystem-io-failed`, operational with unknown
+/// cleanup, so a harness was told retrying might help (#423).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_missing_destination_parent_is_a_policy_refusal_that_writes_nothing() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    init_repository_with_commit(&repository);
+    let parent = fixture.path().join("agents").join("task-1");
+    let destination = parent.join("wt");
+    let state = fixture.path().join("state");
+
+    let (receipt, exit_code) = riftri_json_error(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            destination.to_str().unwrap(),
+            "-b",
+            "task-1",
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(exit_code, Some(3));
+    assert_eq!(receipt["code"], "invalid-request");
+    assert_eq!(receipt["category"], "policy");
+    assert_eq!(receipt["cleanup"], "not-needed");
+    let message = receipt["message"].as_str().expect("message");
+    assert!(
+        message.contains("worktree parent does not exist"),
+        "{message}"
+    );
+    assert!(message.contains(parent.to_str().unwrap()), "{message}");
+    assert!(
+        !fixture.path().join("agents").exists(),
+        "the refusal created the parent"
+    );
+    assert!(!state.exists(), "the refusal created a state directory");
+}
