@@ -651,11 +651,14 @@ fn destination_readiness(
         });
     }
 
-    if let Err(error) = worktree::resolve_destination_parent(destination) {
+    // Missing leading directories are not a blocker: `worktree add` creates
+    // them as `git worktree add` does (#423). What remains is a path Git
+    // could not create either — an existing ancestor that is a file, say.
+    if let Err(error) = worktree::planned_destination_parent(destination) {
         blockers.push(DestinationReadinessBlocker {
             kind: "destination-parent",
             explanation: error.to_string(),
-            remedy: "Create the destination's parent directory or choose an existing accessible directory, then rerun `riftri doctor --destination <path>`."
+            remedy: "Choose a destination whose existing ancestors are all accessible directories, then rerun `riftri doctor --destination <path>`."
                 .to_owned(),
         });
     }

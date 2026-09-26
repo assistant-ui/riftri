@@ -454,65 +454,39 @@ fn doctor_json_preserves_non_utf8_destination_paths() {
     assert!(!fixture.repository.join(".git/riftri").exists());
 }
 
+/// A missing parent is no longer a blocker: `worktree add` creates missing
+/// leading directories the way `git worktree add` does (#423). Doctor still
+/// never creates anything itself.
 #[test]
-fn doctor_blocks_missing_destination_parents_until_they_are_created() {
+fn doctor_accepts_missing_destination_parents_without_creating_them() {
     for relative in [true, false] {
         let fixture = RepositoryFixture::new();
         assert!(riftri(&fixture.repository, &["enable"]).status.success());
         let path = Path::new("missing/nested/view");
         let absolute = fixture.repository.join(path);
         let destination = if relative { path } else { absolute.as_path() };
-        let parent = absolute.parent().unwrap();
 
-        let inspect = || {
-            let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
-                .args(["doctor", "--destination"])
-                .arg(destination)
-                .arg("--json")
-                .current_dir(&fixture.repository)
-                .output()
-                .expect("inspect destination");
-            assert!(output.status.success());
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("parse doctor JSON")
-        };
-
-        let report = inspect();
-        let readiness = &report["destination_readiness"];
-        assert_eq!(readiness["status"], "blocked");
-        assert!(
-            readiness["blockers"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|blocker| {
-                    blocker["kind"] == "destination-parent"
-                        && blocker["explanation"]
-                            .as_str()
-                            .unwrap()
-                            .contains("worktree parent does not exist")
-                        && blocker["remedy"].as_str().unwrap().contains("Create")
-                })
-        );
-        assert!(
-            !readiness["next_command"]
-                .as_str()
-                .is_some_and(|command| command.contains("worktree add"))
-        );
-        assert!(!fixture.repository.join("missing").exists());
-        assert!(!fixture.repository.join(".git/riftri").exists());
-
-        fs::create_dir_all(parent).expect("create destination parent");
-        let report = inspect();
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["doctor", "--destination"])
+            .arg(destination)
+            .arg("--json")
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("inspect destination");
+        assert!(output.status.success());
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("parse doctor JSON");
         let readiness = &report["destination_readiness"];
         assert!(
             !readiness["blockers"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|blocker| blocker["kind"] == "destination-parent")
+                .any(|blocker| blocker["kind"] == "destination-parent"),
+            "a missing parent must not block: {readiness}"
         );
         if readiness["backend"].is_string() {
-            assert_eq!(readiness["status"], "ready");
+            assert_eq!(readiness["status"], "ready", "{readiness}");
             assert!(
                 readiness["next_command"]
                     .as_str()
@@ -520,9 +494,47 @@ fn doctor_blocks_missing_destination_parents_until_they_are_created() {
                     .contains("worktree add")
             );
         }
-        assert!(!absolute.exists());
+        assert!(!fixture.repository.join("missing").exists());
         assert!(!fixture.repository.join(".git/riftri").exists());
     }
+}
+
+/// Under interception an ordinary `git worktree add` must behave as it does
+/// without Riftri: Git creates missing leading directories, so enabling
+/// Riftri must not turn that command into a failure (#423). Agent layouts
+/// such as `.worktrees/<task>` hit this on first use.
+#[cfg(target_os = "macos")]
+#[test]
+fn intercepted_worktree_add_creates_missing_parent_directories_like_git() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let destination = fixture
+        .directory
+        .path()
+        .join("agents")
+        .join("task-1")
+        .join("wt");
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "add", "-b", "task-1"])
+        .arg(&destination)
+        .arg("HEAD")
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("intercepted add");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert!(destination.join(".git").exists());
+    let status = git(&destination, &["status", "--porcelain=v1"]);
+    assert!(status.status.success());
+    assert!(status.stdout.is_empty(), "the new worktree must be clean");
+    let listed = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("task-1"),
+        "Git must list the new worktree"
+    );
 }
 
 #[test]

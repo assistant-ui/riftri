@@ -1127,46 +1127,59 @@ fn a_managed_worktree_deleted_outside_riftri_points_at_repair() {
     );
 }
 
-/// A destination whose parent directory does not exist is a precondition the
-/// caller has to satisfy — `riftri doctor` already reports it as a
-/// `destination-parent` blocker — and nothing has been attempted when it is
-/// found. It was reported as `filesystem-io-failed`, operational with unknown
-/// cleanup, so a harness was told retrying might help (#423).
+/// `worktree add` creates missing leading directories the way Git does
+/// (#423), but only once the request has passed validation — a refusal must
+/// still leave nothing behind, parents included. Git itself refuses a taken
+/// branch before creating anything.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
-fn a_missing_destination_parent_is_a_policy_refusal_that_writes_nothing() {
+fn a_refused_add_into_missing_parents_creates_nothing() {
     let fixture = tempfile::tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");
     init_repository_with_commit(&repository);
-    let parent = fixture.path().join("agents").join("task-1");
-    let destination = parent.join("wt");
+    git(&repository, &["branch", "taken"]);
     let state = fixture.path().join("state");
 
+    let parent = fixture.path().join("agents").join("task-1");
     let (receipt, exit_code) = riftri_json_error(
         &repository,
         &[
             "worktree",
             "add",
-            destination.to_str().unwrap(),
+            parent.join("wt").to_str().unwrap(),
             "-b",
-            "task-1",
+            "taken",
             "--state-dir",
             state.to_str().unwrap(),
         ],
     );
     assert_eq!(exit_code, Some(3));
     assert_eq!(receipt["code"], "invalid-request");
-    assert_eq!(receipt["category"], "policy");
-    assert_eq!(receipt["cleanup"], "not-needed");
-    let message = receipt["message"].as_str().expect("message");
-    assert!(
-        message.contains("worktree parent does not exist"),
-        "{message}"
-    );
-    assert!(message.contains(parent.to_str().unwrap()), "{message}");
     assert!(
         !fixture.path().join("agents").exists(),
-        "the refusal created the parent"
+        "a refused add created parents"
     );
-    assert!(!state.exists(), "the refusal created a state directory");
+    assert!(!state.exists(), "a refused add created a state directory");
+
+    // An existing ancestor that is a file cannot hold a worktree; Git fails
+    // with "Not a directory". Still a policy refusal, still nothing created.
+    let file = fixture.path().join("a-file");
+    std::fs::write(&file, "not a directory\n").expect("write file");
+    let (receipt, exit_code) = riftri_json_error(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            file.join("sub").join("wt").to_str().unwrap(),
+            "-b",
+            "fresh",
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(exit_code, Some(3));
+    assert_eq!(receipt["code"], "invalid-request");
+    assert_eq!(receipt["cleanup"], "not-needed");
+    assert!(file.is_file(), "the file must be untouched");
+    assert!(!state.exists());
 }

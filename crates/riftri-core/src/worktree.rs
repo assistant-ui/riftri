@@ -563,7 +563,7 @@ pub fn validate_new_worktree_destination(
     let repository_root = repository.root.clone().ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
-    let destination = normalize_new_destination(destination)?;
+    let destination = normalize_new_destination(destination, DestinationParents::MayBeCreated)?;
     let resolved = resolve_requested_revision(&git, &repository_root, revision)?;
     let compatibility = validate_resolved_compatibility(
         &git,
@@ -2426,7 +2426,8 @@ fn move_worktree_inner(
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let source = existing_managed_destination(&request.source, &requested_state)?;
-    let destination = normalize_new_destination(&request.destination)?;
+    let destination =
+        normalize_new_destination(&request.destination, DestinationParents::MustExist)?;
     let state_directory = existing_state_directory_for_worktree(&requested_state, &source)?;
     let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
@@ -2794,7 +2795,8 @@ fn add_worktree_inner(
     let repository_root = repository.root.clone().ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
-    let destination = normalize_new_destination(&request.destination)?;
+    let destination =
+        normalize_new_destination(&request.destination, DestinationParents::MayBeCreated)?;
     let resolved = resolve_requested_revision(&git, &repository_root, &request.revision)?;
     // The mirror of the existing-branch check below. Git enforces this too,
     // but only after Riftri has journaled the add, so the refusal arrived as
@@ -4838,16 +4840,34 @@ fn inspected_native_cow_volume(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeError> {
+/// Whether a new destination's missing leading directories may be created.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DestinationParents {
+    /// `git worktree add` creates missing leading directories (#423).
+    MayBeCreated,
+    /// `git worktree move` does not: it fails when the target's parent is
+    /// missing, so a Riftri move refuses the same request.
+    MustExist,
+}
+
+fn normalize_new_destination(
+    destination: &Path,
+    parents: DestinationParents,
+) -> Result<PathBuf, WorktreeError> {
     if destination.as_os_str().is_empty() {
         return Err(WorktreeError::InvalidRequest(
             "destination cannot be empty".to_owned(),
         ));
     }
-    if destination
-        .try_exists()
-        .map_err(|source| io("inspect worktree destination", destination, source))?
-    {
+    let exists = match destination.try_exists() {
+        Ok(exists) => exists,
+        // An ancestor that is a regular file means the destination cannot
+        // exist; the parent check below refuses the request with that
+        // diagnosis instead of an I/O error.
+        Err(source) if source.kind() == std::io::ErrorKind::NotADirectory => false,
+        Err(source) => return Err(io("inspect worktree destination", destination, source)),
+    };
+    if exists {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination already exists: {}",
             destination.display()
@@ -4860,7 +4880,10 @@ fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeErro
             destination.display()
         ))
     })?;
-    let parent = resolve_destination_parent(&absolute)?;
+    let parent = match parents {
+        DestinationParents::MayBeCreated => planned_destination_parent(&absolute)?,
+        DestinationParents::MustExist => resolve_destination_parent(&absolute)?,
+    };
     let normalized = parent.join(file_name);
     if normalized
         .try_exists()
@@ -4872,6 +4895,69 @@ fn normalize_new_destination(destination: &Path) -> Result<PathBuf, WorktreeErro
         )));
     }
     Ok(normalized)
+}
+
+/// The canonical parent a new worktree destination will have once its missing
+/// leading directories exist, computed without creating anything.
+///
+/// `git worktree add` creates missing leading directories, so a Riftri add
+/// does too (#423) — literally: the destination comes into being through the
+/// add's own internal `git worktree add --no-checkout`, on every backend, so
+/// Git creates them, after every validation has passed. A refused request
+/// therefore creates nothing, and a later failure leaves the directories in
+/// place exactly as Git does. The part of the path that exists is resolved through the
+/// filesystem, so symbolic links in it are followed exactly as they will be
+/// when the directories are created; the missing components are appended as
+/// given, since a component that does not exist cannot be a link. An existing
+/// ancestor that is not a directory, or a dangling link along the way, is a
+/// request Git would also fail, and is refused as one.
+pub(crate) fn planned_destination_parent(destination: &Path) -> Result<PathBuf, WorktreeError> {
+    let absolute = absolute_path(destination)?;
+    let parent = absolute.parent().unwrap_or(&absolute);
+    let mut existing = parent;
+    let mut missing = Vec::new();
+    loop {
+        match fs::metadata(existing) {
+            Ok(metadata) if metadata.is_dir() => break,
+            Ok(_) => {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "worktree parent is not a directory: {}",
+                    existing.display()
+                )));
+            }
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                if fs::symlink_metadata(existing).is_ok() {
+                    return Err(WorktreeError::InvalidRequest(format!(
+                        "worktree parent path contains a dangling symbolic link: {}",
+                        existing.display()
+                    )));
+                }
+                // `..` after a directory that does not exist yet cannot be
+                // resolved without creating that directory first; refuse it
+                // rather than guess.
+                let (Some(name), Some(above)) = (existing.file_name(), existing.parent()) else {
+                    return Err(WorktreeError::InvalidRequest(format!(
+                        "worktree destination climbs out of a directory that does not exist yet: {}",
+                        destination.display()
+                    )));
+                };
+                missing.push(name.to_owned());
+                existing = above;
+            }
+            Err(source) => return Err(io("resolve worktree parent", existing, source)),
+        }
+    }
+    let mut planned = fs::canonicalize(existing)
+        .map_err(|source| io("resolve worktree parent", existing, source))?;
+    for name in missing.iter().rev() {
+        planned.push(name);
+    }
+    Ok(planned)
 }
 
 pub(crate) fn resolve_destination_parent(destination: &Path) -> Result<PathBuf, WorktreeError> {
@@ -13064,6 +13150,67 @@ mod tests {
                 "raced write\n"
             );
         }
+    }
+
+    /// Git creates missing leading directories for a new worktree and, when
+    /// the add then fails, removes the worktree but leaves those directories
+    /// (#423). A rolled-back Riftri add must do the same: remove exactly the
+    /// destination it recorded, never the parents it created.
+    #[cfg(unix)]
+    #[test]
+    fn a_rolled_back_add_removes_the_worktree_but_keeps_created_parents() {
+        let fixture = tempfile::tempdir().unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let parents = fixture.path().join("agents").join("task-1");
+        let destination = parents.join("worktree");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+        git(&repository, &["add", "."]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::ViewCreated),
+            true,
+        )
+        .expect_err("injected failure after the view was created");
+
+        assert!(!destination.exists(), "rollback must remove the worktree");
+        assert!(
+            parents.is_dir(),
+            "the created leading directories stay, as with Git"
+        );
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repository)
+            .output()
+            .expect("list worktrees");
+        assert!(
+            !String::from_utf8_lossy(&listed.stdout).contains("task-1"),
+            "Git must no longer list the rolled-back worktree"
+        );
     }
 
     #[test]

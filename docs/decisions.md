@@ -527,6 +527,22 @@ typed errors even though its human rendering includes both messages. This lets
 `storage-full` survive rollback wrapping on macOS, Linux, and Windows while the
 receipt keeps the underlying lifecycle's cleanup and recovery disposition.
 
+### D040: new worktrees get Git's leading-directory behaviour
+
+`worktree add` creates missing leading directories of its destination, as
+`git worktree add` does, so enabling Riftri never turns an ordinary
+`git worktree add` into a failure (#423). The directories come into being
+through the add's own internal `git worktree add --no-checkout`, after every
+validation has passed: a refused request creates nothing. When a later step
+fails, the worktree is rolled back and the created directories are left in
+place — Git leaves them too, and removing directories Riftri did not record
+would be a destructive cleanup outside the journal.
+
+`worktree move` keeps requiring an existing parent, because
+`git worktree move` does. A path Git could not create either — an existing
+ancestor that is a regular file, a dangling symbolic link, or `..` climbing out
+of a directory that does not exist yet — is refused as an invalid request.
+
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 
 Pointer-only worktree cleanup stages the real `.git` pointer at a journal-derived
