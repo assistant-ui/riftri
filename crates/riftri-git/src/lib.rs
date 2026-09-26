@@ -676,6 +676,33 @@ impl Git {
         }
     }
 
+    /// Expand one captured configuration value using Git's pathname rules.
+    ///
+    /// Path-valued configuration can use forms such as `~/hooks` and
+    /// `%(prefix)/hooks`. Let Git expand those forms so callers do not need to
+    /// duplicate platform- and installation-specific parsing. Passing the
+    /// captured value back through a command-line configuration entry avoids
+    /// re-reading a value that could have changed since the caller's snapshot.
+    pub fn expand_config_path(&self, value: &OsStr) -> Result<PathBuf, GitError> {
+        let mut setting = OsString::from("riftri.path=");
+        setting.push(value);
+        let arguments = [
+            OsString::from("-c"),
+            setting,
+            OsString::from("config"),
+            OsString::from("--path"),
+            OsString::from("--null"),
+            OsString::from("--get"),
+            OsString::from("riftri.path"),
+        ];
+        let output = self.run_os(None, &arguments)?;
+        let value = output.stdout.strip_suffix(&[0]).unwrap_or(&output.stdout);
+        Ok(PathBuf::from(os_string_from_git(
+            value,
+            "path configuration",
+        )?))
+    }
+
     /// Read simple `section.variable` keys and detect conditional includes in one
     /// Git process, with normal precedence and the same raw values as `config_value`.
     ///
@@ -3040,6 +3067,35 @@ mod tests {
             git.config_value(fixture.path(), "filter.missing.clean")
                 .expect("read missing config"),
             None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_path_configuration_with_gits_expansion_rules() {
+        let fixture = RepositoryFixture::committed();
+        git(
+            fixture.path(),
+            &["config", "core.hooksPath", "~/riftri-hooks"],
+        );
+        let git = Git::default();
+
+        assert_eq!(
+            git.config_value(fixture.path(), "core.hooksPath")
+                .expect("read raw hooks path")
+                .as_deref(),
+            Some(b"~/riftri-hooks".as_slice())
+        );
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set for Git tests"));
+        assert_eq!(
+            git.expand_config_path(OsStr::new("~/riftri-hooks"))
+                .expect("expand hooks path"),
+            home.join("riftri-hooks")
+        );
+        assert_eq!(
+            git.expand_config_path(OsStr::new("relative/hooks"))
+                .expect("preserve relative hooks path"),
+            PathBuf::from("relative/hooks")
         );
     }
 

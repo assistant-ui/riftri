@@ -85,6 +85,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   unrelated managed add had ever run. None of them creates a state directory in
   order to fail.
 
+- Optimized adds now resolve `core.hooksPath` with Git's pathname rules before
+  creating lifecycle state. Values such as `~/hooks` and
+  `%(prefix)/share/git-core/hooks` therefore run the same `post-checkout` hook
+  as `git worktree add`; previously Riftri treated those forms literally and
+  silently skipped the hook.
+
 - `riftri worktree prune` no longer fails on an enabled repository that has no
   state directory yet, which is every repository until its first managed add.
   It reported `filesystem-io-failed` with a recovery of `inspect`, telling a

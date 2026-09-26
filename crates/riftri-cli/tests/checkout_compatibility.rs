@@ -217,6 +217,61 @@ fn riftri(path: &Path, arguments: &[&str]) -> Output {
         .expect("run Riftri CLI")
 }
 
+#[cfg(unix)]
+#[test]
+fn worktree_add_expands_tilde_in_core_hooks_path_like_git() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = RepositoryFixture::new();
+    let supported = riftri_storage::probe_backends(fixture._directory.path())
+        .iter()
+        .any(|backend| {
+            matches!(
+                backend.kind,
+                riftri_storage::BackendKind::ApfsClone | riftri_storage::BackendKind::Reflink
+            ) && backend.status == riftri_storage::CapabilityStatus::Supported
+        });
+    if !supported {
+        return;
+    }
+
+    let home = fixture._directory.path().join("home");
+    let hooks = home.join("riftri-hooks");
+    fs::create_dir_all(&hooks).expect("create tilde-expanded hooks directory");
+    let hook = hooks.join("post-checkout");
+    fs::write(&hook, "#!/bin/sh\n: > \"$(pwd)/hook-ran\"\n").expect("write checkout hook");
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+        .expect("make checkout hook executable");
+    assert_git_success(
+        &fixture.repository,
+        &["config", "core.hooksPath", "~/riftri-hooks"],
+    );
+
+    let destination = fixture._directory.path().join("view");
+    let state = fixture._directory.path().join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&destination)
+        .args(["--detach", "HEAD", "--state-dir"])
+        .arg(&state)
+        .current_dir(&fixture.repository)
+        .env("HOME", &home)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run Riftri add with a tilde-expanded hooks path");
+
+    assert!(
+        output.status.success(),
+        "Riftri add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        destination.join("hook-ran").exists(),
+        "Riftri skipped the post-checkout hook that Git resolves through HOME"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree() {
