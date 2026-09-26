@@ -51,6 +51,41 @@ function waitForOutput(stream, text) {
   });
 }
 
+function stopTestProcessTree(child) {
+  try {
+    if (onWindows) {
+      child.kill("SIGKILL");
+    } else {
+      process.kill(-child.pid, "SIGKILL");
+    }
+  } catch (error) {
+    if (error?.code !== "ESRCH") {
+      throw error;
+    }
+  }
+}
+
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid) {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (!processIsRunning(pid)) {
+      return;
+    }
+    await delay(20);
+  }
+}
+
 test("maps every platform signal name to 128 plus its number", () => {
   for (const [name, number] of Object.entries(os.constants.signals)) {
     assert.equal(signalExitCode(name), 128 + number);
@@ -202,6 +237,11 @@ async function spawnNativeExec(t) {
     ],
     {
       cwd: directory,
+      // Own a disposable process group so a timeout before the native and
+      // scoped PIDs are printed can still reap every descendant. Otherwise a
+      // surviving riftri keeps these pipes open and the test worker cannot
+      // finish reporting the timeout.
+      detached: !onWindows,
       env: {
         ...process.env,
         HOME: directory,
@@ -212,11 +252,7 @@ async function spawnNativeExec(t) {
     },
   );
   t.after(() => {
-    try {
-      child.kill("SIGKILL");
-    } catch {
-      // Already exited on the happy path.
-    }
+    stopTestProcessTree(child);
   });
   const ready = await waitForOutput(child.stdout, "\n");
   const [nativePid, scopedPid] = ready.trim().split(/\s+/u).map(Number);
@@ -231,6 +267,45 @@ async function spawnNativeExec(t) {
   });
   return { child, nativePid, scopedPid };
 }
+
+test(
+  "native exec cleanup terminates descendants that keep test pipes open",
+  { skip: onWindows, timeout: 15_000 },
+  async (t) => {
+    const descendantProgram = "setInterval(() => {}, 1000);";
+    const parentProgram = [
+      'const { spawn } = require("node:child_process");',
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(descendantProgram)}], { stdio: ["ignore", "inherit", "ignore"] });`,
+      "console.log(child.pid);",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const child = spawn(process.execPath, ["-e", parentProgram], {
+      detached: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    t.after(() => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The regression assertion passed and the whole group is gone.
+      }
+    });
+    const ready = await waitForOutput(child.stdout, "\n");
+    const descendantPid = Number(ready.trim());
+    assert.ok(Number.isInteger(descendantPid) && descendantPid > 0, ready);
+
+    const exited = once(child, "exit");
+    stopTestProcessTree(child);
+    await exited;
+    await waitForProcessExit(descendantPid);
+
+    assert.equal(
+      processIsRunning(descendantPid),
+      false,
+      "cleanup left a descendant alive after its direct child exited",
+    );
+  },
+);
 
 for (const signal of ["SIGTERM", "SIGHUP"]) {
   test(
