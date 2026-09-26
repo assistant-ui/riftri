@@ -42,6 +42,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   failures, operational with unknown cleanup, so an agent re-running a task
   with the same branch name was told to retry. A revision whose object is
   unreadable in a damaged repository stays an operational failure.
+- A managed worktree deleted outside Riftri — commonly with `rm -rf` — now
+  points at the fix. `worktree remove`, `move`, and `compact` on it reported
+  an operational `filesystem-io-failed` and suggested `riftri status`, while
+  its still-active add journal kept the immutable base in use so `gc` could
+  never reclaim it. They now refuse with `recovery-pending` and a
+  `nextCommand` of `riftri repair`, which retires the journal and frees the
+  base. A path that was never managed is a plain policy refusal.
 - Running a command outside a Git repository is reported as a policy refusal —
   `not-a-repository`, exit code `3` — instead of an operational failure with an
   unknown cleanup. The cause reached the receipt by two routes that classified
