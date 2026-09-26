@@ -716,3 +716,170 @@ fn all_states_inventory_discovers_worktrees_across_registered_states() {
         "the other repository's worktree must be filtered out"
     );
 }
+
+/// A `riftri.stateDirectory` registration whose directory has been removed must
+/// not block later lifecycle commands (#415).
+///
+/// Registrations accumulate: each add with a new `--state-dir` appends one, and
+/// they are kept so an add can discover views of this repository living in other
+/// state directories. Resolving a registration strictly meant that deleting one
+/// old state directory made **every** subsequent add in the repository fail,
+/// naming a directory the caller had removed on purpose — and the failure
+/// receipt suggested `riftri status` against the healthy directory, which
+/// reports an all-clear.
+///
+/// An absent directory holds no journals, so it contributes nothing to
+/// discovery and skipping it loses no information. This mirrors the absent
+/// default location, which was already tolerated, and the all-states inventory,
+/// which records a missing registration as a diagnostic rather than a failure.
+/// The registration is deliberately left in place for `riftri state unregister`
+/// to remove, so nothing is silently rewritten.
+#[test]
+fn a_removed_state_directory_registration_does_not_block_later_adds() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let first_state = fixture.path().join("state-one");
+    let second_state = fixture.path().join("state-two");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
+    assert!(
+        git(&repository, &["add", "--", "tracked.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "initial"])
+            .status
+            .success()
+    );
+
+    let add = |destination: &Path, branch: &str, state: &Path| {
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "add"])
+            .arg(destination)
+            .args(["-b", branch, "HEAD", "--state-dir"])
+            .arg(state)
+            .current_dir(&repository)
+            .output()
+            .expect("run Riftri CLI")
+    };
+
+    // Two adds against different state directories register both.
+    let first_view = fixture.path().join("view-one");
+    let output = add(&first_view, "feature/one", &first_state);
+    assert!(
+        output.status.success(),
+        "first add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let second_view = fixture.path().join("view-two");
+    let output = add(&second_view, "feature/two", &second_state);
+    assert!(
+        output.status.success(),
+        "second add failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let registered = String::from_utf8_lossy(
+        &git(
+            &repository,
+            &["config", "--local", "--get-all", "riftri.stateDirectory"],
+        )
+        .stdout,
+    )
+    .into_owned();
+    assert_eq!(
+        registered.lines().count(),
+        2,
+        "both state directories should be registered: {registered}"
+    );
+
+    // Remove the first state directory the way a caller reclaiming disk would.
+    // Immutable bases are write-protected, so restore write permission first.
+    for entry in walk(&first_state) {
+        let mut permissions = fs::metadata(&entry).expect("entry metadata").permissions();
+        permissions.set_mode(permissions.mode() | 0o700);
+        fs::set_permissions(&entry, permissions).expect("restore write permission");
+    }
+    fs::remove_dir_all(&first_state).expect("remove the first state directory");
+
+    // The add must still succeed, and produce a clean worktree.
+    let third_view = fixture.path().join("view-three");
+    let output = add(&third_view, "feature/three", &second_state);
+    assert!(
+        output.status.success(),
+        "an add must not fail because an unrelated registered state directory was removed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        git(&third_view, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty(),
+        "the worktree created alongside a stale registration must be clean"
+    );
+
+    // The stale registration is kept, not silently rewritten: `riftri state
+    // unregister` stays the explicit way to drop it.
+    let registered = String::from_utf8_lossy(
+        &git(
+            &repository,
+            &["config", "--local", "--get-all", "riftri.stateDirectory"],
+        )
+        .stdout,
+    )
+    .into_owned();
+    assert_eq!(
+        registered.lines().count(),
+        2,
+        "the stale registration must remain for explicit removal: {registered}"
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["state", "unregister"])
+        .arg(&first_state)
+        .args(["--repository"])
+        .arg(&repository)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI");
+    assert!(
+        output.status.success(),
+        "state unregister failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let registered = String::from_utf8_lossy(
+        &git(
+            &repository,
+            &["config", "--local", "--get-all", "riftri.stateDirectory"],
+        )
+        .stdout,
+    )
+    .into_owned();
+    assert_eq!(
+        registered.lines().count(),
+        1,
+        "unregister should leave only the live registration: {registered}"
+    );
+}
+
+/// Every path under `root`, deepest first, including `root` itself.
+fn walk(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        if let Ok(entries) = fs::read_dir(&path) {
+            for entry in entries.flatten() {
+                stack.push(entry.path());
+            }
+        }
+        found.push(path);
+    }
+    found.reverse();
+    found
+}

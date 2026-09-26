@@ -380,6 +380,12 @@ and matched to the registered location. Existing paths, including dangling
 symlinks, cannot be unregistered. The former name `forget-missing` remains
 accepted as a hidden compatibility alias.
 
+Unregistering is tidying, not a prerequisite: a registration whose directory has
+been removed does not block `riftri worktree add` or any other lifecycle
+command. An absent directory holds no journals, so discovery skips it, the same
+way `--all-states` reports it as a diagnostic rather than traversing it. Use
+this command when you want the stale entry gone from the repository's config.
+
 ## Worktrees
 
 All `riftri worktree` subcommands accept `--repository <REPOSITORY>`

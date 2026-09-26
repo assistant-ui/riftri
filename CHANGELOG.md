@@ -5,6 +5,18 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Removing one registered Riftri state directory no longer blocks every
+  subsequent `worktree add` in that repository. Registrations accumulate so an
+  add can discover views kept in other state directories, but resolving them
+  strictly meant a deleted directory failed registration outright, reported as
+  `filesystem-io-failed`/operational with a `nextCommand` that inspected the
+  healthy directory and reported an all-clear. An absent directory holds no
+  journals, so it is skipped — matching the absent default location and the
+  all-states inventory, which already records a missing registration as a
+  diagnostic. The registration is left in place for `riftri state unregister`.
+
 ### Added
 
 - A cached-creation baseline on a real repository:

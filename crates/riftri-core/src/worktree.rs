@@ -942,8 +942,14 @@ fn register_state_directory(
     let _lock = acquire_state_directory_locator_lock(&repository.identity.common_git_dir)?;
     let registered = git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?;
     for registered in registered {
-        if registered == state_directory
-            || resolve_real_state_directory(&registered)? == state_directory
+        if registered == state_directory {
+            return Ok(());
+        }
+        // A registration whose directory is gone cannot be the directory this
+        // add is using, since that one exists. Canonicalizing it strictly made
+        // registration fail outright and blocked every add in the repository
+        // (#415); skipping it is both correct and enough.
+        if resolve_real_state_directory_if_present(&registered)?.as_deref() == Some(state_directory)
         {
             return Ok(());
         }
