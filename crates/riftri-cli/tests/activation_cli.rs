@@ -489,7 +489,7 @@ fn doctor_blocks_missing_destination_parents_until_they_are_created() {
                         && blocker["explanation"]
                             .as_str()
                             .unwrap()
-                            .contains("resolve worktree parent")
+                            .contains("worktree parent does not exist")
                         && blocker["remedy"].as_str().unwrap().contains("Create")
                 })
         );
