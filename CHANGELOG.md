@@ -77,6 +77,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Riftri never rewrites a worktree's immutable creation base.
 ### Fixed
 
+- The npm launcher now installs its Unix signal handlers before starting the
+  native process. A fast child can no longer announce readiness while the
+  launcher still has the default fatal `SIGINT` disposition, and the Linux
+  foreground-group regression is enabled again.
 - Unix launcher-signal tests now own and clean up an isolated process group, so
   a native `riftri` process that outlives a timed-out launcher cannot keep the
   test worker's output pipe open and stall Ubuntu CI until the job-level limit.
