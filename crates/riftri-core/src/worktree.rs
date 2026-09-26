@@ -2727,6 +2727,7 @@ fn add_worktree_inner(
         &resolved,
         &sparse_directories,
     )?;
+    let hooks_path = resolve_post_checkout_hooks_path(&git, compatibility.hooks_path.as_deref())?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     if !sparse_directories.is_empty() {
         validate_sparse_directories_in_tree(
@@ -2884,7 +2885,7 @@ fn add_worktree_inner(
             let post_checkout = post_checkout_hook_path(
                 &repository_root,
                 &repository.identity.common_git_dir,
-                compatibility.hooks_path.as_deref(),
+                hooks_path.as_deref(),
             )
             .filter(|hook| hook_is_executable(hook))
             .map(|hook| run_post_checkout_hook(&hook, &destination, &resolved.commit));
@@ -3829,16 +3830,15 @@ fn analyze_repository_compatibility(
 fn post_checkout_hook_path(
     repository: &Path,
     common_git_dir: &Path,
-    hooks_path: Option<&[u8]>,
+    hooks_path: Option<&Path>,
 ) -> Option<PathBuf> {
     let directory = match hooks_path {
         Some(configured) => {
-            let configured = configured_hooks_path(configured)?;
             if configured.as_os_str().is_empty() {
                 return None;
             }
             if configured.is_absolute() {
-                configured
+                configured.to_path_buf()
             } else {
                 repository.join(configured)
             }
@@ -3846,6 +3846,31 @@ fn post_checkout_hook_path(
         None => common_git_dir.join("hooks"),
     };
     Some(directory.join("post-checkout"))
+}
+
+/// Resolve the captured `core.hooksPath` using Git's pathname rules.
+///
+/// Most configured hook paths are already literal relative or absolute paths,
+/// so keep reusing the compatibility pass's batched value without another Git
+/// process. Tilde and installation-prefix forms require Git's platform-aware
+/// expansion and take the uncommon one-process path before durable mutation.
+fn resolve_post_checkout_hooks_path(
+    git: &Git,
+    configured: Option<&[u8]>,
+) -> Result<Option<PathBuf>, WorktreeError> {
+    let Some(value) = configured else {
+        return Ok(None);
+    };
+    let path = configured_hooks_path(value).ok_or_else(|| {
+        WorktreeError::Unsupported(
+            "core.hooksPath is set to a value Riftri cannot interpret as a path; use ordinary git worktree add"
+                .to_owned(),
+        )
+    })?;
+    if value.starts_with(b"~") || value.starts_with(b"%(prefix)/") {
+        return Ok(Some(git.expand_config_path(path.as_os_str())?));
+    }
+    Ok(Some(path))
 }
 
 /// `core.hooksPath` as a path. Git stores configuration as bytes; Windows
