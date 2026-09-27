@@ -387,7 +387,10 @@ creates a fresh native COW replacement, and copies the real linked-worktree
 pointer into it. Immediately before the same-parent directory swap, Riftri
 revalidates registration, HEAD, strict cleanliness, and the snapshot. The old
 view is quarantined until the active add journal points at the new base; its
-snapshot is checked again before deletion.
+snapshot is checked again before deletion. After that check, the verified view
+is renamed to `.riftri-compact-drop-<operation-id>` and deleted only under that
+name. A kill mid-delete therefore leaves a partial tree that recovery finishes
+deleting, instead of a quarantine that can never match its snapshot again.
 
 Recovery cancels intent-only work and restores a quarantined original when the
 replacement was not activated. Once activation occurred it moves forward,

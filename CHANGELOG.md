@@ -29,6 +29,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A compaction killed while it was deleting the old view no longer wedges
+  `riftri repair` with a false "worktree content changed during compaction".
+  The verified old view is renamed to a journal-derived
+  `.riftri-compact-drop-<operation>` name before deletion, and repair finishes
+  deleting it (#455).
 - `riftri repair` now reaps the journal temporary left by a lifecycle command
   that was killed mid-write once that operation has finished, instead of
   preserving it forever. One killed `worktree move`, `remove`, or `compact`
