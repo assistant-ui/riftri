@@ -37,6 +37,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   the journal proves it is the operation's own in-progress marker — never a
   lock on a worktree Git finished registering — and deletes the branch the
   interrupted call created, which previously leaked.
+- An add killed while its new immutable base was being finished no longer
+  leaks that base. The base is moved into place before its integrity digest
+  and completion marker are written, so a kill in between left a full,
+  unmarked copy of the tree that neither `repair` nor `gc --apply` would
+  remove, and `status` reported it on every run. Rollback now removes an
+  unmarked base named by the rolled-back add's own journal, under the base's
+  exclusive lock, and only when no other journal still claims it; a marked
+  base, or one another process holds, is kept.
 - `worktree add` accepts an existing empty directory as its destination, as
   `git worktree add` does, so `dir=$(mktemp -d); git worktree add "$dir" …`
   works under interception instead of failing with "destination already
