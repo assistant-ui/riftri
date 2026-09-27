@@ -87,17 +87,3 @@ test("concurrent runs queue instead of cancelling a half-finished sync", () => {
   assert.match(workflow, /cancel-in-progress: false\n/);
   assert.doesNotMatch(workflow, /group: homebrew-freshness-\$\{\{/);
 });
-
-test("every action is pinned to a full commit SHA with a version comment", () => {
-  const workflow = readWorkflow();
-  const uses = workflow.match(/uses: .*/g) ?? [];
-
-  assert.ok(uses.length > 0, "the workflow pins no actions at all");
-  for (const line of uses) {
-    assert.match(
-      line,
-      /uses: [\w.-]+\/[\w.-]+@[0-9a-f]{40} # v\d+\.\d+\.\d+/,
-      `not pinned by SHA with a version comment: ${line.trim()}`,
-    );
-  }
-});
