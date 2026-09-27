@@ -563,7 +563,7 @@ pub fn validate_new_worktree_destination(
     let repository_root = repository.root.clone().ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
-    let destination = normalize_new_destination(destination, DestinationParents::MayBeCreated)?;
+    let destination = normalize_new_destination(destination, DestinationRules::WorktreeAdd)?;
     let resolved = resolve_requested_revision(&git, &repository_root, revision)?;
     let compatibility = validate_resolved_compatibility(
         &git,
@@ -2427,7 +2427,7 @@ fn move_worktree_inner(
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let source = existing_managed_destination(&request.source, &requested_state)?;
     let destination =
-        normalize_new_destination(&request.destination, DestinationParents::MustExist)?;
+        normalize_new_destination(&request.destination, DestinationRules::WorktreeMove)?;
     let state_directory = existing_state_directory_for_worktree(&requested_state, &source)?;
     let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
         WorktreeError::InvalidRequest(format!(
@@ -2796,7 +2796,7 @@ fn add_worktree_inner(
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
     let destination =
-        normalize_new_destination(&request.destination, DestinationParents::MayBeCreated)?;
+        normalize_new_destination(&request.destination, DestinationRules::WorktreeAdd)?;
     let resolved = resolve_requested_revision(&git, &repository_root, &request.revision)?;
     // The mirror of the existing-branch check below. Git enforces this too,
     // but only after Riftri has journaled the add, so the refusal arrived as
@@ -4873,19 +4873,35 @@ fn inspected_native_cow_volume(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-/// Whether a new destination's missing leading directories may be created.
+/// How Git treats a new destination, which differs between `add` and `move`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DestinationParents {
-    /// `git worktree add` creates missing leading directories (#423).
-    MayBeCreated,
-    /// `git worktree move` does not: it fails when the target's parent is
-    /// missing, so a Riftri move refuses the same request.
-    MustExist,
+enum DestinationRules {
+    /// `git worktree add` creates missing leading directories (#423) and
+    /// accepts an existing empty directory as the destination (#437).
+    WorktreeAdd,
+    /// `git worktree move` does neither: it fails when the target's parent is
+    /// missing or the target exists, so a Riftri move refuses the same request.
+    WorktreeMove,
+}
+
+/// Whether `path` is a real directory — not a symbolic link — with no entries.
+fn is_empty_real_directory(path: &Path) -> Result<bool, WorktreeError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => return Err(io("inspect worktree destination", path, source)),
+    };
+    if !metadata.is_dir() {
+        return Ok(false);
+    }
+    let mut entries =
+        fs::read_dir(path).map_err(|source| io("read worktree destination", path, source))?;
+    Ok(entries.next().is_none())
 }
 
 fn normalize_new_destination(
     destination: &Path,
-    parents: DestinationParents,
+    rules: DestinationRules,
 ) -> Result<PathBuf, WorktreeError> {
     if destination.as_os_str().is_empty() {
         return Err(WorktreeError::InvalidRequest(
@@ -4900,7 +4916,12 @@ fn normalize_new_destination(
         Err(source) if source.kind() == std::io::ErrorKind::NotADirectory => false,
         Err(source) => return Err(io("inspect worktree destination", destination, source)),
     };
-    if exists {
+    // Git's own rule: an existing destination is refused unless it is an empty
+    // directory, which `git worktree add` fills — `dir=$(mktemp -d); git
+    // worktree add "$dir" …` is a common script pattern (#437). A symbolic
+    // link is still refused, even to an empty directory.
+    let accept_empty = rules == DestinationRules::WorktreeAdd;
+    if exists && !(accept_empty && is_empty_real_directory(destination)?) {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination already exists: {}",
             destination.display()
@@ -4913,14 +4934,15 @@ fn normalize_new_destination(
             destination.display()
         ))
     })?;
-    let parent = match parents {
-        DestinationParents::MayBeCreated => planned_destination_parent(&absolute)?,
-        DestinationParents::MustExist => resolve_destination_parent(&absolute)?,
+    let parent = match rules {
+        DestinationRules::WorktreeAdd => planned_destination_parent(&absolute)?,
+        DestinationRules::WorktreeMove => resolve_destination_parent(&absolute)?,
     };
     let normalized = parent.join(file_name);
     if normalized
         .try_exists()
         .map_err(|source| io("inspect normalized destination", &normalized, source))?
+        && !(accept_empty && is_empty_real_directory(&normalized)?)
     {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination already exists: {}",
@@ -9069,12 +9091,17 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
             remove_registered_worktree_for_rollback(git, journal)?;
             remove_empty_directory_if_present(&journal.destination)?;
         }
-    } else if journal.destination.exists() {
+    } else if journal.destination.exists() && !is_empty_real_directory(&journal.destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination {} exists but is not registered by Git; recovery preserved it",
             journal.destination.display()
         )));
     }
+    // An unregistered destination that is an empty directory holds nothing to
+    // undo. An add may target a pre-existing empty directory (#437); when it
+    // fails before Git registers anything, that directory is still the
+    // caller's, so it stays. Refusing here instead left the journal pending,
+    // and `riftri repair` met the same refusal every time.
 
     remove_tree_if_present(&journal.scratch)?;
     remove_tree_if_present(&journal.base_staging)?;
@@ -13183,6 +13210,103 @@ mod tests {
                 "raced write\n"
             );
         }
+    }
+
+    /// Build a committed repository for the empty-destination rollback tests.
+    #[cfg(unix)]
+    fn empty_destination_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let fixture = tempfile::tempdir().unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let destination = fixture.path().join("precreated");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+        git(&repository, &["add", "."]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        fs::create_dir(&destination).unwrap();
+        (fixture, repository, state, destination)
+    }
+
+    #[cfg(unix)]
+    fn assert_no_pending_add(state: &Path) {
+        for journal in JournalStore::open(state).load_all().unwrap() {
+            assert_eq!(
+                journal.phase,
+                AddWorktreePhase::RolledBack,
+                "a failed add must finish its rollback, not stay pending"
+            );
+        }
+    }
+
+    /// Git accepts an existing empty directory as a worktree destination
+    /// (#437). When the add fails before Git has registered anything, that
+    /// directory is still the caller's: rollback must leave it in place and
+    /// complete. Refusing because an unregistered destination exists left the
+    /// journal pending, and `riftri repair` hit the same refusal every time.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_add_into_a_precreated_empty_directory_keeps_it_and_completes_rollback() {
+        let (_fixture, repository, state, destination) = empty_destination_fixture();
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::IntentRecorded),
+            true,
+        )
+        .expect_err("injected failure before Git runs");
+        assert!(
+            destination.is_dir(),
+            "the caller's directory must be preserved"
+        );
+        assert_eq!(fs::read_dir(&destination).unwrap().count(), 0);
+        assert_no_pending_add(&state);
+    }
+
+    /// Once Git has populated a pre-existing empty directory, a failure makes
+    /// Git remove the worktree *and* that directory; Riftri's rollback does the
+    /// same, and still finishes.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_add_after_populating_a_precreated_directory_removes_it_like_git() {
+        let (_fixture, repository, state, destination) = empty_destination_fixture();
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::ViewCreated),
+            true,
+        )
+        .expect_err("injected failure after the view was created");
+        assert!(
+            !destination.exists(),
+            "Git removes the directory in this case too"
+        );
+        assert_no_pending_add(&state);
     }
 
     /// Git creates missing leading directories for a new worktree and, when

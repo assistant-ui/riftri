@@ -29,6 +29,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `worktree add` accepts an existing empty directory as its destination, as
+  `git worktree add` does, so `dir=$(mktemp -d); git worktree add "$dir" …`
+  works under interception instead of failing with "destination already
+  exists". A directory with content, or a symbolic link, is still refused. If
+  such an add fails before Git has used the directory, rollback leaves it in
+  place and completes rather than stopping on an unregistered destination,
+  which would have left the add journal pending for every later `repair`.
 - A new branch created from a remote-tracking start point now tracks it, as
   with Git. `git worktree add -b task <path> origin/main` succeeded under
   Riftri with no upstream, because the add created the branch from the
