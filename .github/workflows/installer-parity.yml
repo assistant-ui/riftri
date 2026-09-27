@@ -25,6 +25,7 @@ jobs:
   deployed-installer-parity:
     name: Deployed installers match repo
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     env:
       DEPLOY_BASE_URL: https://riftri.dev

@@ -37,6 +37,7 @@ jobs:
   check:
     name: Formula tracks the latest release
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     permissions:
       contents: read
@@ -148,6 +149,7 @@ jobs:
     needs: check
     if: needs.check.outputs.drift == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     # Only this job mutates anything, so only this job is trusted to write.
     permissions:
