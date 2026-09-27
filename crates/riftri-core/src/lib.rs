@@ -70,6 +70,42 @@ pub fn is_absent_repository(error: &(dyn std::error::Error + 'static)) -> bool {
         Some(ActivationError::Git(GitError::RepositoryAbsent { .. }))
     )
 }
+/// The machine code for a request refused for a reason retrying cannot
+/// change and no Riftri command can repair, or `None` for anything else.
+///
+/// - `bare-repository`: a command that needs a working tree was run in a bare
+///   repository.
+/// - `invalid-state-directory`: a state path is a regular file or a symbolic
+///   link. Riftri never follows a link for its own state, and nothing turns a
+///   file into a state directory, so suggesting `riftri repair` or
+///   `riftri status` against it only produced a loop between the two (#425).
+///
+/// Like [`is_absent_repository`], each wrapper is matched explicitly:
+/// `#[error(transparent)]` forwards `source()` past the inner error, so walking
+/// the chain alone never observes it. Apply this to every error in the chain.
+pub fn policy_refusal_code(error: &(dyn std::error::Error + 'static)) -> Option<&'static str> {
+    use journal::JournalError::InvalidStateDirectory;
+    if matches!(
+        error.downcast_ref::<ActivationError>(),
+        Some(ActivationError::BareRepository)
+    ) {
+        return Some("bare-repository");
+    }
+    let invalid_state = matches!(
+        error.downcast_ref::<journal::JournalError>(),
+        Some(InvalidStateDirectory { .. })
+    ) || matches!(
+        error.downcast_ref::<WorktreeError>(),
+        Some(WorktreeError::Journal(InvalidStateDirectory { .. }))
+    ) || matches!(
+        error.downcast_ref::<ActivationError>(),
+        Some(ActivationError::Worktree(WorktreeError::Journal(
+            InvalidStateDirectory { .. }
+        )))
+    );
+    invalid_state.then_some("invalid-state-directory")
+}
+
 /// Whether one typed failure means the underlying volume is out of storage.
 ///
 /// Callers should apply this to every error in their wrapper's source chain.

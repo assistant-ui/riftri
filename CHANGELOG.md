@@ -29,6 +29,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Two caller mistakes get their own policy codes (exit 3, `cleanup:
+  not-needed`, no `nextCommand`) instead of operational failures (#425).
+  `bare-repository`: `status`, `gc`, `repair`, and `worktree list` in a bare
+  repository were `command-failed`, and `gc` and `repair` suggested a
+  `riftri status` that failed the same way. `invalid-state-directory`: a
+  `--state-dir` that is a regular file or a symbolic link made `status`, `gc`,
+  and `repair` report `journal-failed` with `recovery: required`, sending a
+  harness back and forth between `repair` and `status` on the same file, while
+  `worktree add` blamed the volume probe or reported "File exists".
 - A repository path that does not exist or names a file is reported as
   `not-a-repository` (policy, exit 3) naming the path, instead of
   `could not start Git command "git"`. The operating system reports a bad
