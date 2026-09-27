@@ -2323,7 +2323,13 @@ fn enabled_prune_preserves_a_missing_managed_view_for_repair() {
         .expect("attempt guarded prune");
 
     assert!(!pruned.status.success());
-    assert!(String::from_utf8_lossy(&pruned.stderr).contains("missing or not registered"));
+    // The refusal names the remedy: `riftri repair` retires the stale journal
+    // without touching the moved directory (#437).
+    let stderr = String::from_utf8_lossy(&pruned.stderr);
+    assert!(
+        stderr.contains("no longer exists") && stderr.contains("riftri repair"),
+        "{stderr}"
+    );
     assert!(preserved.is_dir());
     let inventory = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
     assert!(

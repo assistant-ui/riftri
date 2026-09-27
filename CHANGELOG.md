@@ -36,6 +36,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   such an add fails before Git has used the directory, rollback leaves it in
   place and completes rather than stopping on an unregistered destination,
   which would have left the add journal pending for every later `repair`.
+- `git worktree prune` after a managed worktree was deleted outside Riftri —
+  the standard `rm -rf <worktree> && git worktree prune` cleanup — now says
+  what to do. Prune still never touches a managed worktree, but its refusal
+  ("missing or not registered") named no remedy; it is now a `recovery-pending`
+  refusal whose message and `nextCommand` name `riftri repair`, which retires
+  the stale journal so prune can run. A managed worktree whose Git
+  registration was deleted by hand is refused with its own message and no
+  suggested command, since repair does not resolve it.
 - A new branch created from a remote-tracking start point now tracks it, as
   with Git. `git worktree add -b task <path> origin/main` succeeded under
   Riftri with no upstream, because the add created the branch from the
