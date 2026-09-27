@@ -36,6 +36,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   behaved differently without any warning. Git now makes the tracking decision
   from the name; if the start point moves during the add, the new branch is
   pinned back to the commit resolved beforehand, as it was before.
+- Intercepted `git worktree add` accepts Git's standard option syntax for the
+  options it supports: the short forms `-q` and `-d`, bundled short options
+  such as `-qb <branch>` and `-qd`, a value stuck to its option as in
+  `-b<branch>`, `--no-quiet`, and the explicit defaults `--no-lock`,
+  `--no-force`, `--no-orphan`, and `--no-guess-remote`. Each was refused as
+  unsupported, so `git worktree add -q …` failed under interception.
+  `--no-track` is still refused, because it would change how Git sets up the
+  new branch.
 - Two caller mistakes get their own policy codes (exit 3, `cleanup:
   not-needed`, no `nextCommand`) instead of operational failures (#425).
   `bare-repository`: `status`, `gc`, `repair`, and `worktree list` in a bare
