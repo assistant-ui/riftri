@@ -188,6 +188,94 @@ jobs:
       - name: Check the workspace on the declared rust-version
         run: cargo +1.88 check --workspace --all-targets --locked
 
+  node-floor:
+    # The Rust floor above has a matching Node floor: package.json promises
+    # `engines.node`, but every other job runs a current Node, so nothing
+    # proved the published launcher still starts on the oldest version users
+    # are told to expect. That is how the GNU builds came to require
+    # GLIBC_2.39 while claiming an older floor.
+    name: Launcher runs on the declared Node floor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Read the declared Node floor
+        id: floor
+        run: |
+          set -euo pipefail
+          # Read from engines rather than repeating the number here, so the
+          # job cannot drift from what the published package tells users.
+          range="$(jq -r '.engines.node' package.json)"
+          version="${range#>=}"
+          if [ "${version}" = "${range}" ] || [ -z "${version}" ]; then
+            echo "::error file=package.json::engines.node must be a '>=X.Y' floor, found '${range}'."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up the floor Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ steps.floor.outputs.version }}
+
+      - name: Confirm the floor is what is running
+        env:
+          FLOOR: ${{ steps.floor.outputs.version }}
+        run: |
+          set -euo pipefail
+          # setup-node resolves a range to its newest match, so a careless
+          # change here could quietly test a current Node instead.
+          running="$(node -p 'process.versions.node')"
+          case "${running}" in
+            "${FLOOR}"|"${FLOOR}".*) echo "Running Node ${running} against floor ${FLOOR}." ;;
+            *) echo "::error::Expected Node ${FLOOR}.x, got ${running}."; exit 1 ;;
+          esac
+
+      - name: Build the native binary
+        run: cargo build --locked -p riftri-cli
+
+      - name: Run the shipped launcher on the floor
+        env:
+          RIFTRI_BINARY: ${{ github.workspace }}/target/debug/riftri
+        run: |
+          set -euo pipefail
+          expected="riftri $(jq -r .version package.json)"
+          actual="$(node package/bin/riftri.js --version)"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "::error::expected '${expected}', got '${actual}'."
+            exit 1
+          fi
+          echo "${actual}"
+
+      - name: Exercise the packaged client API on the floor
+        env:
+          RIFTRI_BINARY: ${{ github.workspace }}/target/debug/riftri
+        run: |
+          set -euo pipefail
+          # The dev suite cannot run here: npm test passes --test-timeout,
+          # which Node rejects before 20. This covers the surface that
+          # actually ships instead.
+          cat <<'CHECK' > floor-check.cjs
+          const { Riftri } = require("./package/lib/client.js");
+
+          (async () => {
+            const riftri = new Riftri();
+            await riftri.backends(".");
+            const report = await riftri.doctor();
+            if (report === null || typeof report !== "object") {
+              throw new Error("doctor() did not return a report");
+            }
+            console.log("client API ok on Node " + process.versions.node);
+          })().catch((error) => {
+            console.error("::error::client API failed on the floor: " + error.message);
+            process.exit(1);
+          });
+          CHECK
+          node floor-check.cjs
+
   coverage:
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-24.04
