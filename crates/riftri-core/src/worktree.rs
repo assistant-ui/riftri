@@ -3039,7 +3039,7 @@ fn add_worktree_inner(
                     });
                 })
                 .and_then(|()| decoded.map_err(WorktreeError::from))
-                .and_then(|decoded| rollback_decoded(&git, &decoded))
+                .and_then(|decoded| rollback_decoded(&git, &state_directory, &decoded))
                 .and_then(|()| {
                     journal.transition(AddWorktreePhase::RolledBack)?;
                     store.persist(&journal)?;
@@ -7109,7 +7109,7 @@ pub fn recover_incomplete_operations(
                     .and_then(|journal| {
                         let pending =
                             store.update_phase(&journal, AddWorktreePhase::RollbackPending)?;
-                        rollback_decoded(&git, &journal)?;
+                        rollback_decoded(&git, &state_directory, &journal)?;
                         store.update_phase(&pending, AddWorktreePhase::RolledBack)?;
                         Ok(())
                     })
@@ -9041,7 +9041,11 @@ fn validate_recovery_paths(
     Ok(())
 }
 
-fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeError> {
+fn rollback_decoded(
+    git: &Git,
+    state_directory: &Path,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
     let metadata_lock =
         acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
     let expected_branch_target = if journal.last_forward_phase
@@ -9153,6 +9157,7 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
 
     remove_tree_if_present(&journal.scratch)?;
     remove_tree_if_present(&journal.base_staging)?;
+    remove_unfinished_base(state_directory, journal)?;
     remove_file_if_present(&journal.temporary_index)?;
     remove_file_if_present(&pointer_staging_path(journal))?;
 
@@ -9172,6 +9177,62 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
     }
     drop(metadata_lock);
     Ok(())
+}
+
+/// Remove the immutable base a rolled-back add left without its completion
+/// marker.
+///
+/// `prepare_base` renames the staged base into place, digests every file, and
+/// only then writes the marker, so a kill during the digest leaves a whole base
+/// with no marker. Rollback removed only `base_staging`, and — per D020 —
+/// neither repair nor gc deletes an unmarked path on inference, so the base
+/// leaked for good (#444). This journal names the base, which is what
+/// authorizes removing it, and the removal follows the rule `prepare_base`
+/// itself applies before rebuilding, under the same exclusive base lock.
+/// Anything else keeps the base: a marker that is present (a cache other adds
+/// reuse, or corruption for diagnostics to report), a lock another process
+/// holds, or another journal that still claims the base.
+fn remove_unfinished_base(
+    state_directory: &Path,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    let base = &journal.base_path;
+    let (Some(parent), Some(tree)) = (base.parent(), base.file_name()) else {
+        return Ok(());
+    };
+    if !base.exists() {
+        return Ok(());
+    }
+    let mut marker_name = tree.to_os_string();
+    marker_name.push(".complete");
+    let marker = parent.join(marker_name);
+    let mut lock_name = tree.to_os_string();
+    lock_name.push(".lock");
+    let lock_path = parent.join(lock_name);
+
+    let lock = open_coordination_lock(&lock_path, "open immutable-base lock")?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        // A live process holds the base: it owns whatever state it is in.
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            return Ok(());
+        }
+        Err(source) => return Err(io("lock immutable base", &lock_path, source)),
+    }
+    validate_coordination_lock(&lock, &lock_path)?;
+
+    if marker
+        .try_exists()
+        .map_err(|source| io("inspect immutable-base marker", &marker, source))?
+    {
+        return Ok(());
+    }
+    if protected_bases(state_directory)?.iter().any(|protection| {
+        protection.base_path == *base && protection.operation_id != journal.operation_id
+    }) {
+        return Ok(());
+    }
+    remove_tree_if_present(base)
 }
 
 fn remove_registered_worktree_for_rollback(
@@ -13251,7 +13312,7 @@ mod tests {
                 },
             );
 
-            let error = super::rollback_decoded(&Git::default(), &journal)
+            let error = super::rollback_decoded(&Git::default(), &state, &journal)
                 .expect_err("rollback must preserve the concurrent write");
 
             assert!(
@@ -13528,6 +13589,153 @@ mod tests {
         assert!(
             listed.contains("locked mine"),
             "the user's lock must be kept: {listed}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn base_leak_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let fixture = tempfile::tempdir().unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+        git(&repository, &["add", "."]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        (fixture, repository, state)
+    }
+
+    #[cfg(unix)]
+    fn interrupted_add(
+        repository: &Path,
+        state: &Path,
+        destination: &Path,
+        branch: &str,
+    ) -> PathBuf {
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.to_path_buf(),
+                destination: destination.to_path_buf(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from(branch)),
+                state_dir: Some(state.to_path_buf()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::BaseReady),
+            false,
+        )
+        .expect_err("simulated kill once the base exists");
+        JournalStore::open(state)
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .find(|journal| journal.phase != AddWorktreePhase::Active)
+            .expect("interrupted add journal")
+            .base_path
+    }
+
+    #[cfg(unix)]
+    fn completion_marker(base_path: &Path) -> PathBuf {
+        let tree = base_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        base_path.with_file_name(format!("{tree}.complete"))
+    }
+
+    /// `prepare_base` renames a staged base into place, then digests every
+    /// file, then writes the completion marker. A kill during the digest left a
+    /// whole base with no marker; rollback removed only the staging path, and —
+    /// per D020 — neither repair nor gc deletes an unmarked path on inference,
+    /// so the base leaked for good and `status` reported it on every run (#444).
+    /// The interrupted add's own journal names that base, which authorizes its
+    /// removal.
+    #[cfg(unix)]
+    #[test]
+    fn repair_removes_a_base_an_interrupted_add_left_without_its_marker() {
+        let (fixture, repository, state) = base_leak_fixture();
+        let base = interrupted_add(
+            &repository,
+            &state,
+            &fixture.path().join("killed"),
+            "killed",
+        );
+        // The state a kill during the digest leaves: the base in place, no marker.
+        fs::remove_file(completion_marker(&base)).unwrap();
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(!base.exists(), "the unfinished base must not leak");
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(
+            accounting.diagnostic_issues.is_empty(),
+            "nothing unexplained may remain: {:?}",
+            accounting.diagnostic_issues
+        );
+    }
+
+    /// A finished, marked base is a cache other adds reuse; rolling back one
+    /// add that used it must leave it.
+    #[cfg(unix)]
+    #[test]
+    fn repair_keeps_a_complete_base_when_rolling_back() {
+        let (fixture, repository, state) = base_leak_fixture();
+        let base = interrupted_add(
+            &repository,
+            &state,
+            &fixture.path().join("killed"),
+            "killed",
+        );
+        recover_incomplete_operations(&state).expect("repair");
+        assert!(base.is_dir(), "a complete base is kept for reuse");
+        assert!(completion_marker(&base).is_file());
+    }
+
+    /// An unmarked base that another journal still claims is not this
+    /// rollback's to remove.
+    #[cfg(unix)]
+    #[test]
+    fn repair_keeps_an_unmarked_base_another_journal_still_claims() {
+        let (fixture, repository, state) = base_leak_fixture();
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: fixture.path().join("live"),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("live")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("an active worktree on the same tree");
+        let base = interrupted_add(
+            &repository,
+            &state,
+            &fixture.path().join("killed"),
+            "killed",
+        );
+        fs::remove_file(completion_marker(&base)).unwrap();
+
+        recover_incomplete_operations(&state).expect("repair");
+        assert!(
+            base.is_dir(),
+            "the active worktree's journal still claims this base"
         );
     }
 
