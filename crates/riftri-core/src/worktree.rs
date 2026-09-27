@@ -14264,7 +14264,7 @@ mod tests {
             .unwrap()
             .join(destination.file_name().unwrap());
         let destination = destination.as_path();
-        Git::default()
+        riftri_git::Git::default()
             .list_worktrees(repository)
             .expect("list worktrees")
             .iter()
