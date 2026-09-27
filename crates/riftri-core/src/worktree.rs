@@ -9084,6 +9084,9 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
         .into_iter()
         .find(|worktree| paths_match(&worktree.path, &journal.destination));
 
+    // Set when the registration proves this operation's own `git worktree add
+    // -b` created the branch; see the unlock below.
+    let mut branch_created_by_interrupted_add = None;
     if let Some(worktree) = registered {
         let expected = ObjectId::parse(journal.expected_commit.clone())?;
         let expected_worktree_head = expected_branch_target
@@ -9104,6 +9107,24 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
                 "worktree HEAD changed after creation; recovery preserved {}",
                 journal.destination.display()
             )));
+        }
+        // `git worktree add` registers a new worktree locked as
+        // "initializing" and unlocks it as its very last step. A journal that
+        // never reached `git-metadata-created` means this operation's own Git
+        // call was interrupted, so a lock on the registration it matched above
+        // is that in-progress marker, not a lock someone placed on a finished
+        // worktree. Left in place it makes `git worktree remove` refuse on
+        // every `repair`, and the state directory can never recover (#444).
+        if journal.last_forward_phase < AddWorktreePhase::GitMetadataCreated {
+            if worktree.locked_reason.is_some() {
+                git.unlock_worktree(&journal.repository, &journal.destination)?;
+            }
+            // Git refuses `-b` for an existing branch before registering
+            // anything, so a matched registration on this journal's branch
+            // proves the interrupted call created it.
+            if journal.branch_created {
+                branch_created_by_interrupted_add = journal.branch.as_ref();
+            }
         }
         restore_staged_git_pointer(journal)?;
         if journal.backend == BackendKind::OverlayFs {
@@ -9139,6 +9160,15 @@ fn rollback_decoded(git: &Git, journal: &DecodedJournal) -> Result<(), WorktreeE
         && let Some((branch, Some(_))) = expected_branch_target
     {
         git.delete_branch_force(&journal.repository, branch)?;
+    } else if let Some(branch) = branch_created_by_interrupted_add {
+        let expected = ObjectId::parse(journal.expected_commit.clone())?;
+        if git
+            .local_branch_target(&journal.repository, branch)?
+            .as_ref()
+            == Some(&expected)
+        {
+            git.delete_branch_force(&journal.repository, branch)?;
+        }
     }
     drop(metadata_lock);
     Ok(())
@@ -13334,6 +13364,171 @@ mod tests {
             "Git removes the directory in this case too"
         );
         assert_no_pending_add(&state);
+    }
+
+    /// `git worktree add` registers a new worktree locked as "initializing"
+    /// and unlocks it as its last step. An add killed while that Git call ran
+    /// leaves the lock, its branch, and a journal still at `intent-recorded`.
+    /// `git worktree remove` refuses a locked worktree, so every later
+    /// `repair` failed and the state directory could never recover (#444).
+    #[cfg(unix)]
+    #[test]
+    fn repair_recovers_an_add_killed_inside_its_own_git_worktree_add() {
+        let fixture = tempfile::tempdir().unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let destination = fixture.path().join("killed");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+        git(&repository, &["add", "."]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+
+        // An add whose journal stops at `intent-recorded`, as a kill leaves it.
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("killed-branch")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::IntentRecorded),
+            false,
+        )
+        .expect_err("simulated kill before the journal advanced");
+
+        // What the killed `git worktree add -b` itself left behind: the branch,
+        // a registration still locked "initializing", and no directory.
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--no-checkout",
+                "-b",
+                "killed-branch",
+                destination.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        let admin = repository.join(".git/worktrees/killed");
+        fs::write(admin.join("locked"), "initializing\n").unwrap();
+        fs::remove_dir_all(&destination).unwrap();
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "repair must recover: {report:?}");
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&listed.stdout).contains("killed"),
+            "the interrupted registration must be removed"
+        );
+        let branch = Command::new("git")
+            .args([
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/killed-branch",
+            ])
+            .current_dir(&repository)
+            .status()
+            .unwrap();
+        assert!(
+            !branch.success(),
+            "the branch this add created must not leak"
+        );
+        for journal in JournalStore::open(&state).load_all().unwrap() {
+            assert_eq!(journal.phase, AddWorktreePhase::RolledBack);
+        }
+    }
+
+    /// The guard on the fix above: only the in-progress lock of this
+    /// operation's own interrupted Git call may be removed. A lock placed on a
+    /// worktree Git finished registering belongs to someone else, so rollback
+    /// must leave the worktree and its lock alone.
+    #[cfg(unix)]
+    #[test]
+    fn repair_never_unlocks_a_worktree_git_finished_registering() {
+        let fixture = tempfile::tempdir().unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let destination = fixture.path().join("locked-by-user");
+        fs::create_dir(&repository).unwrap();
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").unwrap();
+        git(&repository, &["add", "."]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("user-locked")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::GitMetadataCreated),
+            false,
+        )
+        .expect_err("simulated kill after Git finished registering");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "lock",
+                "--reason",
+                "mine",
+                destination.to_str().unwrap(),
+            ],
+        );
+
+        let _ = recover_incomplete_operations(&state);
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        let listed = String::from_utf8_lossy(&listed.stdout);
+        assert!(
+            listed.contains("locked-by-user"),
+            "the worktree must be kept: {listed}"
+        );
+        assert!(
+            listed.contains("locked mine"),
+            "the user's lock must be kept: {listed}"
+        );
     }
 
     /// Git creates missing leading directories for a new worktree and, when

@@ -1725,6 +1725,18 @@ impl Git {
         parse_object_output(&output.stdout).map(Some)
     }
 
+    /// Remove the lock on a registered worktree, whether or not its directory
+    /// still exists.
+    pub fn unlock_worktree(&self, repository: &Path, worktree: &Path) -> Result<(), GitError> {
+        let arguments = [
+            OsString::from("worktree"),
+            OsString::from("unlock"),
+            git_path_argument(worktree),
+        ];
+        self.run_os(Some(repository), &arguments)?;
+        Ok(())
+    }
+
     /// Point `branch` at `new` only if it still points at `expected`, as one
     /// compare-and-swap reference update. Used to pin a branch the current
     /// operation just created back to the commit it resolved before mutation.

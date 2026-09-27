@@ -29,6 +29,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri repair` recovers an add that was killed while its own internal
+  `git worktree add` was running. Git registers a new worktree locked as
+  "initializing" and unlocks it only when it finishes, so the interrupted
+  registration stayed locked, `git worktree remove` refused it, and every later
+  `repair` failed for that state directory. Rollback now removes that lock when
+  the journal proves it is the operation's own in-progress marker — never a
+  lock on a worktree Git finished registering — and deletes the branch the
+  interrupted call created, which previously leaked.
 - `worktree add` accepts an existing empty directory as its destination, as
   `git worktree add` does, so `dir=$(mktemp -d); git worktree add "$dir" …`
   works under interception instead of failing with "destination already
