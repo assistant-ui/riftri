@@ -1562,12 +1562,59 @@ fn parse_enabled_add(
                 .ok_or_else(|| unsupported("-b requires a new branch name"))?;
             set_mode(&mut mode, WorktreeMode::NewBranch(branch.clone()))?;
             index += 1;
-        } else if options && argument == "--detach" {
+        } else if options && matches!(argument.to_str(), Some("--detach" | "-d")) {
             set_mode(&mut mode, WorktreeMode::Detached)?;
-        } else if options && argument == "--quiet" {
+        } else if options && matches!(argument.to_str(), Some("--quiet" | "-q")) {
             quiet = true;
+        } else if options && argument == "--no-quiet" {
+            quiet = false;
         } else if options && argument == "--checkout" {
             // Optimized adds always create a checked-out, clean result.
+        } else if options
+            && matches!(
+                argument.to_str(),
+                Some("--no-lock" | "--no-force" | "--no-orphan" | "--no-guess-remote")
+            )
+        {
+            // Explicit defaults: each names what the optimized add already does
+            // — no lock, no force, a branch with history, and no remote
+            // guessing. `--no-track` is deliberately absent: new branches follow
+            // Git's tracking rules, so it would change the result.
+        } else if options && is_short_option_cluster(argument) {
+            // Git's parser also takes short options bundled (`-qd`) and a value
+            // stuck to its option (`-bname`); refusing them made
+            // `git worktree add -qb task …` fail under interception (#437).
+            // Every letter is held to the same rules as its spaced form.
+            let cluster = argument.to_str().ok_or_else(|| {
+                unsupported(format!(
+                    "write short options separately, as in `-b <branch>`, when a value is not valid UTF-8; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+                ))
+            })?;
+            for (offset, letter) in cluster.char_indices().skip(1) {
+                match letter {
+                    'q' => quiet = true,
+                    'd' => set_mode(&mut mode, WorktreeMode::Detached)?,
+                    'b' => {
+                        let stuck = &cluster[offset + letter.len_utf8()..];
+                        let branch = if stuck.is_empty() {
+                            index += 1;
+                            arguments
+                                .get(index)
+                                .cloned()
+                                .ok_or_else(|| unsupported("-b requires a new branch name"))?
+                        } else {
+                            OsString::from(stuck)
+                        };
+                        set_mode(&mut mode, WorktreeMode::NewBranch(branch))?;
+                        break;
+                    }
+                    other => {
+                        return Err(unsupported(format!(
+                            "option -{other} is not supported by the optimized add path; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+                        )));
+                    }
+                }
+            }
         } else if options
             && (argument == "--sparse"
                 || argument == "--sparse-dir"
@@ -1643,6 +1690,14 @@ fn parse_enabled_add(
         },
         quiet,
     ))
+}
+
+/// Whether `argument` is a cluster of short options, such as `-qd` or
+/// `-bname`: one dash followed by more than one character. `-` alone and
+/// long options (`--…`) are not clusters.
+fn is_short_option_cluster(argument: &OsStr) -> bool {
+    let bytes = argument.as_encoded_bytes();
+    bytes.len() > 2 && bytes[0] == b'-' && bytes[1] != b'-'
 }
 
 fn parse_enabled_remove(
@@ -2416,6 +2471,88 @@ mod tests {
             request.mode,
             WorktreeMode::ExistingBranch(OsString::from("feature/existing"))
         );
+    }
+
+    /// Git's option parser accepts short forms, bundled short options, a value
+    /// stuck to `-b`, and explicit defaults. A script is as likely to write
+    /// `git worktree add -q …` as the spelled-out form; interception refused
+    /// every one of these (#437).
+    #[test]
+    fn enabled_add_accepts_gits_standard_option_syntax() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let new_branch = |name: &str| WorktreeMode::NewBranch(OsString::from(name));
+        let cases: Vec<(&[&str], WorktreeMode, bool)> = vec![
+            (&["-q", "-b", "a", "../v"], new_branch("a"), true),
+            (&["-d", "../v"], WorktreeMode::Detached, false),
+            (&["-d", "../v", "HEAD"], WorktreeMode::Detached, false),
+            (&["-bstuck", "../v"], new_branch("stuck"), false),
+            (&["-qb", "bundled", "../v"], new_branch("bundled"), true),
+            (&["-qbglued", "../v"], new_branch("glued"), true),
+            (&["-qd", "../v"], WorktreeMode::Detached, true),
+            (&["--no-quiet", "-b", "nq", "../v"], new_branch("nq"), false),
+            // As in Git, the last of `-q` and `--no-quiet` wins.
+            (
+                &["-q", "--no-quiet", "-b", "last", "../v"],
+                new_branch("last"),
+                false,
+            ),
+            (
+                &[
+                    "--no-lock",
+                    "--no-force",
+                    "--no-orphan",
+                    "--no-guess-remote",
+                    "-b",
+                    "defaults",
+                    "../v",
+                ],
+                new_branch("defaults"),
+                false,
+            ),
+            (&["../v", "-q", "-b", "after"], new_branch("after"), true),
+        ];
+        for (options, expected_mode, expected_quiet) in cases {
+            let mut arguments = vec![OsString::from("worktree"), OsString::from("add")];
+            arguments.extend(options.iter().map(OsString::from));
+            let plan = plan_git_command(fixture.path(), &arguments)
+                .unwrap_or_else(|error| panic!("{options:?} was refused: {error}"));
+            let GitProxyPlan::OptimizedAdd { request, quiet } = plan else {
+                panic!("{options:?} was not optimized");
+            };
+            assert_eq!(request.mode, expected_mode, "{options:?}");
+            assert_eq!(quiet, expected_quiet, "{options:?}");
+            assert_eq!(
+                request.destination,
+                fixture.path().join("../v"),
+                "{options:?}"
+            );
+        }
+    }
+
+    /// Bundling must not smuggle in an option the optimized add does not
+    /// support, and `--no-track` is not an inert default: new branches follow
+    /// Git's tracking rules, so it would have to reach Git, like `--track`.
+    #[test]
+    fn enabled_add_still_refuses_unsupported_options_inside_clusters() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        for options in [
+            &["-qf", "../v", "main"][..],
+            &["-qB", "reset", "../v"],
+            &["-dq", "-B", "reset", "../v"],
+            &["--no-track", "-b", "x", "../v"],
+        ] {
+            let mut arguments = vec![OsString::from("worktree"), OsString::from("add")];
+            arguments.extend(options.iter().map(OsString::from));
+            let error = plan_git_command(fixture.path(), &arguments)
+                .err()
+                .unwrap_or_else(|| panic!("{options:?} must be refused"));
+            assert!(
+                error.to_string().contains("not supported"),
+                "{options:?}: {error}"
+            );
+        }
     }
 
     #[test]
