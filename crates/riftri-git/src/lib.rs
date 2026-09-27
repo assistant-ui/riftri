@@ -183,6 +183,14 @@ pub enum GitError {
     },
 
     #[error(
+        "Git's index lock {} exists: another Git process is using this worktree, or one was \
+         killed while holding the lock; once no Git process is running there, remove {} and retry",
+        .lock.display(),
+        .lock.display()
+    )]
+    IndexLocked { lock: PathBuf },
+
+    #[error(
         "could not peel {revision}: {base} resolves to {target}, but that object is unreadable; \
          the repository object store may be corrupt (try `git fsck`)"
     )]
@@ -1609,8 +1617,27 @@ impl Git {
 
     /// Refresh index stat data without changing staged entries or worktree files.
     pub fn refresh_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
-        self.run(Some(worktree), &["update-index", "-q", "--refresh"])?;
-        Ok(())
+        match self.run(Some(worktree), &["update-index", "-q", "--refresh"]) {
+            Ok(_) => Ok(()),
+            // `-q` also silences Git's own "Unable to create index.lock"
+            // report, which would otherwise leave a bare exit code.
+            Err(error @ GitError::CommandFailed { .. }) => {
+                match self.worktree_index_path(worktree) {
+                    Ok(index) => {
+                        let mut lock = index.into_os_string();
+                        lock.push(".lock");
+                        let lock = PathBuf::from(lock);
+                        if std::fs::symlink_metadata(&lock).is_ok() {
+                            Err(GitError::IndexLocked { lock })
+                        } else {
+                            Err(error)
+                        }
+                    }
+                    Err(_) => Err(error),
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, GitError> {
@@ -2739,6 +2766,37 @@ mod tests {
         assert!(message.contains("unreadable"), "{message}");
         assert!(message.contains("corrupt"), "{message}");
         assert!(!message.contains("unborn"), "{message}");
+    }
+
+    #[test]
+    fn an_index_refresh_blocked_by_a_stale_lock_names_the_lock() {
+        let fixture = RepositoryFixture::committed();
+        let lock = fixture.path().join(".git/index.lock");
+        fs::write(&lock, b"").expect("leave a stale index lock");
+
+        let error = Git::default()
+            .refresh_worktree_index(fixture.path())
+            .expect_err("a held index lock must stop the refresh");
+
+        // `update-index -q` exits 128 without a word; the error must still
+        // say which lock blocks it and how to clear it.
+        let message = error.to_string();
+        assert!(message.contains("no Git process"), "{message}");
+        let super::GitError::IndexLocked { lock: reported } = &error else {
+            panic!("expected the lock to be named: {message}");
+        };
+        // Git spells paths its own way (forward slashes on Windows).
+        assert_eq!(
+            fs::canonicalize(reported).expect("resolve reported lock"),
+            fs::canonicalize(&lock).expect("resolve lock path"),
+            "{message}"
+        );
+        assert!(lock.exists(), "Riftri must never remove Git's lock itself");
+
+        fs::remove_file(&lock).expect("clear the lock");
+        Git::default()
+            .refresh_worktree_index(fixture.path())
+            .expect("refresh succeeds once the lock is gone");
     }
 
     #[test]
