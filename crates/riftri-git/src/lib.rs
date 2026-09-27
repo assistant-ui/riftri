@@ -2781,9 +2781,16 @@ mod tests {
         // `update-index -q` exits 128 without a word; the error must still
         // say which lock blocks it and how to clear it.
         let message = error.to_string();
-        let lock = fs::canonicalize(&lock).expect("resolve lock path");
-        assert!(message.contains(&lock.display().to_string()), "{message}");
         assert!(message.contains("no Git process"), "{message}");
+        let super::GitError::IndexLocked { lock: reported } = &error else {
+            panic!("expected the lock to be named: {message}");
+        };
+        // Git spells paths its own way (forward slashes on Windows).
+        assert_eq!(
+            fs::canonicalize(reported).expect("resolve reported lock"),
+            fs::canonicalize(&lock).expect("resolve lock path"),
+            "{message}"
+        );
         assert!(lock.exists(), "Riftri must never remove Git's lock itself");
 
         fs::remove_file(&lock).expect("clear the lock");
