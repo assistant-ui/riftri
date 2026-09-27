@@ -7936,11 +7936,27 @@ fn resume_compaction(
                 journal.destination.display()
             )));
         }
+        // The verified old view is renamed before it is deleted, so a kill
+        // mid-delete leaves a partial tree under a name only this cleanup
+        // creates. Re-verifying that tree could never succeed; it was already
+        // verified, so recovery just finishes deleting it.
+        let dropped = compaction_drop_path(&journal)?;
         if journal.quarantine.exists() {
+            if symlink_metadata_if_present(&dropped)?.is_some() {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "compaction cleanup path {} already exists beside quarantine {}; both were preserved",
+                    dropped.display(),
+                    journal.quarantine.display()
+                )));
+            }
             verify_snapshot(&journal.quarantine, &journal.expected_snapshot)?;
-            remove_tree_if_present(&journal.quarantine)?;
-            sync_parent(&journal.quarantine)?;
+            fs::rename(&journal.quarantine, &dropped).map_err(|source| {
+                io("hand the compacted-away view to cleanup", &dropped, source)
+            })?;
+            sync_parent(&dropped)?;
         }
+        remove_tree_if_present(&dropped)?;
+        sync_parent(&dropped)?;
         advance_compaction(
             store,
             &mut record,
@@ -7979,6 +7995,22 @@ fn remove_empty_base_bucket(journal: &DecodedCompactJournal) -> Result<(), Workt
         }
         Err(source) => Err(io("remove empty immutable-base bucket", bucket, source)),
     }
+}
+
+/// Where a compaction moves its verified old view to delete it, derived from
+/// the journal so recovery needs no extra record. See `resume_compaction`.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn compaction_drop_path(journal: &DecodedCompactJournal) -> Result<PathBuf, WorktreeError> {
+    journal
+        .quarantine
+        .parent()
+        .map(|parent| parent.join(format!(".riftri-compact-drop-{}", journal.operation_id)))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "compaction journal {} has a quarantine without a parent directory",
+                journal.journal_path.display()
+            ))
+        })
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -10714,6 +10746,108 @@ mod tests {
                 accounting.cancelled_compactions
             );
             assert!(moved.diagnostic_issues.is_empty(), "{phase:?}: {moved:?}");
+        }
+    }
+
+    /// A compaction stopped at `add-journal-updated`: the replacement is
+    /// active and only the verified quarantine of the old view remains.
+    fn compaction_awaiting_quarantine_cleanup() -> (
+        crate::test_support::WritableTempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let caller = fixture.path().join("caller");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::create_dir(repository.join("nested")).expect("create directory");
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        fs::write(repository.join("nested/deep.txt"), "deep\n").expect("write file");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        git(
+            &repository,
+            &["worktree", "add", "--detach", caller.to_str().unwrap()],
+        );
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: caller,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(CompactWorktreePhase::AddJournalUpdated),
+        )
+        .expect_err("stop before the quarantine is cleaned up");
+        let compactions = crate::journal::CompactJournalStore::open(&state)
+            .load_all()
+            .expect("load compaction");
+        assert_eq!(compactions.len(), 1);
+        let quarantine = compactions[0].quarantine.clone();
+        assert!(quarantine.is_dir(), "the old view waits in its quarantine");
+        (fixture, destination, state, quarantine)
+    }
+
+    fn compaction_drop_path(quarantine: &Path) -> PathBuf {
+        let name = quarantine.file_name().unwrap().to_str().unwrap();
+        quarantine.with_file_name(name.replace(".riftri-compact-old-", ".riftri-compact-drop-"))
+    }
+
+    #[test]
+    fn repair_finishes_a_compaction_killed_while_deleting_its_old_view() {
+        let (_fixture, destination, state, quarantine) = compaction_awaiting_quarantine_cleanup();
+        // The kill lands mid-way through deleting the verified old view.
+        let dropped = compaction_drop_path(&quarantine);
+        fs::rename(&quarantine, &dropped).expect("hand the old view to cleanup");
+        fs::remove_file(dropped.join("tracked.txt")).expect("partial delete");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(!dropped.exists(), "cleanup must finish");
+        assert!(!quarantine.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        let accounting = storage_accounting(&state).expect("account after repair");
+        assert_eq!(accounting.pending_compactions, 0);
+        assert_eq!(accounting.completed_compactions, 1);
+    }
+
+    #[test]
+    fn repair_preserves_both_old_view_paths_when_they_coexist() {
+        let (_fixture, _destination, state, quarantine) = compaction_awaiting_quarantine_cleanup();
+        let dropped = compaction_drop_path(&quarantine);
+        fs::create_dir(&dropped).expect("create an unexpected cleanup directory");
+        fs::write(dropped.join("keep.txt"), "keep\n").expect("write content");
+
+        for _ in 0..2 {
+            let report = recover_incomplete_operations(&state).expect("repair report");
+            assert_eq!(report.errors.len(), 1, "{report:?}");
+            assert_eq!(fs::read(dropped.join("keep.txt")).unwrap(), b"keep\n");
+            assert_eq!(fs::read(quarantine.join("tracked.txt")).unwrap(), b"base\n");
         }
     }
 
