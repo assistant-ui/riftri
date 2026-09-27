@@ -14,6 +14,7 @@ jobs:
   build:
     name: Build ${{ matrix.package }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -101,6 +102,7 @@ jobs:
     name: Stage and inspect release
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
 
     steps:
       - name: Check out source and tags
@@ -170,6 +172,7 @@ jobs:
     if: github.event_name == 'push' && vars.NPM_PUBLISH_ENABLED == 'true'
     needs: stage
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
@@ -223,6 +226,7 @@ jobs:
     if: github.event_name == 'push'
     needs: stage
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: write
       id-token: write

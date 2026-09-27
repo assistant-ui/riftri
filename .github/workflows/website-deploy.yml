@@ -21,6 +21,7 @@ jobs:
   deploy:
     name: Build and deploy riftri.dev
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     env:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
