@@ -29,6 +29,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A Git index refresh blocked by `index.lock` now reports the lock path and how
+  to clear it, instead of `Git command failed (update-index -q --refresh): exit
+  code 128`. `-q` silences Git's own explanation, so a lock left by a killed
+  compaction wedged `riftri repair` with no hint (#448).
 - A worktree removal killed while its files were being deleted no longer
   wedges `riftri repair`. Native removals now rename the view to a journal-owned
   `.riftri-remove-<operation>` sibling, let Git unregister the missing path, and
