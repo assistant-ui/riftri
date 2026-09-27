@@ -538,6 +538,11 @@ fails, the worktree is rolled back and the created directories are left in
 place — Git leaves them too, and removing directories Riftri did not record
 would be a destructive cleanup outside the journal.
 
+An existing **empty** directory is accepted as the destination, as Git
+accepts it. If the add fails before Git has registered anything, rollback
+leaves that directory in place — it is the caller's — and completes; once Git
+has populated it, rollback removes it, which Git does too (#437).
+
 `worktree move` keeps requiring an existing parent, because
 `git worktree move` does. A path Git could not create either — an existing
 ancestor that is a regular file, a dangling symbolic link, or `..` climbing out

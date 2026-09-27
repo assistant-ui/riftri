@@ -2857,3 +2857,32 @@ fn explicit_add_sets_up_tracking_exactly_as_git_does() {
         Some("origin/feature")
     );
 }
+
+/// The `mktemp -d` pattern under interception: Git accepts an existing empty
+/// directory as the destination, so enabling Riftri must not refuse it (#437).
+#[cfg(target_os = "macos")]
+#[test]
+fn intercepted_worktree_add_accepts_an_existing_empty_directory_like_git() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let destination = fixture.directory.path().join("tmp.precreated");
+    fs::create_dir(&destination).expect("create empty destination");
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "add"])
+        .arg(&destination)
+        .args(["-b", "from-mktemp"])
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("intercepted add");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert!(destination.join("tracked.txt").is_file());
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+}

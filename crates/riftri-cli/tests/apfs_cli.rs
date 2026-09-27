@@ -910,3 +910,77 @@ fn a_moving_remote_tracking_start_point_is_pinned_and_keeps_its_upstream() {
             .is_empty()
     );
 }
+
+/// `git worktree add` accepts an existing empty directory as the destination —
+/// `dir=$(mktemp -d); git worktree add "$dir" …` is a common script pattern —
+/// and refuses a non-empty one. `riftri worktree add` refused both (#437).
+#[test]
+fn explicit_worktree_add_accepts_an_existing_empty_directory_like_git() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
+    assert!(
+        git(&repository, &["add", "--", "tracked.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "initial"])
+            .status
+            .success()
+    );
+
+    let empty = fixture.path().join("precreated-empty");
+    fs::create_dir(&empty).expect("create empty destination");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&empty)
+        .args(["-b", "into-empty", "HEAD", "--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI");
+    assert!(
+        output.status.success(),
+        "riftri failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(empty.join("tracked.txt")).expect("read checkout"),
+        "tracked\n"
+    );
+    assert!(git(&empty, &["status", "--porcelain=v1"]).stdout.is_empty());
+
+    // A directory with content is still refused, and left exactly as it was.
+    let occupied = fixture.path().join("occupied");
+    fs::create_dir(&occupied).expect("create occupied destination");
+    fs::write(occupied.join("keep.txt"), "mine\n").expect("write caller file");
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&occupied)
+        .args(["-b", "into-occupied", "HEAD", "--state-dir"])
+        .arg(&state)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI");
+    assert!(
+        !output.status.success(),
+        "a non-empty destination must be refused"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("already exists"));
+    assert_eq!(
+        fs::read_to_string(occupied.join("keep.txt")).unwrap(),
+        "mine\n"
+    );
+    assert_eq!(fs::read_dir(&occupied).unwrap().count(), 1);
+}

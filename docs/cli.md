@@ -425,7 +425,10 @@ worktree.
 
 Missing leading directories of `PATH` are created, as `git worktree add`
 does, but only once the request has passed validation — a refused add creates
-nothing. If the add fails after that, the worktree is rolled back and the
+nothing. Like Git, `PATH` may also be an existing **empty** directory (the
+`mktemp -d` pattern); a directory with content, or a symbolic link, is
+refused. If an add into an existing empty directory fails before Git has used
+it, the directory is left as it was. If the add fails after that, the worktree is rolled back and the
 created directories are left in place, which is also what Git does.
 `riftri worktree move` does not create a missing parent, matching
 `git worktree move`.
