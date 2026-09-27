@@ -29,6 +29,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A worktree removal killed while its files were being deleted no longer
+  wedges `riftri repair`. Native removals now rename the view to a journal-owned
+  `.riftri-remove-<operation>` sibling, let Git unregister the missing path, and
+  only then delete the quarantine. Repair finishes from any interruption point
+  instead of refusing a half-deleted tree as "has changes" (#447).
+
 - `riftri repair` recovers an add that was killed while its own internal
   `git worktree add` was running. Git registers a new worktree locked as
   "initializing" and unlocks it only when it finishes, so the interrupted

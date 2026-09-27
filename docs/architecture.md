@@ -300,8 +300,21 @@ intent-recorded
 ```
 
 Clean removal validates cleanliness before recording intent and rechecks it
-when resuming before Git removes a still-registered view. Git performs that
-path without `--force`, so a concurrent dirtying write is also rejected.
+when resuming before Git removes a still-registered view.
+
+Native views are never deleted in place, because a Git recursive delete killed
+midway leaves a half-deleted tree that is still registered and that no later check
+can tell apart from user changes. At `clean-verified`, Riftri renames the view
+atomically to `.riftri-remove-<operation-id>` beside it. A clean removal then
+rechecks the view at that quarantine path, so a concurrent dirtying write is
+still rejected. Git unregisters the now-missing path with an ordinary
+non-force `git worktree remove`, whose missing-path checks refuse a destination
+recreated in the meantime. Only after that does Riftri delete the quarantine,
+which is no longer a Git worktree. A refusal before Git drops the registration
+renames the view back. Recovery finds the quarantine from the journal alone. If
+Git still registers the view, recovery renames it back and decides again as if
+it had never moved. Otherwise recovery finishes deleting it. A quarantine that
+exists beside a reappeared destination is preserved together with it.
 
 An explicit forced removal snapshots the complete native view, or the complete
 OverlayFS private layer, before recording durable intent. The journal records

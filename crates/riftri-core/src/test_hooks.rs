@@ -6,6 +6,7 @@ pub(crate) enum FilesystemRacePoint {
     JournalOpen,
     EmptyDirectoryRemoval,
     ForceRemovalRevalidation,
+    RemovalQuarantined,
     RollbackGitRemoval,
 }
 

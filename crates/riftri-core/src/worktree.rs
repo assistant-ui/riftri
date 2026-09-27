@@ -2365,6 +2365,7 @@ fn remove_worktree_with_mode(
         &git,
         &repository_root,
         &destination,
+        &removal_quarantine_path(&destination, &journal.operation_id)?,
         &managed,
         journal.overlayfs_clean_snapshot.as_deref(),
         journal.force,
@@ -6248,6 +6249,14 @@ fn is_real_directory(path: &Path) -> Result<bool, WorktreeError> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn symlink_metadata_if_present(path: &Path) -> Result<Option<fs::Metadata>, WorktreeError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io("inspect path", path, source)),
+    }
+}
+
 fn is_real_directory_if_present(path: &Path) -> Result<bool, WorktreeError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(metadata.is_dir() && !metadata.file_type().is_symlink()),
@@ -7409,7 +7418,30 @@ fn resume_removal(
     }
 
     if record.phase == RemoveWorktreePhase::CleanVerified {
-        let (registered, destination_exists) = removal_presence(git, &journal)?;
+        let quarantine = removal_quarantine_path(&journal.destination, &journal.operation_id)?;
+        let (mut registered, mut destination_exists) = removal_presence(git, &journal)?;
+        if let Some(metadata) = symlink_metadata_if_present(&quarantine)? {
+            if !metadata.is_dir() || destination_exists {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "removal quarantine {} does not match a recoverable state beside {}; recovery preserved both",
+                    quarantine.display(),
+                    journal.destination.display()
+                )));
+            }
+            if registered {
+                // Killed after the view was quarantined but before Git dropped
+                // its registration: put the view back so every check below
+                // decides again exactly as for a view that never moved.
+                rename_quarantined_view(&quarantine, &journal.destination)?;
+                destination_exists = true;
+            } else {
+                // Git already unregistered the view, so the quarantine is no
+                // longer a worktree. Only this removal creates its name.
+                remove_tree_if_present(&quarantine)?;
+                sync_parent(&quarantine)?;
+                (registered, destination_exists) = removal_presence(git, &journal)?;
+            }
+        }
         if registered {
             let safe = if !destination_exists {
                 true
@@ -7444,6 +7476,7 @@ fn resume_removal(
                 git,
                 &journal.repository,
                 &journal.destination,
+                &quarantine,
                 &managed,
                 journal.overlayfs_clean_snapshot.as_deref(),
                 journal.force,
@@ -8853,23 +8886,61 @@ fn managed_worktree_is_clean_for_removal(
     }
 }
 
-fn remove_managed_worktree_files(
+/// The sibling a removal renames its native view to before deleting it. The
+/// name is derived from the removal's own operation ID, so recovery can find
+/// it from the journal alone and nothing else ever creates it.
+fn removal_quarantine_path(
+    destination: &Path,
+    operation_id: &str,
+) -> Result<PathBuf, WorktreeError> {
+    destination
+        .parent()
+        .map(|parent| parent.join(format!(".riftri-remove-{operation_id}")))
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "worktree {} has no parent directory to quarantine it in",
+                destination.display()
+            ))
+        })
+}
+
+fn rename_quarantined_view(quarantine: &Path, destination: &Path) -> Result<(), WorktreeError> {
+    if symlink_metadata_if_present(destination)?.is_some() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} reappeared while its view was quarantined at {}; both were preserved",
+            destination.display(),
+            quarantine.display()
+        )));
+    }
+    fs::rename(quarantine, destination)
+        .map_err(|source| io("restore quarantined worktree", destination, source))?;
+    sync_parent(destination)
+}
+
+/// Remove a native view so that a crash at any point leaves a state recovery
+/// can finish, instead of the half-deleted, still-registered tree that Git's
+/// own recursive delete leaves when it is killed.
+///
+/// The view is renamed to its journal-derived quarantine in one atomic step.
+/// Git then unregisters the now-missing path through its ordinary missing-path
+/// checks, which never delete a destination recreated in the meantime. Only
+/// then is the quarantine, no longer a Git worktree, deleted. A failure before
+/// Git drops the registration renames the view back untouched.
+fn remove_native_worktree(
     git: &Git,
     repository: &Path,
     destination: &Path,
+    quarantine: &Path,
     managed: &DecodedJournal,
-    expected_snapshot: Option<&str>,
     force: bool,
     force_snapshot: Option<&str>,
 ) -> Result<(), WorktreeError> {
-    #[cfg(not(target_os = "linux"))]
-    let _ = expected_snapshot;
-    if managed.backend != BackendKind::OverlayFs {
-        if !force || !destination.exists() {
-            return git
-                .remove_worktree(repository, destination)
-                .map_err(WorktreeError::from);
-        }
+    if !destination.exists() {
+        return git
+            .remove_worktree(repository, destination)
+            .map_err(WorktreeError::from);
+    }
+    if force {
         #[cfg(test)]
         crate::test_hooks::fire(
             crate::test_hooks::FilesystemRacePoint::ForceRemovalRevalidation,
@@ -8884,9 +8955,70 @@ fn remove_managed_worktree_files(
                 destination.display()
             )));
         }
-        return git
-            .remove_worktree_force(repository, destination)
-            .map_err(WorktreeError::from);
+    }
+    if symlink_metadata_if_present(quarantine)?.is_some() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "removal quarantine {} already exists; {} was preserved",
+            quarantine.display(),
+            destination.display()
+        )));
+    }
+    fs::rename(destination, quarantine)
+        .map_err(|source| io("quarantine worktree for removal", quarantine, source))?;
+    sync_parent(quarantine)?;
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::RemovalQuarantined,
+        quarantine,
+    );
+    // A clean removal still rejects a write that raced it, as Git's own
+    // non-force removal would: the view is rechecked where it now lives.
+    let unregistered = match (force, git.worktree_is_clean(quarantine)) {
+        (false, Ok(false)) => Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} has changes; commit, stash, or remove them before retrying",
+            destination.display()
+        ))),
+        (false, Err(error)) => Err(error.into()),
+        _ => git
+            .remove_worktree(repository, destination)
+            .map_err(WorktreeError::from),
+    };
+    if let Err(operation) = unregistered {
+        return match rename_quarantined_view(quarantine, destination) {
+            Ok(()) => Err(operation),
+            Err(rollback) => Err(WorktreeError::OperationAndRollback {
+                operation: Box::new(operation),
+                rollback: Box::new(rollback),
+            }),
+        };
+    }
+    remove_tree_if_present(quarantine)?;
+    sync_parent(quarantine)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remove_managed_worktree_files(
+    git: &Git,
+    repository: &Path,
+    destination: &Path,
+    quarantine: &Path,
+    managed: &DecodedJournal,
+    expected_snapshot: Option<&str>,
+    force: bool,
+    force_snapshot: Option<&str>,
+) -> Result<(), WorktreeError> {
+    #[cfg(not(target_os = "linux"))]
+    let _ = expected_snapshot;
+    if managed.backend != BackendKind::OverlayFs {
+        return remove_native_worktree(
+            git,
+            repository,
+            destination,
+            quarantine,
+            managed,
+            force,
+            force_snapshot,
+        );
     }
     #[cfg(not(target_os = "linux"))]
     return Err(WorktreeError::Unsupported(
@@ -14056,6 +14188,243 @@ mod tests {
         assert_eq!(repeated.recovered_removals, 0);
         assert_eq!(repeated.completed_removals, 1);
         assert!(repeated.errors.is_empty());
+    }
+
+    /// A managed view whose removal stopped right after `clean-verified`, as a
+    /// kill does before the view is quarantined, plus that removal's
+    /// journal-derived quarantine path.
+    fn interrupted_removal_fixture(
+        force: bool,
+    ) -> (
+        crate::test_support::WritableTempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::create_dir(repository.join("nested")).expect("create directory");
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        fs::write(repository.join("nested/deep.txt"), "deep\n").expect("write file");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        let request = RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: destination.clone(),
+            state_dir: Some(state.clone()),
+        };
+        let interrupted = if force {
+            force_remove_worktree_inner(request, Some(RemoveWorktreePhase::CleanVerified))
+        } else {
+            remove_worktree_inner(request, Some(RemoveWorktreePhase::CleanVerified))
+        };
+        assert!(
+            interrupted
+                .expect_err("simulate a kill after the clean check")
+                .to_string()
+                .contains("injected removal failure")
+        );
+        let removals = RemovalJournalStore::open(&state)
+            .load_all()
+            .expect("load removal");
+        assert_eq!(removals.len(), 1);
+        let quarantine = fixture
+            .path()
+            .join(format!(".riftri-remove-{}", removals[0].operation_id));
+        (fixture, repository, destination, state, quarantine)
+    }
+
+    fn registered(repository: &Path, destination: &Path) -> bool {
+        // Git reports resolved paths; the destination itself may be gone.
+        let destination = fs::canonicalize(destination.parent().unwrap())
+            .unwrap()
+            .join(destination.file_name().unwrap());
+        let destination = destination.as_path();
+        riftri_git::Git::default()
+            .list_worktrees(repository)
+            .expect("list worktrees")
+            .iter()
+            .any(|worktree| super::paths_match(&worktree.path, destination))
+    }
+
+    #[test]
+    fn repair_finishes_a_removal_killed_after_quarantining_its_view() {
+        for force in [false, true] {
+            let (_fixture, repository, destination, state, quarantine) =
+                interrupted_removal_fixture(force);
+            // The kill lands after the view was renamed aside, before Git
+            // dropped its registration.
+            fs::rename(&destination, &quarantine).expect("quarantine the view");
+
+            let report = recover_incomplete_operations(&state).expect("repair");
+            assert!(report.errors.is_empty(), "force={force}: {report:?}");
+            assert_eq!(report.recovered_removals, 1, "force={force}");
+            assert!(!destination.exists(), "force={force}");
+            assert!(
+                !quarantine.exists(),
+                "force={force}: repair must not strand the quarantined view"
+            );
+            assert!(!registered(&repository, &destination), "force={force}");
+            assert_eq!(storage_accounting(&state).unwrap().active_views, 0);
+        }
+    }
+
+    #[test]
+    fn repair_finishes_deleting_a_quarantine_git_already_unregistered() {
+        for force in [false, true] {
+            let (_fixture, repository, destination, state, quarantine) =
+                interrupted_removal_fixture(force);
+            // The kill lands while the unregistered quarantine is being deleted.
+            fs::rename(&destination, &quarantine).expect("quarantine the view");
+            git(
+                &repository,
+                &["worktree", "remove", "--", destination.to_str().unwrap()],
+            );
+            fs::remove_file(quarantine.join("tracked.txt")).expect("partial delete");
+
+            let report = recover_incomplete_operations(&state).expect("repair");
+            assert!(report.errors.is_empty(), "force={force}: {report:?}");
+            assert_eq!(report.recovered_removals, 1, "force={force}");
+            assert!(!quarantine.exists(), "force={force}");
+            assert!(!destination.exists(), "force={force}");
+            assert!(!registered(&repository, &destination), "force={force}");
+        }
+    }
+
+    #[test]
+    fn repair_preserves_a_destination_that_reappears_beside_its_quarantine() {
+        let (_fixture, repository, destination, state, quarantine) =
+            interrupted_removal_fixture(false);
+        fs::rename(&destination, &quarantine).expect("quarantine the view");
+        fs::create_dir(&destination).expect("recreate the destination");
+        fs::write(destination.join("new.txt"), "new\n").expect("write new content");
+
+        for _ in 0..2 {
+            let report = recover_incomplete_operations(&state).expect("repair report");
+            assert_eq!(report.recovered_removals, 0);
+            assert_eq!(report.errors.len(), 1, "{report:?}");
+            assert_eq!(
+                fs::read(destination.join("new.txt")).expect("new content kept"),
+                b"new\n"
+            );
+            assert_eq!(
+                fs::read(quarantine.join("tracked.txt")).expect("quarantine kept"),
+                b"tracked\n"
+            );
+            assert!(registered(&repository, &destination));
+        }
+    }
+
+    #[test]
+    fn clean_removal_restores_a_view_written_after_its_quarantine() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::RemovalQuarantined,
+            |quarantine| {
+                fs::write(quarantine.join("late.txt"), "late write\n")
+                    .expect("write into the quarantined view");
+            },
+        );
+
+        let error = remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect_err("a write racing a clean removal must stop it");
+
+        assert!(error.to_string().contains("has changes"), "{error}");
+        assert_eq!(
+            fs::read(destination.join("late.txt")).expect("late write restored"),
+            b"late write\n"
+        );
+        assert!(registered(&repository, &destination));
+        let leftovers = fs::read_dir(fixture.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".riftri-remove-"))
+            .count();
+        assert_eq!(leftovers, 0, "the quarantine must be renamed back");
+    }
+
+    #[test]
+    fn a_removal_git_refuses_restores_the_quarantined_view() {
+        let (fixture, repository, destination, state, _quarantine) =
+            interrupted_removal_fixture(false);
+        git(
+            &repository,
+            &["worktree", "lock", "--", destination.to_str().unwrap()],
+        );
+
+        let report = recover_incomplete_operations(&state).expect("repair report");
+        assert_eq!(report.recovered_removals, 0);
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(report.errors[0].contains("locked"), "{report:?}");
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).expect("view restored"),
+            b"tracked\n"
+        );
+        assert!(registered(&repository, &destination));
+        let leftovers = fs::read_dir(fixture.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".riftri-remove-"))
+            .count();
+        assert_eq!(leftovers, 0, "the quarantine must be renamed back");
     }
 
     #[test]
