@@ -8452,6 +8452,7 @@ fn verify_prune_safe(
         ));
     }
     let inventory = git.list_worktrees(repository)?;
+    let claimed = claimed_destinations(&adds);
     for journal in adds.iter().filter(|journal| {
         journal.phase == AddWorktreePhase::Active
             && !completed_removals.contains(&journal.operation_id)
@@ -8461,10 +8462,36 @@ fn verify_prune_safe(
                 .iter()
                 .any(|worktree| paths_match(&worktree.path, &journal.destination))
         {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "managed worktree {} is missing or not registered; prune was not run",
-                journal.destination.display()
-            )));
+            // Prune never touches a managed worktree, so it stops here either
+            // way. The commonest cause is `rm -rf <worktree>` before
+            // `git worktree prune`, and `riftri repair` retires exactly that
+            // stale journal — but only when repair's own classification says
+            // the worktree vanished, so this asks the same question rather
+            // than suggesting a repair that would do nothing (#437).
+            return Err(
+                match classify_active_destination(&inventory, &claimed, journal)? {
+                    ActiveDestinationState::Vanished => recovery_pending_error(
+                        format!(
+                            "managed worktree {} no longer exists, but its Riftri add is still recorded as active; prune was not run",
+                            journal.destination.display()
+                        ),
+                        state_directory,
+                    ),
+                    ActiveDestinationState::Relocated(path) => {
+                        WorktreeError::InvalidRequest(format!(
+                            "managed worktree {} appears to have been moved to {} outside Riftri; prune was not run",
+                            journal.destination.display(),
+                            path.display()
+                        ))
+                    }
+                    ActiveDestinationState::Registered | ActiveDestinationState::Present => {
+                        WorktreeError::InvalidRequest(format!(
+                            "managed worktree {} exists but Git no longer lists it as a worktree directory; prune was not run",
+                            journal.destination.display()
+                        ))
+                    }
+                },
+            );
         }
     }
     Ok(())

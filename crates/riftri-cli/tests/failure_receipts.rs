@@ -1262,3 +1262,105 @@ fn a_state_path_that_is_not_a_directory_is_a_policy_refusal() {
         );
     }
 }
+
+/// `rm -rf <worktree> && git worktree prune` is the standard cleanup idiom.
+/// Prune deliberately never touches a managed worktree, so with one deleted
+/// outside Riftri it refused — "missing or not registered; prune was not run"
+/// — with nothing to act on, although `riftri repair` retires exactly that
+/// stale journal (#437). The refusal now names the repair, and following it
+/// lets prune run.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn prune_after_a_managed_worktree_was_deleted_points_at_repair() {
+    let fixture = support::writable_tempdir().expect("fixture directory");
+    if !native_cow_supported(fixture.path()) {
+        return;
+    }
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let view = fixture.path().join("deleted-view");
+    init_repository_with_commit(&repository);
+    add_managed_worktree(&repository, &view, &state);
+    make_writable(&view);
+    std::fs::remove_dir_all(&view).expect("delete the managed view outside Riftri");
+    let state_arg = state.to_str().unwrap();
+
+    let (receipt, exit_code) = riftri_json_error(
+        &repository,
+        &["worktree", "prune", "--state-dir", state_arg],
+    );
+    assert_eq!(exit_code, Some(1), "{receipt}");
+    assert_eq!(receipt["code"], "recovery-pending", "{receipt}");
+    assert_eq!(receipt["recovery"], "required");
+    let next = receipt["nextCommand"].as_str().expect("next command");
+    assert!(next.starts_with("riftri repair --state-dir"), "{next}");
+    assert!(
+        receipt["message"]
+            .as_str()
+            .unwrap()
+            .contains("riftri repair"),
+        "the human message must name the same command: {receipt}"
+    );
+
+    let repaired = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["repair", "--state-dir", state_arg])
+        .current_dir(&repository)
+        .output()
+        .expect("run riftri repair");
+    assert!(
+        repaired.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    let pruned = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "prune", "--state-dir", state_arg])
+        .current_dir(&repository)
+        .output()
+        .expect("run riftri worktree prune");
+    assert!(
+        pruned.status.success(),
+        "prune must succeed once repair retired the journal: {}",
+        String::from_utf8_lossy(&pruned.stderr)
+    );
+}
+
+/// The other case the same refusal covered: the managed worktree still exists
+/// but Git's registration for it was deleted by hand. `riftri repair` does not
+/// resolve that, so the refusal must not suggest it — pointing at a command
+/// that does nothing is what #415 fixed elsewhere.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn prune_with_an_unregistered_managed_worktree_does_not_suggest_repair() {
+    let fixture = support::writable_tempdir().expect("fixture directory");
+    if !native_cow_supported(fixture.path()) {
+        return;
+    }
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let view = fixture.path().join("unregistered-view");
+    init_repository_with_commit(&repository);
+    add_managed_worktree(&repository, &view, &state);
+    let admin = Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir"])
+        .current_dir(&view)
+        .output()
+        .expect("locate the worktree's Git directory");
+    let admin = String::from_utf8(admin.stdout).expect("UTF-8 path");
+    std::fs::remove_dir_all(admin.trim()).expect("delete Git's registration");
+
+    let (receipt, exit_code) = riftri_json_error(
+        &repository,
+        &["worktree", "prune", "--state-dir", state.to_str().unwrap()],
+    );
+    assert_eq!(exit_code, Some(3), "{receipt}");
+    assert_eq!(receipt["code"], "invalid-request", "{receipt}");
+    assert!(receipt["nextCommand"].is_null(), "{receipt}");
+    assert!(
+        receipt["message"]
+            .as_str()
+            .unwrap()
+            .contains("Git no longer lists"),
+        "{receipt}"
+    );
+    assert!(view.is_dir(), "the managed view must be left alone");
+}
