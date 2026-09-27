@@ -2981,6 +2981,7 @@ fn add_worktree_inner(
             &base_staging,
             &temporary_index,
             &resolved.commit,
+            &request.revision,
             &request.mode,
             &resolved.tree,
             &compatibility.checkout_config,
@@ -3072,6 +3073,7 @@ fn perform_add(
     base_staging: &Path,
     temporary_index: &Path,
     commit: &ObjectId,
+    start_point: &OsStr,
     mode: &WorktreeMode,
     tree: &ObjectId,
     checkout_config: &[(String, Vec<u8>)],
@@ -3086,22 +3088,47 @@ fn perform_add(
         WorktreeMode::Detached => WorktreeHead::Detached,
     };
     let metadata_lock = acquire_git_worktree_metadata_lock(common_git_dir)?;
-    git.add_worktree_no_checkout(repository, destination, OsStr::new(commit.as_str()), head)?;
+    // A new branch is created from the start point exactly as the caller named
+    // it, not from the commit it resolved to: Git decides upstream tracking
+    // from that name (`branch.autoSetupMerge`, `--track` configuration), and a
+    // raw commit never gets an upstream. Passing the commit made
+    // `-b task <path> origin/main` succeed with no upstream, silently unlike
+    // Git. Pinning is kept by verifying the result below.
+    let revision = match mode {
+        WorktreeMode::NewBranch(_) => start_point,
+        WorktreeMode::ExistingBranch(_) | WorktreeMode::Detached => OsStr::new(commit.as_str()),
+    };
+    git.add_worktree_no_checkout(repository, destination, revision, head)?;
     advance(
         store,
         journal,
         AddWorktreePhase::GitMetadataCreated,
         fail_after,
     )?;
-    if matches!(mode, WorktreeMode::ExistingBranch(_)) {
-        let attached = git.resolve_revision(destination, OsStr::new("HEAD"))?;
-        if attached.commit != *commit {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "existing branch moved from {} to {} while its worktree was being created",
-                commit.as_str(),
-                attached.commit.as_str()
-            )));
+    match mode {
+        WorktreeMode::ExistingBranch(_) => {
+            let attached = git.resolve_revision(destination, OsStr::new("HEAD"))?;
+            if attached.commit != *commit {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "existing branch moved from {} to {} while its worktree was being created",
+                    commit.as_str(),
+                    attached.commit.as_str()
+                )));
+            }
         }
+        // The add uses the revision resolved before mutation. If the start
+        // point moved in between, Git created the new branch at the moved
+        // commit; this operation owns that branch, so pin it back with a
+        // compare-and-swap update. The upstream Git configured refers to the
+        // start point's name, not its commit, and nothing has been checked
+        // out yet, so the reference is all that needs correcting.
+        WorktreeMode::NewBranch(branch) => {
+            let attached = git.resolve_revision(destination, OsStr::new("HEAD"))?;
+            if attached.commit != *commit {
+                git.move_branch_if_unchanged(repository, branch, commit, &attached.commit)?;
+            }
+        }
+        WorktreeMode::Detached => {}
     }
     drop(metadata_lock);
 

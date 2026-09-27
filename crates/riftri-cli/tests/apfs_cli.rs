@@ -771,3 +771,142 @@ fn explicit_worktree_add_creates_missing_parent_directories() {
             .is_empty()
     );
 }
+
+/// The pinning guarantee above must hold for a remote-tracking start point too,
+/// and must not cost the upstream Git sets for it. Riftri creates the branch
+/// from the start point's name so Git decides tracking; when that name moves
+/// mid-add, the new branch is pinned back to the resolved commit and keeps
+/// its upstream.
+#[test]
+fn a_moving_remote_tracking_start_point_is_pinned_and_keeps_its_upstream() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let destination = fixture.path().join("worktree");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).expect("create repository");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        assert!(git(&repository, arguments).status.success());
+    }
+    fs::write(repository.join("tracked.txt"), "first\n").expect("write first revision");
+    assert!(
+        git(&repository, &["add", "--", "tracked.txt"])
+            .status
+            .success()
+    );
+    assert!(
+        git(&repository, &["commit", "--quiet", "-m", "first"])
+            .status
+            .success()
+    );
+    let first = String::from_utf8(git(&repository, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    fs::write(repository.join("tracked.txt"), "second\n").expect("write second revision");
+    assert!(
+        git(&repository, &["commit", "-am", "second", "--quiet"])
+            .status
+            .success()
+    );
+    let second = String::from_utf8(git(&repository, &["rev-parse", "HEAD"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    // A remote whose `feature` is visible only as `origin/feature`, at `first`.
+    let upstream = fixture.path().join("upstream.git");
+    assert!(
+        Command::new("git")
+            .args(["clone", "--quiet", "--bare"])
+            .arg(&repository)
+            .arg(&upstream)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        git(&upstream, &["branch", "feature", &first])
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&upstream)
+            .current_dir(&repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        git(&repository, &["fetch", "--quiet", "origin"])
+            .status
+            .success()
+    );
+
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let wrapper = fixture.path().join("moving-git");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nif [ \"$1\" = worktree ] && [ \"$2\" = add ]; then\n  \"$RIFTRI_TEST_REAL_GIT\" update-ref refs/remotes/origin/feature \"$RIFTRI_TEST_MOVED_COMMIT\" || exit $?\nfi\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write Git wrapper");
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add"])
+        .arg(&destination)
+        .args(["-b", "task", "origin/feature", "--state-dir"])
+        .arg(&state)
+        .env("RIFTRI_SHIM_ACTIVE", "1")
+        .env("RIFTRI_REAL_GIT", &wrapper)
+        .env("RIFTRI_TEST_REAL_GIT", real_git)
+        .env("RIFTRI_TEST_MOVED_COMMIT", &second)
+        .current_dir(&repository)
+        .output()
+        .expect("run Riftri CLI through a moving remote-tracking ref");
+    assert!(
+        output.status.success(),
+        "riftri failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let head = String::from_utf8(git(&destination, &["rev-parse", "HEAD"]).stdout).unwrap();
+    assert_eq!(
+        head.trim(),
+        first,
+        "the branch must stay at the resolved commit"
+    );
+    let upstream_name = String::from_utf8(
+        git(
+            &repository,
+            &["rev-parse", "--abbrev-ref", "task@{upstream}"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(upstream_name.trim(), "origin/feature");
+    assert_eq!(
+        fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+        "first\n"
+    );
+    assert!(
+        git(&destination, &["status", "--porcelain=v1"])
+            .stdout
+            .is_empty()
+    );
+}
