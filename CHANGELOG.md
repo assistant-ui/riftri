@@ -29,6 +29,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A new branch created from a remote-tracking start point now tracks it, as
+  with Git. `git worktree add -b task <path> origin/main` succeeded under
+  Riftri with no upstream, because the add created the branch from the
+  resolved commit rather than the name, so a later `git push` or `git pull`
+  behaved differently without any warning. Git now makes the tracking decision
+  from the name; if the start point moves during the add, the new branch is
+  pinned back to the commit resolved beforehand, as it was before.
 - Two caller mistakes get their own policy codes (exit 3, `cleanup:
   not-needed`, no `nextCommand`) instead of operational failures (#425).
   `bare-repository`: `status`, `gc`, `repair`, and `worktree list` in a bare

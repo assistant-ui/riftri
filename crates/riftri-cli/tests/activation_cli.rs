@@ -2731,3 +2731,129 @@ fn enabled_prune_verbose_never_bypasses_the_journal() {
         String::from_utf8_lossy(&refused.stderr)
     );
 }
+
+/// Give the fixture an `origin` remote whose `feature` branch exists only as
+/// the remote-tracking ref `origin/feature`.
+#[cfg(target_os = "macos")]
+fn add_origin_with_feature_branch(fixture: &RepositoryFixture) {
+    let upstream = fixture.directory.path().join("upstream.git");
+    assert!(
+        Command::new("git")
+            .args(["clone", "--quiet", "--bare"])
+            .arg(&fixture.repository)
+            .arg(&upstream)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        git(&upstream, &["branch", "feature", "HEAD"])
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .args(["remote", "add", "origin"])
+            .arg(&upstream)
+            .current_dir(&fixture.repository)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        git(&fixture.repository, &["fetch", "--quiet", "origin"])
+            .status
+            .success()
+    );
+}
+
+/// The upstream Git configured for `branch`, or `None`.
+#[cfg(target_os = "macos")]
+fn upstream_of(repository: &Path, branch: &str) -> Option<String> {
+    let output = git(
+        repository,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            &format!("{branch}@{{upstream}}"),
+        ],
+    );
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+/// `git worktree add -b task <path> origin/feature` makes `task` track
+/// `origin/feature`: that is Git's `branch.autoSetupMerge` default for a
+/// remote-tracking start point. Riftri used to hand its internal Git call the
+/// resolved commit instead of the name, so the add succeeded with no upstream
+/// and a later `git push` or `git pull` behaved differently, silently. A local
+/// start point must still get no upstream, exactly as with Git.
+#[cfg(target_os = "macos")]
+#[test]
+fn intercepted_add_sets_up_tracking_exactly_as_git_does() {
+    let fixture = RepositoryFixture::new();
+    add_origin_with_feature_branch(&fixture);
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    for (branch, start, expected) in [
+        ("task", "origin/feature", Some("origin/feature")),
+        ("local-start", "HEAD", None),
+    ] {
+        let destination = fixture.directory.path().join(branch);
+        let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", "worktree", "add", "-b", branch])
+            .arg(&destination)
+            .arg(start)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("intercepted add");
+        assert!(
+            added.status.success(),
+            "{branch}: {}",
+            String::from_utf8_lossy(&added.stderr)
+        );
+        assert!(
+            destination.join(".git").exists(),
+            "{branch} must be a Riftri worktree"
+        );
+        assert_eq!(
+            upstream_of(&fixture.repository, branch).as_deref(),
+            expected,
+            "{branch} from {start}"
+        );
+    }
+}
+
+/// The explicit command mirrors Git's syntax, so it follows the same rule.
+#[cfg(target_os = "macos")]
+#[test]
+fn explicit_add_sets_up_tracking_exactly_as_git_does() {
+    let fixture = RepositoryFixture::new();
+    add_origin_with_feature_branch(&fixture);
+    let destination = fixture.directory.path().join("explicit-task");
+    let state = fixture.directory.path().join("state");
+    let added = riftri(
+        &fixture.repository,
+        &[
+            "worktree",
+            "add",
+            destination.to_str().unwrap(),
+            "-b",
+            "explicit-task",
+            "origin/feature",
+            "--state-dir",
+            state.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert_eq!(
+        upstream_of(&fixture.repository, "explicit-task").as_deref(),
+        Some("origin/feature")
+    );
+}

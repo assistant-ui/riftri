@@ -1725,6 +1725,31 @@ impl Git {
         parse_object_output(&output.stdout).map(Some)
     }
 
+    /// Point `branch` at `new` only if it still points at `expected`, as one
+    /// compare-and-swap reference update. Used to pin a branch the current
+    /// operation just created back to the commit it resolved before mutation.
+    pub fn move_branch_if_unchanged(
+        &self,
+        repository: &Path,
+        branch: &OsStr,
+        new: &ObjectId,
+        expected: &ObjectId,
+    ) -> Result<(), GitError> {
+        let mut reference = OsString::from("refs/heads/");
+        reference.push(branch);
+        let arguments = [
+            OsString::from("update-ref"),
+            OsString::from("--no-deref"),
+            OsString::from("-m"),
+            OsString::from("riftri: pin new branch to the resolved start point"),
+            reference,
+            OsString::from(new.as_str()),
+            OsString::from(expected.as_str()),
+        ];
+        self.run_os(Some(repository), &arguments)?;
+        Ok(())
+    }
+
     /// Delete a local branch during rollback after the caller verifies its
     /// target still matches the commit created for the failed transaction.
     pub fn delete_branch_force(&self, repository: &Path, branch: &OsStr) -> Result<(), GitError> {

@@ -543,6 +543,22 @@ would be a destructive cleanup outside the journal.
 ancestor that is a regular file, a dangling symbolic link, or `..` climbing out
 of a directory that does not exist yet — is refused as an invalid request.
 
+### D041: new branches get Git's upstream, at the resolved commit
+
+A new branch is created by the add's internal `git worktree add -b` from the
+start point **as the caller named it**, so Git alone decides upstream
+tracking — `branch.autoSetupMerge`, `branch.autoSetupRebase`, and any other
+configuration Git applies. Passing the resolved commit instead meant
+`-b task <path> origin/main` succeeded with no upstream, silently unlike Git.
+
+The add still uses the revision resolved before mutation. If the start point
+moves in between, Git creates the branch at the moved commit; the operation
+owns that branch, so it is pinned back to the resolved commit with a
+compare-and-swap `update-ref`. The upstream refers to the start point's name,
+not its commit, and nothing is checked out yet, so the reference is the only
+thing to correct. An existing branch that moves is still refused, because the
+caller owns it.
+
 ### Cleanup checks survive pointer removal and OverlayFS unmount
 
 Pointer-only worktree cleanup stages the real `.git` pointer at a journal-derived
