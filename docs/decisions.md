@@ -166,7 +166,11 @@ behavior, never shadow it.
 Clean Riftri removal records intent only after an initial clean check, invokes
 Git without `--force`, and moves forward to completion rather than trying to
 reconstruct a deleted writable view. Recovery rechecks a still-present view and
-preserves it if it changed. Active reference counts are derived from terminal
+preserves it if it changed. A native view is never deleted in place. One atomic
+rename moves it to a journal-derived quarantine, Git unregisters the missing
+path, and only then is the quarantine deleted. An interrupted delete therefore
+cannot leave a half-deleted view that is still registered, a state recovery
+could not tell apart from user changes (#447). Active reference counts are derived from terminal
 add and removal journals instead of maintained as a second mutable counter.
 Zero-reference bases remain cached until the explicit garbage collector is
 applied; collection is journaled and independently validates that no active or
