@@ -2851,19 +2851,19 @@ fn add_worktree_inner(
             ));
         }
     }
-    let selected_backend = supported_worktree_backend(&destination)?;
-    let destination_volume = &selected_backend.volume;
-
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let state_directory = absolute_path(&requested_state)?;
     // A state path that exists as a regular file or a symbolic link can never
-    // hold Riftri state. Refuse it here, as the invalid state directory it is,
-    // instead of letting the volume probe below misreport it as a missing
-    // volume identity or `create_state_layout` fail with "File exists"
-    // (#425). A path that does not exist yet is fine: the add creates it.
+    // hold Riftri state. It is a caller mistake, so refuse it before probing
+    // any backend — otherwise a volume without copy-on-write support answers
+    // first with `unsupported-checkout`, and one with it misreports the file
+    // as a missing volume identity or fails with "File exists" (#425). A path
+    // that does not exist yet is fine: the add creates it.
     resolve_real_state_directory_if_present(&state_directory)?;
+    let selected_backend = supported_worktree_backend(&destination)?;
+    let destination_volume = &selected_backend.volume;
     let state_volume = inspected_native_cow_volume(&state_directory, selected_backend.kind)?;
     if destination_volume.identity != state_volume.identity {
         return Err(WorktreeError::Unsupported(format!(
