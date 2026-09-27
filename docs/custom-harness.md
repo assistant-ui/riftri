@@ -123,6 +123,16 @@ a repository reports `"code": "not-a-repository"` with `category` `policy` and
 exit code `3`, so a runner in the wrong working directory is told to fix the
 call rather than to retry or inspect.
 
+Two more carry their own codes, also `policy` with exit `3`, `cleanup`
+`not-needed`, and no `nextCommand`, because no Riftri command can fix them:
+
+- `bare-repository` — a command that needs a working tree ran in a bare
+  repository;
+- `invalid-state-directory` — a `--state-dir`, or a path inside it, is a
+  regular file or a symbolic link. Riftri never follows a link for its own
+  state; point `--state-dir` at a directory, or at a path that does not exist
+  yet for an add to create.
+
 With `--json-errors`, the failure arrives as one receipt on stderr:
 
 ```json

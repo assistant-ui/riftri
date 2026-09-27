@@ -729,7 +729,7 @@ fn failure_exit_code(error: &anyhow::Error) -> i32 {
     if let Some(interrupted) = error.downcast_ref::<ui::Interrupted>() {
         return interrupted.0;
     }
-    if absent_repository(error) {
+    if absent_repository(error) || policy_refusal_code(error).is_some() {
         return 3;
     }
     match error
@@ -749,6 +749,13 @@ fn failure_exit_code(error: &anyhow::Error) -> i32 {
 /// `policy` receipt delivered with exit 1 would be read as operational and
 /// retried, which is the defect this answers. One predicate serves both so
 /// they cannot drift.
+/// The code for a caller-side refusal anywhere in the chain; see
+/// `riftri_core::policy_refusal_code`. The exit code and the receipt both use
+/// it so they cannot disagree.
+fn policy_refusal_code(error: &anyhow::Error) -> Option<&'static str> {
+    error.chain().find_map(riftri_core::policy_refusal_code)
+}
+
 fn absent_repository(error: &anyhow::Error) -> bool {
     error.chain().any(riftri_core::is_absent_repository)
 }
@@ -1185,6 +1192,7 @@ fn failure_receipt(
     // classifies both identically, so the commands cannot drift apart again.
     let absent_repository = absent_repository(error);
     let storage_full = error.chain().any(riftri_core::is_storage_full);
+    let refusal = policy_refusal_code(error);
     let (code, category, phase, cleanup, recovery) = if absent_repository {
         (
             "not-a-repository",
@@ -1193,6 +1201,11 @@ fn failure_receipt(
             "not-needed",
             "not-required",
         )
+    } else if let Some(code) = refusal {
+        // A bare repository, or a state path that is not a directory: nothing
+        // was attempted, retrying cannot help, and no Riftri command fixes it,
+        // so there is no follow-up to suggest (#425).
+        (code, "policy", None, "not-needed", "not-required")
     } else {
         worktree_error.map(worktree_failure_fields).unwrap_or((
             "command-failed",

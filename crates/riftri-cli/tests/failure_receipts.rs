@@ -1183,3 +1183,82 @@ fn a_refused_add_into_missing_parents_creates_nothing() {
     assert!(file.is_file(), "the file must be untouched");
     assert!(!state.exists());
 }
+
+/// Commands that need a working tree, run in a bare repository, are refused
+/// for a reason retrying cannot change. They were `command-failed`,
+/// operational with unknown cleanup, and `gc` and `repair` suggested
+/// `riftri status` — which fails the same way (#425).
+#[test]
+fn a_bare_repository_is_a_policy_refusal_with_no_follow_up_command() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let bare = fixture.path().join("bare.git");
+    std::fs::create_dir(&bare).expect("create bare repository directory");
+    git(&bare, &["init", "--quiet", "--bare"]);
+
+    for arguments in [
+        &["status"][..],
+        &["gc"][..],
+        &["repair"][..],
+        &["worktree", "list"][..],
+    ] {
+        let (receipt, exit_code) = riftri_json_error(&bare, arguments);
+        assert_eq!(exit_code, Some(3), "{arguments:?}");
+        assert_eq!(receipt["code"], "bare-repository", "{arguments:?}");
+        assert_eq!(receipt["category"], "policy", "{arguments:?}");
+        assert_eq!(receipt["cleanup"], "not-needed", "{arguments:?}");
+        assert!(receipt["nextCommand"].is_null(), "{arguments:?}: {receipt}");
+    }
+}
+
+/// A `--state-dir` that names a regular file or a symbolic link is a caller
+/// mistake: Riftri never follows a link for its own state, and no command can
+/// turn a file into a state directory. `status`, `gc`, and `repair` reported
+/// `journal-failed` with `recovery: required`, sending a harness back and
+/// forth between `repair` and `status` on the same file; `worktree add`
+/// blamed the volume probe or said "File exists" (#425).
+#[cfg(unix)]
+#[test]
+fn a_state_path_that_is_not_a_directory_is_a_policy_refusal() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    init_repository_with_commit(&repository);
+    let file = fixture.path().join("state-file");
+    std::fs::write(&file, "not a directory\n").expect("write state file");
+    let dangling = fixture.path().join("state-link");
+    std::os::unix::fs::symlink(fixture.path().join("nowhere"), &dangling)
+        .expect("create dangling state link");
+
+    for state in [&file, &dangling] {
+        let state_arg = state.to_str().unwrap();
+        let view = fixture.path().join("view");
+        let view_arg = view.to_str().unwrap();
+        for arguments in [
+            &["status", "--state-dir", state_arg][..],
+            &["gc", "--state-dir", state_arg][..],
+            &["repair", "--state-dir", state_arg][..],
+            &[
+                "worktree",
+                "add",
+                view_arg,
+                "-b",
+                "state-test",
+                "--state-dir",
+                state_arg,
+            ][..],
+        ] {
+            let (receipt, exit_code) = riftri_json_error(&repository, arguments);
+            assert_eq!(exit_code, Some(3), "{arguments:?}: {receipt}");
+            assert_eq!(receipt["code"], "invalid-state-directory", "{arguments:?}");
+            assert_eq!(receipt["category"], "policy", "{arguments:?}");
+            assert_eq!(receipt["cleanup"], "not-needed", "{arguments:?}");
+            assert!(receipt["nextCommand"].is_null(), "{arguments:?}: {receipt}");
+            let message = receipt["message"].as_str().expect("message");
+            assert!(message.contains(state_arg), "{arguments:?}: {message}");
+            assert!(!view.exists(), "{arguments:?} created the destination");
+        }
+        assert!(
+            std::fs::symlink_metadata(state).is_ok(),
+            "the state path itself must be left untouched"
+        );
+    }
+}

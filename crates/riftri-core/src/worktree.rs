@@ -2858,6 +2858,12 @@ fn add_worktree_inner(
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let state_directory = absolute_path(&requested_state)?;
+    // A state path that exists as a regular file or a symbolic link can never
+    // hold Riftri state. Refuse it here, as the invalid state directory it is,
+    // instead of letting the volume probe below misreport it as a missing
+    // volume identity or `create_state_layout` fail with "File exists"
+    // (#425). A path that does not exist yet is fine: the add creates it.
+    resolve_real_state_directory_if_present(&state_directory)?;
     let state_volume = inspected_native_cow_volume(&state_directory, selected_backend.kind)?;
     if destination_volume.identity != state_volume.identity {
         return Err(WorktreeError::Unsupported(format!(
