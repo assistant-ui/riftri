@@ -5616,14 +5616,30 @@ fn diagnose_state_paths(
                 ]
             })
             .collect(),
+        &|_| true,
         &mut issues,
     )?;
+    let finished = finished_lifecycle_operations(
+        removal_journals,
+        move_journals,
+        compact_journals,
+        prune_journals,
+        collection_journals,
+    );
+    let reapable = |directory: &str| {
+        let finished = finished
+            .iter()
+            .find(|(name, _)| *name == directory)
+            .map(|(_, operations)| operations);
+        move |owner: &str| finished.is_some_and(|operations| operations.contains(owner))
+    };
     diagnose_journal_directory(
         &state_directory.join("removals"),
         removal_journals
             .iter()
             .map(|journal| journal.journal_path.clone())
             .collect(),
+        &reapable("removals"),
         &mut issues,
     )?;
     diagnose_journal_directory(
@@ -5632,6 +5648,7 @@ fn diagnose_state_paths(
             .iter()
             .map(|journal| journal.journal_path.clone())
             .collect(),
+        &reapable("moves"),
         &mut issues,
     )?;
     diagnose_journal_directory(
@@ -5640,6 +5657,7 @@ fn diagnose_state_paths(
             .iter()
             .map(|journal| journal.journal_path.clone())
             .collect(),
+        &reapable("compactions"),
         &mut issues,
     )?;
     diagnose_journal_directory(
@@ -5648,6 +5666,7 @@ fn diagnose_state_paths(
             .iter()
             .map(|journal| journal.journal_path.clone())
             .collect(),
+        &reapable("prunes"),
         &mut issues,
     )?;
     diagnose_journal_directory(
@@ -5656,6 +5675,7 @@ fn diagnose_state_paths(
             .iter()
             .map(|journal| journal.journal_path.clone())
             .collect(),
+        &reapable("collections"),
         &mut issues,
     )?;
 
@@ -5934,22 +5954,97 @@ fn is_operation_coordination_lock(path: &Path) -> bool {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-/// The one journal directory whose interrupted atomic-write temporaries
-/// `riftri repair` reaps; see `reap_interrupted_journal_temporaries`.
+/// The add-journal directory, whose interrupted atomic-write temporaries
+/// `riftri repair` reaps under each operation's coordination lock; see
+/// `reap_interrupted_journal_temporaries`.
 const REAPABLE_JOURNAL_DIRECTORY: &str = "operations";
 
-/// Whether [`reap_interrupted_journal_temporaries`] covers this directory.
+/// Operation IDs whose lifecycle journal is terminal, per journal directory.
 ///
-/// The reaper is deliberately limited to `operations/`; this keeps the advice
-/// `status` prints from promising a cleanup that never happens.
+/// A terminal journal is never rewritten, so a temporary named for one of
+/// these operations cannot belong to a write still in progress: it is an
+/// orphan of a write that a kill interrupted before the operation finished.
+/// Both `status` advice and the reaper use this one predicate, so the advice
+/// never promises a cleanup that repair does not perform. Temporaries whose
+/// owner is unknown or still pending stay preserved: the first write of a new
+/// operation looks exactly like that.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn reapable_journal_directory(directory: &Path) -> bool {
-    directory.file_name() == Some(OsStr::new(REAPABLE_JOURNAL_DIRECTORY))
+fn finished_lifecycle_operations(
+    removals: &[DecodedRemovalJournal],
+    moves: &[DecodedMoveJournal],
+    compactions: &[DecodedCompactJournal],
+    prunes: &[DecodedPruneJournal],
+    collections: &[DecodedCollectionJournal],
+) -> [(&'static str, HashSet<String>); 5] {
+    fn finished<J>(
+        journals: &[J],
+        terminal: impl Fn(&J) -> bool,
+        id: impl Fn(&J) -> &String,
+    ) -> HashSet<String> {
+        journals
+            .iter()
+            .filter(|journal| terminal(journal))
+            .map(|journal| id(journal).clone())
+            .collect()
+    }
+    [
+        (
+            "removals",
+            finished(
+                removals,
+                |journal| journal.phase == RemoveWorktreePhase::Complete,
+                |journal| &journal.operation_id,
+            ),
+        ),
+        (
+            "moves",
+            finished(
+                moves,
+                |journal| journal.phase == MoveWorktreePhase::Complete,
+                |journal| &journal.operation_id,
+            ),
+        ),
+        (
+            "compactions",
+            finished(
+                compactions,
+                |journal| {
+                    matches!(
+                        journal.phase,
+                        CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                    )
+                },
+                |journal| &journal.operation_id,
+            ),
+        ),
+        (
+            "prunes",
+            finished(
+                prunes,
+                |journal| journal.phase == PruneWorktreesPhase::Complete,
+                |journal| &journal.operation_id,
+            ),
+        ),
+        (
+            "collections",
+            finished(
+                collections,
+                |journal| {
+                    matches!(
+                        journal.phase,
+                        GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
+                    )
+                },
+                |journal| &journal.operation_id,
+            ),
+        ),
+    ]
 }
 
 fn diagnose_journal_directory(
     directory: &Path,
     expected: HashSet<PathBuf>,
+    reapable: &dyn Fn(&str) -> bool,
     issues: &mut Vec<StateDiagnosticIssue>,
 ) -> Result<(), WorktreeError> {
     if !is_real_directory_if_present(directory)? {
@@ -5963,12 +6058,11 @@ fn diagnose_journal_directory(
             // Riftri's own artifacts are not foreign files: an interrupted
             // atomic write is reapable by `riftri repair`, and a coordination
             // lock outliving its journal is expected by design.
-            if interrupted_journal_temporary_owner(&path).is_some() {
-                // Only `operations/` is reaped: it is the one directory whose
-                // per-operation lock makes removal provably safe. Promising
-                // `riftri repair` elsewhere sends the user in a loop, because
-                // repair reports success and leaves the file in place.
-                let advice = if reapable_journal_directory(directory) {
+            if let Some(owner) = interrupted_journal_temporary_owner(&path) {
+                // Promise `riftri repair` only where the reaper provably acts;
+                // anything else would send the user in a loop, because repair
+                // reports success and leaves the file in place.
+                let advice = if reapable(&owner) {
                     "an interrupted Riftri journal write left this temporary file; `riftri repair` removes it"
                 } else {
                     "an interrupted Riftri journal write left this temporary file; it holds no operation and Riftri preserves it"
@@ -6933,7 +7027,57 @@ fn reap_interrupted_journal_temporaries(
     if let Some(path) = reaped.last() {
         sync_parent(path)?;
     }
+    reap_finished_lifecycle_temporaries(state_directory, &mut reaped)?;
     Ok(reaped)
+}
+
+/// Reap the temporaries that interrupted lifecycle journal writes left beside
+/// journals that have since reached a terminal phase. See
+/// `finished_lifecycle_operations` for why this needs no lock.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn reap_finished_lifecycle_temporaries(
+    state_directory: &Path,
+    reaped: &mut Vec<PathBuf>,
+) -> Result<(), WorktreeError> {
+    let finished = finished_lifecycle_operations(
+        &RemovalJournalStore::open(state_directory)
+            .load_all_for_status()?
+            .journals,
+        &MoveJournalStore::open(state_directory)
+            .load_all_for_status()?
+            .journals,
+        &CompactJournalStore::open(state_directory)
+            .load_all_for_status()?
+            .journals,
+        &PruneJournalStore::open(state_directory)
+            .load_all_for_status()?
+            .journals,
+        &CollectionJournalStore::open(state_directory)
+            .load_all_for_status()?
+            .journals,
+    );
+    for (name, operations) in finished {
+        let directory = state_directory.join(name);
+        if operations.is_empty() || !is_real_directory_if_present(&directory)? {
+            continue;
+        }
+        let mut reaped_here = None;
+        for path in child_paths(&directory, "read Riftri journal directory")? {
+            let Some(owner) = interrupted_journal_temporary_owner(&path) else {
+                continue;
+            };
+            if !operations.contains(&owner) || !is_regular_file(&path)? {
+                continue;
+            }
+            remove_file_if_present(&path)?;
+            reaped_here = Some(path.clone());
+            reaped.push(path);
+        }
+        if let Some(path) = reaped_here {
+            sync_parent(&path)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn recover_incomplete_operations(
@@ -12753,11 +12897,12 @@ mod tests {
         );
     }
 
-    /// `repair`'s reaper is deliberately scoped to `operations/`, the one
-    /// journal directory whose per-operation lock makes removal provably safe.
-    /// `status` promised "`riftri repair` removes it" for all six directories,
-    /// so a temporary in any other one was flagged forever while repair kept
-    /// reporting success — advice the user can never satisfy.
+    /// `repair` reaps a temporary only when removal is provably safe: in
+    /// `operations/` under the add's lock, elsewhere only once the owning
+    /// journal is terminal. `status` once promised "`riftri repair` removes it"
+    /// for every directory, so a temporary with no such proof was flagged
+    /// forever while repair kept reporting success. That advice could never
+    /// be satisfied.
     #[test]
     fn journal_temporary_advice_matches_what_repair_actually_reaps() {
         let fixture = tempdir().expect("fixture");
@@ -12802,6 +12947,151 @@ mod tests {
             preserved.exists(),
             "a preserved temporary must stay in place"
         );
+    }
+
+    /// A kill during any lifecycle journal write leaves a temporary beside the
+    /// journal. Once that journal is terminal it is never rewritten, so no
+    /// writer can still own the temporary: repair reaps it, and status says so.
+    /// A temporary whose owner is unknown or still pending stays preserved.
+    #[test]
+    fn repair_reaps_journal_temporaries_of_finished_operations() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let add = |destination: &Path| {
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.to_path_buf(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+        };
+        let moved_from = fixture.path().join("moved-from");
+        let moved_to = fixture.path().join("moved-to");
+        let removed = fixture.path().join("removed");
+        let pending = fixture.path().join("pending");
+        add(&moved_from);
+        add(&removed);
+        add(&pending);
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: moved_from,
+                destination: moved_to,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: removed,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: pending.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(RemoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("leave one removal pending");
+        // A change after intent keeps that removal pending through repair.
+        fs::write(pending.join("tracked.txt"), "changed\n").expect("change pending view");
+
+        // Diagnostics record canonical paths.
+        let state = fs::canonicalize(&state).expect("canonical state directory");
+        let temporary_for = |directory: &str, operation_id: &str| {
+            let path = state
+                .join(directory)
+                .join(format!(".{operation_id}.Qq34Cd.tmp"));
+            fs::write(&path, b"{\"partial\"").expect("write temporary");
+            path
+        };
+        let moves = crate::journal::MoveJournalStore::open(&state)
+            .load_all()
+            .expect("moves");
+        let removals = RemovalJournalStore::open(&state)
+            .load_all()
+            .expect("removals");
+        let finished_removal = removals
+            .iter()
+            .find(|journal| journal.phase == RemoveWorktreePhase::Complete)
+            .expect("a completed removal");
+        let pending_removal = removals
+            .iter()
+            .find(|journal| journal.phase != RemoveWorktreePhase::Complete)
+            .expect("a pending removal");
+        assert_eq!(moves[0].phase, MoveWorktreePhase::Complete);
+        let reapable = [
+            temporary_for("moves", &moves[0].operation_id),
+            temporary_for("removals", &finished_removal.operation_id),
+        ];
+        let preserved = [
+            temporary_for("removals", &pending_removal.operation_id),
+            temporary_for("removals", "remove-op-unknown"),
+        ];
+
+        let report = storage_accounting(&state).expect("status");
+        let advice = |path: &Path| {
+            report
+                .diagnostic_issues
+                .iter()
+                .find(|issue| issue.path == path)
+                .map(|issue| issue.reason.clone())
+                .unwrap_or_else(|| panic!("no diagnostic for {}", path.display()))
+        };
+        for path in &reapable {
+            assert!(
+                advice(path).contains("`riftri repair` removes it"),
+                "{}: {}",
+                path.display(),
+                advice(path)
+            );
+        }
+        for path in &preserved {
+            assert!(
+                !advice(path).contains("`riftri repair` removes it"),
+                "{}: {}",
+                path.display(),
+                advice(path)
+            );
+        }
+
+        let reaped = recover_incomplete_operations(&state)
+            .expect("repair")
+            .reaped_artifacts;
+        for path in &reapable {
+            assert!(reaped.contains(path), "{reaped:?}");
+            assert!(!path.exists(), "{}", path.display());
+        }
+        for path in &preserved {
+            assert!(!reaped.contains(path), "{reaped:?}");
+            assert!(path.exists(), "{}", path.display());
+        }
     }
 
     #[test]

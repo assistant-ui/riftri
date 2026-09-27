@@ -29,6 +29,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri repair` now reaps the journal temporary left by a lifecycle command
+  that was killed mid-write once that operation has finished, instead of
+  preserving it forever. One killed `worktree move`, `remove`, or `compact`
+  previously kept `riftri status` from ever reporting a clean state directory.
+  Temporaries of unknown or still-pending operations stay preserved (#449).
 - A Git index refresh blocked by `index.lock` now reports the lock path and how
   to clear it, instead of `Git command failed (update-index -q --refresh): exit
   code 128`. `-q` silences Git's own explanation, so a lock left by a killed
@@ -38,7 +43,6 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `.riftri-remove-<operation>` sibling, let Git unregister the missing path, and
   only then delete the quarantine. Repair finishes from any interruption point
   instead of refusing a half-deleted tree as "has changes" (#447).
-
 - `riftri repair` recovers an add that was killed while its own internal
   `git worktree add` was running. Git registers a new worktree locked as
   "initializing" and unlocks it only when it finishes, so the interrupted
