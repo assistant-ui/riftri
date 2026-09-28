@@ -16250,6 +16250,8 @@ mod tests {
             &root,
             &["clone", "--quiet", "--bare", "repository", "bare.git"],
         );
+        // A clone does not copy local config; Windows Git defaults autocrlf on.
+        git(&bare, &["config", "core.autocrlf", "false"]);
         let first = root.join("first");
         add_from(&bare, &first, &state);
         assert_eq!(
