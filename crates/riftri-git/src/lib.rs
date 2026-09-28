@@ -2771,6 +2771,14 @@ mod tests {
     #[test]
     fn an_index_refresh_blocked_by_a_stale_lock_names_the_lock() {
         let fixture = RepositoryFixture::committed();
+        // Git takes the lock only when the refresh must rewrite the index, so
+        // make the cached stat data stale; otherwise newer Git succeeds.
+        fs::File::options()
+            .write(true)
+            .open(fixture.path().join("tracked.txt"))
+            .expect("open tracked file")
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .expect("age the tracked file");
         let lock = fixture.path().join(".git/index.lock");
         fs::write(&lock, b"").expect("leave a stale index lock");
 
