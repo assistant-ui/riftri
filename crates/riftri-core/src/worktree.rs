@@ -2420,6 +2420,10 @@ fn remove_worktree_with_mode(
     // its journal after the lookup above.
     let _operation_lock = lock_managed_worktree(&managed, &destination)?;
     revalidate_managed_add_journal(&state_directory, &destination, &managed)?;
+    // Name the worktree exactly as its add journal does: every journal of one
+    // lineage must agree byte for byte, and a request may spell the same path
+    // differently (Unicode normalization on macOS).
+    let destination = managed.destination.clone();
     let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
     let registered = git
         .list_worktrees(&repository_root)?
@@ -2565,6 +2569,10 @@ fn move_worktree_inner(
     // published its journal after the lookup above.
     let _operation_lock = lock_managed_worktree(&managed, &source)?;
     revalidate_managed_add_journal(&state_directory, &source, &managed)?;
+    // Name the worktree exactly as its add journal does: every journal of one
+    // lineage must agree byte for byte, and a request may spell the same path
+    // differently (Unicode normalization on macOS).
+    let source = managed.destination.clone();
     if managed.backend == BackendKind::OverlayFs {
         return Err(WorktreeError::Unsupported(
             "moving an active OverlayFS worktree is not yet supported; remove and recreate the worktree at its new path"
@@ -2720,6 +2728,10 @@ fn compact_worktree_inner(
     // competing removal or move may have claimed the worktree since. Confirm
     // the claim now that no other lifecycle operation can be in flight.
     revalidate_managed_add_journal(&state_directory, &destination, &managed)?;
+    // Name the worktree exactly as its add journal does: every journal of one
+    // lineage must agree byte for byte, and a request may spell the same path
+    // differently (Unicode normalization on macOS).
+    let destination = managed.destination.clone();
     let resolved = git.resolve_revision(&destination, OsStr::new("HEAD"))?;
     verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)?;
     // `verify_compaction_source` proved above that `destination` is one of
@@ -5304,9 +5316,26 @@ fn paths_match(left: &Path, right: &Path) -> bool {
     windows_path_key(left) == windows_path_key(right)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn paths_match(left: &Path, right: &Path) -> bool {
     left == right
+}
+
+/// APFS is normalization-insensitive, and macOS Git registers worktree paths
+/// precomposed (NFC, `core.precomposeunicode`), while the file system keeps
+/// the spelling it was given. Compare composed forms so a worktree named in
+/// decomposed Unicode (NFD), as Finder and many apps write names, is still
+/// recognized as the worktree Git registered. Paths that are not UTF-8 are
+/// compared exactly.
+#[cfg(target_os = "macos")]
+fn paths_match(left: &Path, right: &Path) -> bool {
+    use unicode_normalization::UnicodeNormalization;
+
+    left == right
+        || matches!(
+            (left.to_str(), right.to_str()),
+            (Some(left), Some(right)) if left.nfc().eq(right.nfc())
+        )
 }
 
 #[cfg(target_os = "windows")]
@@ -5577,7 +5606,7 @@ fn find_managed_add_journal(
         .into_iter()
         .filter(|journal| {
             journal.phase == AddWorktreePhase::Active
-                && journal.destination == destination
+                && paths_match(&journal.destination, destination)
                 && !completed.contains(&journal.operation_id)
         })
         .collect::<Vec<_>>();
@@ -16310,6 +16339,49 @@ mod tests {
         assert!(status.diagnostic_issues.is_empty(), "{status:?}");
         assert_eq!(status.active_views, 0);
         drop(fixture);
+    }
+
+    /// macOS Git precomposes path arguments to NFC (`core.precomposeunicode`)
+    /// and registers that spelling, while the file system keeps whatever
+    /// spelling it was given. A worktree added under a decomposed (NFD) name,
+    /// as Finder and many apps produce, was then never found in Git's
+    /// registry: status reported it unregistered and every move or removal
+    /// was refused.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_worktree_named_in_decomposed_unicode_stays_manageable() {
+        let (_fixture, repository, state) = stable_root_fixture();
+        let decomposed = repository.with_file_name("cafe\u{301}");
+        let composed = repository.with_file_name("caf\u{e9}");
+        add_from(&repository, &decomposed, &state);
+
+        let status = storage_accounting(&state).expect("status");
+        assert!(status.diagnostic_issues.is_empty(), "{status:?}");
+        assert_eq!(status.active_views, 1);
+
+        let moved = repository.with_file_name("moved-cafe\u{301}");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: composed,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move by the composed spelling");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove by the decomposed spelling");
+        assert!(!moved.exists());
+        let status = storage_accounting(&state).expect("status after removal");
+        assert!(status.diagnostic_issues.is_empty(), "{status:?}");
     }
 
     #[test]

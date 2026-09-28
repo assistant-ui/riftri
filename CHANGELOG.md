@@ -29,6 +29,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- On macOS, a worktree whose path uses decomposed Unicode (NFD), as Finder and
+  many apps write names, stays manageable. Git registers such paths
+  precomposed, and the byte comparison made `status` report the worktree as
+  unregistered and made `move` and `remove` refuse it. Paths now compare by
+  their composed form on macOS, where APFS treats both spellings as the same
+  file (#489).
 - `riftri repair` re-homes add journals that an older Riftri wrote while the
   add ran inside a linked worktree, once that worktree has been removed. It
   points them at the repository's main worktree, so moving, compacting, and
