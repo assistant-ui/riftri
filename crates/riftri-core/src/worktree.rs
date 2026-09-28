@@ -2913,14 +2913,44 @@ fn add_worktree_inner(
     // fail-closed on anything unreadable, which is what actually prevents a
     // duplicate journal.
     let _ = reconcile_active_add_journals(&git, &state_directory, Some(&destination));
-    if let Some(claimant) = active_add_journals_for_destination(&state_directory, &destination)?
+    // Everything from the claim check to Git's registration of the worktree
+    // runs under the repository's worktree-metadata lock, so two adds of one
+    // destination can never both record intent. Otherwise the loser's rollback
+    // found the winner's registration, took it for its own, and removed it
+    // (#469). Taken only after the reconcile above, which locks it itself.
+    let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
+    if let Some(claimant) = add_journals_claiming_destination(&state_directory, &destination)?
         .into_iter()
         .next()
     {
+        return Err(WorktreeError::InvalidRequest(
+            if claimant.phase == AddWorktreePhase::Active {
+                format!(
+                    "{} is already claimed by active Riftri journal {}; remove that worktree with `riftri worktree remove`, or run `riftri repair` if it no longer exists",
+                    destination.display(),
+                    claimant.operation_id
+                )
+            } else {
+                format!(
+                    "another Riftri add of {} is in progress or was interrupted (journal {}); retry once it finishes, or run `riftri repair --state-dir {}` if it was interrupted",
+                    destination.display(),
+                    claimant.operation_id,
+                    state_directory.display()
+                )
+            },
+        ));
+    }
+    // The destination was validated before the lock was taken; a concurrent
+    // add or plain Git may have used it since.
+    if git
+        .list_worktrees(&repository_root)?
+        .iter()
+        .any(|worktree| paths_match(&worktree.path, &destination))
+        || (fs::symlink_metadata(&destination).is_ok() && !is_empty_real_directory(&destination)?)
+    {
         return Err(WorktreeError::InvalidRequest(format!(
-            "{} is already claimed by active Riftri journal {}; remove that worktree with `riftri worktree remove`, or run `riftri repair` if it no longer exists",
-            destination.display(),
-            claimant.operation_id
+            "{} was taken by another worktree while this add was being prepared",
+            destination.display()
         )));
     }
     let base_directory = state_directory.join("bases/v1").join(repository_cache_id(
@@ -2994,9 +3024,13 @@ fn add_worktree_inner(
         phase: journal.phase,
     });
 
+    let mut metadata_lock = Some(metadata_lock);
     let operation = fail_add_if_requested(journal.phase, fail_after).and_then(|()| {
         perform_add(
             &git,
+            metadata_lock
+                .take()
+                .expect("the metadata lock is handed over once"),
             &store,
             &mut journal,
             &repository_root,
@@ -3012,7 +3046,6 @@ fn add_worktree_inner(
             &compatibility.checkout_config,
             &compatibility.lfs_objects,
             &sparse_directories,
-            &repository.identity.common_git_dir,
             fail_after,
         )
     });
@@ -3043,6 +3076,8 @@ fn add_worktree_inner(
             })
         }
         Err(operation_error) => {
+            // Rollback takes the metadata lock itself.
+            drop(metadata_lock.take());
             if !rollback_on_error {
                 return Err(operation_error);
             }
@@ -3089,6 +3124,7 @@ fn add_worktree_inner(
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn perform_add(
     git: &Git,
+    metadata_lock: File,
     store: &JournalStore,
     journal: &mut JournalRecord,
     repository: &Path,
@@ -3104,7 +3140,6 @@ fn perform_add(
     checkout_config: &[(String, Vec<u8>)],
     lfs_objects: &[GitLfsObject],
     sparse_directories: &[String],
-    common_git_dir: &Path,
     fail_after: Option<AddWorktreePhase>,
 ) -> Result<bool, WorktreeError> {
     let head = match mode {
@@ -3112,7 +3147,6 @@ fn perform_add(
         WorktreeMode::ExistingBranch(branch) => WorktreeHead::ExistingBranch(branch),
         WorktreeMode::Detached => WorktreeHead::Detached,
     };
-    let metadata_lock = acquire_git_worktree_metadata_lock(common_git_dir)?;
     // A new branch is created from the start point exactly as the caller named
     // it, not from the commit it resolved to: Git decides upstream tracking
     // from that name (`branch.autoSetupMerge`, `--track` configuration), and a
@@ -6735,7 +6769,7 @@ fn classify_active_destination(
 /// Active add journals that still claim `destination` and that no completed
 /// removal has retired.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn active_add_journals_for_destination(
+fn add_journals_claiming_destination(
     state_directory: &Path,
     destination: &Path,
 ) -> Result<Vec<DecodedJournal>, WorktreeError> {
@@ -6772,8 +6806,11 @@ fn active_add_journals_for_destination(
     Ok(load
         .journals
         .into_iter()
+        // Every add that has not been rolled back claims its destination, in
+        // flight or interrupted included: repair must be able to trust that a
+        // registration there belongs to that add.
         .filter(|journal| {
-            journal.phase == AddWorktreePhase::Active
+            journal.phase != AddWorktreePhase::RolledBack
                 && paths_match(&journal.destination, destination)
                 && !completed.contains(journal.operation_id.as_str())
         })
@@ -15374,6 +15411,180 @@ mod tests {
             git(&repository, &["worktree", "prune"]);
             add("second").expect("add after pruning the stale registration");
         }
+    }
+
+    fn same_destination_fixture() -> (
+        crate::test_support::WritableTempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        for index in 0..50 {
+            fs::write(repository.join(format!("file-{index}.txt")), "tracked\n")
+                .expect("write file");
+        }
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        (fixture, repository, destination, state)
+    }
+
+    fn detached_add_request(
+        repository: &Path,
+        destination: &Path,
+        state: &Path,
+    ) -> AddWorktreeRequest {
+        AddWorktreeRequest {
+            repository: repository.to_path_buf(),
+            destination: destination.to_path_buf(),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.to_path_buf()),
+            sparse_directories: Vec::new(),
+        }
+    }
+
+    /// Concurrent adds of one destination: a loser's rollback used to find
+    /// the winner's registration, take it for its own, and remove it, even
+    /// after the winner had reported success (#469).
+    #[test]
+    fn concurrent_adds_of_one_destination_keep_the_winner() {
+        for round in 0..3 {
+            let (_fixture, repository, destination, state) = same_destination_fixture();
+            let results = std::thread::scope(|scope| {
+                let handles = (0..6)
+                    .map(|_| {
+                        let request = detached_add_request(&repository, &destination, &state);
+                        scope.spawn(move || add_worktree_inner(request, None, true))
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|handle| handle.join().expect("add thread"))
+                    .collect::<Vec<_>>()
+            });
+
+            let winners = results.iter().filter(|result| result.is_ok()).count();
+            assert_eq!(winners, 1, "round {round}: {results:?}");
+            for error in results.iter().filter_map(|result| result.as_ref().err()) {
+                assert!(
+                    matches!(error, super::WorktreeError::InvalidRequest(_)),
+                    "round {round}: a loser must be refused, not rolled back: {error}"
+                );
+            }
+            assert_eq!(
+                fs::read(destination.join("file-0.txt")).expect("winner intact"),
+                b"tracked\n",
+                "round {round}"
+            );
+            assert!(registered(&repository, &destination), "round {round}");
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(accounting.pending_adds, 0, "round {round}: {accounting:?}");
+            assert!(
+                accounting.diagnostic_issues.is_empty(),
+                "round {round}: {accounting:?}"
+            );
+        }
+    }
+
+    /// An add interrupted before Git registered its worktree still claims the
+    /// destination, so no later add can register that path before `repair`
+    /// has decided what the interrupted one left there.
+    #[test]
+    fn an_interrupted_add_claims_its_destination_until_repair() {
+        let (_fixture, repository, destination, state) = same_destination_fixture();
+        add_worktree_inner(
+            detached_add_request(&repository, &destination, &state),
+            Some(AddWorktreePhase::IntentRecorded),
+            false,
+        )
+        .expect_err("simulate a crash right after intent");
+
+        let error = add_worktree_inner(
+            detached_add_request(&repository, &destination, &state),
+            None,
+            true,
+        )
+        .expect_err("the interrupted add still claims the destination");
+        let message = error.to_string();
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{message}"
+        );
+        assert!(message.contains("riftri repair"), "{message}");
+        assert!(!destination.exists(), "nothing may be created: {message}");
+
+        let repaired = recover_incomplete_operations(&state).expect("repair");
+        assert!(repaired.errors.is_empty(), "{repaired:?}");
+        add_worktree_inner(
+            detached_add_request(&repository, &destination, &state),
+            None,
+            true,
+        )
+        .expect("add after repair");
+    }
+
+    /// A base no active worktree references but an unfinished add journal
+    /// still claims must be reported by both `gc` and `status`, not silently
+    /// dropped from the plan. (Moved from the integration suite: racing adds
+    /// no longer leave such a journal behind (#469), so an add interrupted
+    /// once its base is ready provides it instead.)
+    #[test]
+    fn collection_names_the_journal_that_protects_an_unreferenced_base() {
+        let (_fixture, repository, destination, state) = same_destination_fixture();
+        add_worktree_inner(
+            detached_add_request(&repository, &destination, &state),
+            Some(AddWorktreePhase::BaseReady),
+            false,
+        )
+        .expect_err("interrupt the add once its base is ready");
+
+        let accounting = storage_accounting(&state).expect("account before collection");
+        assert_eq!(accounting.bases.len(), 1);
+        assert_eq!(accounting.bases[0].reference_count, 0);
+        assert!(
+            accounting
+                .diagnostic_issues
+                .iter()
+                .any(|issue| issue.reason.contains("still claims it")),
+            "status must explain the retained base: {:?}",
+            accounting.diagnostic_issues
+        );
+
+        let report = super::garbage_collect(&state, true).expect("collect with a protected base");
+        assert!(report.candidates.is_empty());
+        assert!(report.collected.is_empty());
+        assert!(
+            !report.skipped_protected.is_empty(),
+            "gc must account for the bases it refuses to collect"
+        );
+        let base_path = accounting.bases[0].path.clone();
+        assert!(
+            report
+                .skipped_protected
+                .iter()
+                .all(|protection| protection.base_path == base_path
+                    && !protection.operation_id.is_empty()),
+            "every skip must name the journal responsible: {:?}",
+            report.skipped_protected
+        );
+
+        // Once repair rolls the interrupted add back, the base is collectible.
+        recover_incomplete_operations(&state).expect("repair before recollecting");
+        let report = super::garbage_collect(&state, true).expect("collect after repair");
+        assert_eq!(report.skipped_protected.len(), 0);
+        assert_eq!(report.collected, [base_path]);
     }
 
     #[test]

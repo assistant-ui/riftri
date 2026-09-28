@@ -20,7 +20,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use riftri_core::{
-    AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree, garbage_collect,
+    AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree,
     recover_incomplete_operations, remove_worktree, storage_accounting,
 };
 
@@ -198,11 +198,12 @@ fn repair_reports_a_relocated_worktree_without_retiring_or_deleting_it() {
     assert!(!original.exists());
 }
 
-/// Defect 3: the losers of a racing add are stuck in `rollback-pending` and
-/// correctly refuse to delete the winner's tree. Repair must be able to retire
-/// them anyway, without touching the winner.
+/// Defect 3: the losers of a racing add were left in `rollback-pending`, and
+/// with a matching registration a loser's rollback could delete the winner
+/// (#469). Losers are now refused before recording anything, so repair has
+/// nothing to do and the winner is untouched.
 #[test]
-fn repair_retires_racing_add_losers_without_touching_the_winner() {
+fn racing_add_losers_leave_nothing_for_repair_and_keep_the_winner() {
     let fixture = tempdir().expect("fixture directory");
     let root = fixture.path().canonicalize().expect("resolve fixture");
     let repository = root.join("repository");
@@ -241,7 +242,7 @@ fn repair_retires_racing_add_losers_without_touching_the_winner() {
 
     let report = recover_incomplete_operations(&state).expect("repair after the race");
     assert!(report.errors.is_empty(), "{:?}", report.errors);
-    assert_eq!(report.recovered, racers - 1);
+    assert_eq!(report.recovered, 0, "losers must not leave journals behind");
 
     // Idempotent: a second pass finds nothing left to do.
     let repeated = recover_incomplete_operations(&state).expect("repeat repair after the race");
@@ -267,99 +268,6 @@ fn repair_retires_racing_add_losers_without_touching_the_winner() {
         .filter_map(|path| PathBuf::from(path).canonicalize().ok())
         .any(|path| path == destination);
     assert!(winner_listed, "{registered}");
-}
-
-/// Defect 4: a base no active worktree references but an unfinished journal
-/// still claims must be reported by both `gc` and `status`, not silently
-/// dropped from the plan.
-#[test]
-fn collection_names_the_journal_that_protects_an_unreferenced_base() {
-    let fixture = tempdir().expect("fixture directory");
-    let root = fixture.path().canonicalize().expect("resolve fixture");
-    let repository = root.join("repository");
-    let state = root.join("state");
-    let destination = root.join("contested");
-    create_repository(&repository);
-
-    let racers = 2;
-    let barrier = Arc::new(Barrier::new(racers));
-    let handles = (0..racers)
-        .map(|index| {
-            let barrier = Arc::clone(&barrier);
-            let repository = repository.clone();
-            let state = state.clone();
-            let destination = destination.clone();
-            thread::spawn(move || {
-                barrier.wait();
-                add_worktree(AddWorktreeRequest {
-                    repository,
-                    destination,
-                    revision: OsString::from("HEAD"),
-                    mode: WorktreeMode::NewBranch(OsString::from(format!("feature/gc-{index}"))),
-                    state_dir: Some(state),
-                    sparse_directories: Vec::new(),
-                })
-                .is_ok()
-            })
-        })
-        .collect::<Vec<_>>();
-    let winners = handles
-        .into_iter()
-        .map(|handle| handle.join().expect("racing add thread"))
-        .filter(|won| *won)
-        .count();
-    assert_eq!(winners, 1);
-
-    remove_worktree(RemoveWorktreeRequest {
-        repository: repository.clone(),
-        destination: destination.clone(),
-        state_dir: Some(state.clone()),
-    })
-    .expect("remove the winning worktree");
-
-    // No active view references the base now, but the losing journal does.
-    let accounting = storage_accounting(&state).expect("account before collection");
-    assert_eq!(accounting.bases.len(), 1);
-    assert_eq!(accounting.bases[0].reference_count, 0);
-    let explained = accounting
-        .diagnostic_issues
-        .iter()
-        .any(|issue| issue.reason.contains("still claims it"));
-    assert!(
-        explained,
-        "status must explain the retained base: {:?}",
-        accounting.diagnostic_issues
-    );
-
-    let report = garbage_collect(&state, true).expect("collect with a protected base");
-    assert!(report.candidates.is_empty());
-    assert!(report.collected.is_empty());
-    assert!(
-        !report.skipped_protected.is_empty(),
-        "gc must account for the bases it refuses to collect"
-    );
-    let base_path = accounting.bases[0].path.clone();
-    assert!(
-        report
-            .skipped_protected
-            .iter()
-            .all(|protection| protection.base_path == base_path),
-        "{:?}",
-        report.skipped_protected
-    );
-    assert!(
-        report
-            .skipped_protected
-            .iter()
-            .all(|protection| !protection.operation_id.is_empty()),
-        "every skip must name the journal responsible"
-    );
-
-    // Once repair retires the loser, the same base becomes collectible.
-    recover_incomplete_operations(&state).expect("repair before recollecting");
-    let report = garbage_collect(&state, true).expect("collect after repair");
-    assert_eq!(report.skipped_protected.len(), 0);
-    assert_eq!(report.collected, [base_path]);
 }
 
 /// Defect 5: Riftri's own interrupted atomic-write temporaries must be reaped

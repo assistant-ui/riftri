@@ -279,6 +279,16 @@ intent-recorded
 Every incomplete forward state may transition to `rollback-pending`, followed
 by `rolled-back`. `active` and `rolled-back` are terminal for an add operation.
 
+From its destination claim check until `git-metadata-created` is recorded, an
+add holds the repository's Git worktree-metadata lock. Under that lock it
+refuses a destination that another add journal claims, including one in flight
+or interrupted, or that Git registers or something already occupies. It then
+records `intent-recorded` and lets Git register the worktree. So at most one
+unfinished add journal names a destination. A registration found there by
+rollback or repair at `intent-recorded` can belong only to that add or to a
+command run outside Riftri, never to a competing Riftri add, whose worktree an
+earlier design could remove (#469).
+
 Rollback checks staged index changes separately from working-file bytes,
 including intent-to-add and conflicted entries. An existing index is never
 reset to make a failed creation appear clean. If the index is absent and the
