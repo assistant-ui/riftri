@@ -558,14 +558,11 @@ pub fn validate_new_worktree_destination(
     validate_lifecycle_git_environment()?;
     let git = Git::default();
     let repository = git.inspect_repository(repository)?;
-    if repository.is_bare {
-        return Err(WorktreeError::Unsupported(
-            "bare repositories are not supported by optimized checkout".to_owned(),
-        ));
-    }
-    let repository_root = repository.root.clone().ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-    })?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
     let destination = normalize_new_destination(destination, DestinationRules::WorktreeAdd)?;
     let resolved = resolve_requested_revision(&git, &repository_root, revision)?;
     let compatibility = validate_resolved_compatibility(
@@ -668,6 +665,18 @@ fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// The directory Riftri runs Git in for a repository: its working-tree root,
+/// or the Git directory of a bare repository. Git's worktree, ref, and config
+/// commands work from either, and no lifecycle operation needs a main working
+/// tree, so a bare repository with linked worktrees is managed like any other.
+pub(crate) fn git_command_root(repository: &riftri_git::RepositoryInfo) -> Option<&Path> {
+    repository.root.as_deref().or_else(|| {
+        repository
+            .is_bare
+            .then_some(repository.identity.common_git_dir.as_path())
+    })
+}
+
 /// The directory lifecycle commands run Git from and journals record for a
 /// repository: its main worktree, which Git lists first (a bare repository's
 /// own directory). The worktree a command was run from can be the one being
@@ -690,6 +699,16 @@ fn main_worktree_root(inventory: &[riftri_git::WorktreeInfo], live_root: &Path) 
         .unwrap_or_else(|| live_root.to_path_buf())
 }
 
+/// The default state directory of the repository at `repository`,
+/// `<common-git-dir>/riftri`, for bare repositories as well.
+pub fn default_state_directory(repository: &Path) -> Result<PathBuf, WorktreeError> {
+    Ok(Git::default()
+        .inspect_repository(repository)?
+        .identity
+        .common_git_dir
+        .join("riftri"))
+}
+
 /// Return whether `destination` is an active Riftri-managed worktree in any
 /// state directory registered by the repository.
 pub fn is_managed_worktree(repository: &Path, destination: &Path) -> Result<bool, WorktreeError> {
@@ -706,8 +725,8 @@ pub fn forget_missing_state_directory(
     validate_lifecycle_git_environment()?;
     let git = Git::default();
     let repository = git.inspect_repository(repository)?;
-    let repository_root = repository.root.as_deref().ok_or_else(|| {
-        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    let repository_root = git_command_root(&repository).ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
     })?;
     let state_directory = absolute_path(state_directory)?;
     match fs::symlink_metadata(&state_directory) {
@@ -811,8 +830,8 @@ fn repository_state_directories_with_git(
     git: &Git,
     repository: &riftri_git::RepositoryInfo,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
-    let repository_root = repository.root.as_deref().ok_or_else(|| {
-        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    let repository_root = git_command_root(repository).ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
     })?;
     let default = repository.identity.common_git_dir.join("riftri");
     let mut directories = Vec::new();
@@ -919,8 +938,8 @@ pub fn worktree_inventory_across_states(
 ) -> Result<AllStatesWorktreeInventory, WorktreeError> {
     let git = Git::default();
     let repository_info = git.inspect_repository(repository)?;
-    let repository_root = repository_info.root.as_deref().ok_or_else(|| {
-        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    let repository_root = git_command_root(&repository_info).ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
     })?;
     let query_identity = repository_info.identity.common_git_dir.clone();
 
@@ -1052,8 +1071,8 @@ fn register_state_directory(
     repository: &riftri_git::RepositoryInfo,
     state_directory: &Path,
 ) -> Result<(), WorktreeError> {
-    let repository_root = repository.root.as_deref().ok_or_else(|| {
-        WorktreeError::InvalidRequest("bare repositories have no Riftri state locations".to_owned())
+    let repository_root = git_command_root(repository).ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
     })?;
     let default = repository.identity.common_git_dir.join("riftri");
     if resolve_real_state_directory_if_present(&default)?.as_deref() == Some(state_directory) {
@@ -2377,14 +2396,11 @@ fn remove_worktree_with_mode(
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
     let git = Git::default();
     let repository = git.inspect_repository(&request.repository)?;
-    if repository.is_bare {
-        return Err(WorktreeError::Unsupported(
-            "bare repositories do not have removable linked worktree views".to_owned(),
-        ));
-    }
-    let repository_root = repository.root.ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-    })?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
     let requested_state = request
         .state_dir
@@ -2523,14 +2539,11 @@ fn move_worktree_inner(
 ) -> Result<MoveWorktreeResult, WorktreeError> {
     let git = Git::default();
     let repository = git.inspect_repository(&request.repository)?;
-    if repository.is_bare {
-        return Err(WorktreeError::Unsupported(
-            "bare repositories do not have movable linked worktree views".to_owned(),
-        ));
-    }
-    let repository_root = repository.root.ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-    })?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
     let requested_state = request
         .state_dir
@@ -2631,14 +2644,11 @@ fn compact_worktree_inner(
 ) -> Result<CompactWorktreeResult, WorktreeError> {
     let git = Git::default();
     let repository = git.inspect_repository(&request.repository)?;
-    if repository.is_bare {
-        return Err(WorktreeError::Unsupported(
-            "bare repositories do not have compactable worktree views".to_owned(),
-        ));
-    }
-    let repository_root = repository.root.ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-    })?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
     let requested_state = request
         .state_dir
@@ -2843,14 +2853,11 @@ fn prune_worktrees_inner(
 ) -> Result<PruneWorktreesResult, WorktreeError> {
     let git = Git::default();
     let repository = git.inspect_repository(&request.repository)?;
-    if repository.is_bare {
-        return Err(WorktreeError::Unsupported(
-            "bare repositories do not have linked worktree views to prune".to_owned(),
-        ));
-    }
-    let repository_root = repository.root.ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-    })?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
@@ -2899,14 +2906,11 @@ fn add_worktree_inner(
 ) -> Result<AddWorktreeResult, WorktreeError> {
     let git = Git::default();
     let repository = git.inspect_repository(&request.repository)?;
-    if repository.is_bare {
-        return Err(WorktreeError::Unsupported(
-            "bare repositories are not supported by optimized checkout".to_owned(),
-        ));
-    }
-    let repository_root = repository.root.clone().ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-    })?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
     let destination =
         normalize_new_destination(&request.destination, DestinationRules::WorktreeAdd)?;
     let resolved = resolve_requested_revision(&git, &repository_root, &request.revision)?;
@@ -16228,6 +16232,84 @@ mod tests {
             .expect("journal kept")
             .repository;
         assert_eq!(recorded, repository.with_file_name("gone"));
+    }
+
+    /// `git clone --bare` followed by `git worktree add` from the bare
+    /// directory is a common layout. Git's worktree commands all work there,
+    /// and Riftri already managed the same repository from its linked
+    /// worktrees, but refused every lifecycle command run from the bare
+    /// directory itself.
+    #[test]
+    fn a_bare_repository_manages_its_worktrees_from_the_bare_directory() {
+        let (fixture, source, _state) = stable_root_fixture();
+        let root = source.parent().unwrap().to_path_buf();
+        let bare = root.join("bare.git");
+        let state = bare.join("riftri");
+        // Relative paths: Git cannot take the verbatim `\\?\` form on Windows.
+        git(
+            &root,
+            &["clone", "--quiet", "--bare", "repository", "bare.git"],
+        );
+        // A clone does not copy local config; Windows Git defaults autocrlf on.
+        git(&bare, &["config", "core.autocrlf", "false"]);
+        let first = root.join("first");
+        add_from(&bare, &first, &state);
+        assert_eq!(
+            fs::read(first.join("nested/tracked.txt")).expect("view materialized"),
+            b"tracked\n"
+        );
+        let recorded = JournalStore::open(&state).load_all().expect("journals")[0]
+            .repository
+            .clone();
+        assert!(super::paths_match(&recorded, &bare), "{recorded:?}");
+
+        let moved = root.join("first-moved");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: bare.clone(),
+                source: first,
+                destination: moved.clone(),
+                state_dir: None,
+            },
+            None,
+        )
+        .expect("move from the bare directory");
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: bare.clone(),
+                destination: moved.clone(),
+                state_dir: None,
+            },
+            None,
+        )
+        .expect("compact from the bare directory");
+        // Managed from inside a linked worktree as well.
+        let second = root.join("second");
+        add_from(&moved, &second, &state);
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: moved.clone(),
+                destination: second.clone(),
+                state_dir: None,
+            },
+            None,
+        )
+        .expect("remove from inside a linked worktree");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: bare.clone(),
+                destination: moved.clone(),
+                state_dir: None,
+            },
+            None,
+        )
+        .expect("remove from the bare directory");
+
+        assert!(!moved.exists() && !second.exists());
+        let status = storage_accounting(&state).expect("status");
+        assert!(status.diagnostic_issues.is_empty(), "{status:?}");
+        assert_eq!(status.active_views, 0);
+        drop(fixture);
     }
 
     #[test]

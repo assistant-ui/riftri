@@ -1221,12 +1221,13 @@ fn a_refused_add_into_missing_parents_creates_nothing() {
     assert!(!state.exists());
 }
 
-/// Commands that need a working tree, run in a bare repository, are refused
-/// for a reason retrying cannot change. They were `command-failed`,
-/// operational with unknown cleanup, and `gc` and `repair` suggested
-/// `riftri status` — which fails the same way (#425).
+/// A bare repository has no working tree, but inspecting and repairing its
+/// Riftri state never needs one: `status`, `gc`, `repair`, and `worktree list`
+/// work there, as the worktree lifecycle commands do. Only enabling Git
+/// interception still requires a working tree, and that refusal stays a
+/// policy receipt with no follow-up command (#425).
 #[test]
-fn a_bare_repository_is_a_policy_refusal_with_no_follow_up_command() {
+fn a_bare_repository_is_inspected_and_only_activation_is_refused() {
     let fixture = tempfile::tempdir().expect("fixture directory");
     let bare = fixture.path().join("bare.git");
     std::fs::create_dir(&bare).expect("create bare repository directory");
@@ -1238,13 +1239,25 @@ fn a_bare_repository_is_a_policy_refusal_with_no_follow_up_command() {
         &["repair"][..],
         &["worktree", "list"][..],
     ] {
-        let (receipt, exit_code) = riftri_json_error(&bare, arguments);
-        assert_eq!(exit_code, Some(3), "{arguments:?}");
-        assert_eq!(receipt["code"], "bare-repository", "{arguments:?}");
-        assert_eq!(receipt["category"], "policy", "{arguments:?}");
-        assert_eq!(receipt["cleanup"], "not-needed", "{arguments:?}");
-        assert!(receipt["nextCommand"].is_null(), "{arguments:?}: {receipt}");
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .arg("--json-errors")
+            .args(arguments)
+            .current_dir(&bare)
+            .output()
+            .expect("run Riftri in a bare repository");
+        assert!(
+            output.status.success(),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
+
+    let (receipt, exit_code) = riftri_json_error(&bare, &["enable"]);
+    assert_eq!(exit_code, Some(3));
+    assert_eq!(receipt["code"], "bare-repository");
+    assert_eq!(receipt["category"], "policy");
+    assert_eq!(receipt["cleanup"], "not-needed");
+    assert!(receipt["nextCommand"].is_null(), "{receipt}");
 }
 
 /// A `--state-dir` that names a regular file or a symbolic link is a caller

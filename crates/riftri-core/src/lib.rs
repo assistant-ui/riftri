@@ -139,7 +139,7 @@ pub use worktree::{
     ProtectedBase, PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
     RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue, StateDirectorySource,
     StateWorktreeInventory, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
-    WorktreeMode, add_worktree, compact_worktree, force_remove_worktree,
+    WorktreeMode, add_worktree, compact_worktree, default_state_directory, force_remove_worktree,
     forget_missing_state_directory, garbage_collect, is_managed_worktree, move_worktree,
     prune_worktrees, recover_incomplete_operations, recovery_pending_error, remove_worktree,
     storage_accounting, validate_new_worktree_destination, worktree_inventory_across_states,
@@ -572,10 +572,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
                 .unwrap_or(false)
         });
     let repository_compatibility = match repository_check.value.as_ref() {
-        Some(repository) if repository.is_bare => {
-            Diagnostic::failure("bare repositories are not supported by optimized checkout")
-        }
-        Some(repository) => match repository.root.as_deref() {
+        Some(repository) => match worktree::git_command_root(repository) {
             Some(root) if repository.head_commit.is_some() => {
                 match worktree::inspect_repository_compatibility(
                     &git,
@@ -588,7 +585,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
                 }
             }
             Some(_) => Diagnostic::failure("repository HEAD is unborn; commit a tree first"),
-            None => Diagnostic::failure("Git did not report a working-tree root"),
+            None => Diagnostic::failure("Git did not report a repository directory"),
         },
         None => Diagnostic::failure("repository inspection did not succeed"),
     };
@@ -652,11 +649,17 @@ fn destination_readiness(
             remedy: "Run `riftri enable` from this repository; activation remains opt-in one repository at a time."
                 .to_owned(),
         }),
-        None if repository.error.is_none() => blockers.push(DestinationReadinessBlocker {
+        // A bare repository offers no transparent interception, but explicit
+        // `riftri worktree add` works there, so enablement blocks nothing.
+        None if repository.error.is_none()
+            && !repository.value.as_ref().is_some_and(|info| info.is_bare) =>
+        {
+            blockers.push(DestinationReadinessBlocker {
             kind: "repository-activation",
             explanation: "repository-local activation could not be determined".to_owned(),
             remedy: "Run `riftri enable` from an existing non-bare Git worktree.".to_owned(),
-        }),
+        })
+        }
         Some(true) | None => {}
     }
 
@@ -724,7 +727,7 @@ fn destination_readiness(
     let repository_root = repository
         .value
         .as_ref()
-        .and_then(|info| info.root.as_deref());
+        .and_then(|info| worktree::git_command_root(info));
     let next_command = match status {
         DestinationReadinessStatus::Ready => repository_root.and_then(|root| {
             let destination = shell::shell_quoted_path(destination)?;

@@ -688,6 +688,19 @@ process output retain their existing contracts. `--plain`, `--no-animation`,
 and `NO_COLOR` provide explicit accessibility and presentation controls. There
 is no state migration and no new activation or shell-profile behavior.
 
+### D042: bare repositories are managed like any other
+
+`git clone --bare` followed by `git worktree add` from the bare directory is a
+common layout, and nothing in a worktree lifecycle needs a main working tree:
+Git's worktree, ref, and config commands all run from the bare directory.
+Riftri already managed such a repository from its linked worktrees, so the
+refusal only depended on where a command was run. Lifecycle commands, `status`,
+`gc`, `repair`, and `doctor` therefore run Git from the working-tree root or,
+for a bare repository, from its Git directory, and journals record that
+directory, the first entry of `git worktree list`, as the repository.
+Repository-local Git interception (`riftri enable`) still requires a working
+tree and keeps the `bare-repository` policy receipt.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

@@ -1644,10 +1644,7 @@ fn resolve_state_directory(repository: &Path, state_directory: Option<PathBuf>) 
             }
             Ok(state_directory)
         }
-        None => {
-            let activation = riftri_core::repository_activation(repository)?;
-            Ok(activation.common_git_dir.join("riftri"))
-        }
+        None => Ok(riftri_core::default_state_directory(repository)?),
     }
 }
 
