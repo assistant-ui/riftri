@@ -1981,15 +1981,14 @@ impl Git {
             .map_err(|source| self.start_error(path, source))
     }
 
-    /// The operating system reports a missing working directory as a missing
-    /// program, so a spawn failure there must not blame the Git executable.
+    /// A spawn fails when its working directory is missing, which Unix reports
+    /// as a missing program and Windows as an invalid directory name. Either
+    /// way the directory is the cause, so the Git executable is not blamed.
     fn start_error(&self, path: Option<&Path>, source: std::io::Error) -> GitError {
         match path {
-            Some(path) if source.kind() == std::io::ErrorKind::NotFound && !path.is_dir() => {
-                GitError::WorkingDirectoryMissing {
-                    path: path.to_path_buf(),
-                }
-            }
+            Some(path) if !path.is_dir() => GitError::WorkingDirectoryMissing {
+                path: path.to_path_buf(),
+            },
             _ => GitError::Start {
                 command: self.command.clone(),
                 source,
