@@ -5274,11 +5274,23 @@ pub(crate) fn planned_destination_parent(destination: &Path) -> Result<PathBuf, 
                     std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                if fs::symlink_metadata(existing).is_ok() {
-                    return Err(WorktreeError::InvalidRequest(format!(
-                        "worktree parent path contains a dangling symbolic link: {}",
-                        existing.display()
-                    )));
+                #[cfg(test)]
+                crate::test_hooks::fire(
+                    crate::test_hooks::FilesystemRacePoint::DestinationParentProbe,
+                    existing,
+                );
+                if let Ok(entry) = fs::symlink_metadata(existing) {
+                    // Something exists here after all. Only a link that still
+                    // resolves to nothing is dangling; anything else appeared
+                    // since the probe above (a concurrent add creating its
+                    // state directory, say), so look at it again.
+                    if entry.file_type().is_symlink() && fs::metadata(existing).is_err() {
+                        return Err(WorktreeError::InvalidRequest(format!(
+                            "worktree parent path contains a dangling symbolic link: {}",
+                            existing.display()
+                        )));
+                    }
+                    continue;
                 }
                 // `..` after a directory that does not exist yet cannot be
                 // resolved without creating that directory first; refuse it
@@ -16613,6 +16625,26 @@ mod tests {
         let accounting = storage_accounting(&state).expect("status");
         assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
         assert!(accounting.bases.is_empty(), "{accounting:?}");
+    }
+
+    /// A directory created by a concurrent add between the two probes was
+    /// taken for a dangling symbolic link, failing that add at random.
+    #[test]
+    fn a_parent_created_concurrently_is_not_a_dangling_link() {
+        let fixture = tempdir().expect("fixture");
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let appearing = root.join("state");
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::DestinationParentProbe,
+            |path| {
+                fs::create_dir(path).expect("create the parent concurrently");
+            },
+        );
+
+        let planned = super::planned_destination_parent(&appearing.join("child"))
+            .expect("a real directory appearing concurrently is fine");
+
+        assert_eq!(planned, appearing);
     }
 
     #[test]

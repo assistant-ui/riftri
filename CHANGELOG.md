@@ -29,6 +29,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Concurrent adds sharing a new state directory no longer fail at random with
+  "worktree parent path contains a dangling symbolic link" when another add
+  creates that directory between two probes (#498).
 - `riftri worktree add` no longer aborts with a stack overflow on a tree more
   than about 120 directories deep. The base integrity hash kept a 64 KiB read
   buffer in every recursion frame. The hashed bytes are unchanged, so existing
