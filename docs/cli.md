@@ -455,11 +455,15 @@ worktrees with local changes are refused unless `-f, --force` is given, which
 discards current changes only after recording an exact recovery snapshot. A
 forced removal asks for confirmation on a terminal; `--yes` skips that prompt
 and requires `--force`.
+A worktree locked with `git worktree lock` is refused, even with `--force`,
+before anything is recorded. Run `git worktree unlock` first.
 
 ### `riftri worktree move [OPTIONS] <SOURCE> <DESTINATION>`
 
 Move a Riftri-managed linked worktree with recoverable metadata updates.
 `DESTINATION` must be on the same filesystem volume.
+Like `git worktree move`, it refuses a locked worktree before recording
+anything.
 
 ### `riftri worktree compact [OPTIONS] <PATH>`
 

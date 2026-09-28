@@ -171,8 +171,8 @@ fn pending_move_receipts_require_repair_with_the_state_directory() {
 
     // A move that Git rejects mid-flight leaves a durable pending move
     // journal, exactly as an interrupted process would.
-    git(&repository, &["worktree", "lock", source.to_str().unwrap()]);
-    let (_, exit_code) = riftri_json_error(
+    let failing_git = git_failing_worktree_subcommand(fixture.path(), "move");
+    let (_, exit_code) = riftri_json_error_with_git(
         &repository,
         &[
             "worktree",
@@ -182,12 +182,9 @@ fn pending_move_receipts_require_repair_with_the_state_directory() {
             "--state-dir",
             state.to_str().unwrap(),
         ],
+        &failing_git,
     );
     assert_ne!(exit_code, Some(0));
-    git(
-        &repository,
-        &["worktree", "unlock", source.to_str().unwrap()],
-    );
 
     // Every lifecycle command blocked by the pending move must report the
     // recovery obligation, not a generic policy refusal (guards from #178).
@@ -255,12 +252,8 @@ fn pending_removal_receipts_require_repair_with_the_state_directory() {
     init_repository_with_commit(&repository);
     add_managed_worktree(&repository, &worktree, &state);
 
-    // Git refuses to remove a locked worktree, stranding the removal journal
-    // after its intent was durably recorded.
-    git(
-        &repository,
-        &["worktree", "lock", worktree.to_str().unwrap()],
-    );
+    // A Git failure after the intent was durably recorded strands the
+    // removal journal, exactly as an interrupted process would.
     let remove = [
         "worktree",
         "remove",
@@ -268,12 +261,9 @@ fn pending_removal_receipts_require_repair_with_the_state_directory() {
         "--state-dir",
         state.to_str().unwrap(),
     ];
-    let (_, exit_code) = riftri_json_error(&repository, &remove);
+    let failing_git = git_failing_worktree_subcommand(fixture.path(), "remove");
+    let (_, exit_code) = riftri_json_error_with_git(&repository, &remove, &failing_git);
     assert_ne!(exit_code, Some(0));
-    git(
-        &repository,
-        &["worktree", "unlock", worktree.to_str().unwrap()],
-    );
 
     let (receipt, exit_code) = riftri_json_error(&repository, &remove);
     assert_eq!(exit_code, Some(1));
@@ -668,11 +658,58 @@ fn git(repository: &std::path::Path, arguments: &[&str]) {
     assert!(status.success(), "git {arguments:?} failed");
 }
 
+/// A Git stand-in that fails `git worktree <subcommand>` like a Git refusal
+/// and passes every other command to the real Git.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn git_failing_worktree_subcommand(
+    directory: &std::path::Path,
+    subcommand: &str,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let wrapper = directory.join(format!("git-failing-worktree-{subcommand}"));
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = {subcommand} ]; then\n    echo 'fatal: injected worktree {subcommand} failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec git \"$@\"\n"
+        ),
+    )
+    .expect("write failing Git stand-in");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("mark Git stand-in executable");
+    wrapper
+}
+
 fn riftri_json_error(
     current_directory: &std::path::Path,
     arguments: &[&str],
 ) -> (serde_json::Value, Option<i32>) {
-    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+    run_riftri_json_error(
+        Command::new(env!("CARGO_BIN_EXE_riftri")),
+        current_directory,
+        arguments,
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn riftri_json_error_with_git(
+    current_directory: &std::path::Path,
+    arguments: &[&str],
+    git: &std::path::Path,
+) -> (serde_json::Value, Option<i32>) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_riftri"));
+    command
+        .env("RIFTRI_SHIM_ACTIVE", "1")
+        .env("RIFTRI_REAL_GIT", git);
+    run_riftri_json_error(command, current_directory, arguments)
+}
+
+fn run_riftri_json_error(
+    mut command: Command,
+    current_directory: &std::path::Path,
+    arguments: &[&str],
+) -> (serde_json::Value, Option<i32>) {
+    let output = command
         .arg("--json-errors")
         .args(arguments)
         .current_dir(current_directory)

@@ -29,6 +29,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri worktree remove` (with or without `--force`) and `riftri worktree
+  move` now refuse a worktree locked with `git worktree lock` before recording
+  anything, naming the lock reason and `git worktree unlock`. Previously Git
+  refused only after Riftri had journaled its intent, and the pending journal
+  blocked every later command on that worktree until `riftri repair` (#460).
 - `riftri repair` also reaps the intent a removal, move, or compaction was
   writing when it was killed before publishing it. Such an operation never
   started, but its complete temporary record was previously preserved forever.
