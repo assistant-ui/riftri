@@ -16245,15 +16245,10 @@ mod tests {
         let root = source.parent().unwrap().to_path_buf();
         let bare = root.join("bare.git");
         let state = bare.join("riftri");
+        // Relative paths: Git cannot take the verbatim `\\?\` form on Windows.
         git(
             &root,
-            &[
-                "clone",
-                "--quiet",
-                "--bare",
-                source.to_str().unwrap(),
-                bare.to_str().unwrap(),
-            ],
+            &["clone", "--quiet", "--bare", "repository", "bare.git"],
         );
         let first = root.join("first");
         add_from(&bare, &first, &state);
