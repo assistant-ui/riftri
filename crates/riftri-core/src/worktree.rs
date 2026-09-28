@@ -9455,19 +9455,30 @@ fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
                     "OverlayFS snapshot entry changed type".to_owned(),
                 ));
             }
-            let mut buffer = [0; 64 * 1024];
-            loop {
-                let count = file
-                    .read(&mut buffer)
-                    .map_err(|source| io("read OverlayFS snapshot file", path, source))?;
-                if count == 0 {
-                    break;
-                }
-                digest.update(&buffer[..count]);
-            }
+            read_into_digest(&mut file, path, digest)?;
         }
         // Special entries such as kernel whiteouts are represented by metadata;
         // never open a FIFO or device while inspecting the upper layer.
+        Ok(())
+    }
+    // Out of line with a heap buffer: `visit` recurses once per directory
+    // level, and a 64 KiB stack buffer in every frame overflowed deep trees.
+    #[inline(never)]
+    fn read_into_digest(
+        file: &mut fs::File,
+        path: &Path,
+        digest: &mut Sha256,
+    ) -> Result<(), WorktreeError> {
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let count = file
+                .read(&mut buffer)
+                .map_err(|source| io("read OverlayFS snapshot file", path, source))?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
         Ok(())
     }
     let mut digest = Sha256::new();
