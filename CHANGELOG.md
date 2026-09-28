@@ -29,6 +29,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri worktree add` from an orphaned branch now says `HEAD is on branch
+  <name>, which has no commits yet` instead of claiming that the whole
+  repository has no commits (#479).
 - Concurrent `riftri worktree add` calls for the same path can no longer
   delete the one that won. Each loser's rollback used to take the winner's
   registration for its own and remove it, even after the winner had reported

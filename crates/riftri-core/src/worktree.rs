@@ -4090,17 +4090,34 @@ fn resolve_requested_revision(
     repository: &Path,
     revision: &OsStr,
 ) -> Result<ResolvedRevision, WorktreeError> {
-    git.resolve_requested_revision(repository, revision)?
-        .ok_or_else(|| {
-            WorktreeError::InvalidRequest(if revision == OsStr::new("HEAD") {
-                "HEAD does not name a commit: the repository has no commits yet".to_owned()
-            } else {
-                format!(
-                    "revision does not name a commit in this repository: {}",
-                    revision.to_string_lossy()
-                )
-            })
-        })
+    if let Some(resolved) = git.resolve_requested_revision(repository, revision)? {
+        return Ok(resolved);
+    }
+    Err(WorktreeError::InvalidRequest(
+        if revision == OsStr::new("HEAD") {
+            unresolved_head_message(git, repository)
+        } else {
+            format!(
+                "revision does not name a commit in this repository: {}",
+                revision.to_string_lossy()
+            )
+        },
+    ))
+}
+
+/// Explain an unresolvable `HEAD`: an orphaned branch in a repository that
+/// has other history is not an empty repository. Only computed on failure.
+fn unresolved_head_message(git: &Git, repository: &Path) -> String {
+    match (
+        git.symbolic_head_branch(repository).ok().flatten(),
+        git.has_any_reference(repository).unwrap_or(false),
+    ) {
+        (Some(branch), true) => format!(
+            "HEAD is on branch {}, which has no commits yet; name a commit or branch to start from",
+            String::from_utf8_lossy(&branch)
+        ),
+        _ => "HEAD does not name a commit: the repository has no commits yet".to_owned(),
+    }
 }
 
 fn analyze_repository_compatibility(
@@ -15724,6 +15741,48 @@ mod tests {
         let report = super::garbage_collect(&state, true).expect("collect after repair");
         assert_eq!(report.skipped_protected.len(), 0);
         assert_eq!(report.collected, [base_path]);
+    }
+
+    /// Git warns that an orphaned HEAD points to an invalid reference; the
+    /// repository still has commits on other branches, so "no commits yet"
+    /// about the whole repository sent people looking for a missing history.
+    #[test]
+    fn an_orphaned_head_names_its_branch_not_an_empty_repository() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        git(&repository, &["checkout", "--quiet", "--orphan", "fresh"]);
+
+        let error = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: fixture.path().join("worktree"),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(fixture.path().join("state")),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect_err("an unborn HEAD names no commit");
+
+        let message = error.to_string();
+        assert!(message.contains("fresh"), "{message}");
+        assert!(message.contains("no commits yet"), "{message}");
+        assert!(
+            !message.contains("the repository has no commits"),
+            "{message}"
+        );
     }
 
     #[test]
