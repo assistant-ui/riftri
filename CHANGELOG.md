@@ -29,6 +29,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri repair` re-homes add journals that an older Riftri wrote while the
+  add ran inside a linked worktree, once that worktree has been removed. It
+  points them at the repository's main worktree, so moving, compacting, and
+  removing their worktrees works again. A journal is re-homed only while its
+  destination is still a live worktree of the repository that owns the state
+  directory (#476 follow-up).
 - `riftri worktree remove` works when run from inside the worktree being
   removed, or one of its subdirectories, as `git worktree remove` does.
   Previously it failed with `cannot run Git in <worktree>` and left a pending

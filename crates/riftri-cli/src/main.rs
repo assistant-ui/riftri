@@ -1749,6 +1749,7 @@ fn print_recovery_report(
             "completed_collections": report.completed_collections,
             "recovered_collections": report.recovered_collections,
             "retired_adds": report.retired_adds,
+            "rehomed_adds": report.rehomed_adds,
             "relocated_worktrees": relocated_worktrees_json(report),
             "unresolvable_worktrees": report
                 .unresolvable_worktrees
@@ -1823,6 +1824,7 @@ fn print_recovery_report(
     outputln!("Completed collections: {}", report.completed_collections);
     outputln!("Recovered collections: {}", report.recovered_collections);
     outputln!("Retired add operations: {}", report.retired_adds);
+    outputln!("Re-homed add operations: {}", report.rehomed_adds);
     outputln!(
         "Reaped interrupted journal writes: {}",
         report.reaped_artifacts.len()

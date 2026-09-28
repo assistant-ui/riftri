@@ -340,6 +340,11 @@ Repair also reconciles active journals against Git's own worktree registry:
   — for example after `rm -rf` plus `git worktree prune` — is retired by a
   journaled completion, releasing its immutable base. Reported as
   `Retired add operations` (`retired_adds`).
+- A journal that an older Riftri wrote while the add ran inside a linked
+  worktree records that worktree as its repository. Once it is removed, the
+  journal is re-homed to the repository's main worktree, but only when its
+  destination is still a live worktree of the repository this state directory
+  belongs to. Reported as `Re-homed add operations` (`rehomed_adds`).
 - A journal whose worktree Git registers under a *different* path is reported,
   not adopted, under `Relocated worktrees Riftri no longer tracks`
   (`relocated_worktrees`). The live worktree and its contents are untouched.
