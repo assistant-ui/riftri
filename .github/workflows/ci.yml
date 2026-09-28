@@ -301,6 +301,45 @@ jobs:
           CHECK
           node floor-check.cjs
 
+  cross-targets:
+    # The three runners above compile only their own host triple, so five of
+    # the eight targets release.yml ships were type-checked nowhere until a
+    # release built them. That gap hid two tests that do not compile against
+    # musl, where ioctl's request parameter is c_int rather than c_ulong.
+    #
+    # `check`, not `build`: this proves the sources compile for every shipped
+    # target without needing a cross-linker for each one.
+    name: Cross-check ${{ matrix.target }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every target release.yml builds. package/test/cross-targets.test.js
+        # fails if these two lists drift apart.
+        target:
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-musl
+          - x86_64-unknown-linux-musl
+          - aarch64-pc-windows-msvc
+          - x86_64-pc-windows-msvc
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install the target's standard library
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Check every crate and test for the target
+        run: >-
+          cargo check --workspace --all-targets --all-features --locked
+          --target ${{ matrix.target }}
+
   coverage:
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-24.04

@@ -385,11 +385,6 @@ mod unix {
         assert_terminates(pids[0], "scoped command");
     }
 
-    /// ioctl request numbers are `c_ulong` on the platforms these tests run
-    /// on, while the type of the libc constant varies by target.
-    #[allow(clippy::unnecessary_cast)]
-    const TIOCSCTTY_REQUEST: libc::c_ulong = libc::TIOCSCTTY as libc::c_ulong;
-
     /// Open a fresh pseudo-terminal pair, returning `(master, slave)`.
     fn open_pty() -> (File, File) {
         let mut master: libc::c_int = -1;
@@ -469,7 +464,11 @@ mod unix {
                     // Adopt the pty as the controlling terminal; the fresh
                     // session leader's process group becomes the terminal's
                     // foreground process group.
-                    if libc::ioctl(0, TIOCSCTTY_REQUEST, 0) == -1 {
+                    // `as _` rather than a named integer type: ioctl's
+                    // request parameter is c_ulong against glibc and
+                    // c_int against musl, and the constant's own type
+                    // varies with it.
+                    if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
