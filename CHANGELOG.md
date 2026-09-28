@@ -52,6 +52,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   directory does not exist`. Previously it read `could not start Git command
   "git": No such file or directory`, which pointed at the Git installation
   (#465).
+- `riftri status` no longer calls the journal of a managed worktree that was
+  removed or moved with plain `git worktree remove`/`move` an "unsafe durable
+  add journal". It now says the worktree was removed or moved outside Riftri and
+  names what clears it: `riftri repair` for a removal, and `git worktree move`
+  back (or `git worktree remove`, then `riftri repair`) for a move (#467).
 - `riftri repair` also reaps the intent a removal, move, or compaction was
   writing when it was killed before publishing it. Such an operation never
   started, but its complete temporary record was previously preserved forever.

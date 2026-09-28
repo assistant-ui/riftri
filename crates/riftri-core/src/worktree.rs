@@ -1371,18 +1371,26 @@ pub fn storage_accounting(
     let mut add_journals = Vec::with_capacity(loaded_add_journals.len());
     let mut registered_worktrees = BTreeMap::new();
     let mut invalid_add_journals = Vec::new();
+    let claimed = status_claimed_destinations(&loaded_add_journals);
     for journal in loaded_add_journals {
         match validate_status_add_journal(
             &git,
             &state_directory,
             &journal,
             completed.contains(&journal.operation_id),
+            &claimed,
         ) {
-            Ok(worktree) => {
+            Ok(StatusAddJournal::Tracked(worktree)) => {
                 if let Some(worktree) = worktree {
                     registered_worktrees.insert(journal.operation_id.clone(), worktree);
                 }
                 add_journals.push(journal);
+            }
+            Ok(StatusAddJournal::Unregistered(reason)) => {
+                invalid_add_journals.push(StateDiagnosticIssue {
+                    path: journal.journal_path.clone(),
+                    reason,
+                })
             }
             Err(error) => invalid_add_journals.push(StateDiagnosticIssue {
                 path: journal.journal_path.clone(),
@@ -1582,27 +1590,45 @@ pub fn storage_accounting(
     })
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn status_claimed_destinations(journals: &[DecodedJournal]) -> HashSet<PathBuf> {
+    claimed_destinations(journals)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn status_claimed_destinations(_journals: &[DecodedJournal]) -> HashSet<PathBuf> {
+    HashSet::new()
+}
+
+/// How `status` accounts for one add journal.
+enum StatusAddJournal {
+    /// A journal status tracks, with Git's registration when it is active.
+    Tracked(Option<riftri_git::WorktreeInfo>),
+    /// An active journal whose worktree Git no longer registers at its path,
+    /// with the explanation and remedy to report instead.
+    Unregistered(String),
+}
+
 fn validate_status_add_journal(
     git: &Git,
     state_directory: &Path,
     journal: &DecodedJournal,
     removal_complete: bool,
-) -> Result<Option<riftri_git::WorktreeInfo>, WorktreeError> {
+    claimed: &HashSet<PathBuf>,
+) -> Result<StatusAddJournal, WorktreeError> {
     validate_recovery_paths(state_directory, journal)?;
     if journal.phase != AddWorktreePhase::Active || removal_complete {
-        return Ok(None);
+        return Ok(StatusAddJournal::Tracked(None));
     }
-    let registered = git
-        .list_worktrees(&journal.repository)?
-        .into_iter()
+    let inventory = git.list_worktrees(&journal.repository)?;
+    let Some(registered) = inventory
+        .iter()
         .find(|worktree| paths_match(&worktree.path, &journal.destination))
-        .ok_or_else(|| {
-            WorktreeError::InvalidRequest(format!(
-                "active destination {} is not registered by Git for {}",
-                journal.destination.display(),
-                journal.repository.display()
-            ))
-        })?;
+        .cloned()
+    else {
+        return unregistered_destination_advice(&inventory, claimed, journal)
+            .map(StatusAddJournal::Unregistered);
+    };
     if registered.head_unresolvable {
         return Err(WorktreeError::InvalidRequest(format!(
             "Git cannot resolve the worktree HEAD of active destination {}; \
@@ -1616,7 +1642,52 @@ fn validate_status_add_journal(
             journal.destination.display()
         )));
     }
-    Ok(Some(registered))
+    Ok(StatusAddJournal::Tracked(Some(registered)))
+}
+
+/// Explain an active journal whose worktree Git no longer registers at its
+/// path, which is what `git worktree remove` or `git worktree move` run
+/// directly on a managed worktree leaves behind, and name what clears it.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn unregistered_destination_advice(
+    inventory: &[riftri_git::WorktreeInfo],
+    claimed: &HashSet<PathBuf>,
+    journal: &DecodedJournal,
+) -> Result<String, WorktreeError> {
+    let destination = journal.destination.display();
+    Ok(
+        match classify_active_destination(inventory, claimed, journal)? {
+            ActiveDestinationState::Vanished => format!(
+                "managed worktree {destination} was removed outside Riftri; \
+             `riftri repair` retires this journal and releases its base"
+            ),
+            ActiveDestinationState::Relocated(path) => format!(
+                "managed worktree {destination} was moved outside Riftri and Git now registers it at {}; \
+             Riftri does not adopt the new path. Move it back with `git worktree move {} {destination}`, \
+             or remove it with `git worktree remove {}` and then run `riftri repair`",
+                path.display(),
+                path.display(),
+                path.display()
+            ),
+            ActiveDestinationState::Present | ActiveDestinationState::Registered => format!(
+                "{destination} still exists but is not registered by Git as a worktree; \
+             Riftri left it and its journal alone"
+            ),
+        },
+    )
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+fn unregistered_destination_advice(
+    _inventory: &[riftri_git::WorktreeInfo],
+    _claimed: &HashSet<PathBuf>,
+    journal: &DecodedJournal,
+) -> Result<String, WorktreeError> {
+    Ok(format!(
+        "active destination {} is not registered by Git for {}",
+        journal.destination.display(),
+        journal.repository.display()
+    ))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -13524,6 +13595,74 @@ mod tests {
         let accounting = storage_accounting(&state).expect("status after repair");
         assert_eq!(accounting.active_views, 2);
         assert_eq!(accounting.diagnostic_issues.len(), 1, "{accounting:?}");
+    }
+
+    /// A managed worktree removed or moved with plain Git is not an unsafe
+    /// journal: status must say what happened and what clears it, and that
+    /// advice must actually work.
+    #[test]
+    fn status_explains_worktrees_changed_outside_riftri() {
+        for action in ["removed", "moved"] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let elsewhere = fixture.path().join("elsewhere");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from("feature")),
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            let from = destination.to_str().unwrap().to_owned();
+            let to = elsewhere.to_str().unwrap().to_owned();
+            if action == "removed" {
+                git(&repository, &["worktree", "remove", &from]);
+            } else {
+                git(&repository, &["worktree", "move", &from, &to]);
+            }
+
+            let report = storage_accounting(&state).expect("status");
+            assert_eq!(report.diagnostic_issues.len(), 1, "{action}: {report:?}");
+            let reason = &report.diagnostic_issues[0].reason;
+            assert!(!reason.contains("unsafe"), "{action}: {reason}");
+            assert!(
+                reason.contains(&format!("{action} outside Riftri")),
+                "{action}: {reason}"
+            );
+            if action == "removed" {
+                assert!(reason.contains("`riftri repair`"), "{reason}");
+                let repaired = recover_incomplete_operations(&state).expect("repair");
+                assert!(repaired.errors.is_empty(), "{repaired:?}");
+            } else {
+                assert!(reason.contains("elsewhere"), "{reason}");
+                assert!(reason.contains("git worktree move"), "{reason}");
+                git(&repository, &["worktree", "move", &to, &from]);
+            }
+            let report = storage_accounting(&state).expect("status after advice");
+            assert!(
+                report.diagnostic_issues.is_empty(),
+                "{action}: following the advice must clear it: {report:?}"
+            );
+        }
     }
 
     #[test]
