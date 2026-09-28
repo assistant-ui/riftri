@@ -194,22 +194,31 @@ fn hash_entry(path: &Path, digest: &mut Sha256, version: MarkerVersion) -> io::R
     } else if metadata.is_file() {
         digest.update(b"file");
         digest.update(metadata.len().to_le_bytes());
-        let mut file = open_regular(path)?;
-        let mut buffer = [0; 64 * 1024];
-        let mut length = 0;
-        loop {
-            let count = file.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            length += count as u64;
-            digest.update(&buffer[..count]);
-        }
-        if length != metadata.len() {
-            return Err(io::Error::other("integrity input changed while reading"));
-        }
+        hash_file_bytes(path, metadata.len(), digest)?;
     } else {
         return Err(io::Error::other("unsupported entry in immutable base"));
+    }
+    Ok(())
+}
+
+/// Hash a regular file's bytes. Kept out of line, with its buffer on the heap,
+/// because `hash_entry` recurses once per directory level: a 64 KiB stack
+/// buffer in every frame overflowed the stack a few hundred levels deep.
+#[inline(never)]
+fn hash_file_bytes(path: &Path, expected_length: u64, digest: &mut Sha256) -> io::Result<()> {
+    let mut file = open_regular(path)?;
+    let mut buffer = vec![0; 64 * 1024];
+    let mut length = 0;
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        length += count as u64;
+        digest.update(&buffer[..count]);
+    }
+    if length != expected_length {
+        return Err(io::Error::other("integrity input changed while reading"));
     }
     Ok(())
 }
@@ -219,6 +228,24 @@ mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    /// Every recursion level used to reserve the 64 KiB read buffer on the
+    /// stack, so a tree a few hundred directories deep, which Git checks out
+    /// without trouble, aborted Riftri with a stack overflow mid-add.
+    #[test]
+    fn integrity_hashes_a_very_deep_tree() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let mut deepest = fixture.path().to_path_buf();
+        for _ in 0..300 {
+            deepest.push("n");
+        }
+        fs::create_dir_all(&deepest).expect("deep tree");
+        fs::write(deepest.join("leaf"), b"leaf\n").expect("leaf");
+
+        // Test threads get a 2 MiB stack, a quarter of the main thread's.
+        let first = marker(fixture.path()).expect("digest a deep tree");
+        assert_eq!(marker(fixture.path()).unwrap(), first);
+    }
 
     #[test]
     fn integrity_covers_bytes_names_modes_and_link_targets() {
