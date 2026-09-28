@@ -2835,6 +2835,24 @@ fn add_worktree_inner(
             )));
         }
     }
+    // Git also refuses a destination it still registers, even once the
+    // directory is gone, but only after Riftri has journaled the add, and
+    // rollback then mistook that stale registration for its own (#461).
+    if let Some(registered) = git
+        .list_worktrees(&repository_root)?
+        .into_iter()
+        .find(|worktree| paths_match(&worktree.path, &destination))
+    {
+        let clear = if registered.locked_reason.is_some() {
+            "run `git worktree unlock` and then `git worktree prune` to clear it"
+        } else {
+            "run `git worktree prune` to clear it"
+        };
+        return Err(WorktreeError::InvalidRequest(format!(
+            "{} is already registered as a Git worktree; if that worktree was deleted, {clear}",
+            destination.display()
+        )));
+    }
     let sparse_directories =
         resolve_sparse_profile(&git, &repository_root, &request.sparse_directories)?;
     let compatibility = validate_resolved_compatibility(
@@ -15280,6 +15298,82 @@ mod tests {
         })
         .expect("completed moves do not block removal");
         assert!(!destination.exists());
+    }
+
+    /// Git refuses an add onto a path it still registers, even after the
+    /// directory is gone. Letting Git refuse after intent was recorded made
+    /// rollback mistake that stale registration for its own and stop with a
+    /// pending add (#461); refuse before anything is written instead.
+    #[test]
+    fn add_refuses_a_destination_git_still_registers() {
+        for locked in [false, true] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            let add = |branch: &str| {
+                add_worktree_inner(
+                    AddWorktreeRequest {
+                        repository: repository.clone(),
+                        destination: destination.clone(),
+                        revision: OsString::from("HEAD"),
+                        mode: WorktreeMode::NewBranch(OsString::from(branch)),
+                        state_dir: Some(state.clone()),
+                        sparse_directories: Vec::new(),
+                    },
+                    None,
+                    true,
+                )
+            };
+            add("first").expect("create worktree");
+            let target = destination.to_str().unwrap().to_owned();
+            if locked {
+                git(&repository, &["worktree", "lock", &target]);
+            }
+            super::remove_tree_if_present(&destination).expect("delete the worktree directory");
+
+            let error = add("second").expect_err("Git still registers the path");
+            let message = error.to_string();
+            assert!(
+                matches!(error, super::WorktreeError::InvalidRequest(_)),
+                "locked={locked}: {message}"
+            );
+            assert!(message.contains("already registered"), "{message}");
+            assert!(message.contains("git worktree prune"), "{message}");
+            if locked {
+                assert!(message.contains("git worktree unlock"), "{message}");
+            }
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(
+                accounting.pending_adds, 0,
+                "locked={locked}: {accounting:?}"
+            );
+            assert!(
+                riftri_git::Git::default()
+                    .local_branch_target(&repository, std::ffi::OsStr::new("second"))
+                    .unwrap()
+                    .is_none(),
+                "locked={locked}: nothing may be created"
+            );
+
+            // Following the advice clears the way.
+            if locked {
+                git(&repository, &["worktree", "unlock", &target]);
+            }
+            git(&repository, &["worktree", "prune"]);
+            add("second").expect("add after pruning the stale registration");
+        }
     }
 
     #[test]
