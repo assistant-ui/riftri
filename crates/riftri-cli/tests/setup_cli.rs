@@ -308,9 +308,9 @@ mod terminal {
                     if libc::setsid() == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
-                    #[allow(clippy::unnecessary_cast)]
-                    let request = libc::TIOCSCTTY as libc::c_ulong;
-                    if libc::ioctl(0, request, 0) == -1 {
+                    // `as _` rather than a named integer type: ioctl's request
+                    // parameter is c_ulong against glibc and c_int against musl.
+                    if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
                     Ok(())
