@@ -133,7 +133,17 @@ jobs:
         if: always() && matrix.os == 'macos-15'
         run: |
           volume="$RUNNER_TEMP/riftri-apfs"
-          mount | grep -q "on $volume " || exit 0
+          image="$RUNNER_TEMP/riftri-benchmark.sparsebundle"
+          # The image's own device, from `hdiutil info`, empty once detached.
+          attached_device() {
+            hdiutil info | awk -v img="$image" '
+              $1 == "image-path" { found = ($3 == img) }
+              found && $1 ~ /^\/dev\/disk[0-9]+$/ { print $1; exit }'
+          }
+          device=$(attached_device)
+          if [ -z "$device" ] && ! mount | grep -q "on $volume "; then
+            exit 0
+          fi
 
           # The #431 diagnostics captured this failure in run 36347186317 and
           # found nothing holding the volume: no process with a working
@@ -148,9 +158,19 @@ jobs:
           # leak: every attempt is a plain detach, never --force, and if all
           # of them fail the diagnostics below still run and still fail the
           # job, so a genuine leak is reported exactly as it is today.
+          #
+          # Detach by the image's device, not the mount point. An attempt can
+          # unmount the volume and still fail to eject the image ("Resource
+          # busy"); the mount point is then gone, and retrying by path failed
+          # every time with "No such file or directory" while nothing held
+          # anything (run 36364770706).
           attempt=1
           while :; do
-            if hdiutil detach "$volume"; then
+            if hdiutil detach "${device:-$volume}"; then
+              exit 0
+            fi
+            device=$(attached_device)
+            if [ -z "$device" ] && ! mount | grep -q "on $volume "; then
               exit 0
             fi
             if [ "${attempt}" -ge 5 ]; then
