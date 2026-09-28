@@ -35,6 +35,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   unregistered and made `move` and `remove` refuse it. Paths now compare by
   their composed form on macOS, where APFS treats both spellings as the same
   file (#489).
+- `riftri worktree add --state-dir` accepts a path with `.` components or
+  trailing separators, which failed as an I/O error. It refuses, before
+  creating anything, a state path that climbs out of a directory that does not
+  exist yet (previously left behind as litter), and a state directory inside
+  the new worktree or the reverse (previously reported as "taken by another
+  worktree" with the directories left behind) (#491).
 - `riftri repair` re-homes add journals that an older Riftri wrote while the
   add ran inside a linked worktree, once that worktree has been removed. It
   points them at the repository's main worktree, so moving, compacting, and
