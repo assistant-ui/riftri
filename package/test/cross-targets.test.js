@@ -75,8 +75,11 @@ test("the cross-check covers tests, not just the shipped binary", () => {
 
   // The release builds `-p riftri-cli`, so a test that does not compile for a
   // target is invisible to it. `--all-targets` is the whole point of this job.
-  assert.match(job, /cargo check[\s\S]*?--all-targets/, "the check must pass --all-targets");
+  assert.match(job, /cargo clippy[\s\S]*?--all-targets/, "the check must pass --all-targets");
   assert.match(job, /--locked/, "the check must respect the lockfile");
+  // Lints differ by target: a cast required against glibc is redundant against
+  // musl, so a plain `cargo check` here would miss what this job exists for.
+  assert.match(job, /-- -D warnings/, "the lint must be denied, not merely reported");
   assert.match(
     job,
     /--target \$\{\{ matrix\.target \}\}/,
