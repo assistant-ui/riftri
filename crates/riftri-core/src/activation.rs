@@ -305,6 +305,8 @@ pub fn execute_scoped_command(command: &[OsString]) -> Result<i32, ActivationErr
 /// that exposes only the internal OverlayFS mount protocol when elevated.
 #[cfg(target_os = "linux")]
 pub fn install_overlayfs_helper(replace: bool) -> Result<PathBuf, ActivationError> {
+    // SAFETY: geteuid takes no arguments, cannot fail, and only reads the
+    // calling process's effective user ID.
     if unsafe { libc::geteuid() } != 0 {
         return Err(process_error(
             "installing the OverlayFS helper requires root; run `sudo riftri overlayfs install-helper`",

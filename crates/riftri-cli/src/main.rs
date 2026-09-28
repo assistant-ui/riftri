@@ -1536,6 +1536,8 @@ fn collection_phase_name(phase: riftri_core::GarbageCollectionPhase) -> &'static
 
 #[cfg(target_os = "linux")]
 fn invoked_as_overlayfs_helper() -> bool {
+    // SAFETY: geteuid and getuid take no arguments, cannot fail, and only
+    // read the calling process's own identity.
     let elevated = unsafe { libc::geteuid() } != unsafe { libc::getuid() };
     let installed_name = env::current_exe()
         .ok()
@@ -1548,10 +1550,15 @@ fn invoked_as_overlayfs_helper() -> bool {
 #[cfg(target_os = "linux")]
 fn run_overlayfs_helper() -> Result<()> {
     anyhow::ensure!(
+        // SAFETY: geteuid takes no arguments, cannot fail, and only reads the
+        // calling process's effective user ID.
         unsafe { libc::geteuid() } == 0,
         "the OverlayFS helper is not elevated; reinstall it with `sudo riftri overlayfs install-helper --replace`"
     );
+    // SAFETY: getuid and getgid take no arguments, cannot fail, and only read
+    // the calling process's own identity.
     let requester_uid = unsafe { libc::getuid() };
+    // SAFETY: as above.
     let requester_gid = unsafe { libc::getgid() };
     let arguments = env::args_os().skip(1).collect::<Vec<_>>();
     let Some(operation) = arguments.first().and_then(|value| value.to_str()) else {
