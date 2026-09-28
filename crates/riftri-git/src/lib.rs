@@ -1618,6 +1618,30 @@ impl Git {
     }
 
     /// Refresh index stat data without changing staged entries or worktree files.
+    /// The branch `HEAD` names, without its `refs/heads/` prefix, or `None`
+    /// for a detached `HEAD`.
+    pub fn symbolic_head_branch(&self, path: &Path) -> Result<Option<Vec<u8>>, GitError> {
+        let arguments = ["symbolic-ref", "--quiet", "HEAD"];
+        let output = self.output(Some(path), &arguments)?;
+        if output.status.code() == Some(1) {
+            return Ok(None);
+        }
+        if !output.status.success() {
+            return Err(command_failed(&arguments.map(OsString::from), &output));
+        }
+        let name = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+        Ok(Some(
+            name.strip_prefix(b"refs/heads/").unwrap_or(name).to_vec(),
+        ))
+    }
+
+    /// Whether the repository has any reference at all, which tells an empty
+    /// repository apart from one whose current branch is merely unborn.
+    pub fn has_any_reference(&self, path: &Path) -> Result<bool, GitError> {
+        let output = self.run(Some(path), &["for-each-ref", "--count=1", "--format=x"])?;
+        Ok(!output.stdout.is_empty())
+    }
+
     pub fn refresh_worktree_index(&self, worktree: &Path) -> Result<(), GitError> {
         match self.run(Some(worktree), &["update-index", "-q", "--refresh"]) {
             Ok(_) => Ok(()),
