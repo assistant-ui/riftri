@@ -2322,6 +2322,11 @@ fn remove_worktree_with_mode(
             destination.display()
         )));
     }
+    refuse_locked_worktree(
+        &destination,
+        registered.locked_reason.as_deref(),
+        "removing",
+    )?;
     let overlayfs_clean_snapshot = snapshot_overlayfs_private_layer(&managed)?;
     let force_snapshot = if force {
         Some(snapshot_managed_worktree_for_force(&managed)?)
@@ -2475,6 +2480,7 @@ fn move_worktree_inner(
             source.display()
         )));
     }
+    refuse_locked_worktree(&source, registered.locked_reason.as_deref(), "moving")?;
 
     let store = MoveJournalStore::create(&state_directory)?;
     let operation_id = allocate_move_operation_id(&store)?;
@@ -9139,6 +9145,31 @@ fn managed_worktree_is_clean_for_removal(
     }
 }
 
+/// Refuse a worktree Git has locked, before any journal records intent.
+///
+/// Git's own `move` and `remove` refuse a locked worktree unless forced twice,
+/// which Riftri's single `--force` never is. Letting Git refuse after intent
+/// was recorded left a pending journal that blocked every later command.
+fn refuse_locked_worktree(
+    worktree: &Path,
+    locked_reason: Option<&[u8]>,
+    action: &str,
+) -> Result<(), WorktreeError> {
+    let Some(reason) = locked_reason else {
+        return Ok(());
+    };
+    let reason = if reason.is_empty() {
+        String::new()
+    } else {
+        format!(" (reason: {})", String::from_utf8_lossy(reason))
+    };
+    Err(WorktreeError::InvalidRequest(format!(
+        "worktree {} is locked{reason}; run `git worktree unlock {}` before {action} it",
+        worktree.display(),
+        worktree.display()
+    )))
+}
+
 /// The sibling a removal renames its native view to before deleting it. The
 /// name is derived from the removal's own operation ID, so recovery can find
 /// it from the journal alone and nothing else ever creates it.
@@ -15061,6 +15092,194 @@ mod tests {
             .filter(|name| name.to_string_lossy().starts_with(".riftri-remove-"))
             .count();
         assert_eq!(leftovers, 0, "the quarantine must be renamed back");
+    }
+
+    /// Git refuses to move or remove a locked worktree unless forced twice,
+    /// and Riftri's single `--force` is not that. Refusing only after
+    /// recording intent left a pending journal that blocked every later
+    /// command until the user found `riftri repair` (#460).
+    #[test]
+    fn locked_worktrees_are_refused_before_any_journal_is_written() {
+        for operation in ["move", "remove", "force-remove"] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            let lock_target = destination.to_str().unwrap().to_owned();
+            git(
+                &repository,
+                &["worktree", "lock", "--reason", "on usb", &lock_target],
+            );
+            let attempt = || match operation {
+                "move" => move_worktree_inner(
+                    MoveWorktreeRequest {
+                        repository: repository.clone(),
+                        source: destination.clone(),
+                        destination: fixture.path().join("moved"),
+                        state_dir: Some(state.clone()),
+                    },
+                    None,
+                )
+                .map(|_| ()),
+                "remove" => remove_worktree_inner(
+                    RemoveWorktreeRequest {
+                        repository: repository.clone(),
+                        destination: destination.clone(),
+                        state_dir: Some(state.clone()),
+                    },
+                    None,
+                )
+                .map(|_| ()),
+                _ => force_remove_worktree_inner(
+                    RemoveWorktreeRequest {
+                        repository: repository.clone(),
+                        destination: destination.clone(),
+                        state_dir: Some(state.clone()),
+                    },
+                    None,
+                )
+                .map(|_| ()),
+            };
+
+            let error = attempt().expect_err("a locked worktree must be refused");
+            let message = error.to_string();
+            assert!(
+                matches!(error, super::WorktreeError::InvalidRequest(_)),
+                "{operation}: {message}"
+            );
+            assert!(message.contains("is locked"), "{operation}: {message}");
+            assert!(message.contains("on usb"), "{operation}: {message}");
+            assert!(
+                message.contains("git worktree unlock"),
+                "{operation}: {message}"
+            );
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(accounting.pending_moves, 0, "{operation}");
+            assert_eq!(accounting.pending_removals, 0, "{operation}");
+            assert_eq!(
+                fs::read(destination.join("tracked.txt")).expect("view intact"),
+                b"tracked\n"
+            );
+
+            // Nothing pending blocks the same command once the user unlocks.
+            git(&repository, &["worktree", "unlock", &lock_target]);
+            attempt().unwrap_or_else(|error| panic!("{operation} after unlock: {error}"));
+        }
+    }
+
+    #[test]
+    fn pending_move_blocks_lifecycle_changes_until_repair() {
+        let fixture = tempdir().expect("fixture directory");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("destination");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        super::add_worktree(AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: source.clone(),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::Detached,
+            state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+
+        let request = MoveWorktreeRequest {
+            repository: repository.clone(),
+            source: source.clone(),
+            destination: destination.clone(),
+            state_dir: Some(state.clone()),
+        };
+        move_worktree_inner(request.clone(), Some(MoveWorktreePhase::IntentRecorded))
+            .expect_err("stop after the move intent");
+        assert_eq!(super::storage_accounting(&state).unwrap().pending_moves, 1);
+
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: source.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect_err("removal must preserve the pending move source");
+        super::force_remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: source.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect_err("forced removal must preserve the pending move source");
+        super::compact_worktree(CompactWorktreeRequest {
+            repository: repository.clone(),
+            destination: source.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect_err("compaction must wait for the pending move");
+        super::move_worktree(request).expect_err("a second move must wait for repair");
+        assert_eq!(
+            fs::read_to_string(source.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(!destination.exists());
+
+        let recovered = super::recover_incomplete_operations(&state).expect("repair pending move");
+        assert!(recovered.errors.is_empty(), "{:?}", recovered.errors);
+        assert_eq!(recovered.recovered_moves, 1);
+        assert!(!source.exists());
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(
+            riftri_git::Git::default()
+                .worktree_is_clean(&destination)
+                .unwrap()
+        );
+        super::compact_worktree(CompactWorktreeRequest {
+            repository: repository.clone(),
+            destination: destination.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect("completed moves do not block compaction");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: destination.clone(),
+            state_dir: Some(state),
+        })
+        .expect("completed moves do not block removal");
+        assert!(!destination.exists());
     }
 
     #[test]
