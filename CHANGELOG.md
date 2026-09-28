@@ -47,6 +47,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `git worktree prune`, and says how to clear it. Previously Git refused only
   after the add was journaled, and rollback mistook the stale registration for
   its own, leaving a pending add until `riftri repair` (#461).
+- Running Git in a directory that no longer exists, such as a repository moved
+  after its worktrees were created, now reports `cannot run Git in <path>: the
+  directory does not exist`. Previously it read `could not start Git command
+  "git": No such file or directory`, which pointed at the Git installation
+  (#465).
 - `riftri repair` also reaps the intent a removal, move, or compaction was
   writing when it was killed before publishing it. Such an operation never
   started, but its complete temporary record was previously preserved forever.

@@ -171,6 +171,9 @@ pub enum GitError {
         source: std::io::Error,
     },
 
+    #[error("cannot run Git in {}: the directory does not exist", path.display())]
+    WorkingDirectoryMissing { path: PathBuf },
+
     #[error("{} is not a Git repository", path.display())]
     RepositoryAbsent { path: PathBuf },
 
@@ -1302,10 +1305,9 @@ impl Git {
                     command.env_remove(name);
                 }
             }
-            let output = command.output().map_err(|source| GitError::Start {
-                command: self.command.clone(),
-                source,
-            })?;
+            let output = command
+                .output()
+                .map_err(|source| self.start_error(Some(destination), source))?;
             if output.status.success() {
                 Ok(())
             } else {
@@ -1974,10 +1976,24 @@ impl Git {
             command.current_dir(path);
         }
 
-        command.output().map_err(|source| GitError::Start {
-            command: self.command.clone(),
-            source,
-        })
+        command
+            .output()
+            .map_err(|source| self.start_error(path, source))
+    }
+
+    /// A spawn fails when its working directory is missing, which Unix reports
+    /// as a missing program and Windows as an invalid directory name. Either
+    /// way the directory is the cause, so the Git executable is not blamed.
+    fn start_error(&self, path: Option<&Path>, source: std::io::Error) -> GitError {
+        match path {
+            Some(path) if !path.is_dir() => GitError::WorkingDirectoryMissing {
+                path: path.to_path_buf(),
+            },
+            _ => GitError::Start {
+                command: self.command.clone(),
+                source,
+            },
+        }
     }
 
     #[cfg(unix)]
@@ -2003,10 +2019,9 @@ impl Git {
             command.current_dir(path);
         }
 
-        let mut child = command.spawn().map_err(|source| GitError::Start {
-            command: self.command.clone(),
-            source,
-        })?;
+        let mut child = command
+            .spawn()
+            .map_err(|source| self.start_error(path, source))?;
         let mut stdin = child.stdin.take().ok_or_else(|| GitError::InvalidOutput {
             context: "Git command input",
             detail: "piped standard input was unavailable".to_owned(),
@@ -2766,6 +2781,26 @@ mod tests {
         assert!(message.contains("unreadable"), "{message}");
         assert!(message.contains("corrupt"), "{message}");
         assert!(!message.contains("unborn"), "{message}");
+    }
+
+    #[test]
+    fn git_in_a_missing_directory_names_the_directory_not_git() {
+        let parent = tempdir().expect("temporary directory");
+        let missing = parent.path().join("moved-away");
+
+        let error = Git::default()
+            .list_worktrees(&missing)
+            .expect_err("Git cannot run in a missing directory");
+
+        // The OS reports a bad working directory as a missing program; the
+        // error must not send people to debug their Git installation.
+        let message = error.to_string();
+        assert!(
+            matches!(&error, super::GitError::WorkingDirectoryMissing { path } if path == &missing),
+            "{message}"
+        );
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(!message.contains("could not start Git"), "{message}");
     }
 
     #[test]
