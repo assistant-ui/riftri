@@ -365,6 +365,9 @@ pub struct RecoveryReport {
     /// Add journals whose worktree Git no longer registers and whose
     /// destination is absent, retired by a journaled completion.
     pub retired_adds: usize,
+    /// Add journals that named a vanished linked worktree as their repository,
+    /// re-homed to the repository's main worktree.
+    pub rehomed_adds: usize,
     /// Journaled worktrees Git registers under a different path.
     pub relocations: Vec<RelocatedWorktree>,
     /// Worktrees Git lists without a resolvable HEAD (corrupt or empty HEAD
@@ -1641,6 +1644,12 @@ fn validate_status_add_journal(
     validate_recovery_paths(state_directory, journal)?;
     if journal.phase != AddWorktreePhase::Active || removal_complete {
         return Ok(StatusAddJournal::Tracked(None));
+    }
+    if !journal.repository.is_dir() && journal.destination.is_dir() {
+        return Ok(StatusAddJournal::Unregistered(format!(
+            "this journal records repository {}, which no longer exists (likely a linked worktree the add ran in that has since been removed); `riftri repair` re-homes it to the repository's main worktree while the worktree still belongs to this repository",
+            journal.repository.display()
+        )));
     }
     let inventory = git.list_worktrees(&journal.repository)?;
     let Some(registered) = inventory
@@ -7032,6 +7041,124 @@ fn retire_vanished_add_journal(
     Ok(())
 }
 
+/// Re-home active add journals whose recorded repository no longer exists.
+///
+/// An older Riftri recorded the worktree an add ran in, which can be a linked
+/// worktree removed since (#476); every Git call for the journal then failed.
+/// A journal is re-homed only when nothing else is pending for it, its
+/// destination is still a live worktree root, this state directory belongs to
+/// the repository found through that worktree, and Git registers the
+/// destination there. Anything else is left for `status` to report.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn rehome_stranded_add_journals(
+    git: &Git,
+    state_directory: &Path,
+) -> Result<(usize, Vec<String>), WorktreeError> {
+    let store = JournalStore::open(state_directory);
+    let journals = store.load_all_reconciling()?.journals;
+    let removals = RemovalJournalStore::open(state_directory).load_all_for_status()?;
+    let moves = MoveJournalStore::open(state_directory).load_all_for_status()?;
+    let compactions = CompactJournalStore::open(state_directory).load_all_for_status()?;
+    if !removals.issues.is_empty() || !moves.issues.is_empty() || !compactions.issues.is_empty() {
+        // Without every lifecycle journal, "nothing else is pending" is unknown.
+        return Ok((0, Vec::new()));
+    }
+    let mut claimed = HashSet::new();
+    claimed.extend(
+        removals
+            .journals
+            .iter()
+            .map(|removal| removal.source_add_operation_id.as_str()),
+    );
+    claimed.extend(
+        moves
+            .journals
+            .iter()
+            .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+            .map(|journal| journal.source_add_operation_id.as_str()),
+    );
+    claimed.extend(
+        compactions
+            .journals
+            .iter()
+            .filter(|journal| {
+                !matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+            })
+            .map(|journal| journal.source_add_operation_id.as_str()),
+    );
+    let mut rehomed = 0;
+    let mut errors = Vec::new();
+    for journal in &journals {
+        if journal.phase != AddWorktreePhase::Active
+            || claimed.contains(journal.operation_id.as_str())
+            || journal.repository.is_dir()
+            || !is_real_directory_if_present(&journal.destination)?
+        {
+            continue;
+        }
+        let _operation_lock = match try_lock_add_operation(&journal.journal_path) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => continue,
+            Err(error) => {
+                errors.push(format!("operation {}: {error}", journal.operation_id));
+                continue;
+            }
+        };
+        match rehome_add_journal(git, state_directory, &store, &journal.operation_id) {
+            Ok(true) => rehomed += 1,
+            Ok(false) => {}
+            Err(error) => errors.push(format!("operation {}: {error}", journal.operation_id)),
+        }
+    }
+    Ok((rehomed, errors))
+}
+
+/// Re-home one add journal whose operation lock the caller holds.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn rehome_add_journal(
+    git: &Git,
+    state_directory: &Path,
+    store: &JournalStore,
+    operation_id: &str,
+) -> Result<bool, WorktreeError> {
+    // Reload under the lock: the inventory may predate the owner's writes.
+    let journal = store.load_operation(operation_id)?;
+    if journal.phase != AddWorktreePhase::Active || journal.repository.is_dir() {
+        return Ok(false);
+    }
+    let repository = git.inspect_repository(&journal.destination)?;
+    if !repository
+        .root
+        .as_deref()
+        .is_some_and(|root| paths_match(root, &journal.destination))
+    {
+        return Ok(false);
+    }
+    // The same path may now hold another repository's worktree.
+    if !repository_state_directories_with_git(git, &repository)?
+        .iter()
+        .any(|owned| owned == state_directory)
+    {
+        return Ok(false);
+    }
+    let main = stable_repository_root(git, &journal.destination)?;
+    if !git.list_worktrees(&main)?.iter().any(|worktree| {
+        paths_match(&worktree.path, &journal.destination) && worktree.prunable_reason.is_none()
+    }) {
+        return Ok(false);
+    }
+    store.update_active_repository(
+        &journal.journal_path,
+        &journal.destination,
+        &journal.repository,
+        &main,
+    )?;
+    Ok(true)
+}
+
 /// Reconcile every active add journal in `state_directory` against Git's
 /// worktree registry, retiring the journals whose worktree no longer exists.
 ///
@@ -7345,6 +7472,10 @@ pub fn recover_incomplete_operations(
     // whose worktree no longer exists must stop referencing its destination
     // and its base before anything else inspects either. Doing this before the
     // inventory is loaded also means the rest of the pass sees the retirement.
+    // Re-home journals that name a vanished linked worktree first: every later
+    // step, reconciliation included, runs Git from a journal's repository.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let rehoming = rehome_stranded_add_journals(&Git::default(), &state_directory);
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     let reconciliation = reconcile_active_add_journals(&Git::default(), &state_directory, None);
     let store = JournalStore::open(&state_directory);
@@ -7417,6 +7548,16 @@ pub fn recover_incomplete_operations(
     report.unresolvable_worktrees.sort_unstable();
     report.unresolvable_worktrees.dedup();
 
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    match rehoming {
+        Ok((rehomed, errors)) => {
+            report.rehomed_adds = rehomed;
+            report.errors.extend(errors);
+        }
+        Err(error) => report
+            .errors
+            .push(format!("add-journal re-homing: {error}")),
+    }
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     match reconciliation {
         Ok((retired, relocations, errors)) => {
@@ -15962,6 +16103,136 @@ mod tests {
         .expect("remove the child");
         let repaired = recover_incomplete_operations(&state).expect("repair");
         assert!(repaired.errors.is_empty(), "{repaired:?}");
+    }
+
+    /// Rewrite an add journal's recorded repository, reproducing a journal an
+    /// older Riftri wrote when the add ran inside a linked worktree (#476).
+    fn record_repository(state: &Path, destination: &Path, repository: &Path) {
+        let journal = JournalStore::open(state)
+            .load_all()
+            .expect("journals")
+            .into_iter()
+            .find(|journal| journal.destination == destination)
+            .expect("journal for destination");
+        JournalStore::open(state)
+            .update_active_repository(
+                &journal.journal_path,
+                destination,
+                &journal.repository,
+                repository,
+            )
+            .expect("rewrite journal");
+    }
+
+    /// Journals an older Riftri wrote while running inside a linked worktree
+    /// name that worktree; once it is removed every command on the child
+    /// failed. Repair re-homes them to the repository's main worktree.
+    #[test]
+    fn repair_rehomes_a_journal_that_names_a_removed_worktree() {
+        let (_fixture, repository, state) = stable_root_fixture();
+        let parent = repository.with_file_name("parent");
+        let child = repository.with_file_name("child");
+        add_from(&repository, &parent, &state);
+        add_from(&parent, &child, &state);
+        record_repository(&state, &child, &parent);
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: parent.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the parent worktree");
+
+        let status = storage_accounting(&state).expect("status before repair");
+        assert_eq!(status.diagnostic_issues.len(), 1, "{status:?}");
+        assert!(
+            status.diagnostic_issues[0]
+                .reason
+                .contains("`riftri repair`"),
+            "{status:?}"
+        );
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.rehomed_adds, 1, "{report:?}");
+        let again = recover_incomplete_operations(&state).expect("repeat repair");
+        assert_eq!(again.rehomed_adds, 0, "re-homing is idempotent");
+        let status = storage_accounting(&state).expect("status after repair");
+        assert!(status.diagnostic_issues.is_empty(), "{status:?}");
+
+        let moved = repository.with_file_name("child-moved");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: child,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move the re-homed child");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: moved,
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the re-homed child");
+    }
+
+    /// Re-homing must never attach a journal to a different repository that
+    /// happens to have a worktree at the same path.
+    #[test]
+    fn repair_does_not_rehome_a_journal_onto_another_repository() {
+        let (_fixture, repository, state) = stable_root_fixture();
+        let child = repository.with_file_name("child");
+        add_from(&repository, &child, &state);
+        record_repository(&state, &child, &repository.with_file_name("gone"));
+        // The destination now belongs to an unrelated repository.
+        super::remove_tree_if_present(&child).expect("delete the child view");
+        git(&repository, &["worktree", "prune"]);
+        let other = repository.with_file_name("other");
+        fs::create_dir(&other).expect("create other repository");
+        git(&other, &["init", "--quiet"]);
+        git(
+            &other,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "other",
+            ],
+        );
+        git(
+            &other,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                child.to_str().unwrap(),
+            ],
+        );
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert_eq!(report.rehomed_adds, 0, "{report:?}");
+        let recorded = JournalStore::open(&state)
+            .load_all()
+            .expect("journals")
+            .into_iter()
+            .find(|journal| journal.destination == child)
+            .expect("journal kept")
+            .repository;
+        assert_eq!(recorded, repository.with_file_name("gone"));
     }
 
     #[test]

@@ -1479,6 +1479,49 @@ impl JournalStore {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    /// Point an active add journal at a new location of its repository,
+    /// replacing `expected_repository`. Repair uses it when the recorded
+    /// location, a linked worktree an older Riftri ran the add in, is gone.
+    pub fn update_active_repository(
+        &self,
+        journal_path: &Path,
+        expected_destination: &Path,
+        expected_repository: &Path,
+        repository: &Path,
+    ) -> Result<(), JournalError> {
+        let contents = read_real_journal(journal_path, "open operation journal")?;
+        let mut record: JournalRecord =
+            serde_json::from_slice(&contents).map_err(|source| JournalError::Deserialize {
+                path: journal_path.to_path_buf(),
+                source,
+            })?;
+        validate_operation_identity(&self.directory, &record.operation_id, journal_path)?;
+        let decoded = record.clone().decode(journal_path.to_path_buf())?;
+        if decoded.phase != AddWorktreePhase::Active || decoded.destination != expected_destination
+        {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: "only the expected active add journal can be re-homed".to_owned(),
+            });
+        }
+        if decoded.repository == repository {
+            return Ok(());
+        }
+        if decoded.repository != expected_repository {
+            return Err(JournalError::InvalidRecord {
+                path: journal_path.to_path_buf(),
+                detail: format!(
+                    "expected repository {}, found {}",
+                    expected_repository.display(),
+                    decoded.repository.display()
+                ),
+            });
+        }
+        record.repository = NativeOsString::encode(repository.as_os_str());
+        self.persist(&record)?;
+        Ok(())
+    }
+
     pub fn update_active_base(
         &self,
         journal_path: &Path,
