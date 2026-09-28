@@ -29,6 +29,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri worktree remove` works when run from inside the worktree being
+  removed, or one of its subdirectories, as `git worktree remove` does.
+  Previously it failed with `cannot run Git in <worktree>` and left a pending
+  removal (#475).
+- A worktree created from inside another linked worktree stays manageable after
+  that worktree is removed. Journals now record the repository's main worktree
+  instead of whichever worktree ran the command. Previously `move` left a
+  pending move, `compact` and `remove` refused, and `status` called the journal
+  unsafe (#476).
 - `riftri worktree add` from an orphaned branch now says `HEAD is on branch
   <name>, which has no commits yet` instead of claiming that the whole
   repository has no commits (#479).

@@ -279,6 +279,13 @@ intent-recorded
 Every incomplete forward state may transition to `rollback-pending`, followed
 by `rolled-back`. `active` and `rolled-back` are terminal for an add operation.
 
+A journal records the repository by its main worktree, the first entry of
+`git worktree list` (the directory itself for a bare repository), and lifecycle
+commands run Git from there. Revisions such as `HEAD` still resolve in the
+worktree the command was run in, as with Git. Recording that worktree instead
+would strand every journal naming it once it is removed, and would make a
+removal run Git from the very directory it deletes.
+
 From its destination claim check until `git-metadata-created` is recorded, an
 add holds the repository's Git worktree-metadata lock. Under that lock it
 refuses a destination that another add journal claims, including one in flight
