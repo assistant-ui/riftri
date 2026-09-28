@@ -3000,7 +3000,7 @@ fn add_worktree_inner(
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
-    let state_directory = absolute_path(&requested_state)?;
+    let state_directory = planned_state_directory(&requested_state, &destination)?;
     // A state path that exists as a regular file or a symbolic link can never
     // hold Riftri state. It is a caller mistake, so refuse it before probing
     // any backend — otherwise a volume without copy-on-write support answers
@@ -5150,6 +5150,50 @@ fn normalize_new_destination(
         )));
     }
     Ok(normalized)
+}
+
+/// The state directory an add will create, spelled without `.` components or
+/// trailing separators, which `create_dir_all` cannot create as given.
+///
+/// A `..` after a directory that does not exist yet could only be resolved by
+/// creating that directory, which a refused or failed add would leave behind,
+/// so it is refused, as for worktree destinations. So is a state directory
+/// inside the new worktree or a worktree inside the state directory: the state
+/// would be created first and then make the destination look taken. The path
+/// is not otherwise resolved, so a symbolic link is still refused as a state
+/// directory later instead of being silently followed.
+fn planned_state_directory(state: &Path, destination: &Path) -> Result<PathBuf, WorktreeError> {
+    let planned: PathBuf = absolute_path(state)?.components().collect();
+    let mut prefix = PathBuf::new();
+    for component in planned.components() {
+        if component == std::path::Component::ParentDir && !prefix.is_dir() {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "state directory {} climbs out of a directory that does not exist yet",
+                state.display()
+            )));
+        }
+        prefix.push(component);
+    }
+    // A file or symbolic link here is its own, more specific refusal.
+    resolve_real_state_directory_if_present(&planned)?;
+    // Compare where both actually land: the destination is already resolved
+    // through its existing ancestors, so resolve the state path the same way.
+    let landing = planned_destination_parent(&planned.join("state"))?;
+    if landing.starts_with(destination) {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "state directory {} would be inside the new worktree {}; choose a state directory outside it",
+            state.display(),
+            destination.display()
+        )));
+    }
+    if destination.starts_with(&landing) {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} would be inside the Riftri state directory {}; choose a destination outside it",
+            destination.display(),
+            state.display()
+        )));
+    }
+    Ok(planned)
 }
 
 /// The canonical parent a new worktree destination will have once its missing
@@ -16382,6 +16426,86 @@ mod tests {
         assert!(!moved.exists());
         let status = storage_accounting(&state).expect("status after removal");
         assert!(status.diagnostic_issues.is_empty(), "{status:?}");
+    }
+
+    fn add_with_state(
+        repository: &Path,
+        destination: &Path,
+        state: &Path,
+    ) -> Result<super::AddWorktreeResult, super::WorktreeError> {
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.to_path_buf(),
+                destination: destination.to_path_buf(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.to_path_buf()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+    }
+
+    /// `--state-dir some/dir/.` names the same directory as `some/dir`, but
+    /// creating it as spelled failed as an operational I/O error.
+    #[test]
+    fn a_state_directory_spelled_with_dot_components_is_created_once() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        add_with_state(&repository, &root.join("worktree"), &root.join("state/./"))
+            .expect("add with a dot-component state directory");
+        assert!(root.join("state/operations").is_dir());
+        assert!(
+            storage_accounting(&root.join("state"))
+                .unwrap()
+                .diagnostic_issues
+                .is_empty()
+        );
+    }
+
+    /// `..` after a directory that does not exist yet can only be resolved
+    /// by creating that directory, which left it behind as litter.
+    #[test]
+    fn a_state_directory_climbing_out_of_a_missing_directory_is_refused() {
+        let (fixture, repository, _state) = stable_root_fixture();
+        // Not the canonical root: in a Windows verbatim path (`\\?\`), `..`
+        // is an ordinary name, not a step to the parent.
+        let root = fixture.path().to_path_buf();
+        let error = add_with_state(
+            &repository,
+            &root.join("worktree"),
+            &root.join("missing/../state"),
+        )
+        .expect_err("`..` out of a missing directory is refused");
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{error}"
+        );
+        assert!(!root.join("missing").exists(), "nothing may be created");
+        assert!(!root.join("state").exists());
+        assert!(!root.join("worktree").exists());
+    }
+
+    /// A state directory inside the new worktree (or the reverse) was created
+    /// first, which then made the add refuse its own destination as "taken by
+    /// another worktree" and left the directories behind.
+    #[test]
+    fn a_state_directory_and_worktree_cannot_contain_each_other() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let worktree = root.join("worktree");
+        let error = add_with_state(&repository, &worktree, &worktree.join("state"))
+            .expect_err("state inside the worktree is refused");
+        assert!(error.to_string().contains("inside"), "{error}");
+        assert!(!worktree.exists(), "nothing may be created");
+
+        let state = root.join("state");
+        fs::create_dir(&state).unwrap();
+        let error = add_with_state(&repository, &state.join("worktree"), &state)
+            .expect_err("a worktree inside the state directory is refused");
+        assert!(error.to_string().contains("inside"), "{error}");
+        assert!(!state.join("worktree").exists());
     }
 
     #[test]
