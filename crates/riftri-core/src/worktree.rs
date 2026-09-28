@@ -16214,13 +16214,8 @@ mod tests {
         );
         git(
             &other,
-            &[
-                "worktree",
-                "add",
-                "--quiet",
-                "--detach",
-                child.to_str().unwrap(),
-            ],
+            // Relative path: Git cannot take the verbatim `\\?\` form on Windows.
+            &["worktree", "add", "--quiet", "--detach", "../child"],
         );
 
         let report = recover_incomplete_operations(&state).expect("repair");
