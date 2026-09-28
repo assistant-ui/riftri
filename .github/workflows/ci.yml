@@ -327,8 +327,10 @@ jobs:
     # release built them. That gap hid two tests that do not compile against
     # musl, where ioctl's request parameter is c_int rather than c_ulong.
     #
-    # `check`, not `build`: this proves the sources compile for every shipped
-    # target without needing a cross-linker for each one.
+    # `clippy`, not `build`: this proves the sources compile and lint clean
+    # for every shipped target without needing a cross-linker for each one.
+    # Lints genuinely differ by target -- a cast that is required against
+    # glibc is redundant against musl -- so linting only the host misses them.
     name: Cross-check ${{ matrix.target }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -353,12 +355,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install the target's standard library
-        run: rustup target add ${{ matrix.target }}
+        run: |
+          rustup target add ${{ matrix.target }}
+          rustup component add clippy
 
-      - name: Check every crate and test for the target
+      - name: Lint every crate and test for the target
         run: >-
-          cargo check --workspace --all-targets --all-features --locked
-          --target ${{ matrix.target }}
+          cargo clippy --workspace --all-targets --all-features --locked
+          --target ${{ matrix.target }} -- -D warnings
 
   coverage:
     name: Coverage (cargo-llvm-cov)

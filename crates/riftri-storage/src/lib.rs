@@ -1425,7 +1425,10 @@ fn filesystem_name(stats: &libc::statfs) -> String {
     const BTRFS_SUPER_MAGIC: u64 = 0x9123_683e;
     const XFS_SUPER_MAGIC: u64 = 0x5846_5342;
     const OVERLAYFS_SUPER_MAGIC: u64 = 0x794c_7630;
-    let filesystem_magic = stats.f_type as u64;
+    // `as _` rather than `as u64`: f_type is __fsword_t (i64) against glibc
+    // and c_ulong (u64) against musl, so naming the target type makes the
+    // cast redundant on one of them. The match arms below pin the type.
+    let filesystem_magic = stats.f_type as _;
 
     match filesystem_magic {
         BTRFS_SUPER_MAGIC => "btrfs".to_owned(),
