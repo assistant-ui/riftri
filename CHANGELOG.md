@@ -33,6 +33,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   than about 120 directories deep. The base integrity hash kept a 64 KiB read
   buffer in every recursion frame. The hashed bytes are unchanged, so existing
   bases still verify (#494).
+- A tree path that fits in Git's checkout but not under Riftri's base or
+  staging locations within the platform path limit is refused up front,
+  naming the path and suggesting a shorter `--state-dir`. It used to fail deep
+  inside the base build as an operational `git-failed` error (#496).
 - On macOS, a worktree whose path uses decomposed Unicode (NFD), as Finder and
   many apps write names, stays manageable. Git registers such paths
   precomposed, and the byte comparison made `status` report the worktree as
