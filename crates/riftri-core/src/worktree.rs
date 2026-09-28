@@ -665,6 +665,28 @@ fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// The directory lifecycle commands run Git from and journals record for a
+/// repository: its main worktree, which Git lists first (a bare repository's
+/// own directory). The worktree a command was run from can be the one being
+/// removed (#475), or a linked worktree that is removed later and would strand
+/// every journal naming it (#476). Falls back to `live_root` when the main
+/// worktree is not an existing directory.
+fn stable_repository_root(git: &Git, live_root: &Path) -> Result<PathBuf, WorktreeError> {
+    Ok(main_worktree_root(
+        &git.list_worktrees(live_root)?,
+        live_root,
+    ))
+}
+
+/// [`stable_repository_root`] from an inventory the caller already listed.
+fn main_worktree_root(inventory: &[riftri_git::WorktreeInfo], live_root: &Path) -> PathBuf {
+    inventory
+        .first()
+        .map(|main| main.path.clone())
+        .filter(|main| main.is_dir())
+        .unwrap_or_else(|| live_root.to_path_buf())
+}
+
 /// Return whether `destination` is an active Riftri-managed worktree in any
 /// state directory registered by the repository.
 pub fn is_managed_worktree(repository: &Path, destination: &Path) -> Result<bool, WorktreeError> {
@@ -2354,6 +2376,7 @@ fn remove_worktree_with_mode(
     let repository_root = repository.root.ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
+    let repository_root = stable_repository_root(&git, &repository_root)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
@@ -2499,6 +2522,7 @@ fn move_worktree_inner(
     let repository_root = repository.root.ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
+    let repository_root = stable_repository_root(&git, &repository_root)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
@@ -2606,6 +2630,7 @@ fn compact_worktree_inner(
     let repository_root = repository.root.ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
     })?;
+    let repository_root = stable_repository_root(&git, &repository_root)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
@@ -3013,8 +3038,8 @@ fn add_worktree_inner(
     }
     // The destination was validated before the lock was taken; a concurrent
     // add or plain Git may have used it since.
-    if git
-        .list_worktrees(&repository_root)?
+    let inventory = git.list_worktrees(&repository_root)?;
+    if inventory
         .iter()
         .any(|worktree| paths_match(&worktree.path, &destination))
         || (fs::symlink_metadata(&destination).is_ok() && !is_empty_real_directory(&destination)?)
@@ -3050,8 +3075,11 @@ fn add_worktree_inner(
         WorktreeMode::ExistingBranch(branch) => (Some(branch.as_os_str()), false),
         WorktreeMode::Detached => (None, false),
     };
+    // `HEAD` and every Git call above mean the worktree the add was run in, as
+    // with Git; the journal records a location that outlives that worktree.
+    let recorded_repository = main_worktree_root(&inventory, &repository_root);
     let journal_paths = JournalPaths {
-        repository: &repository_root,
+        repository: &recorded_repository,
         destination: &destination,
         scratch: &scratch,
         base_staging: &base_staging,
@@ -15783,6 +15811,157 @@ mod tests {
             !message.contains("the repository has no commits"),
             "{message}"
         );
+    }
+
+    fn stable_root_fixture() -> (crate::test_support::WritableTempDir, PathBuf, PathBuf) {
+        let fixture = tempdir().expect("fixture");
+        let repository = fs::canonicalize(fixture.path())
+            .expect("resolve fixture")
+            .join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::create_dir(repository.join("nested")).expect("create directory");
+        fs::write(repository.join("nested/tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "."]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        (fixture, repository, state)
+    }
+
+    fn add_from(invoked_in: &Path, destination: &Path, state: &Path) {
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: invoked_in.to_path_buf(),
+                destination: destination.to_path_buf(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.to_path_buf()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+    }
+
+    /// Git removes the worktree it is run from; Riftri renamed that view aside
+    /// and then could not start Git there to unregister it (#475).
+    #[test]
+    fn a_worktree_can_be_removed_from_inside_itself() {
+        for from_subdirectory in [false, true] {
+            let (_fixture, repository, state) = stable_root_fixture();
+            let destination = repository.with_file_name("worktree");
+            add_from(&repository, &destination, &state);
+            let invoked_in = if from_subdirectory {
+                destination.join("nested")
+            } else {
+                destination.clone()
+            };
+
+            remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository: invoked_in,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .unwrap_or_else(|error| panic!("subdirectory={from_subdirectory}: {error}"));
+
+            assert!(!destination.exists(), "subdirectory={from_subdirectory}");
+            assert!(!registered(&repository, &destination));
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(accounting.pending_removals, 0, "{accounting:?}");
+        }
+    }
+
+    /// A worktree created from inside another linked worktree must stay
+    /// manageable after that worktree is removed: its journal records the
+    /// repository's main worktree, not the one that ran the add (#476).
+    #[test]
+    fn a_task_worktree_outlives_the_worktree_it_was_created_from() {
+        let (_fixture, repository, state) = stable_root_fixture();
+        let parent = repository.with_file_name("parent");
+        let child = repository.with_file_name("child");
+        add_from(&repository, &parent, &state);
+        git(
+            &parent,
+            &["commit", "--quiet", "--allow-empty", "-m", "parent only"],
+        );
+        add_from(&parent, &child, &state);
+        let head = |path: &Path| {
+            riftri_git::Git::default()
+                .resolve_revision(path, std::ffi::OsStr::new("HEAD"))
+                .unwrap()
+                .commit
+        };
+        assert_eq!(
+            head(&child),
+            head(&parent),
+            "HEAD means the invoking worktree"
+        );
+        assert_ne!(head(&child), head(&repository));
+        let recorded = JournalStore::open(&state)
+            .load_all()
+            .expect("journals")
+            .into_iter()
+            .find(|journal| journal.destination == child)
+            .expect("child journal")
+            .repository;
+        // Git spells paths its own way on Windows; compare as Riftri does.
+        assert!(
+            super::paths_match(&recorded, &repository),
+            "journals record the main worktree: {recorded:?}"
+        );
+
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: parent.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the parent worktree");
+        let moved = repository.with_file_name("child-moved");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: child.clone(),
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move the child after its parent is gone");
+        let status = storage_accounting(&state).expect("status");
+        assert!(status.diagnostic_issues.is_empty(), "{status:?}");
+        compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository: repository.clone(),
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("compact the child");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: moved.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("remove the child");
+        let repaired = recover_incomplete_operations(&state).expect("repair");
+        assert!(repaired.errors.is_empty(), "{repaired:?}");
     }
 
     #[test]
