@@ -134,15 +134,40 @@ jobs:
         run: |
           volume="$RUNNER_TEMP/riftri-apfs"
           mount | grep -q "on $volume " || exit 0
-          if hdiutil detach "$volume"; then
-            exit 0
-          fi
-          # "Resource busy" means something still holds the volume. As on the
-          # Linux unmount below (#385), name the holder while it is still
-          # there: rerunning the job destroys the evidence (#431). A process
-          # leaked by the test steps shows up here, since TMPDIR points inside
-          # the volume — and so would a system daemon such as Spotlight
-          # indexing the freshly created volume.
+
+          # The #431 diagnostics captured this failure in run 36347186317 and
+          # found nothing holding the volume: no process with a working
+          # directory inside it, and `lsof` on the mount point listed no open
+          # file at all, 2.7 seconds after hdiutil reported "Resource busy".
+          # So this is the disk-image subsystem settling — hdiejectd and
+          # diskimages-helper were still up, and the runner had to terminate
+          # the latter as an orphan — not a process the tests leaked.
+          #
+          # This is not the retry #400 argued against. That one would have
+          # hidden a hang. This one separates a transient holder from a real
+          # leak: every attempt is a plain detach, never --force, and if all
+          # of them fail the diagnostics below still run and still fail the
+          # job, so a genuine leak is reported exactly as it is today.
+          attempt=1
+          while :; do
+            if hdiutil detach "$volume"; then
+              exit 0
+            fi
+            if [ "${attempt}" -ge 5 ]; then
+              break
+            fi
+            delay=$((attempt * 2))
+            echo "Volume still busy after attempt ${attempt}; retrying in ${delay}s."
+            sleep "${delay}"
+            attempt=$((attempt + 1))
+          done
+
+          # Still busy after 5 attempts over 20 seconds. As on the Linux
+          # unmount below (#385), name the holder while it is still there:
+          # rerunning the job destroys the evidence (#431). A process leaked by
+          # the test steps shows up here, since TMPDIR points inside the
+          # volume — and so would a system daemon such as Spotlight indexing
+          # the freshly created volume.
           echo "::group::Processes holding $volume"
           echo "-- working directories inside the volume --"
           sudo lsof -d cwd 2>/dev/null | grep -F "$volume" || echo "(none)"
@@ -152,7 +177,7 @@ jobs:
           echo "-- process tree --"
           ps -axo pid,ppid,user,command || true
           echo "::endgroup::"
-          echo "::error::Could not detach $volume: still busy. The holder is listed above (#431)."
+          echo "::error::Could not detach $volume after 5 attempts over 20s: still busy. The holder is listed above (#431)."
           exit 1
 
       - name: Run npm launcher tests
