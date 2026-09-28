@@ -348,8 +348,12 @@ Repair also reconciles active journals against Git's own worktree registry:
   is removed once its operation lock proves no writer is active. A removal,
   move, compaction, prune, or garbage-collection temporary is removed once its
   journal has reached a terminal phase and will never be written again. A
-  temporary whose operation is unknown or still pending is preserved, and
-  `riftri status` keeps reporting it.
+  removal, move, or compaction killed during its first journal write leaves a
+  complete intent that never reached its atomic rename. That intent is removed
+  once repair holds the lock of the add it names, because the writer held that
+  lock for as long as the temporary could exist. A torn temporary, or one whose
+  operation is unknown or still pending, is preserved, and `riftri status` keeps
+  reporting it.
 - On Linux, an OverlayFS probe directory abandoned next to a worktree after a
   failed probe unmount (named `.riftri-overlay-probe-*`, also flagged by
   `riftri status`) is removed only when the kernel's mount inventory proves
