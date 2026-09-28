@@ -179,6 +179,7 @@ fn shares_foreground_terminal() -> bool {
     let process_group = unsafe { libc::getpgrp() };
     [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO]
         .into_iter()
+        // SAFETY: as above; isatty and tcgetpgrp only read descriptor state.
         .any(|descriptor| unsafe {
             libc::isatty(descriptor) == 1 && libc::tcgetpgrp(descriptor) == process_group
         })

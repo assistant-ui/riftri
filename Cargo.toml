@@ -16,6 +16,13 @@ authors = ["Assistant UI contributors"]
 repository = "https://github.com/assistant-ui/riftri"
 homepage = "https://github.com/assistant-ui/riftri"
 
+[workspace.lints.clippy]
+# Every `unsafe` block states why it is sound, next to the block itself. The
+# workspace was already at 120 of 123 when this was turned on; the three gaps
+# were comments that sat above an enclosing statement, where the reader could
+# find them but the lint could not.
+undocumented_unsafe_blocks = "deny"
+
 [workspace.dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

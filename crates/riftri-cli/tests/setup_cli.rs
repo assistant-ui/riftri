@@ -259,8 +259,8 @@ mod terminal {
                 ws_xpixel: 0,
                 ws_ypixel: 0,
             };
-            // SAFETY: openpty writes two fresh descriptors; optional pointers are null.
             assert_eq!(
+                // SAFETY: openpty writes two fresh descriptors; optional pointers are null.
                 unsafe {
                     libc::openpty(
                         &mut master,
@@ -393,9 +393,9 @@ mod terminal {
             }
             let status = wait(&mut child);
             drop(child);
-            // SAFETY: master is an open terminal descriptor and mode is writable.
             let mut mode = std::mem::MaybeUninit::<libc::termios>::uninit();
             assert_eq!(
+                // SAFETY: master is an open terminal descriptor and mode is writable.
                 unsafe { libc::tcgetattr(master.as_raw_fd(), mode.as_mut_ptr()) },
                 0
             );

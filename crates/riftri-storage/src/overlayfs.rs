@@ -1721,6 +1721,12 @@ fn run_probe_child_with<T>(
 // cannot help a child that never execs: another thread's open mount/file/lock
 // would otherwise remain pinned for the child's lifetime. Fork has already
 // given this child a private descriptor table, so the parent's FDs are untouched.
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "post-fork child code whose binding constraint is async-signal \
+              safety, not pointer validity; the contract is written down and \
+              the blocks documented in #473"
+)]
 unsafe fn close_inherited_descriptors(result_fd: RawFd, retained_fd: RawFd) -> i32 {
     let low = result_fd.min(retained_fd) as u32;
     let high = result_fd.max(retained_fd) as u32;
@@ -1743,6 +1749,12 @@ unsafe fn close_inherited_descriptors(result_fd: RawFd, retained_fd: RawFd) -> i
     }
 }
 
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "post-fork child code whose binding constraint is async-signal \
+              safety, not pointer validity; the contract is written down and \
+              the blocks documented in #473"
+)]
 unsafe fn close_inherited_descriptors_via_proc(result_fd: RawFd, retained_fd: RawFd) -> i32 {
     // SAFETY: fixed NUL-terminated path; open in the child so self refers to
     // its table, including any descriptors created concurrently before fork.
@@ -1760,6 +1772,12 @@ unsafe fn close_inherited_descriptors_via_proc(result_fd: RawFd, retained_fd: Ra
     error
 }
 
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "post-fork child code whose binding constraint is async-signal \
+              safety, not pointer validity; the contract is written down and \
+              the blocks documented in #473"
+)]
 unsafe fn close_proc_descriptors(directory: RawFd, result_fd: RawFd, retained_fd: RawFd) -> i32 {
     // Raw getdents64 and stack buffers avoid allocator/readdir locks after a
     // multithreaded fork. Linux's fixed header is ino64, off64, reclen16, type8.
@@ -1846,6 +1864,12 @@ fn wait_for_child(child: libc::pid_t) -> std::io::Result<i32> {
     }
 }
 
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "post-fork child code whose binding constraint is async-signal \
+              safety, not pointer validity; the contract is written down and \
+              the blocks documented in #473"
+)]
 unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeContext<'_>) -> ! {
     const OVERLAY: &[u8] = b"overlay\0";
     const ROOT: &[u8] = b"/\0";
@@ -2022,6 +2046,12 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
     unsafe { libc::_exit(0) };
 }
 
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "post-fork child code whose binding constraint is async-signal \
+              safety, not pointer validity; the contract is written down and \
+              the blocks documented in #473"
+)]
 unsafe fn child_fail(result_fd: RawFd, stage: i32, error: i32) -> ! {
     unsafe { child_report(result_fd, ChildResult { stage, error }) };
     unsafe { libc::_exit(1) };
@@ -2042,6 +2072,11 @@ fn last_errno() -> i32 {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "test scaffolding for the post-fork child; documented with \
+              the production blocks in #473"
+)]
 mod tests {
     use super::*;
 
