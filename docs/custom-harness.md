@@ -126,8 +126,9 @@ call rather than to retry or inspect.
 Two more carry their own codes, also `policy` with exit `3`, `cleanup`
 `not-needed`, and no `nextCommand`, because no Riftri command can fix them:
 
-- `bare-repository` — a command that needs a working tree ran in a bare
-  repository;
+- `bare-repository` — enabling Git interception (`riftri enable`) ran in a
+  bare repository. Worktree lifecycle commands, `status`, `gc`, and `repair`
+  all work in one;
 - `invalid-state-directory` — a `--state-dir`, or a path inside it, is a
   regular file or a symbolic link. Riftri never follows a link for its own
   state; point `--state-dir` at a directory, or at a path that does not exist

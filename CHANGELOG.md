@@ -35,6 +35,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   removing their worktrees works again. A journal is re-homed only while its
   destination is still a live worktree of the repository that owns the state
   directory (#476 follow-up).
+- Worktree lifecycle commands, `status`, `gc`, `repair`, and `doctor` work
+  when run from a bare repository (`git clone --bare`, then `git worktree add`
+  from the bare directory). They refused there, although the same repository
+  already worked from its linked worktrees. `riftri enable` still requires a
+  working tree (D042, #485).
 - `riftri worktree remove` works when run from inside the worktree being
   removed, or one of its subdirectories, as `git worktree remove` does.
   Previously it failed with `cannot run Git in <worktree>` and left a pending
