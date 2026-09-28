@@ -29,6 +29,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri repair` also reaps the intent a removal, move, or compaction was
+  writing when it was killed before publishing it. Such an operation never
+  started, but its complete temporary record was previously preserved forever.
+  Repair removes it once it holds the lock of the add the intent names; torn
+  records stay preserved (#457).
 - A compaction killed while it was deleting the old view no longer wedges
   `riftri repair` with a false "worktree content changed during compaction".
   The verified old view is renamed to a journal-derived

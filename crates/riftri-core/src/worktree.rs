@@ -5616,7 +5616,7 @@ fn diagnose_state_paths(
                 ]
             })
             .collect(),
-        &|_| true,
+        &|_, _| true,
         &mut issues,
     )?;
     let finished = finished_lifecycle_operations(
@@ -5626,12 +5626,16 @@ fn diagnose_state_paths(
         prune_journals,
         collection_journals,
     );
-    let reapable = |directory: &str| {
+    let reapable = |directory: &'static str| {
         let finished = finished
             .iter()
             .find(|(name, _)| *name == directory)
             .map(|(_, operations)| operations);
-        move |owner: &str| finished.is_some_and(|operations| operations.contains(owner))
+        move |owner: &str, path: &Path| {
+            finished.is_some_and(|operations| operations.contains(owner))
+                || unpublished_intent_add_journal(state_directory, directory, owner, path)
+                    .is_ok_and(|add_journal| add_journal.is_some())
+        }
     };
     diagnose_journal_directory(
         &state_directory.join("removals"),
@@ -5968,6 +5972,62 @@ const REAPABLE_JOURNAL_DIRECTORY: &str = "operations";
 /// never promises a cleanup that repair does not perform. Temporaries whose
 /// owner is unknown or still pending stay preserved: the first write of a new
 /// operation looks exactly like that.
+/// The add journal whose operation lock the writer of `path` held, when `path`
+/// is a complete intent record for `owner` in lifecycle directory `name` that
+/// never reached its atomic rename (its own journal does not exist).
+///
+/// Removal, move, and compaction take their source add's operation lock
+/// before their first journal write and hold it until they return, and a
+/// failed write cleans up its own temporary. So once that lock can be taken,
+/// no writer of this temporary is still alive. A torn record proves nothing
+/// about its writer and yields `None`, as does a source add that does not
+/// exist, since its lock could never have been held.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn unpublished_intent_add_journal(
+    state_directory: &Path,
+    name: &str,
+    owner: &str,
+    path: &Path,
+) -> Result<Option<PathBuf>, WorktreeError> {
+    let published = state_directory.join(name).join(format!("{owner}.json"));
+    if symlink_metadata_if_present(&published)?.is_some() || !is_regular_file_if_present(path)? {
+        return Ok(None);
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    let intent = match name {
+        "removals" => serde_json::from_slice::<RemovalJournalRecord>(&bytes)
+            .ok()
+            .filter(|record| record.phase == RemoveWorktreePhase::IntentRecorded)
+            .map(|record| (record.operation_id, record.source_add_operation_id)),
+        "moves" => serde_json::from_slice::<MoveJournalRecord>(&bytes)
+            .ok()
+            .filter(|record| record.phase == MoveWorktreePhase::IntentRecorded)
+            .map(|record| (record.operation_id, record.source_add_operation_id)),
+        "compactions" => serde_json::from_slice::<CompactJournalRecord>(&bytes)
+            .ok()
+            .filter(|record| record.phase == CompactWorktreePhase::IntentRecorded)
+            .map(|record| (record.operation_id, record.source_add_operation_id)),
+        _ => None,
+    };
+    let Some((operation_id, source)) = intent else {
+        return Ok(None);
+    };
+    if operation_id != owner || !journal_identifier_like(&source) {
+        return Ok(None);
+    }
+    let add_journal = state_directory
+        .join(REAPABLE_JOURNAL_DIRECTORY)
+        .join(format!("{source}.json"));
+    if !is_regular_file_if_present(&add_journal)?
+        || !is_regular_file_if_present(&add_journal.with_extension("lock"))?
+    {
+        return Ok(None);
+    }
+    Ok(Some(add_journal))
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn finished_lifecycle_operations(
     removals: &[DecodedRemovalJournal],
@@ -6044,7 +6104,7 @@ fn finished_lifecycle_operations(
 fn diagnose_journal_directory(
     directory: &Path,
     expected: HashSet<PathBuf>,
-    reapable: &dyn Fn(&str) -> bool,
+    reapable: &dyn Fn(&str, &Path) -> bool,
     issues: &mut Vec<StateDiagnosticIssue>,
 ) -> Result<(), WorktreeError> {
     if !is_real_directory_if_present(directory)? {
@@ -6062,7 +6122,7 @@ fn diagnose_journal_directory(
                 // Promise `riftri repair` only where the reaper provably acts;
                 // anything else would send the user in a loop, because repair
                 // reports success and leaves the file in place.
-                let advice = if reapable(&owner) {
+                let advice = if reapable(&owner, &path) {
                     "an interrupted Riftri journal write left this temporary file; `riftri repair` removes it"
                 } else {
                     "an interrupted Riftri journal write left this temporary file; it holds no operation and Riftri preserves it"
@@ -7058,7 +7118,7 @@ fn reap_finished_lifecycle_temporaries(
     );
     for (name, operations) in finished {
         let directory = state_directory.join(name);
-        if operations.is_empty() || !is_real_directory_if_present(&directory)? {
+        if !is_real_directory_if_present(&directory)? {
             continue;
         }
         let mut reaped_here = None;
@@ -7066,8 +7126,25 @@ fn reap_finished_lifecycle_temporaries(
             let Some(owner) = interrupted_journal_temporary_owner(&path) else {
                 continue;
             };
-            if !operations.contains(&owner) || !is_regular_file(&path)? {
+            if !is_regular_file(&path)? {
                 continue;
+            }
+            // Held only while this temporary is proven orphaned.
+            let mut _writer_lock = None;
+            if !operations.contains(&owner) {
+                let Some(add_journal) =
+                    unpublished_intent_add_journal(state_directory, name, &owner, &path)?
+                else {
+                    continue;
+                };
+                let Some(lock) = try_lock_add_operation(&add_journal)? else {
+                    continue;
+                };
+                _writer_lock = Some(lock);
+                // Re-check under the lock: the writer may have published it.
+                if unpublished_intent_add_journal(state_directory, name, &owner, &path)?.is_none() {
+                    continue;
+                }
             }
             remove_file_if_present(&path)?;
             reaped_here = Some(path.clone());
@@ -13226,6 +13303,141 @@ mod tests {
             assert!(!reaped.contains(path), "{reaped:?}");
             assert!(path.exists(), "{}", path.display());
         }
+    }
+
+    /// A kill during a lifecycle command's first journal write leaves a
+    /// complete intent record that was never renamed into place. The writer
+    /// held the source add's lock for as long as that temporary could exist,
+    /// so once repair holds the lock, nothing can still be writing it.
+    #[test]
+    fn repair_reaps_intent_writes_that_were_never_published() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        let add = |destination: &Path| {
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.to_path_buf(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+        };
+        let moving = fixture.path().join("moving");
+        let removing = fixture.path().join("removing");
+        add(&moving);
+        add(&removing);
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: moving.clone(),
+                destination: fixture.path().join("moved"),
+                state_dir: Some(state.clone()),
+            },
+            Some(MoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("stop after the move intent");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: removing.clone(),
+                state_dir: Some(state.clone()),
+            },
+            Some(RemoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("stop after the removal intent");
+
+        // Diagnostics record canonical paths.
+        let state = fs::canonicalize(&state).expect("canonical state directory");
+        // Turn each published intent back into the temporary a kill before
+        // its atomic rename leaves behind.
+        let unpublish = |journal: &Path, suffix: &str| {
+            let name = journal.file_stem().unwrap().to_str().unwrap();
+            let temporary = journal.with_file_name(format!(".{name}.{suffix}.tmp"));
+            fs::rename(journal, &temporary).expect("unpublish intent");
+            temporary
+        };
+        let moves = crate::journal::MoveJournalStore::open(&state)
+            .load_all()
+            .expect("moves");
+        let removals = RemovalJournalStore::open(&state)
+            .load_all()
+            .expect("removals");
+        let move_intent = unpublish(&moves[0].journal_path, "Qq34Cd");
+        let removal_intent = unpublish(&removals[0].journal_path, "Zz12Ab");
+        // A torn write proves nothing about its writer and stays preserved.
+        let torn = removal_intent.with_file_name(".remove-op-torn.Tt56Ef.tmp");
+        let bytes = fs::read(&removal_intent).expect("read intent");
+        fs::write(&torn, &bytes[..bytes.len() / 2]).expect("write torn intent");
+
+        let report = storage_accounting(&state).expect("status");
+        let advice = |path: &Path| {
+            report
+                .diagnostic_issues
+                .iter()
+                .find(|issue| issue.path == path)
+                .map(|issue| issue.reason.clone())
+                .unwrap_or_else(|| panic!("no diagnostic for {}", path.display()))
+        };
+        for path in [&move_intent, &removal_intent] {
+            assert!(
+                advice(path).contains("`riftri repair` removes it"),
+                "{}: {}",
+                path.display(),
+                advice(path)
+            );
+        }
+        assert!(!advice(&torn).contains("`riftri repair` removes it"));
+
+        // While the source add is busy, its intent may still be in flight.
+        let busy = {
+            let add_journal = JournalStore::open(&state)
+                .load_all()
+                .expect("adds")
+                .into_iter()
+                .find(|journal| journal.operation_id == removals[0].source_add_operation_id)
+                .expect("removal source add");
+            super::try_lock_add_operation(&add_journal.journal_path)
+                .expect("lock source add")
+                .expect("source add is idle")
+        };
+        let reaped = recover_incomplete_operations(&state)
+            .expect("repair while busy")
+            .reaped_artifacts;
+        assert!(reaped.contains(&move_intent), "{reaped:?}");
+        assert!(!reaped.contains(&removal_intent), "{reaped:?}");
+        assert!(removal_intent.exists());
+        drop(busy);
+
+        let reaped = recover_incomplete_operations(&state)
+            .expect("repair")
+            .reaped_artifacts;
+        assert!(reaped.contains(&removal_intent), "{reaped:?}");
+        assert!(!removal_intent.exists());
+        assert!(torn.exists(), "a torn intent must stay preserved");
+        // The operations never started, so their views are untouched.
+        assert!(moving.is_dir());
+        assert!(removing.is_dir());
+        let accounting = storage_accounting(&state).expect("status after repair");
+        assert_eq!(accounting.active_views, 2);
+        assert_eq!(accounting.diagnostic_issues.len(), 1, "{accounting:?}");
     }
 
     #[test]
