@@ -29,6 +29,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Concurrent `riftri worktree add` calls for the same path can no longer
+  delete the one that won. Each loser's rollback used to take the winner's
+  registration for its own and remove it, even after the winner had reported
+  success. With distinct branches, every loser was instead left with a pending
+  add and a leaked branch. The claim check through Git's registration now runs
+  under the worktree-metadata lock: one add wins, and the others are refused
+  cleanly before recording anything. An interrupted add also keeps claiming its
+  path until `riftri repair` resolves it (#469).
 - `riftri worktree remove` (with or without `--force`) and `riftri worktree
   move` now refuse a worktree locked with `git worktree lock` before recording
   anything, naming the lock reason and `git worktree unlock`. Previously Git
