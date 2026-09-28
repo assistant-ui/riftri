@@ -16468,8 +16468,10 @@ mod tests {
     /// by creating that directory, which left it behind as litter.
     #[test]
     fn a_state_directory_climbing_out_of_a_missing_directory_is_refused() {
-        let (_fixture, repository, _state) = stable_root_fixture();
-        let root = repository.parent().unwrap().to_path_buf();
+        let (fixture, repository, _state) = stable_root_fixture();
+        // Not the canonical root: in a Windows verbatim path (`\\?\`), `..`
+        // is an ordinary name, not a step to the parent.
+        let root = fixture.path().to_path_buf();
         let error = add_with_state(
             &repository,
             &root.join("worktree"),
