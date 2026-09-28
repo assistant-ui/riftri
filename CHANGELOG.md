@@ -34,6 +34,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   anything, naming the lock reason and `git worktree unlock`. Previously Git
   refused only after Riftri had journaled its intent, and the pending journal
   blocked every later command on that worktree until `riftri repair` (#460).
+- `riftri worktree add` now refuses, before recording anything, a path Git
+  still registers as a worktree whose directory was deleted without
+  `git worktree prune`, and says how to clear it. Previously Git refused only
+  after the add was journaled, and rollback mistook the stale registration for
+  its own, leaving a pending add until `riftri repair` (#461).
 - `riftri repair` also reaps the intent a removal, move, or compaction was
   writing when it was killed before publishing it. Such an operation never
   started, but its complete temporary record was previously preserved forever.
