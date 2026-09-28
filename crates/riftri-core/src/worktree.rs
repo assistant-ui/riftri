@@ -2786,6 +2786,10 @@ fn compact_worktree_inner(
     }
     let base_path = base_directory.join(resolved.tree.as_str());
     let base_staging = base_directory.join(format!(".riftri-build-{operation_id}"));
+    validate_materialization_path_lengths(
+        &compatibility.checkout_paths,
+        &[&base_path, &base_staging, &replacement, &quarantine],
+    )?;
     let temporary_index = state_directory
         .join("tmp")
         .join(format!("compact-index-{operation_id}"));
@@ -3095,6 +3099,10 @@ fn add_worktree_inner(
         .parent()
         .expect("normalized destination has a parent")
         .join(format!(".riftri-view-{operation_id}"));
+    validate_materialization_path_lengths(
+        &compatibility.checkout_paths,
+        &[&base_path, &base_staging, &scratch],
+    )?;
     let (branch, branch_created) = match &request.mode {
         WorktreeMode::NewBranch(branch) => (Some(branch.as_os_str()), true),
         WorktreeMode::ExistingBranch(branch) => (Some(branch.as_os_str()), false),
@@ -3992,6 +4000,42 @@ fn validate_sparse_directories_in_tree(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+/// Refuse a tree whose longest path fits in Git's own checkout but not under a
+/// longer location Riftri also writes the tree to: the immutable base, its
+/// build staging, and view siblings. Without this, the base build failed deep
+/// inside `git checkout-index` with "File name too long", reported as an
+/// operational failure that invites a retry which can never succeed.
+#[cfg(unix)]
+fn validate_materialization_path_lengths(
+    paths: &[PathBuf],
+    roots: &[&Path],
+) -> Result<(), WorktreeError> {
+    let Some(longest) = paths.iter().max_by_key(|path| path.as_os_str().len()) else {
+        return Ok(());
+    };
+    // PATH_MAX counts the terminating NUL.
+    let limit = libc::PATH_MAX as usize - 1;
+    for root in roots {
+        if root.as_os_str().len() + 1 + longest.as_os_str().len() > limit {
+            return Err(WorktreeError::Unsupported(format!(
+                "Git tree path {} ({} bytes) does not fit under Riftri's working location {} within the platform path limit of {limit} bytes; pass a shorter --state-dir, or choose a destination whose parent path is shorter",
+                longest.display(),
+                longest.as_os_str().len(),
+                root.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_materialization_path_lengths(
+    _paths: &[PathBuf],
+    _roots: &[&Path],
+) -> Result<(), WorktreeError> {
+    Ok(())
+}
+
 fn validate_destination_path_semantics(
     paths: &[PathBuf],
     destination: &Path,
@@ -16517,6 +16561,58 @@ mod tests {
             .expect_err("a worktree inside the state directory is refused");
         assert!(error.to_string().contains("inside"), "{error}");
         assert!(!state.join("worktree").exists());
+    }
+
+    /// Riftri materializes a tree under its base location and a staging
+    /// sibling, both longer than the destination. A path Git checks out
+    /// within the platform limit then failed deep inside the base build as an
+    /// operational `checkout-index` error, which invites a pointless retry.
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_path_too_long_for_the_base_location_is_refused_up_front() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let destination = root.join("w");
+        let state = root.join("state");
+        // Fits under the destination, not under the ~120-byte-longer base path.
+        let budget = libc::PATH_MAX as usize - 1 - destination.as_os_str().len() - 1 - 16;
+        let mut long = String::new();
+        while long.len() + 101 < budget {
+            long.push_str(&"d".repeat(100));
+            long.push('/');
+        }
+        long.push_str(&"f".repeat(budget - long.len()));
+        let blob = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&repository)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("hash an empty blob");
+        let blob = String::from_utf8(blob.stdout).unwrap().trim().to_owned();
+        git(
+            &repository,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{blob},{long}"),
+            ],
+        );
+        git(&repository, &["commit", "--quiet", "-m", "long path"]);
+
+        let error = add_with_state(&repository, &destination, &state)
+            .expect_err("a path that cannot fit under the base is refused");
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, super::WorktreeError::Unsupported(_)),
+            "{message}"
+        );
+        assert!(message.contains("--state-dir"), "{message}");
+        assert!(!destination.exists(), "nothing may be created");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.bases.is_empty(), "{accounting:?}");
     }
 
     #[test]
