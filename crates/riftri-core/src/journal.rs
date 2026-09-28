@@ -58,6 +58,11 @@ pub enum JournalError {
     #[error("invalid operation journal {path}: {detail}")]
     InvalidRecord { path: PathBuf, detail: String },
 
+    /// Another real file took the journal's path after it was opened: the
+    /// owner's atomic persist renamed a new version into place.
+    #[error("operation journal {path} was replaced while it was being read")]
+    ReplacedWhileReading { path: PathBuf },
+
     #[error("Riftri state path is not a real directory: {path}")]
     InvalidStateDirectory { path: PathBuf },
 }
@@ -161,21 +166,30 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
     let opened = file
         .metadata()
         .map_err(|source| io("inspect opened journal", path, source))?;
+    #[cfg(test)]
+    crate::test_hooks::fire(crate::test_hooks::FilesystemRacePoint::JournalOpened, path);
     let current =
         fs::symlink_metadata(path).map_err(|source| io("recheck journal path", path, source))?;
-    let mut valid = opened.is_file() && current.is_file() && !current.file_type().is_symlink();
+    let valid = opened.is_file() && current.is_file() && !current.file_type().is_symlink();
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        valid &= opened.dev() == current.dev() && opened.ino() == current.ino();
+        if valid && (opened.dev() != current.dev() || opened.ino() != current.ino()) {
+            // A different real file now holds the path: a write in flight,
+            // which a reconciling reader retries. Anything else fails closed.
+            return Err(JournalError::ReplacedWhileReading {
+                path: path.to_path_buf(),
+            });
+        }
     }
     #[cfg(windows)]
-    {
+    let valid = {
         use std::os::windows::fs::MetadataExt;
-        valid &= opened.file_attributes()
-            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
-            == 0;
-    }
+        valid
+            && opened.file_attributes()
+                & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+                == 0
+    };
     if !valid {
         return Err(JournalError::InvalidRecord {
             path: path.to_path_buf(),
@@ -214,6 +228,9 @@ fn read_real_journal(path: &Path, operation: &'static str) -> Result<Vec<u8>, Jo
 /// in flight — never as an error to propagate, and never as evidence the
 /// journal can be retired.
 pub(crate) fn journal_error_is_in_flight(error: &JournalError) -> bool {
+    if matches!(error, JournalError::ReplacedWhileReading { .. }) {
+        return true;
+    }
     let JournalError::Io { source, .. } = error else {
         return false;
     };
@@ -2272,6 +2289,53 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    /// An owner's atomic persist renames a new file over the journal. A reader
+    /// that opened the old file then sees a different file at the path, which
+    /// is a write in flight, not a broken journal: reconciling loads retry it
+    /// rather than refusing every concurrent add as "unsafe".
+    #[cfg(unix)]
+    #[test]
+    fn a_journal_replaced_while_being_read_is_retried() {
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let record = JournalRecord::new(
+            "replaced-open".to_owned(),
+            JournalPaths {
+                repository: Path::new("/repository"),
+                destination: Path::new("/destination"),
+                scratch: Path::new("/scratch"),
+                base_staging: Path::new("/base-staging"),
+                base_path: Path::new("/base"),
+                temporary_index: Path::new("/index"),
+                branch: None,
+                branch_created: false,
+                sparse_directories: &[],
+            },
+            "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            riftri_storage::BackendKind::ApfsClone,
+        );
+        let journal_path = store.persist(&record).expect("persist journal");
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::JournalOpened,
+            |path| {
+                let replacement = path.with_extension("replacement");
+                std::fs::copy(path, &replacement).expect("write the new version");
+                std::fs::rename(&replacement, path).expect("atomically replace the journal");
+            },
+        );
+
+        let load = store.load_all_reconciling().expect("reconciling load");
+
+        assert!(
+            load.issues.is_empty(),
+            "{:?}",
+            load.issues.first().map(|issue| &issue.reason)
+        );
+        assert!(load.unreadable.is_empty());
+        assert_eq!(load.journals.len(), 1);
+        assert_eq!(load.journals[0].journal_path, journal_path);
     }
 
     fn assert_invalid_journal<T>(result: Result<T, JournalError>, expected_path: &Path) {
