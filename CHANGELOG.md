@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.5.1] - 2026-09-29
+
 ### Added
 
 - A cached-creation baseline on a real repository:
@@ -13,15 +15,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   reports riftri's allocation accounting separately from whole-volume deltas, and
   retains its outliers. It also records that the unmodified repository is now
   accepted, which the 2026-09-12 experiment could not certify.
-
-### Added
-
 - A cached-creation baseline benchmark records serial and ten-way concurrent
   creation latencies against one warm base, for #211. CI uploads it as
   `cached-creation-baseline-macos-apfs`.
-
-### Added
-
 - A sparse monorepo benchmark measures allocation and creation costs for a cone
   against the full tree, closing Milestone 6's outstanding measurement for
   sparse-checkout profiles. CI records it on a disposable APFS volume and
