@@ -17072,7 +17072,8 @@ mod tests {
                 "clone",
                 "--quiet",
                 "--no-checkout",
-                repository.to_str().unwrap(),
+                // Relative: Windows verbatim paths are not valid clone URLs.
+                "../repository",
                 "vendored",
             ],
         );
