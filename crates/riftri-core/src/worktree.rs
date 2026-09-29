@@ -5400,7 +5400,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf, WorktreeError> {
 
 fn resolve_real_state_directory(path: &Path) -> Result<PathBuf, WorktreeError> {
     let metadata = fs::symlink_metadata(path)
-        .map_err(|source| io("inspect Riftri state directory", path, source))?;
+        .map_err(|source| state_directory_io("inspect Riftri state directory", path, source))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(JournalError::InvalidStateDirectory {
             path: path.to_path_buf(),
@@ -5450,7 +5450,30 @@ fn resolve_real_state_directory_if_present(path: &Path) -> Result<Option<PathBuf
                 .map_err(|source| io("resolve state directory", path, source))
         }
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(io("inspect Riftri state directory", path, source)),
+        Err(source) => Err(state_directory_io(
+            "inspect Riftri state directory",
+            path,
+            source,
+        )),
+    }
+}
+
+/// An I/O failure on a requested state directory. A path that runs through a
+/// regular file ("Not a directory") is the same caller mistake as a state path
+/// that is a file, so it gets the same policy refusal instead of an
+/// operational error that invites a retry.
+fn state_directory_io(
+    operation: &'static str,
+    path: &Path,
+    source: std::io::Error,
+) -> WorktreeError {
+    if source.kind() == std::io::ErrorKind::NotADirectory {
+        JournalError::InvalidStateDirectory {
+            path: path.to_path_buf(),
+        }
+        .into()
+    } else {
+        io(operation, path, source)
     }
 }
 
@@ -5519,8 +5542,9 @@ fn windows_path_key(path: &Path) -> Vec<u16> {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn create_state_layout(state_directory: &Path) -> Result<(), WorktreeError> {
-    fs::create_dir_all(state_directory)
-        .map_err(|source| io("create Riftri state directory", state_directory, source))?;
+    fs::create_dir_all(state_directory).map_err(|source| {
+        state_directory_io("create Riftri state directory", state_directory, source)
+    })?;
     require_real_state_directory(state_directory)?;
     for directory in [
         state_directory.join("bases"),

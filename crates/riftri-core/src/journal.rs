@@ -81,8 +81,16 @@ pub(crate) struct StatusJournalLoad<T> {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 pub(crate) fn require_real_state_directory(directory: &Path) -> Result<(), JournalError> {
-    let metadata = fs::symlink_metadata(directory)
-        .map_err(|source| io("inspect Riftri state directory", directory, source))?;
+    let metadata = fs::symlink_metadata(directory).map_err(|source| {
+        // A path through a regular file is the same caller mistake as a file.
+        if source.kind() == std::io::ErrorKind::NotADirectory {
+            JournalError::InvalidStateDirectory {
+                path: directory.to_path_buf(),
+            }
+        } else {
+            io("inspect Riftri state directory", directory, source)
+        }
+    })?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(JournalError::InvalidStateDirectory {
             path: directory.to_path_buf(),
