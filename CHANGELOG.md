@@ -29,6 +29,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri worktree add <path> <branch>` checks out the branch even when a tag
+  has the same name, as Git does. It used to resolve the tag and refuse with a
+  false "existing branch moved". A tree or blob ID given as the revision is now
+  the same `invalid-request` refusal as an unknown name, instead of an
+  operational Git failure (#503).
 - Concurrent adds sharing a new state directory no longer fail at random with
   "worktree parent path contains a dangling symbolic link" when another add
   creates that directory between two probes (#498).

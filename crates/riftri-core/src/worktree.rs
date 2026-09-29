@@ -2929,7 +2929,24 @@ fn add_worktree_inner(
         })?;
     let destination =
         normalize_new_destination(&request.destination, DestinationRules::WorktreeAdd)?;
-    let resolved = resolve_requested_revision(&git, &repository_root, &request.revision)?;
+    // An existing-branch add checks out the branch, as `git worktree add
+    // <path> <branch>` does, even when a tag has the same name: resolving the
+    // bare name would pick the tag and then refuse because "the branch moved".
+    let requested = match &request.mode {
+        WorktreeMode::ExistingBranch(branch) => {
+            if git.local_branch_target(&repository_root, branch)?.is_none() {
+                return Err(WorktreeError::InvalidRequest(format!(
+                    "existing local branch does not exist: {}",
+                    branch.to_string_lossy()
+                )));
+            }
+            let mut qualified = OsString::from("refs/heads/");
+            qualified.push(branch);
+            qualified
+        }
+        WorktreeMode::NewBranch(_) | WorktreeMode::Detached => request.revision.clone(),
+    };
+    let resolved = resolve_requested_revision(&git, &repository_root, &requested)?;
     // The mirror of the existing-branch check below. Git enforces this too,
     // but only after Riftri has journaled the add, so the refusal arrived as
     // an operational `git-failed` with unknown cleanup — and re-running a task
@@ -16696,6 +16713,85 @@ mod tests {
             .expect("a real directory appearing concurrently is fine");
 
         assert_eq!(planned, appearing);
+    }
+
+    /// A name can be both a branch and a tag (a release branch and its tag,
+    /// say). Git checks out the branch; Riftri resolved the bare name, which
+    /// prefers the tag, and then refused because "the branch moved".
+    #[test]
+    fn an_existing_branch_add_resolves_the_branch_not_a_same_named_tag() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        git(&repository, &["branch", "release"]);
+        git(
+            &repository,
+            &["commit", "--quiet", "--allow-empty", "-m", "later"],
+        );
+        git(&repository, &["tag", "release"]);
+        let branch_commit = riftri_git::Git::default()
+            .local_branch_target(&repository, std::ffi::OsStr::new("release"))
+            .unwrap()
+            .expect("branch exists");
+
+        let result = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: root.join("release"),
+                revision: OsString::from("release"),
+                mode: WorktreeMode::ExistingBranch(OsString::from("release")),
+                state_dir: Some(root.join("state")),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("check out the branch, as Git does");
+
+        assert_eq!(result.commit, branch_commit);
+        let head = Command::new("git")
+            .args(["symbolic-ref", "HEAD"])
+            .current_dir(root.join("release"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "refs/heads/release"
+        );
+    }
+
+    /// A tree or blob ID names an object, but not a commit: that is the same
+    /// caller mistake as an unknown name, not an operational Git failure.
+    #[test]
+    fn a_detached_add_of_a_non_commit_object_is_an_invalid_request() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let tree = Command::new("git")
+            .args(["rev-parse", "HEAD^{tree}"])
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        let tree = String::from_utf8(tree.stdout).unwrap().trim().to_owned();
+
+        let error = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: root.join("tree-view"),
+                revision: OsString::from(&tree),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(root.join("state")),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect_err("a tree is not a commit");
+
+        let message = error.to_string();
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{message}"
+        );
+        assert!(message.contains("does not name a commit"), "{message}");
     }
 
     #[test]
