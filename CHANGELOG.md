@@ -25,6 +25,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri doctor --destination` now agrees with `riftri worktree add`. It
+  blocks a non-empty directory, a symbolic link, or a destination whose nearest
+  existing directory is not writable, all of which it used to report as ready,
+  and no longer blocks an add from a cone-mode sparse worktree, which inherits
+  that cone (#529).
 - In an enabled repository without commits, an intercepted
   `git worktree add -b <branch>` now runs as ordinary Git, which creates an
   orphan worktree, instead of being refused. There is no tree to clone, so

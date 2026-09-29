@@ -566,11 +566,16 @@ pub struct CompactJournalTransitionError {
 /// Inspect a repository and the volume containing `path` without changing
 /// Git or filesystem state.
 pub fn doctor(path: &Path) -> DoctorReport {
-    doctor_for_destination(path, path)
+    doctor_inner(path, path, false)
 }
 
-/// Inspect a repository and a possibly different proposed destination.
+/// Inspect a repository and a possibly different proposed destination,
+/// judging that destination exactly as `worktree add` would.
 pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> DoctorReport {
+    doctor_inner(repository_path, destination, true)
+}
+
+fn doctor_inner(repository_path: &Path, destination: &Path, explicit: bool) -> DoctorReport {
     let git = Git::default();
     let git_check = match git.detect() {
         Ok(info) => Diagnostic::success(info),
@@ -612,6 +617,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
     };
     let destination_readiness = destination_readiness(
         destination,
+        explicit,
         repository_enabled,
         &git_check,
         &repository_check,
@@ -637,6 +643,7 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
 
 fn destination_readiness(
     destination: &Path,
+    explicit: bool,
     repository_enabled: Option<bool>,
     git: &Diagnostic<GitInfo>,
     repository: &Diagnostic<RepositoryInfo>,
@@ -714,13 +721,42 @@ fn destination_readiness(
     // Missing leading directories are not a blocker: `worktree add` creates
     // them as `git worktree add` does (#423). What remains is a path Git
     // could not create either — an existing ancestor that is a file, say.
-    if let Err(error) = worktree::planned_destination_parent(destination) {
-        blockers.push(DestinationReadinessBlocker {
+    match worktree::planned_destination_parent(destination) {
+        Err(error) => blockers.push(DestinationReadinessBlocker {
             kind: "destination-parent",
             explanation: error.to_string(),
             remedy: "Choose a destination whose existing ancestors are all accessible directories, then rerun `riftri doctor --destination <path>`."
                 .to_owned(),
-        });
+        }),
+        // Without `--destination`, `doctor` only probes the repository's own
+        // volume; the path is not a proposed destination.
+        Ok(parent) if explicit => {
+            if let Err(error) = worktree::validate_new_add_destination(destination) {
+                blockers.push(DestinationReadinessBlocker {
+                    kind: "destination",
+                    explanation: error.to_string(),
+                    remedy: "Choose a path that does not exist yet, or an existing empty directory, then rerun `riftri doctor --destination <path>`."
+                        .to_owned(),
+                });
+            }
+            // Git creates the destination and any missing parents inside the
+            // nearest existing directory, so that one must be writable.
+            #[cfg(unix)]
+            if let Some(existing) = parent.ancestors().find(|ancestor| ancestor.is_dir())
+                && rustix::fs::access(existing, rustix::fs::Access::WRITE_OK).is_err()
+            {
+                blockers.push(DestinationReadinessBlocker {
+                    kind: "destination-parent",
+                    explanation: format!(
+                        "{} is not writable, so Git cannot create the worktree inside it",
+                        existing.display()
+                    ),
+                    remedy: "Choose a destination inside a directory you can write to, then rerun `riftri doctor --destination <path>`."
+                        .to_owned(),
+                });
+            }
+        }
+        Ok(_) => {}
     }
 
     let only_activation_blocks = !blockers.is_empty()
@@ -896,6 +932,7 @@ mod tests {
         let object = ObjectId::parse("0123456789abcdef0123456789abcdef01234567").unwrap();
         let readiness = super::destination_readiness(
             destination.path(),
+            true,
             Some(false),
             &Diagnostic::success(GitInfo {
                 command: PathBuf::from("git"),
