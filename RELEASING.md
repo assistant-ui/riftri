@@ -220,14 +220,19 @@ latest published release.
 4. Open and squash-merge a conventional release pull request such as
    `chore: release v0.1.0`. The pull request title becomes the release commit
    subject on `main`.
-5. From the updated `main`, create and push the matching signed tag:
+5. From the updated `main`, create and push the matching annotated tag:
 
    ```console
    $ git switch main
    $ git pull --ff-only
-   $ git tag -s v0.1.0 -m "Riftri 0.1.0"
+   $ git tag -a v0.1.0 -m "Riftri 0.1.0"
    $ git push origin v0.1.0
    ```
+
+   Sign the tag with `git tag -s` instead when you have a signing key
+   configured. The release workflow passes `--verify-tag`, which requires the
+   tag to exist on the remote at the staged commit; it does not check a
+   signature, so an unsigned tag does not block a release.
 
 The tag version must exactly match every manifest. The release workflow refuses
 version mismatches or missing platform artifacts instead of publishing a
