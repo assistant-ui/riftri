@@ -224,8 +224,9 @@ Riftri should eventually report and benchmark:
 - Read, write, checkout, build, and test performance.
 - Private-layer growth over the worktree lifetime.
 - Recovery success after forced termination at each transaction step.
-- Compatibility across symlinks, executable bits, filters, LFS, sparse checkout,
-  submodules, unusual paths, and case-sensitivity differences.
+- Compatibility across symlinks, executable bits, filters, LFS, submodules,
+  unusual paths, and case-sensitivity differences. Cone-mode sparse checkout is
+  covered; non-cone forms and sparse combined with LFS are not.
 
 ## Current state
 
@@ -277,6 +278,28 @@ Before any durable add state is created, Riftri checks the exact Git tree for
 ASCII case aliases and non-ASCII names and verifies potential collisions on the
 destination filesystem. Colliding path sets fail without creating a journal or linked
 worktree, while case-sensitive destinations continue to accept distinct names.
+Explicit cone-mode sparse checkouts are available through
+`riftri worktree add --sparse-dir`. A selection is keyed into the checkout
+profile and the immutable-base identity, an add made from inside a sparse
+worktree inherits that cone as Git does, and a pristine sparse view compacts at
+its creation profile. Non-cone forms, sparse combined with Git LFS, and
+compacting a view whose selection changed since its add remain fail-closed or
+open. Riftri also manages worktrees for a bare repository from its Git
+directory, and runs a repository's `post-checkout` hook itself rather than
+refusing a repository that defines one.
+
+Beyond the lifecycle verbs, `riftri setup` interactively creates a view and can
+then open a coding agent, `riftri worktree list` reports managed views and their
+storage use across every registered state directory, `riftri state unregister`
+clears a registration for a missing state directory without deleting files, and
+`riftri completions` and `riftri man` generate shell completions and man pages
+on demand rather than shipping them in the release archive. Every command
+accepts `--json-errors` except the interactive `setup`, which refuses it with a
+single receipt; the read-only reports also accept `--json`. Failures carry
+distinct exit codes -- 1 operational, 2 usage, 3 policy -- mirroring the
+receipt's category. The npm package ships a programmatic API alongside the
+launcher.
+
 Automatic orphan-state repair,
 ordinary-NTFS alternatives,
 managed-environment integration, and a daemon are not implemented.
