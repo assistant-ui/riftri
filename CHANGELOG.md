@@ -29,6 +29,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A `riftri worktree move` that Git refuses, for example for a worktree that
+  contains submodules, no longer leaves the worktree stuck behind a pending
+  move that `riftri repair` could never finish. When both paths show nothing
+  moved, the move is recorded as cancelled and the command reports Git's
+  reason; `repair` cancels journals already stuck this way. Moving a worktree
+  into itself is refused before anything is recorded. `status` and `repair`
+  report `cancelled_moves` (#505).
 - `riftri worktree add <path> <branch>` checks out the branch even when a tag
   has the same name, as Git does. It used to resolve the tag and refuse with a
   false "existing branch moved". A tree or blob ID given as the revision is now

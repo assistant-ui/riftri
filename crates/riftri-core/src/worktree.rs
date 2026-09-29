@@ -315,6 +315,7 @@ pub struct StorageAccountingReport {
     pub completed_removals: usize,
     pub pending_removals: usize,
     pub completed_moves: usize,
+    pub cancelled_moves: usize,
     pub pending_moves: usize,
     pub completed_compactions: usize,
     pub cancelled_compactions: usize,
@@ -356,6 +357,8 @@ pub struct RecoveryReport {
     pub recovered_removals: usize,
     pub completed_moves: usize,
     pub recovered_moves: usize,
+    /// Pending moves Git refused while both paths proved nothing had moved.
+    pub cancelled_moves: usize,
     pub completed_compactions: usize,
     pub recovered_compactions: usize,
     pub completed_prunes: usize,
@@ -801,7 +804,7 @@ pub(crate) fn managed_worktree_state_directory(
             .load_all()?
             .into_iter()
             .any(|journal| {
-                journal.phase != MoveWorktreePhase::Complete
+                !journal.phase.is_finished()
                     && (destination_set.contains(&journal.source)
                         || destination_set.contains(&journal.destination))
             });
@@ -1579,9 +1582,13 @@ pub fn storage_accounting(
             .iter()
             .filter(|journal| journal.phase == MoveWorktreePhase::Complete)
             .count(),
+        cancelled_moves: move_journals
+            .iter()
+            .filter(|journal| journal.phase == MoveWorktreePhase::Cancelled)
+            .count(),
         pending_moves: move_journals
             .iter()
-            .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+            .filter(|journal| !journal.phase.is_finished())
             .count(),
         completed_compactions: compact_journals
             .iter()
@@ -2606,6 +2613,15 @@ fn move_worktree_inner(
         )));
     }
     refuse_locked_worktree(&source, registered.locked_reason.as_deref(), "moving")?;
+    if destination
+        .ancestors()
+        .any(|ancestor| paths_match(ancestor, &source))
+    {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "cannot move {} into itself",
+            source.display()
+        )));
+    }
 
     let store = MoveJournalStore::create(&state_directory)?;
     let operation_id = allocate_move_operation_id(&store)?;
@@ -2620,12 +2636,17 @@ fn move_worktree_inner(
     );
     let journal_path = store.persist(&journal)?;
     fail_move_if_requested(journal.phase, fail_after)?;
-    resume_move(
+    if let MoveResumption::Cancelled(error) = resume_move(
         &git,
         &store,
         journal.decode(journal_path.clone())?,
         fail_after,
-    )?;
+    )? {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "Git refused to move {}; nothing was changed: {error}",
+            source.display()
+        )));
+    }
 
     Ok(MoveWorktreeResult {
         source,
@@ -5710,7 +5731,7 @@ fn find_managed_add_journal(
     let pending_moves = MoveJournalStore::open(state_directory)
         .load_all()?
         .into_iter()
-        .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+        .filter(|journal| !journal.phase.is_finished())
         .map(|journal| journal.source_add_operation_id)
         .collect::<HashSet<_>>();
     let pending_compactions = CompactJournalStore::open(state_directory)
@@ -6398,7 +6419,7 @@ fn finished_lifecycle_operations(
             "moves",
             finished(
                 moves,
-                |journal| journal.phase == MoveWorktreePhase::Complete,
+                |journal| journal.phase.is_finished(),
                 |journal| &journal.operation_id,
             ),
         ),
@@ -7229,7 +7250,7 @@ fn rehome_stranded_add_journals(
         moves
             .journals
             .iter()
-            .filter(|journal| journal.phase != MoveWorktreePhase::Complete)
+            .filter(|journal| !journal.phase.is_finished())
             .map(|journal| journal.source_add_operation_id.as_str()),
     );
     claimed.extend(
@@ -7850,21 +7871,29 @@ pub fn recover_incomplete_operations(
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     for journal in move_journals {
-        if journal.phase == MoveWorktreePhase::Complete {
-            report.completed_moves += 1;
-            continue;
+        match journal.phase {
+            MoveWorktreePhase::Complete => {
+                report.completed_moves += 1;
+                continue;
+            }
+            MoveWorktreePhase::Cancelled => continue,
+            _ => {}
         }
         progress::emit(ProgressEvent::RepairRecovering {
             kind: "move",
             operation_id: journal.operation_id.clone(),
         });
-        if let Err(error) = resume_move(&git, &move_store, journal.clone(), None) {
-            report
+        match resume_move(&git, &move_store, journal.clone(), None) {
+            Ok(MoveResumption::Moved) => {
+                report.recovered_moves += 1;
+                report.completed_moves += 1;
+            }
+            // Git refuses this move for good; retrying it on every repair
+            // left the worktree stuck. The paths proved nothing moved.
+            Ok(MoveResumption::Cancelled(_)) => report.cancelled_moves += 1,
+            Err(error) => report
                 .errors
-                .push(format!("move operation {}: {error}", journal.operation_id));
-        } else {
-            report.recovered_moves += 1;
-            report.completed_moves += 1;
+                .push(format!("move operation {}: {error}", journal.operation_id)),
         }
     }
 
@@ -8216,7 +8245,7 @@ fn resume_move(
     store: &MoveJournalStore,
     journal: DecodedMoveJournal,
     fail_after: Option<MoveWorktreePhase>,
-) -> Result<(), WorktreeError> {
+) -> Result<MoveResumption, WorktreeError> {
     let state_directory = lifecycle_state_directory(&journal.journal_path, "move")?;
     if store.path_for(&journal.operation_id) != journal.journal_path {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -8226,6 +8255,12 @@ fn resume_move(
     }
     validate_move_paths(&state_directory, &journal)?;
     let mut record = store.reload(&journal)?;
+    if record.phase == MoveWorktreePhase::Cancelled {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "move journal {} was cancelled; nothing is left to resume",
+            journal.journal_path.display()
+        )));
+    }
 
     if record.phase == MoveWorktreePhase::IntentRecorded {
         let metadata_lock =
@@ -8234,7 +8269,25 @@ fn resume_move(
         let source_exists = journal.source.exists();
         let destination_exists = journal.destination.exists();
         if source_registered && source_exists && !destination_registered && !destination_exists {
-            git.move_worktree(&journal.repository, &journal.source, &journal.destination)?;
+            if let Err(error) =
+                git.move_worktree(&journal.repository, &journal.source, &journal.destination)
+            {
+                // Git refuses some moves only once asked, and for good (a
+                // worktree holding submodules). Retrying would refuse again
+                // forever while the pending journal blocks every other
+                // lifecycle command, so cancel it when both paths prove
+                // nothing moved. Anything else stays for manual attention.
+                let (source_registered, destination_registered) = move_registration(git, &journal)?;
+                if source_registered
+                    && journal.source.exists()
+                    && !destination_registered
+                    && !journal.destination.exists()
+                {
+                    advance_move(store, &mut record, MoveWorktreePhase::Cancelled, fail_after)?;
+                    return Ok(MoveResumption::Cancelled(error));
+                }
+                return Err(error.into());
+            }
         } else if !source_registered
             && !source_exists
             && destination_registered
@@ -8297,7 +8350,15 @@ fn resume_move(
         validate_move_paths(&state_directory, &journal)?;
         advance_move(store, &mut record, MoveWorktreePhase::Complete, fail_after)?;
     }
-    Ok(())
+    Ok(MoveResumption::Moved)
+}
+
+/// How a move journal ended once resumed.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+enum MoveResumption {
+    Moved,
+    /// Git refused the move and nothing changed; the journal is cancelled.
+    Cancelled(GitError),
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -9194,7 +9255,7 @@ fn verify_prune_safe(
         || MoveJournalStore::open(state_directory)
             .load_all()?
             .iter()
-            .any(|journal| journal.phase != MoveWorktreePhase::Complete)
+            .any(|journal| !journal.phase.is_finished())
         || CompactJournalStore::open(state_directory)
             .load_all()?
             .iter()
@@ -16792,6 +16853,130 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("does not name a commit"), "{message}");
+    }
+
+    /// Give `worktree` a submodule store, which makes `git worktree move`
+    /// refuse it ("working trees containing submodules cannot be moved")
+    /// without cloning a real submodule. Returns the store to delete later.
+    fn add_submodule_store(worktree: &Path) -> PathBuf {
+        let admin = Command::new("git")
+            .args(["rev-parse", "--absolute-git-dir"])
+            .current_dir(worktree)
+            .output()
+            .unwrap();
+        let modules =
+            PathBuf::from(String::from_utf8(admin.stdout).unwrap().trim()).join("modules");
+        fs::create_dir(&modules).unwrap();
+        modules
+    }
+
+    fn move_request(
+        repository: &Path,
+        source: &Path,
+        destination: &Path,
+        state: &Path,
+    ) -> MoveWorktreeRequest {
+        MoveWorktreeRequest {
+            repository: repository.to_path_buf(),
+            source: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            state_dir: Some(state.to_path_buf()),
+        }
+    }
+
+    /// Git refuses some moves only once asked (a worktree holding submodules).
+    /// The move journal stayed at intent, so remove, compact and another move
+    /// all refused as "pending", and every repair retried the same refused
+    /// move: the worktree was stuck for good.
+    #[test]
+    fn a_move_git_refuses_is_cancelled_and_leaves_the_worktree_usable() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let source = root.join("source");
+        add_with_state(&repository, &source, &state).expect("add");
+        let modules = add_submodule_store(&source);
+
+        let error = move_worktree_inner(
+            move_request(&repository, &source, &root.join("moved"), &state),
+            None,
+        )
+        .expect_err("Git refuses to move a worktree with submodules");
+
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("submodules"), "{error}");
+        assert!(source.is_dir() && !root.join("moved").exists());
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_moves, 0, "{accounting:?}");
+        assert_eq!(accounting.cancelled_moves, 1, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+
+        // The worktree is usable again: once the submodule is gone it moves.
+        fs::remove_dir(&modules).unwrap();
+        move_worktree_inner(
+            move_request(&repository, &source, &root.join("moved"), &state),
+            None,
+        )
+        .expect("move after the cause is fixed");
+        assert!(root.join("moved").is_dir());
+    }
+
+    /// A journal already stuck at intent (from an older release) is cancelled
+    /// by repair instead of being reported for manual attention forever.
+    #[test]
+    fn repair_cancels_a_pending_move_git_refuses() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let source = root.join("source");
+        add_with_state(&repository, &source, &state).expect("add");
+        add_submodule_store(&source);
+        move_worktree_inner(
+            move_request(&repository, &source, &root.join("moved"), &state),
+            Some(MoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("stop after the move intent");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.cancelled_moves, 1, "{report:?}");
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_moves, 0, "{accounting:?}");
+        assert!(source.is_dir() && !root.join("moved").exists());
+        let second = recover_incomplete_operations(&state).expect("second repair");
+        assert!(second.errors.is_empty(), "{second:?}");
+    }
+
+    /// Moving a worktree into itself is refused before anything is recorded.
+    #[test]
+    fn a_move_into_the_worktree_itself_is_refused_up_front() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let source = root.join("source");
+        add_with_state(&repository, &source, &state).expect("add");
+
+        let error = move_worktree_inner(
+            move_request(&repository, &source, &source.join("inner"), &state),
+            None,
+        )
+        .expect_err("a worktree cannot move into itself");
+
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("into itself"), "{error}");
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_moves, 0, "{accounting:?}");
+        assert_eq!(
+            accounting.cancelled_moves, 0,
+            "nothing was recorded: {accounting:?}"
+        );
     }
 
     #[test]

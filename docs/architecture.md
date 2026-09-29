@@ -361,6 +361,9 @@ intent-recorded
   -> worktree-moved
   -> add-journal-updated
   -> complete
+
+intent-recorded
+  -> cancelled
 ```
 
 Git performs the directory and administrative-metadata move. Recovery accepts
@@ -371,7 +374,16 @@ volume.
 
 If a move journal is incomplete, Riftri rejects removal, forced removal,
 compaction, and another move of that managed worktree. This keeps the worktree
-intact for `riftri repair`, including after Git rejects a locked worktree move.
+intact for `riftri repair`.
+
+Git refuses some moves only when asked, and refuses them every time, for
+example a worktree that contains submodules. When `git worktree move` fails
+and both paths still show an intact, registered source and an absent,
+unregistered destination, the journal advances to `cancelled` and the command
+reports Git's reason. Repair does the same for a journal left at
+`intent-recorded`, so a refused move never blocks the worktree. Any other state
+after a failure is preserved for manual attention. A destination inside the
+source worktree is refused before intent is recorded.
 
 ## Compaction-operation journal state machine
 

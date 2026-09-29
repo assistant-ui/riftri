@@ -1499,6 +1499,7 @@ fn move_phase_name(phase: riftri_core::MoveWorktreePhase) -> &'static str {
         WorktreeMoved => "worktree-moved",
         AddJournalUpdated => "add-journal-updated",
         Complete => "complete",
+        Cancelled => "cancelled",
     }
 }
 
@@ -1739,6 +1740,7 @@ fn print_recovery_report(
             "recovered_removals": report.recovered_removals,
             "completed_moves": report.completed_moves,
             "recovered_moves": report.recovered_moves,
+            "cancelled_moves": report.cancelled_moves,
             "completed_compactions": report.completed_compactions,
             "recovered_compactions": report.recovered_compactions,
             "completed_prunes": report.completed_prunes,
@@ -1814,6 +1816,7 @@ fn print_recovery_report(
     outputln!("Recovered removals: {}", report.recovered_removals);
     outputln!("Completed moves: {}", report.completed_moves);
     outputln!("Recovered moves: {}", report.recovered_moves);
+    outputln!("Cancelled moves: {}", report.cancelled_moves);
     outputln!("Completed compactions: {}", report.completed_compactions);
     outputln!("Recovered compactions: {}", report.recovered_compactions);
     outputln!("Completed prunes: {}", report.completed_prunes);
@@ -2468,6 +2471,7 @@ fn print_storage_accounting(
                 "completed_removals": report.completed_removals,
                 "pending_removals": report.pending_removals,
                 "completed_moves": report.completed_moves,
+                "cancelled_moves": report.cancelled_moves,
                 "pending_moves": report.pending_moves,
                 "completed_compactions": report.completed_compactions,
                 "cancelled_compactions": report.cancelled_compactions,
@@ -2509,6 +2513,7 @@ fn print_storage_accounting(
         outputln!("Attention: {repair} to resume pending removals");
     }
     outputln!("Completed moves: {}", report.completed_moves);
+    outputln!("Cancelled moves: {}", report.cancelled_moves);
     outputln!("Pending moves: {}", report.pending_moves);
     if report.pending_moves > 0 {
         outputln!("Attention: {repair} to resume pending moves");
