@@ -25,6 +25,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri status`, `riftri worktree list`, and `riftri repair` list Git's
+  worktrees once per repository instead of once per managed worktree. They
+  slowed quadratically: at 120 worktrees, `status` took 5.4 s and now takes
+  0.39 s, and `repair` went from 3.7 s to 0.12 s (#531).
 - `riftri doctor --destination` now agrees with `riftri worktree add`. It
   blocks a non-empty directory, a symbolic link, or a destination whose nearest
   existing directory is not writable, all of which it used to report as ready,
