@@ -29,6 +29,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A `--state-dir` that runs through a regular file now gets the same
+  `invalid-state-directory` policy receipt as one that is a file, instead of an
+  operational failure that invited a retry (#510).
 - `riftri worktree remove` without `--force` refuses a worktree that contains
   submodules, as `git worktree remove` does. It used to remove it together
   with the submodule repositories in the worktree's Git directory, because Git

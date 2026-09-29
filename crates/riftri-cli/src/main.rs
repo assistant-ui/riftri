@@ -1625,7 +1625,10 @@ fn resolve_state_directory(repository: &Path, state_directory: Option<PathBuf>) 
     match state_directory {
         Some(state_directory) => {
             match std::fs::symlink_metadata(&state_directory) {
+                // A path through a regular file: the core refuses it as an
+                // invalid state directory, like a state path that is a file.
                 Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     return Err(anyhow::Error::new(
                         riftri_core::WorktreeError::InvalidRequest(format!(

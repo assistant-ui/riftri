@@ -1299,8 +1299,12 @@ fn a_state_path_that_is_not_a_directory_is_a_policy_refusal() {
     let dangling = fixture.path().join("state-link");
     std::os::unix::fs::symlink(fixture.path().join("nowhere"), &dangling)
         .expect("create dangling state link");
+    // A path that runs through a regular file is the same mistake; it
+    // reported `filesystem-io-failed` ("Not a directory") and so invited a
+    // retry.
+    let under_file = file.join("state");
 
-    for state in [&file, &dangling] {
+    for (state, untouched) in [(&file, &file), (&dangling, &dangling), (&under_file, &file)] {
         let state_arg = state.to_str().unwrap();
         let view = fixture.path().join("view");
         let view_arg = view.to_str().unwrap();
@@ -1329,7 +1333,7 @@ fn a_state_path_that_is_not_a_directory_is_a_policy_refusal() {
             assert!(!view.exists(), "{arguments:?} created the destination");
         }
         assert!(
-            std::fs::symlink_metadata(state).is_ok(),
+            std::fs::symlink_metadata(untouched).is_ok(),
             "the state path itself must be left untouched"
         );
     }
