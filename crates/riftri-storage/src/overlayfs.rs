@@ -1717,16 +1717,50 @@ fn run_probe_child_with<T>(
     ))
 }
 
-// Only the result pipe and immutable payload belong to this probe. CLOEXEC
-// cannot help a child that never execs: another thread's open mount/file/lock
-// would otherwise remain pinned for the child's lifetime. Fork has already
-// given this child a private descriptor table, so the parent's FDs are untouched.
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "post-fork child code whose binding constraint is async-signal \
-              safety, not pointer validity; the contract is written down and \
-              the blocks documented in #473"
-)]
+// ---------------------------------------------------------------------------
+// Post-fork child region.
+//
+// Everything from here to `last_errno` runs in the child created by `fork` in
+// `run_probe_child_with`, and the binding constraint is not pointer validity:
+// it is async-signal safety. The child inherits the parent's whole address
+// space but only the forking thread, so any lock another thread held at the
+// moment of `fork` -- the allocator's, the environment's, stdio's, the dynamic
+// loader's -- is now held by a thread that does not exist here and can never
+// release it. Touching such a lock deadlocks the child forever rather than
+// failing.
+//
+// So the rules every block below relies on, and which a new block must keep:
+//
+// * Call only async-signal-safe functions. Direct `libc` syscalls qualify;
+//   `malloc`, `readdir`, formatting, panicking and anything that may allocate
+//   do not. This is why the descriptor sweep uses raw `getdents64` into a
+//   stack buffer rather than `readdir`.
+// * Read only memory that was fully built before the `fork`. The `CString`s in
+//   `ProbeContext` are prepared by the parent and stay valid for the child's
+//   whole life because the child never frees or reallocates.
+// * Never return into Rust. Every path ends in `child_fail` or `_exit`, so no
+//   destructor, unwind or atexit handler runs in the child.
+// * Report failure only through `result_fd`, the inherited write end of the
+//   parent's pipe. It is the child's sole channel; the parent distinguishes a
+//   stage from an errno.
+//
+// Each `unsafe` block below states what is specific to it and takes the four
+// rules above as given.
+// ---------------------------------------------------------------------------
+
+/// Close every descriptor the child inherited except the result pipe and the
+/// retained payload.
+///
+/// Only the result pipe and immutable payload belong to this probe. CLOEXEC
+/// cannot help a child that never execs: another thread's open mount/file/lock
+/// would otherwise remain pinned for the child's lifetime. Fork has already
+/// given this child a private descriptor table, so the parent's FDs are
+/// untouched.
+///
+/// # Safety
+///
+/// Must be called only in the fork child, before any other descriptor is
+/// opened, and only with descriptors that child owns.
 unsafe fn close_inherited_descriptors(result_fd: RawFd, retained_fd: RawFd) -> i32 {
     let low = result_fd.min(retained_fd) as u32;
     let high = result_fd.max(retained_fd) as u32;
@@ -1736,25 +1770,29 @@ unsafe fn close_inherited_descriptors(result_fd: RawFd, retained_fd: RawFd) -> i
             // SAFETY: scalar inclusive bounds; no unsharing or CLOEXEC flags.
             && unsafe { libc::syscall(libc::SYS_close_range, first, keep - 1, 0_u32) } != 0
         {
+            // SAFETY: still in the fork child, which is this function's precondition, and both descriptors belong to it.
             return unsafe { close_inherited_descriptors_via_proc(result_fd, retained_fd) };
         }
         first = keep + 1;
     }
+    // SAFETY: scalar inclusive bounds; no unsharing or CLOEXEC flags.
     if unsafe { libc::syscall(libc::SYS_close_range, first, u32::MAX, 0_u32) } == 0 {
         0
     } else {
         // Older kernels (or syscall filters) may lack close_range. Enumerate
         // the child's actual table, not a parent snapshot or a lowered rlimit.
+        // SAFETY: still in the fork child, which is this function's precondition, and both descriptors belong to it.
         unsafe { close_inherited_descriptors_via_proc(result_fd, retained_fd) }
     }
 }
 
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "post-fork child code whose binding constraint is async-signal \
-              safety, not pointer validity; the contract is written down and \
-              the blocks documented in #473"
-)]
+/// Fallback sweep for kernels without `close_range`, enumerating the child's
+/// real descriptor table.
+///
+/// # Safety
+///
+/// Must be called only in the fork child, and only with descriptors that child
+/// owns.
 unsafe fn close_inherited_descriptors_via_proc(result_fd: RawFd, retained_fd: RawFd) -> i32 {
     // SAFETY: fixed NUL-terminated path; open in the child so self refers to
     // its table, including any descriptors created concurrently before fork.
@@ -1767,17 +1805,20 @@ unsafe fn close_inherited_descriptors_via_proc(result_fd: RawFd, retained_fd: Ra
     if directory == -1 {
         return last_errno();
     }
+    // SAFETY: `directory` is the `/proc/self/fd` descriptor opened just above, in this child.
     let error = unsafe { close_proc_descriptors(directory, result_fd, retained_fd) };
+    // SAFETY: the descriptor was returned by a checked `open` in this child and is not used again.
     unsafe { libc::close(directory) };
     error
 }
 
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "post-fork child code whose binding constraint is async-signal \
-              safety, not pointer validity; the contract is written down and \
-              the blocks documented in #473"
-)]
+/// Close every descriptor listed under an open `/proc/self/fd`, except the
+/// three the probe needs.
+///
+/// # Safety
+///
+/// `directory` must be an open descriptor for `/proc/self/fd` in this child,
+/// and the call must happen in the fork child.
 unsafe fn close_proc_descriptors(directory: RawFd, result_fd: RawFd, retained_fd: RawFd) -> i32 {
     // Raw getdents64 and stack buffers avoid allocator/readdir locks after a
     // multithreaded fork. Linux's fixed header is ino64, off64, reclen16, type8.
@@ -1824,6 +1865,7 @@ unsafe fn close_proc_descriptors(directory: RawFd, result_fd: RawFd, retained_fd
                 if fd != directory && fd != result_fd && fd != retained_fd {
                     // Like close_range, ignore per-FD close errors. Linux has
                     // already released the descriptor even on EINTR/EIO.
+                    // SAFETY: `fd` was parsed from this child's own `/proc/self/fd` listing, so it names a descriptor in this table, and the three the probe needs are excluded just above.
                     unsafe { libc::close(fd) };
                 }
             }
@@ -1864,12 +1906,14 @@ fn wait_for_child(child: libc::pid_t) -> std::io::Result<i32> {
     }
 }
 
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "post-fork child code whose binding constraint is async-signal \
-              safety, not pointer validity; the contract is written down and \
-              the blocks documented in #473"
-)]
+/// The probe itself: isolate a mount namespace, mount OverlayFS, prove private
+/// writes, unmount, and report.
+///
+/// # Safety
+///
+/// Must be called only in the fork child. `result_fd` must be the inherited
+/// write end of the parent's pipe, and `context` must hold strings built
+/// before the `fork`.
 unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeContext<'_>) -> ! {
     const OVERLAY: &[u8] = b"overlay\0";
     const ROOT: &[u8] = b"/\0";
@@ -1883,11 +1927,13 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
     // SAFETY: `getppid` has no preconditions. A changed parent means the
     // expected parent exited before the death signal was installed.
     if unsafe { libc::getppid() } != parent {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 1, libc::ESRCH) };
     }
     // SAFETY: the child owns no Rust synchronization state and creates only a
     // private mount namespace.
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 1, last_errno()) };
     }
     // SAFETY: the NUL-terminated root path is valid; null source, type, and
@@ -1902,6 +1948,7 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         )
     } != 0
     {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 2, last_errno()) };
     }
     // SAFETY: the path was encoded before `fork` and remains valid. Resolving
@@ -1909,6 +1956,7 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
     // mount namespace. Fixed relative layer names then keep caller paths out
     // of the comma- and colon-delimited mount option language.
     if unsafe { libc::chdir(context.root.as_ptr()) } != 0 {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 3, last_errno()) };
     }
     // SAFETY: all strings are NUL-terminated and live until the child exits.
@@ -1922,6 +1970,7 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         )
     } != 0
     {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 4, last_errno()) };
     }
 
@@ -1934,10 +1983,13 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         )
     };
     if merged_fd == -1 {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 5, last_errno()) };
     }
+    // SAFETY: `merged_fd` was returned by the checked `open` above, and `contents` is writable for the length passed.
     let read = unsafe { libc::pread(merged_fd, contents.as_mut_ptr().cast(), contents.len(), 0) };
     if read != contents.len() as isize {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe {
             child_fail(
                 result_fd,
@@ -1947,6 +1999,7 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         };
     }
     if contents != *PROBE_CONTENTS {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 5, libc::EIO) };
     }
     // SAFETY: `merged_fd` was returned by `open` above.
@@ -1960,8 +2013,10 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         )
     };
     if merged_fd == -1 {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 6, last_errno()) };
     }
+    // SAFETY: the descriptor was returned by a checked `open`, and the source buffer is readable for the length passed.
     let written = unsafe {
         libc::pwrite(
             merged_fd,
@@ -1971,6 +2026,7 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         )
     };
     if written != PRIVATE_CONTENTS.len() as isize {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe {
             child_fail(
                 result_fd,
@@ -1985,8 +2041,10 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
     }
     // SAFETY: `merged_fd` is an open writable regular file descriptor.
     if unsafe { libc::fsync(merged_fd) } != 0 {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 7, last_errno()) };
     }
+    // SAFETY: `merged_fd` was returned by the checked `open` above and is not used again.
     unsafe { libc::close(merged_fd) };
 
     contents.fill(0);
@@ -2000,6 +2058,7 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         )
     };
     if read != contents.len() as isize {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe {
             child_fail(
                 result_fd,
@@ -2009,6 +2068,7 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         };
     }
     if contents != *PROBE_CONTENTS {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 8, libc::EIO) };
     }
 
@@ -2021,10 +2081,13 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         )
     };
     if upper_fd == -1 {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 9, last_errno()) };
     }
+    // SAFETY: `upper_fd` was returned by the checked `open` above, and `contents` is writable for the length passed.
     let read = unsafe { libc::pread(upper_fd, contents.as_mut_ptr().cast(), contents.len(), 0) };
     if read != contents.len() as isize {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe {
             child_fail(
                 result_fd,
@@ -2034,29 +2097,42 @@ unsafe fn child_probe(result_fd: RawFd, parent: libc::pid_t, context: &ProbeCont
         };
     }
     if contents != *PRIVATE_CONTENTS {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 9, libc::EIO) };
     }
+    // SAFETY: `upper_fd` was returned by the checked `open` above and is not used again.
     unsafe { libc::close(upper_fd) };
 
     // SAFETY: the target is the exact mount created above.
     if unsafe { libc::umount2(context.merged.as_ptr(), 0) } != 0 {
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
         unsafe { child_fail(result_fd, 10, last_errno()) };
     }
+    // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end.
     unsafe { child_report(result_fd, ChildResult { stage: 0, error: 0 }) };
+    // SAFETY: `_exit` is async-signal-safe and ends the child without running destructors or atexit handlers.
     unsafe { libc::_exit(0) };
 }
 
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "post-fork child code whose binding constraint is async-signal \
-              safety, not pointer validity; the contract is written down and \
-              the blocks documented in #473"
-)]
+/// Report a failing stage to the parent and end the child.
+///
+/// # Safety
+///
+/// Must be called only in the fork child, with `result_fd` the inherited write
+/// end of the parent's pipe.
 unsafe fn child_fail(result_fd: RawFd, stage: i32, error: i32) -> ! {
+    // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end.
     unsafe { child_report(result_fd, ChildResult { stage, error }) };
+    // SAFETY: `_exit` is async-signal-safe and ends the child without running destructors or atexit handlers.
     unsafe { libc::_exit(1) };
 }
 
+/// Write the child's single fixed-size result message to the parent.
+///
+/// # Safety
+///
+/// Must be called only in the fork child, with `result_fd` the inherited write
+/// end of the parent's pipe.
 unsafe fn child_report(result_fd: RawFd, result: ChildResult) {
     let mut bytes = [0_u8; std::mem::size_of::<ChildResult>()];
     bytes[..4].copy_from_slice(&result.stage.to_ne_bytes());
@@ -2072,11 +2148,6 @@ fn last_errno() -> i32 {
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::undocumented_unsafe_blocks,
-    reason = "test scaffolding for the post-fork child; documented with \
-              the production blocks in #473"
-)]
 mod tests {
     use super::*;
 
@@ -2125,6 +2196,7 @@ mod tests {
         let unrelated = tempfile::tempfile().unwrap();
         // A high, close-on-exec FD models a concurrent mount's open payload.
         // The probe never execs, so CLOEXEC alone cannot release its reference.
+        // SAFETY: scalar `fcntl` arguments against a descriptor the test owns. This runs in the parent, before any fork.
         let high_fd = unsafe { libc::fcntl(unrelated.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 512) };
         assert!(high_fd >= 512);
         // SAFETY: fcntl returned a new owned descriptor.
@@ -2147,20 +2219,27 @@ mod tests {
         // Populate enough new child-only descriptors to span getdents batches.
         let mut descriptors = [-1; 128];
         for fd in &mut descriptors {
+            // SAFETY: scalar `fcntl` arguments against the descriptor this child retained.
             *fd = unsafe { libc::fcntl(context.retained, libc::F_DUPFD_CLOEXEC, 512) };
             if *fd == -1 {
+                // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
                 unsafe { child_fail(result_fd, 11, last_errno()) };
             }
         }
+        // SAFETY: still in the fork child, which is that function's precondition, and both descriptors belong to it.
         let error = unsafe { close_inherited_descriptors_via_proc(result_fd, context.retained) };
         if error != 0 {
+            // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
             unsafe { child_fail(result_fd, 11, error) };
         }
         for fd in descriptors {
+            // SAFETY: `F_GETFD` only queries an integer descriptor and has no preconditions.
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 || last_errno() != libc::EBADF {
+                // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
                 unsafe { child_fail(result_fd, 11, libc::EBUSY) };
             }
         }
+        // SAFETY: still in the fork child, which is this function's precondition.
         unsafe { check_descriptors(result_fd, parent, context) };
     }
 
@@ -2189,6 +2268,7 @@ mod tests {
         for fd in [context.unrelated, 0, 1, 2] {
             // SAFETY: F_GETFD only queries an integer descriptor.
             if unsafe { libc::fcntl(fd, libc::F_GETFD) } != -1 || last_errno() != libc::EBADF {
+                // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
                 unsafe { child_fail(result_fd, 11, libc::EBUSY) };
             }
         }
@@ -2203,9 +2283,12 @@ mod tests {
             )
         };
         if read != 8 || payload != *b"retained" {
+            // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end, and `child_fail` reports and exits without returning.
             unsafe { child_fail(result_fd, 11, libc::EBADF) };
         }
+        // SAFETY: still in the fork child; `result_fd` is the inherited pipe write end.
         unsafe { child_report(result_fd, ChildResult { stage: 0, error: 0 }) };
+        // SAFETY: `_exit` is async-signal-safe and ends the child without running destructors or atexit handlers.
         unsafe { libc::_exit(0) };
     }
 }
