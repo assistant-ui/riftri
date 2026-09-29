@@ -118,6 +118,10 @@ document is a lower bound rather than the truth. A base whose count is
 incomplete reports `in_use: true`, because an unreadable journal may still
 claim it: never treat a base as unreferenced unless `reference_count_complete`
 is `true`. These keys are additive and do not change the schema version.
+Each base also carries an additive `damaged` flag: `true` once an add found
+that base failing its integrity check. A damaged base is never reused, so adds
+of its tree are refused until the worktrees using it are removed and
+`riftri gc --apply` deletes it.
 On Unix, `native_path_encoding` is `unix-bytes-hex`. On Windows, it is
 `windows-utf16le-hex`.
 

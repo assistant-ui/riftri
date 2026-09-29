@@ -246,6 +246,9 @@ pub struct BaseStorageAccounting {
     pub reference_count: usize,
     pub logical_bytes: u64,
     pub allocated_bytes: u64,
+    /// An add found this base failing its integrity check. It is preserved and
+    /// never reused; `riftri gc --apply` deletes it once no view uses it.
+    pub damaged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1518,11 +1521,13 @@ pub fn storage_accounting(
         } else {
             (0, 0)
         };
+        let damaged = is_regular_file_if_present(&damaged_base_marker(&path))?;
         bases.push(BaseStorageAccounting {
             path,
             reference_count,
             logical_bytes,
             allocated_bytes,
+            damaged,
         });
     }
 
@@ -2087,6 +2092,7 @@ fn resume_collection(
 
     if record.phase == GarbageCollectionPhase::BaseQuarantined {
         remove_tree_if_present(&journal.quarantine_path)?;
+        clear_damaged_base_marker(&journal.base_path)?;
         // An interrupted marker restore may have staged a marker before the
         // protecting reference disappeared again; the collection is finishing
         // now, so retire that leftover instead of reporting it forever.
@@ -3592,12 +3598,7 @@ fn verify_existing_base(base_path: &Path, complete_path: &Path) -> Result<bool, 
                     source,
                 )
             })?;
-        let mismatch = || {
-            Err(WorktreeError::InvalidRequest(format!(
-                "immutable-base integrity check failed for {}; the base was preserved and cannot be reused",
-                base_path.display()
-            )))
-        };
+        let mismatch = || Err(damaged_base_error(base_path));
         if stored.starts_with(crate::base_integrity::MARKER_V2_PREFIX) {
             if stored
                 != crate::base_integrity::marker_v2(base_path)
@@ -3619,13 +3620,89 @@ fn verify_existing_base(base_path: &Path, complete_path: &Path) -> Result<bool, 
             // exclusive lock and records a v2 marker, instead of trusting
             // metadata no marker ever covered. Legacy content tampering
             // still refuses above; existing views are never disturbed.
+            clear_damaged_base_marker(base_path)?;
             return Ok(false);
         } else {
             return mismatch();
         }
+        clear_damaged_base_marker(base_path)?;
         return Ok(true);
     }
+    // No complete base: whatever an earlier add found damaged is gone or is
+    // about to be rebuilt, so its marker no longer describes anything.
+    clear_damaged_base_marker(base_path)?;
     Ok(false)
+}
+
+/// Beside a base, records that an add found it failing its integrity check,
+/// so `status` can say so without re-reading every base. Evidence only: it
+/// never decides reuse, which always recomputes the digest.
+fn damaged_base_marker(base_path: &Path) -> PathBuf {
+    base_path.with_extension("damaged")
+}
+
+fn clear_damaged_base_marker(base_path: &Path) -> Result<(), WorktreeError> {
+    remove_file_if_present(&damaged_base_marker(base_path))
+}
+
+/// Refuse a damaged base, and say how to get the tree back: the base stays as
+/// evidence while any view uses it, and garbage collection deletes it after.
+fn damaged_base_error(base_path: &Path) -> WorktreeError {
+    // Best effort: failing to record the marker must not hide the refusal.
+    let _ = fs::write(damaged_base_marker(base_path), b"");
+    let state_directory = base_path.ancestors().nth(4);
+    let users = state_directory
+        .map(|state| base_users(base_path, state))
+        .unwrap_or_default();
+    let collect = match state_directory {
+        Some(state) => format!("riftri gc --apply --state-dir {}", state.display()),
+        None => "riftri gc --apply".to_owned(),
+    };
+    let guidance = if users.is_empty() {
+        format!("No active worktree uses it; run `{collect}` to delete it and add the tree again.")
+    } else {
+        format!(
+            "Worktrees still using it: {}. To add this tree again, remove them, then run `{collect}` to delete the damaged base.",
+            users
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    WorktreeError::InvalidRequest(format!(
+        "immutable-base integrity check failed for {}; the base was preserved and cannot be reused. {guidance}",
+        base_path.display()
+    ))
+}
+
+/// Destinations whose active add still references `base_path`, for guidance
+/// only; unreadable journals yield
+/// fewer names, never an error.
+fn base_users(base_path: &Path, state_directory: &Path) -> Vec<PathBuf> {
+    let removed = RemovalJournalStore::open(state_directory)
+        .load_all()
+        .map(|journals| {
+            journals
+                .into_iter()
+                .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
+                .map(|journal| journal.source_add_operation_id)
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut users = JournalStore::open(state_directory)
+        .load_all()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|journal| {
+            journal.phase == AddWorktreePhase::Active
+                && journal.base_path == base_path
+                && !removed.contains(&journal.operation_id)
+        })
+        .map(|journal| journal.destination)
+        .collect::<Vec<_>>();
+    users.sort();
+    users
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -6642,8 +6719,15 @@ fn diagnose_base_directories(
                     .file_stem()
                     .and_then(OsStr::to_str)
                     .is_some_and(looks_like_object_id);
+            // Reported on the base itself; see `damaged_base_marker`.
+            let is_damaged_marker = path.extension() == Some(OsStr::new("damaged"))
+                && is_regular_file(&path)?
+                && path
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .is_some_and(looks_like_object_id);
 
-            if is_complete_marker || is_lock {
+            if is_complete_marker || is_lock || is_damaged_marker {
                 if is_lock {
                     *coordination_locks = (*coordination_locks).saturating_add(1);
                 }
@@ -11076,6 +11160,7 @@ mod tests {
             reference_count: 3,
             logical_bytes: base_allocated,
             allocated_bytes: base_allocated,
+            damaged: false,
         }];
         let fresh_view = |destination: &str| ViewStorageAccounting {
             repository: PathBuf::from("/repo"),
@@ -11141,6 +11226,7 @@ mod tests {
             reference_count: 1,
             logical_bytes: base_allocated,
             allocated_bytes: base_allocated,
+            damaged: false,
         }];
         // Unlike a CoW clone, an OverlayFS view's `allocated_bytes` measures
         // only its private upper/work layers, so it is already base-exclusive.
@@ -17125,6 +17211,70 @@ mod tests {
 
         assert!(error.to_string().contains("submodules"), "{error}");
         assert!(worktree.join("vendored/.git").exists());
+    }
+
+    /// A base that fails its integrity check is preserved, and every add of
+    /// its tree is refused. That refusal named no way out, `status` showed
+    /// the base as merely "in use", and `repair` was silent, so the tree could
+    /// not be added again until someone found every view built from it.
+    #[cfg(unix)]
+    #[test]
+    fn a_damaged_base_names_its_users_and_is_reported_until_collected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let first = root.join("first");
+        let built = add_with_state(&repository, &first, &state).expect("first add");
+        let mut pending = vec![built.base_path.clone()];
+        let mut damaged_file = None;
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                let kind = fs::symlink_metadata(&path).unwrap().file_type();
+                if kind.is_dir() {
+                    pending.push(path);
+                } else if kind.is_file() {
+                    damaged_file = Some(path);
+                }
+            }
+        }
+        let damaged_file = damaged_file.expect("a regular file in the base");
+        fs::set_permissions(
+            damaged_file.parent().unwrap(),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::set_permissions(&damaged_file, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&damaged_file, "damaged\n").unwrap();
+
+        let error = add_with_state(&repository, &root.join("second"), &state)
+            .expect_err("a damaged base is never reused");
+        let message = error.to_string();
+        assert!(message.contains(first.to_str().unwrap()), "{message}");
+        assert!(message.contains("riftri gc --apply"), "{message}");
+
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.bases.len(), 1, "{accounting:?}");
+        assert!(accounting.bases[0].damaged, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+
+        // The way out it names works: remove the user, collect, add again.
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: first,
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove the view built from the damaged base");
+        super::garbage_collect(&state, true).expect("collect the damaged base");
+        assert!(!built.base_path.with_extension("damaged").exists());
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(accounting.bases.is_empty(), "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        add_with_state(&repository, &root.join("third"), &state).expect("a rebuilt base");
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(!accounting.bases[0].damaged, "{accounting:?}");
     }
 
     #[test]
