@@ -2463,9 +2463,9 @@ fn remove_worktree_with_mode(
     } else {
         None
     };
-    if !force && !git.worktree_is_clean(&destination)? {
+    if !force && let Some(reason) = non_force_removal_blocker(&git, &destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
-            "worktree {} has changes; commit, stash, or remove them before retrying",
+            "worktree {} {reason}",
             destination.display()
         )));
     }
@@ -9632,15 +9632,36 @@ fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
     Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
 
+/// Why Git's own non-force removal would refuse `worktree`, if it would.
+///
+/// Riftri moves a view aside before asking Git to unregister it, and Git skips
+/// its submodule check for a missing directory, deleting the worktree's
+/// submodule repositories with its administrative directory. So Riftri makes
+/// the same refusal itself, as `git worktree remove` does without `--force`.
+fn non_force_removal_blocker(
+    git: &Git,
+    worktree: &Path,
+) -> Result<Option<&'static str>, WorktreeError> {
+    if !git.worktree_is_clean(worktree)? {
+        return Ok(Some(
+            "has changes; commit, stash, or remove them before retrying",
+        ));
+    }
+    if git.worktree_has_submodules(worktree)? {
+        return Ok(Some(
+            "contains submodules, which Git removes only with --force; that also deletes the submodule repositories",
+        ));
+    }
+    Ok(None)
+}
+
 fn managed_worktree_is_clean_for_removal(
     git: &Git,
     managed: &DecodedJournal,
     expected_snapshot: Option<&str>,
 ) -> Result<bool, WorktreeError> {
     if managed.backend != BackendKind::OverlayFs {
-        return git
-            .worktree_is_clean(&managed.destination)
-            .map_err(WorktreeError::from);
+        return Ok(non_force_removal_blocker(git, &managed.destination)?.is_none());
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -9672,9 +9693,9 @@ fn managed_worktree_is_clean_for_removal(
             &managed.destination,
         )?;
         match OverlayFsMounter::mount_state(&layout, identity)? {
-            OverlayFsMountState::Active => git
-                .worktree_is_clean(&managed.destination)
-                .map_err(WorktreeError::from),
+            OverlayFsMountState::Active => {
+                Ok(non_force_removal_blocker(git, &managed.destination)?.is_none())
+            }
             OverlayFsMountState::Absent if expected_snapshot.is_some() => {
                 Ok(Some(overlayfs_layer_snapshot(layout.upper())?.as_str()) == expected_snapshot)
             }
@@ -9803,12 +9824,12 @@ fn remove_native_worktree(
     );
     // A clean removal still rejects a write that raced it, as Git's own
     // non-force removal would: the view is rechecked where it now lives.
-    let unregistered = match (force, git.worktree_is_clean(quarantine)) {
-        (false, Ok(false)) => Err(WorktreeError::InvalidRequest(format!(
-            "worktree {} has changes; commit, stash, or remove them before retrying",
+    let unregistered = match (force, non_force_removal_blocker(git, quarantine)) {
+        (false, Ok(Some(reason))) => Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} {reason}",
             destination.display()
         ))),
-        (false, Err(error)) => Err(error.into()),
+        (false, Err(error)) => Err(error),
         _ => git
             .remove_worktree(repository, destination)
             .map_err(WorktreeError::from),
@@ -9890,7 +9911,7 @@ fn remove_managed_worktree_files(
                     let current_snapshot = snapshot_managed_worktree_for_force(managed)?;
                     force_snapshot.is_some_and(|expected| current_snapshot == expected)
                 } else {
-                    git.worktree_is_clean(destination)?
+                    non_force_removal_blocker(git, destination)?.is_none()
                 };
                 if !safe {
                     return Err(changed_rollback_worktree(managed));
@@ -16977,6 +16998,109 @@ mod tests {
             accounting.cancelled_moves, 0,
             "nothing was recorded: {accounting:?}"
         );
+    }
+
+    /// Git refuses to remove a worktree with submodules without `--force`,
+    /// because that deletes the submodule repositories kept in the worktree's
+    /// administrative directory. Riftri moved the view aside first, and Git
+    /// skips the check for a missing directory, so a clean removal deleted them.
+    #[test]
+    fn a_clean_removal_refuses_a_worktree_whose_submodule_store_git_protects() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let worktree = root.join("worktree");
+        add_with_state(&repository, &worktree, &state).expect("add");
+        let modules = add_submodule_store(&worktree);
+        fs::write(modules.join("unpushed"), "submodule work\n").unwrap();
+
+        let error = super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: worktree.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect_err("Git refuses this without --force");
+
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{error}"
+        );
+        assert!(error.to_string().contains("submodules"), "{error}");
+        assert!(worktree.is_dir() && modules.join("unpushed").is_file());
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_removals, 0, "{accounting:?}");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+
+        // `--force` removes it, as `git worktree remove --force` does.
+        super::force_remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: worktree.clone(),
+            state_dir: Some(state),
+        })
+        .expect("forced removal");
+        assert!(!worktree.exists());
+    }
+
+    /// The other half of Git's check: a committed gitlink whose submodule is
+    /// checked out, with no `modules` store (cloned by hand, say).
+    #[test]
+    fn a_clean_removal_refuses_a_worktree_with_a_checked_out_submodule() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let worktree = root.join("worktree");
+        add_with_state(&repository, &worktree, &state).expect("add");
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&worktree)
+            .output()
+            .unwrap();
+        let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+        git(
+            &worktree,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},vendored"),
+            ],
+        );
+        git(&worktree, &["commit", "--quiet", "-m", "vendor"]);
+        git(
+            &worktree,
+            &[
+                "clone",
+                "--quiet",
+                "--no-checkout",
+                // Relative: Windows verbatim paths are not valid clone URLs.
+                "../repository",
+                "vendored",
+            ],
+        );
+        git(
+            &worktree.join("vendored"),
+            &["checkout", "--quiet", "--detach", &head],
+        );
+        assert!(
+            Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&worktree)
+                .output()
+                .unwrap()
+                .stdout
+                .is_empty(),
+            "the worktree is clean by Git's status"
+        );
+
+        let error = super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: worktree.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect_err("Git refuses this without --force");
+
+        assert!(error.to_string().contains("submodules"), "{error}");
+        assert!(worktree.join("vendored/.git").exists());
     }
 
     #[test]

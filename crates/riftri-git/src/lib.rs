@@ -1707,6 +1707,42 @@ impl Git {
         Ok(output.stdout.is_empty())
     }
 
+    /// Whether Git refuses to remove `worktree` without `--force` because it
+    /// contains submodules: its administrative directory holds a `modules`
+    /// store, or its index has a gitlink whose directory is checked out. This
+    /// mirrors Git's own check, which Git applies only while the worktree
+    /// directory exists.
+    pub fn worktree_has_submodules(&self, worktree: &Path) -> Result<bool, GitError> {
+        let admin = self.run_path(
+            Some(worktree),
+            &["rev-parse", "--absolute-git-dir"],
+            "worktree administrative directory",
+        )?;
+        if admin.join("modules").is_dir() {
+            return Ok(true);
+        }
+        let output = self.run(
+            Some(worktree),
+            &["ls-files", "--stage", "--full-name", "-z"],
+        )?;
+        for entry in output.stdout.split(|byte| *byte == 0) {
+            if !entry.starts_with(b"160000 ") {
+                continue;
+            }
+            let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+                return Err(GitError::InvalidOutput {
+                    context: "gitlink index entry",
+                    detail: "entry has no path".to_owned(),
+                });
+            };
+            let path = os_string_from_git(&entry[tab + 1..], "gitlink path")?;
+            if worktree.join(path).join(".git").exists() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Return whether replacing a checkout from its exact tree would discard
     /// no tracked, untracked, or ignored files.
     pub fn worktree_is_pristine(&self, worktree: &Path) -> Result<bool, GitError> {
