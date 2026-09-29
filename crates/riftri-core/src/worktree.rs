@@ -2629,17 +2629,24 @@ fn remove_worktree_with_mode(
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
+    let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let destination = existing_managed_destination(&request.destination, &requested_state)?;
-    let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
+    let state_directory = existing_state_directory_for_worktree(
+        &request.repository,
+        &requested_state,
+        state_given,
+        &destination,
+    )?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            destination.display(),
-            state_directory.display()
-        ))
+        not_managed_in_state_directory(
+            &request.repository,
+            &destination,
+            &state_directory,
+            state_given,
+        )
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     // Claim the worktree before reading any state that decides what to mutate,
@@ -2776,19 +2783,21 @@ fn move_worktree_inner(
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
+    let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let source = existing_managed_destination(&request.source, &requested_state)?;
     let destination =
         normalize_new_destination(&request.destination, DestinationRules::WorktreeMove)?;
-    let state_directory = existing_state_directory_for_worktree(&requested_state, &source)?;
+    let state_directory = existing_state_directory_for_worktree(
+        &request.repository,
+        &requested_state,
+        state_given,
+        &source,
+    )?;
     let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            source.display(),
-            state_directory.display()
-        ))
+        not_managed_in_state_directory(&request.repository, &source, &state_directory, state_given)
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     // Claim the worktree before reading any state that decides what to mutate,
@@ -2899,17 +2908,24 @@ fn compact_worktree_inner(
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
+    let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let destination = existing_managed_destination(&request.destination, &requested_state)?;
-    let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
+    let state_directory = existing_state_directory_for_worktree(
+        &request.repository,
+        &requested_state,
+        state_given,
+        &destination,
+    )?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            destination.display(),
-            state_directory.display()
-        ))
+        not_managed_in_state_directory(
+            &request.repository,
+            &destination,
+            &state_directory,
+            state_given,
+        )
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     if managed.backend == BackendKind::OverlayFs {
@@ -5757,17 +5773,45 @@ fn resolve_real_state_directory(path: &Path) -> Result<PathBuf, WorktreeError> {
 /// read still fails as the I/O error it is.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn existing_state_directory_for_worktree(
+    repository: &Path,
     requested_state: &Path,
+    state_given: bool,
     target: &Path,
 ) -> Result<PathBuf, WorktreeError> {
     let requested_state = absolute_path(requested_state)?;
     resolve_real_state_directory_if_present(&requested_state)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            target.display(),
-            requested_state.display()
-        ))
+        not_managed_in_state_directory(repository, target, &requested_state, state_given)
     })
+}
+
+/// Refuse a worktree the selected state directory does not manage. Without
+/// `--state-dir`, only the default location is read (D026), but the worktree
+/// may be managed in a state directory the repository registers; then say
+/// which, instead of implying the worktree is not managed at all.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn not_managed_in_state_directory(
+    repository: &Path,
+    target: &Path,
+    state_directory: &Path,
+    state_given: bool,
+) -> WorktreeError {
+    let mut message = format!(
+        "{} is not an active Riftri-managed worktree in {}",
+        target.display(),
+        state_directory.display()
+    );
+    if !state_given
+        && let Ok(Some(owner)) = managed_worktree_state_directory(repository, target)
+        && !paths_match(&owner, state_directory)
+    {
+        let flag =
+            crate::shell::shell_quoted_path(&owner).unwrap_or_else(|| owner.display().to_string());
+        message.push_str(&format!(
+            "; it is managed in the registered state directory {}, so pass --state-dir {flag}",
+            owner.display()
+        ));
+    }
+    WorktreeError::InvalidRequest(message)
 }
 
 fn resolve_real_state_directory_if_present(path: &Path) -> Result<Option<PathBuf>, WorktreeError> {
@@ -17799,6 +17843,40 @@ mod tests {
         fs::remove_file(&second.journal_path).expect("lose the add journal");
         let accounting = storage_accounting(&state).expect("status");
         assert_eq!(accounting.diagnostic_issues.len(), 1, "{accounting:?}");
+    }
+
+    /// Without `--state-dir`, lifecycle commands read only the default state
+    /// directory (D026). A worktree managed in a registered custom state
+    /// directory was then reported as "not an active Riftri-managed
+    /// worktree", although the repository records exactly where it is managed.
+    #[test]
+    fn a_refusal_names_the_registered_state_directory_that_manages_the_worktree() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let custom = root.join("custom-state");
+        let worktree = root.join("view");
+        add_with_state(&repository, &worktree, &custom).expect("add with a custom state");
+        let custom = fs::canonicalize(&custom).unwrap();
+
+        let error = super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: worktree.clone(),
+            state_dir: None,
+        })
+        .expect_err("the default state directory does not manage it");
+        let message = error.to_string();
+        assert!(message.contains(custom.to_str().unwrap()), "{message}");
+        assert!(message.contains("--state-dir"), "{message}");
+
+        // An explicit, different state directory keeps the plain refusal.
+        let error = super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: worktree.clone(),
+            state_dir: Some(root.join("other-state")),
+        })
+        .expect_err("that state directory does not manage it");
+        assert!(!error.to_string().contains("registered"), "{error}");
+        assert!(worktree.is_dir());
     }
 
     #[test]
