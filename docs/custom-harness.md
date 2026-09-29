@@ -109,6 +109,14 @@ before parsing anything:
 | `2` | Usage — bad flag or argument | Fix the call; never retry |
 | `3` | **Policy refusal** | Riftri will not optimize this. Nothing changed. Fall back or stop |
 
+One success exits non-zero. When `worktree add` creates the worktree but the
+repository's `post-checkout` hook fails, Riftri keeps the worktree and exits
+with the hook's code, exactly as `git worktree add` does, so there is no
+failure receipt on stderr: nothing failed on Riftri's side. With `--json`, the
+result on stdout carries `post_checkout.exit_code`; a non-zero exit without a
+receipt from `worktree add` is this case. Treat the worktree as created and
+report the hook's failure.
+
 A killed process has no exit code of its own. Report `128 +` the signal
 number, as a shell does, rather than passing the null through: a runner
 comparing against zero would otherwise read a killed command as success.

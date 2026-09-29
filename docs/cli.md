@@ -195,6 +195,12 @@ Enable optimized worktree creation for one repository. `PATH` defaults to `.`.
 Disable optimized worktree creation for one repository. `PATH` defaults to
 `.`.
 
+A disabled repository hands every Git command to the real Git, including
+`git worktree remove` and `move` of worktrees Riftri already manages. Remove
+those with `riftri worktree remove`; one removed with plain Git leaves its
+Riftri journal behind, which `riftri status` reports and `riftri repair`
+retires.
+
 ### `riftri exec [OPTIONS] <COMMAND>...`
 
 Run a command with process-scoped Git worktree interception — `git worktree
