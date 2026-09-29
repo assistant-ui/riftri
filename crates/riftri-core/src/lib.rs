@@ -352,6 +352,8 @@ pub enum MoveWorktreePhase {
     WorktreeMoved,
     AddJournalUpdated,
     Complete,
+    /// Git refused the move and both paths proved nothing had changed.
+    Cancelled,
 }
 
 /// Durable phases of a Git worktree-prune transaction.
@@ -426,14 +428,22 @@ impl RemoveWorktreePhase {
 impl MoveWorktreePhase {
     /// Return whether a move journal may atomically advance to `next`.
     pub fn can_transition_to(self, next: Self) -> bool {
-        use MoveWorktreePhase::{AddJournalUpdated, Complete, IntentRecorded, WorktreeMoved};
+        use MoveWorktreePhase::{
+            AddJournalUpdated, Cancelled, Complete, IntentRecorded, WorktreeMoved,
+        };
 
         matches!(
             (self, next),
-            (IntentRecorded, WorktreeMoved)
+            (IntentRecorded, WorktreeMoved | Cancelled)
                 | (WorktreeMoved, AddJournalUpdated)
                 | (AddJournalUpdated, Complete)
         )
+    }
+
+    /// Whether the move needs no further work: it completed, or it was
+    /// cancelled before anything moved.
+    pub fn is_finished(self) -> bool {
+        matches!(self, Self::Complete | Self::Cancelled)
     }
 }
 
@@ -1009,6 +1019,9 @@ mod tests {
             MoveWorktreePhase::AddJournalUpdated.can_transition_to(MoveWorktreePhase::Complete)
         );
         assert!(!MoveWorktreePhase::Complete.can_transition_to(MoveWorktreePhase::IntentRecorded));
+        assert!(MoveWorktreePhase::IntentRecorded.can_transition_to(MoveWorktreePhase::Cancelled));
+        assert!(!MoveWorktreePhase::WorktreeMoved.can_transition_to(MoveWorktreePhase::Cancelled));
+        assert!(!MoveWorktreePhase::Cancelled.can_transition_to(MoveWorktreePhase::WorktreeMoved));
         assert!(
             PruneWorktreesPhase::IntentRecorded
                 .can_transition_to(PruneWorktreesPhase::GitMetadataPruned)

@@ -169,9 +169,10 @@ fn pending_move_receipts_require_repair_with_the_state_directory() {
     init_repository_with_commit(&repository);
     add_managed_worktree(&repository, &source, &state);
 
-    // A move that Git rejects mid-flight leaves a durable pending move
-    // journal, exactly as an interrupted process would.
-    let failing_git = git_failing_worktree_subcommand(fixture.path(), "move");
+    // A move whose outcome Riftri cannot verify leaves a durable pending move
+    // journal, exactly as an interrupted process would. A plain Git refusal is
+    // not enough: once the paths prove nothing moved, that move is cancelled.
+    let failing_git = git_failing_move_then_inventory(fixture.path());
     let (_, exit_code) = riftri_json_error_with_git(
         &repository,
         &[
@@ -672,6 +673,27 @@ fn git_failing_worktree_subcommand(
         &wrapper,
         format!(
             "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = {subcommand} ]; then\n    echo 'fatal: injected worktree {subcommand} failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec git \"$@\"\n"
+        ),
+    )
+    .expect("write failing Git stand-in");
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+        .expect("mark Git stand-in executable");
+    wrapper
+}
+
+/// A Git stand-in that refuses `worktree move` and then also fails every
+/// `worktree list`, so the caller cannot tell whether anything moved.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn git_failing_move_then_inventory(directory: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let wrapper = directory.join("git-failing-move-then-inventory");
+    let marker = directory.join("git-move-was-refused");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = move ]; then\n    : > '{marker}'\n    echo 'fatal: injected worktree move failure' >&2\n    exit 128\n  fi\n  if [ -n \"$seen\" ] && [ \"$arg\" = list ] && [ -e '{marker}' ]; then\n    echo 'fatal: injected worktree list failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec git \"$@\"\n",
+            marker = marker.display()
         ),
     )
     .expect("write failing Git stand-in");

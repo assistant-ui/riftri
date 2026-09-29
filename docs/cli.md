@@ -473,6 +473,10 @@ Move a Riftri-managed linked worktree with recoverable metadata updates.
 `DESTINATION` must be on the same filesystem volume.
 Like `git worktree move`, it refuses a locked worktree before recording
 anything.
+A destination inside the worktree itself is refused the same way. When Git
+refuses the move itself, for example because the worktree contains submodules,
+nothing is changed: the move is recorded as cancelled, the command reports
+Git's reason, and the worktree stays usable.
 
 ### `riftri worktree compact [OPTIONS] <PATH>`
 
