@@ -365,6 +365,20 @@ mod unix {
         assert_terminates(pids[0], "scoped command");
     }
 
+    /// PID-directed SIGQUIT at riftri alone stops the scoped command. It was
+    /// the one termination signal a supervised riftri neither forwarded nor
+    /// ignored, so riftri died and left the scoped command running in its own
+    /// process group, with the temporary Git shim never removed.
+    #[test]
+    fn sigquit_to_riftri_stops_scoped_child() {
+        let mut exec = SupervisedExec::spawn("echo \"$$\"; exec /bin/sleep 30");
+        let pids = exec.read_pids(1);
+        let riftri_pid = i32::try_from(exec.riftri.id()).expect("riftri PID fits i32");
+        signal(riftri_pid, libc::SIGQUIT);
+        assert_eq!(exec.wait_exit_code(), 128 + libc::SIGQUIT);
+        assert_terminates(pids[0], "scoped command");
+    }
+
     /// A scoped command that dies from a signal of its own still maps to the
     /// conventional 128 + signal exit status, with the shim cleaned up.
     #[test]

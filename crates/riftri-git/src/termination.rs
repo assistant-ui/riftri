@@ -113,8 +113,8 @@ pub fn run_forwarding_terminations(command: &mut Command) -> Result<ExitStatus, 
     // is the other keyboard-generated termination signal (Ctrl-\) that the
     // terminal delivers to the whole foreground process group: a child that
     // catches or ignores it must not lose its waiter either. In supervised mode
-    // SIGQUIT keeps its default disposition, unchanged from the original
-    // forwarding contract.
+    // it is forwarded like SIGINT: left at its default, a PID-directed SIGQUIT
+    // killed the waiter and orphaned the child in its own process group.
     let (forwarded, ignored): (&[libc::c_int], &[libc::c_int]) = if interactive {
         // The terminal already delivers keyboard-generated SIGINT and SIGQUIT
         // to the whole foreground process group, which includes the child;
@@ -125,7 +125,10 @@ pub fn run_forwarding_terminations(command: &mut Command) -> Result<ExitStatus, 
             &[libc::SIGINT, libc::SIGQUIT],
         )
     } else {
-        (&[libc::SIGTERM, libc::SIGINT, libc::SIGHUP], &[])
+        (
+            &[libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT],
+            &[],
+        )
     };
     let guard = ForwardingGuard::install(forwarded, ignored)?;
     // Every signal whose disposition was replaced must be restored in the
