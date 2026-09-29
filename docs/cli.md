@@ -484,7 +484,9 @@ Git's reason, and the worktree stays usable.
 ### `riftri worktree compact [OPTIONS] <PATH>`
 
 Replace a pristine managed worktree with a fresh native COW view, returning
-its storage cost to that of a new view. The worktree must be clean.
+its storage cost to that of a new view. The worktree must be clean. A difference Git does not report, such as a modified file marked
+`assume-unchanged` or `skip-worktree`, is caught before anything is swapped:
+the compaction is cancelled and the worktree is left exactly as it was.
 
 ### `riftri worktree prune`
 

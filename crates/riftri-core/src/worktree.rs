@@ -2840,21 +2840,41 @@ fn compact_worktree_inner(
     let journal_path = store.persist(&journal)?;
     fail_compaction_if_requested(journal.phase, fail_after)?;
 
-    let reused_base = prepare_base(
-        &git,
-        &destination,
-        &resolved.tree,
-        &base_path,
-        &base_staging,
-        &temporary_index,
-        &compatibility.checkout_config,
-        &compatibility.lfs_objects,
-        &sparse_directories,
-    )?;
-    NativeCowCloner::clone_tree_owner_writable(&base_path, &replacement)?;
-    copy_git_pointer(&destination, &replacement)?;
-    verify_snapshot(&replacement, &journal.expected_snapshot)?;
-    sync_parent(&replacement)?;
+    let prepared = (|| {
+        let reused_base = prepare_base(
+            &git,
+            &destination,
+            &resolved.tree,
+            &base_path,
+            &base_staging,
+            &temporary_index,
+            &compatibility.checkout_config,
+            &compatibility.lfs_objects,
+            &sparse_directories,
+        )?;
+        NativeCowCloner::clone_tree_owner_writable(&base_path, &replacement)?;
+        copy_git_pointer(&destination, &replacement)?;
+        if directory_snapshot(&replacement)? != journal.expected_snapshot {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "worktree {} differs from a fresh checkout of its commit in a way Git does not report, such as a modified file marked assume-unchanged or skip-worktree, or an extended attribute; compaction was cancelled and nothing changed",
+                destination.display()
+            )));
+        }
+        sync_parent(&replacement)?;
+        Ok(reused_base)
+    })();
+    let reused_base = match prepared {
+        Ok(reused_base) => reused_base,
+        Err(error) => {
+            // Nothing has touched the worktree yet, so cancel now, exactly as
+            // repair would: remove the replacement and staging and retire the
+            // journal. A pending compaction blocks every other lifecycle
+            // command on this worktree until someone runs repair. If the
+            // cancellation itself fails, the journal stays for repair.
+            let _ = resume_compaction(&git, &store, journal.decode(journal_path.clone())?, None);
+            return Err(error);
+        }
+    };
     advance_compaction(
         &store,
         &mut journal,
@@ -17275,6 +17295,66 @@ mod tests {
         add_with_state(&repository, &root.join("third"), &state).expect("a rebuilt base");
         let accounting = storage_accounting(&state).expect("status");
         assert!(!accounting.bases[0].damaged, "{accounting:?}");
+    }
+
+    /// `git status` hides a modified file marked assume-unchanged or
+    /// skip-worktree, so compaction passed its pristine check and only its
+    /// snapshot comparison caught the difference. It preserved the view but
+    /// left the compaction pending, with its replacement directory beside the
+    /// worktree, so remove, move and another compaction refused until repair.
+    #[test]
+    fn a_compaction_whose_view_differs_from_its_tree_is_cancelled() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let view = root.join("view");
+        add_with_state(&repository, &view, &state).expect("add");
+        let tracked = Command::new("git")
+            .args(["ls-files", "-z"])
+            .current_dir(&view)
+            .output()
+            .unwrap();
+        let tracked = String::from_utf8(tracked.stdout).unwrap();
+        let tracked = tracked
+            .split('\0')
+            .find(|path| !path.is_empty())
+            .unwrap()
+            .to_owned();
+        git(&view, &["update-index", "--assume-unchanged", &tracked]);
+        let file = view.join(&tracked);
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        fs::set_permissions(&file, permissions).unwrap();
+        fs::write(&file, "hidden local change\n").unwrap();
+
+        let error = super::compact_worktree(CompactWorktreeRequest {
+            repository: repository.clone(),
+            destination: view.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .expect_err("the view is not a fresh checkout of its tree");
+
+        let message = error.to_string();
+        assert!(message.contains("assume-unchanged"), "{message}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "hidden local change\n");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
+        assert_eq!(accounting.cancelled_compactions, 1, "{accounting:?}");
+        let leftovers = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".riftri-compact-"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        // Nothing is pending, so the worktree's other lifecycle commands work.
+        super::force_remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: view.clone(),
+            state_dir: Some(state),
+        })
+        .expect("forced removal without a repair first");
+        assert!(!view.exists());
     }
 
     #[test]
