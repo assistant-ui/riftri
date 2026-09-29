@@ -2447,6 +2447,7 @@ fn print_storage_accounting(
                     "reference_count_complete": counts_are_complete,
                     "logical_bytes": base.logical_bytes,
                     "allocated_bytes": base.allocated_bytes,
+                    "damaged": base.damaged,
                 })
             })
             .collect::<Vec<_>>();
@@ -2563,6 +2564,11 @@ fn print_storage_accounting(
             display_byte_count(base.allocated_bytes),
             state
         );
+        if base.damaged {
+            outputln!(
+                "  Damaged: this base failed its integrity check and is never reused; remove the worktrees that use it, then run `riftri gc --apply` to add its tree again"
+            );
+        }
     }
     outputln!("Active view storage:");
     for view in &report.views {

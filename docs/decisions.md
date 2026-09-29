@@ -600,7 +600,12 @@ New base buckets use a versioned SHA-256 completion marker covering every entry'
 native name, kind, file bytes, permissions, and symlink target. Reuse recomputes
 the digest under the base lock and refuses a mismatch without deleting evidence
 or disturbing existing views. This adds a sequential read on cache hits without
-allocating another checkout. An empty marker cannot establish integrity: new
+allocating another checkout. The refusal names the worktrees still using
+the base and says to remove them and run `riftri gc --apply`, which deletes
+it; the add also leaves an empty `<tree>.damaged` file beside the base so
+`status` can mark it damaged without re-reading every base. That file is only
+a report: reuse always recomputes the digest, a later successful check or
+rebuild removes it, and collection deletes it with the base. An empty marker cannot establish integrity: new
 adds use a new cache namespace, while older bases remain available to their
 existing views and explicit garbage collection. This detects accidental cache
 corruption; it does not make same-user mutable state a security sandbox.

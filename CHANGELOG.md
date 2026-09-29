@@ -29,6 +29,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- An add refused because a base failed its integrity check now names the
+  worktrees still using that base and says to remove them and run
+  `riftri gc --apply`. `riftri status` marks such a base as damaged, in text
+  and as `damaged` in JSON, until it is collected (#512).
 - A `--state-dir` that runs through a regular file now gets the same
   `invalid-state-directory` policy receipt as one that is a file, instead of an
   operational failure that invited a retry (#510).
