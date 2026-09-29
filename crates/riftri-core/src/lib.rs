@@ -79,6 +79,8 @@ pub fn is_absent_repository(error: &(dyn std::error::Error + 'static)) -> bool {
 ///   link. Riftri never follows a link for its own state, and nothing turns a
 ///   file into a state directory, so suggesting `riftri repair` or
 ///   `riftri status` against it only produced a loop between the two (#425).
+/// - `invalid-worktree-binding`: `riftri exec --worktree` did not name the
+///   exact root of a registered Git worktree, so the command never started.
 ///
 /// Like [`is_absent_repository`], each wrapper is matched explicitly:
 /// `#[error(transparent)]` forwards `source()` past the inner error, so walking
@@ -103,7 +105,16 @@ pub fn policy_refusal_code(error: &(dyn std::error::Error + 'static)) -> Option<
             InvalidStateDirectory { .. }
         )))
     );
-    invalid_state.then_some("invalid-state-directory")
+    if invalid_state {
+        return Some("invalid-state-directory");
+    }
+    // `riftri exec --worktree` that names no registered worktree root: the
+    // command was never started, and only a different path can succeed.
+    matches!(
+        error.downcast_ref::<ActivationError>(),
+        Some(ActivationError::WorktreeBinding(_))
+    )
+    .then_some("invalid-worktree-binding")
 }
 
 /// Whether one typed failure means the underlying volume is out of storage.
