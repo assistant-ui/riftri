@@ -28,7 +28,8 @@ fn setup_rejects_noninteractive_input_without_creating_state() {
         .stdin(Stdio::null())
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    // A policy refusal: nothing was attempted and retrying cannot help.
+    assert_eq!(output.status.code(), Some(3));
     let error = String::from_utf8(output.stderr).unwrap();
     assert!(error.contains("interactive terminal"), "{error}");
     assert!(error.contains("riftri worktree add"), "{error}");
