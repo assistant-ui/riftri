@@ -207,8 +207,8 @@ without any shell-level activation.
 
 Termination follows the platform's conventions. On Unix, without a foreground
 controlling terminal (a supervisor or script), the command runs in its own
-process group, and SIGTERM, SIGINT, or SIGHUP delivered to `riftri exec` is
-forwarded to that whole group, stopping the command's descendants without
+process group, and SIGTERM, SIGINT, SIGHUP, or SIGQUIT delivered to
+`riftri exec` is forwarded to that whole group, stopping the command's descendants without
 touching unrelated processes. With a foreground controlling terminal, the
 command stays in `riftri exec`'s process group so terminal job control is
 unchanged: the terminal keeps delivering Ctrl-C (SIGINT) and Ctrl-\ (SIGQUIT)
@@ -227,8 +227,8 @@ intercepted, so no forwarding layer exists.
 
 The forwarding and ignoring above describe what `riftri exec` does *while it
 waits*; they never change what the command itself starts with. On Unix, every
-signal whose disposition `riftri exec` replaces — SIGTERM, SIGHUP, and SIGINT,
-plus SIGQUIT in interactive mode — is reset in the command before it execs to
+signal whose disposition `riftri exec` replaces — SIGTERM, SIGHUP, SIGINT, and
+SIGQUIT — is reset in the command before it execs to
 the disposition `riftri exec` itself inherited: `SIG_IGN` stays `SIG_IGN`, and
 anything else becomes `SIG_DFL`, because a caught handler cannot survive an
 exec while an ignore can. So `nohup riftri exec -- <command>` leaves the
@@ -240,8 +240,8 @@ ignored there, so it starts at `SIG_DFL` and Ctrl-C reaches it normally.
 
 Forwarding also survives the Git shim. When the scoped command runs `git`, the
 `git` it resolves is Riftri's own shim, which delegates to the real Git; the
-shim applies this same termination contract to that delegation. A SIGTERM or
-SIGHUP forwarded to the shim is therefore forwarded on to the real Git process
+shim applies this same termination contract to that delegation. A SIGTERM,
+SIGHUP, or (without a terminal) SIGINT or SIGQUIT forwarded to the shim is therefore forwarded on to the real Git process
 instead of killing the shim and leaving a `clone` or `fetch` running, orphaned
 and still writing. The shim waits for the real Git, restores its own signal
 dispositions, and exits with Git's status under the same `128 + signal` rule,

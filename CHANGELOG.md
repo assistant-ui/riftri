@@ -29,6 +29,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Without a terminal, `riftri exec` and the Git shim now forward SIGQUIT to
+  their child like SIGINT. A PID-directed SIGQUIT used to kill the wrapper and
+  leave the scoped command, or the real Git, running as an orphan (#520).
 - An add refused because a base failed its integrity check now names the
   worktrees still using that base and says to remove them and run
   `riftri gc --apply`. `riftri status` marks such a base as damaged, in text
