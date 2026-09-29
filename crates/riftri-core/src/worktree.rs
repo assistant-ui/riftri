@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
@@ -1405,6 +1405,9 @@ pub fn storage_accounting(
     // here; the per-journal validation below already surfaces them.
     let mut unresolvable_worktree_issues = Vec::new();
     let mut inspected_repositories = HashSet::new();
+    // One listing per repository serves every journal below: listing again
+    // per journal made status quadratic in the number of worktrees.
+    let mut inventories = HashMap::new();
     for journal in &loaded_add_journals {
         if !inspected_repositories.insert(journal.repository.clone()) {
             continue;
@@ -1412,6 +1415,7 @@ pub fn storage_accounting(
         let Ok(registered) = git.list_worktrees(&journal.repository) else {
             continue;
         };
+        inventories.insert(journal.repository.clone(), registered.clone());
         for worktree in registered {
             if worktree.head_unresolvable {
                 unresolvable_worktree_issues.push(StateDiagnosticIssue {
@@ -1431,6 +1435,7 @@ pub fn storage_accounting(
     for journal in loaded_add_journals {
         match validate_status_add_journal(
             &git,
+            &inventories,
             &state_directory,
             &journal,
             completed.contains(&journal.operation_id),
@@ -1673,6 +1678,7 @@ enum StatusAddJournal {
 
 fn validate_status_add_journal(
     git: &Git,
+    inventories: &HashMap<PathBuf, Vec<riftri_git::WorktreeInfo>>,
     state_directory: &Path,
     journal: &DecodedJournal,
     removal_complete: bool,
@@ -1688,13 +1694,22 @@ fn validate_status_add_journal(
             journal.repository.display()
         )));
     }
-    let inventory = git.list_worktrees(&journal.repository)?;
+    // A repository whose listing failed above is listed again here, so its
+    // error is reported against this journal exactly as before.
+    let listed;
+    let inventory = match inventories.get(&journal.repository) {
+        Some(inventory) => inventory,
+        None => {
+            listed = git.list_worktrees(&journal.repository)?;
+            &listed
+        }
+    };
     let Some(registered) = inventory
         .iter()
         .find(|worktree| paths_match(&worktree.path, &journal.destination))
         .cloned()
     else {
-        return unregistered_destination_advice(&inventory, claimed, journal)
+        return unregistered_destination_advice(inventory, claimed, journal)
             .map(StatusAddJournal::Unregistered);
     };
     if registered.head_unresolvable {
@@ -7529,6 +7544,13 @@ fn reconcile_active_add_journals(
         .filter(|removal| removal.phase != RemoveWorktreePhase::Complete)
         .map(|removal| removal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    // One listing per repository, taken on first use, confirms every journal
+    // whose worktree Git still registers: those need nothing. Anything else is
+    // decided on a fresh listing under that journal's lock, as before. A
+    // stale snapshot cannot make a moved worktree look registered (the
+    // reloaded journal names its new path), and one removed since is merely
+    // left for the next pass. Listing per journal made repair quadratic.
+    let mut inventories = HashMap::new();
     let mut retired = 0;
     let mut relocations = Vec::new();
     let mut errors = Vec::new();
@@ -7563,6 +7585,22 @@ fn reconcile_active_add_journals(
             }
         };
         if journal.phase != AddWorktreePhase::Active {
+            continue;
+        }
+        if !inventories.contains_key(&journal.repository)
+            && let Ok(listed) = git.list_worktrees(&journal.repository)
+        {
+            inventories.insert(journal.repository.clone(), listed);
+        }
+        if inventories
+            .get(&journal.repository)
+            .is_some_and(|inventory| {
+                matches!(
+                    classify_active_destination(inventory, &claimed, &journal),
+                    Ok(ActiveDestinationState::Registered)
+                )
+            })
+        {
             continue;
         }
         let registered = match git.list_worktrees(&journal.repository) {
