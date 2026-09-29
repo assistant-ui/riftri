@@ -465,7 +465,7 @@ impl Git {
                     revision.to_os_string(),
                 ];
                 let probe = self.output_os(Some(path), &arguments)?;
-                if probe.status.code() == Some(1) {
+                if probe.status.code() == Some(1) || self.names_a_non_commit(path, revision)? {
                     Ok(None)
                 } else {
                     Err(error)
@@ -473,6 +473,39 @@ impl Git {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Whether `revision` resolves to an object that is not a commit even
+    /// after peeling tags: a tree, a blob, or a tag of one. Like an unknown
+    /// name, that is a caller mistake rather than a Git failure. Anything this
+    /// probe cannot establish (a corrupt object store, say) answers `false`,
+    /// keeping the caller's original error.
+    fn names_a_non_commit(&self, path: &Path, revision: &OsStr) -> Result<bool, GitError> {
+        let mut peeled = revision.to_os_string();
+        peeled.push("^{}");
+        let object = self.output_os(
+            Some(path),
+            &[
+                OsString::from("rev-parse"),
+                OsString::from("--verify"),
+                OsString::from("--quiet"),
+                OsString::from("--end-of-options"),
+                peeled,
+            ],
+        )?;
+        if !object.status.success() {
+            return Ok(false);
+        }
+        let object = String::from_utf8_lossy(&object.stdout).trim().to_owned();
+        let kind = self.output_os(
+            Some(path),
+            &[
+                OsString::from("cat-file"),
+                OsString::from("-t"),
+                OsString::from(object),
+            ],
+        )?;
+        Ok(kind.status.success() && String::from_utf8_lossy(&kind.stdout).trim() != "commit")
     }
 
     /// Return Git's stable, NUL-delimited worktree inventory.
