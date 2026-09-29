@@ -64,6 +64,39 @@ the default local LFS store. External attributes, custom LFS storage or pointer
 extensions, custom filters, encodings, ident substitution, legacy attributes,
 and unknown attribute names remain fail-closed.
 
+Milestone 6 is substantially complete. Exact-tree ASCII case and Unicode alias
+candidates are replayed against the real destination volume before any durable
+state exists. Explicit cone-mode sparse checkouts work through
+`riftri worktree add --sparse-dir`, keyed into the checkout profile and the
+immutable-base identity; an add made from inside a cone-mode sparse worktree
+inherits that cone as Git does, and a pristine sparse view compacts at its
+creation profile. Clean-worktree compaction onto a new immutable base is
+complete for APFS, Linux reflink, and ReFS. Build-cache guidance lives in
+`docs/build-caches.md`, and cold/cached creation and allocation benchmarks are
+recorded by CI across the supported filesystem matrix. Submodule policy,
+OverlayFS upper-layer compaction, non-cone sparse forms, sparse combined with
+Git LFS, and compacting a view whose selection changed since its add all remain
+open or fail-closed. Riftri also manages worktrees for a bare repository from
+its Git directory, and runs a repository's `post-checkout` hook itself rather
+than refusing a repository that defines one.
+
+The command surface now extends past the lifecycle verbs. `riftri setup`
+interactively creates a view and can then open a coding agent; its terminal UI
+sits behind a `tui` feature that is off by default, so an ordinary build stays
+lean, while release archives enable it and strip the binary.
+`riftri worktree list` reports managed views and their storage use across every
+registered state directory, and `riftri state unregister` clears a registration
+for a missing state directory without deleting files. `riftri completions` and
+`riftri man` generate shell completions and man pages on demand, which keeps the
+one-executable release archive the installers verify. Every command accepts
+`--json-errors` except the interactive `setup`, which refuses it with a single
+receipt before prompting; the read-only reports also accept `--json`. Failures
+carry distinct exit codes -- 1 operational, 2 usage, 3 policy -- mirroring the
+receipt's `category`, so a wrapper can branch without parsing JSON. Lifecycle
+phase progress goes to stderr and is silenced with `--no-progress`. Beyond the
+CLI, the npm package ships a programmatic API documented in
+`docs/node-api.md`.
+
 Milestone 4's transparent-Git compatibility matrix lives in
 `crates/riftri-cli/tests/global_activation.rs`. Global per-user shell activation
 never replaces repository-local consent; preserve that distinction in UX and
