@@ -152,3 +152,36 @@ test("no bound is so large that it stops being a backstop", () => {
   // An hour is already generous against the slowest measured job.
   assert.deepEqual(tooLarge, [], `bounds over 60m: ${tooLarge.join(", ")}`);
 });
+
+test("the publish job outlasts both npm propagation budgets", async () => {
+  // The verification budget and the job bound are set in different files, so
+  // raising the budget can silently push the job past its timeout -- which
+  // would turn a ridable propagation delay into a hard kill mid-release,
+  // exactly the failure the budget exists to prevent.
+  const { VERIFICATION_ATTEMPTS, verificationWaits } = await import(
+    "../scripts/publish-packages.mjs"
+  );
+  const phaseMinutes =
+    verificationWaits(VERIFICATION_ATTEMPTS).reduce(
+      (total, milliseconds) => total + milliseconds,
+      0,
+    ) / 60_000;
+  // Both phases can time out in one run: once before the launcher and once
+  // after it. Publishing nine packages adds a couple of minutes on top.
+  const worstCaseMinutes = phaseMinutes * 2 + 5;
+
+  const workflow = fs.readFileSync(
+    path.join(workflowDirectory, "release.yml"),
+    "utf8",
+  );
+  const publish = jobs(workflow).find((job) => job.id === "publish");
+  assert.ok(publish, "release.yml must declare a publish job");
+  const match = /^\s+timeout-minutes: (\d+)$/m.exec(publish.body);
+  assert.ok(match, "the publish job must bound itself");
+
+  assert.ok(
+    Number(match[1]) > worstCaseMinutes,
+    `publish is bounded at ${match[1]}m but can spend ${worstCaseMinutes}m ` +
+      `waiting on npm; raise the bound or lower VERIFICATION_ATTEMPTS`,
+  );
+});

@@ -129,13 +129,16 @@ test("does not publish the launcher if a platform publish never becomes visible"
 test("verification rides out registry propagation before giving up", async (t) => {
   // Five attempts waited 15 seconds in total, and npm's read API takes
   // minutes: the first workflow-published release flunked two successful
-  // publishes in one evening (#370). Pin the schedule so the budget cannot
-  // quietly shrink again: exponential, capped at a minute, ~4 minutes total.
+  // publishes in one evening (#370). Ten attempts (~4 minutes) then flunked
+  // v0.5.1 the same way. Pin the schedule so the budget cannot quietly shrink
+  // again: exponential, capped at a minute.
   const repositoryRoot = await releaseFixture(t);
   const registry = fakeRegistry({
     omitAfterPublish: `riftri-win32-x64@${packageVersion}`,
   });
-  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+  const { publishPackages, verificationWaits } = await import(
+    "../scripts/publish-packages.mjs"
+  );
   const waits = [];
   await assert.rejects(
     publishPackages({
@@ -149,7 +152,65 @@ test("verification rides out registry propagation before giving up", async (t) =
   );
   assert.deepEqual(
     waits,
-    [1, 2, 4, 8, 16, 32, 60, 60, 60].map((seconds) => seconds * 1_000),
+    [1, 2, 4, 8, 16, 32, ...Array(11).fill(60)].map(
+      (seconds) => seconds * 1_000,
+    ),
+  );
+  assert.deepEqual(waits, verificationWaits());
+  const budgetMinutes = waits.reduce((total, ms) => total + ms, 0) / 60_000;
+  assert.ok(
+    budgetMinutes > 10,
+    `a phase must ride out more than ten minutes, got ${budgetMinutes}`,
+  );
+});
+
+test("a pre-launcher timeout reports that npm still serves the old release", async (t) => {
+  // The message names a platform package, but the damage is the unpublished
+  // launcher: v0.5.1 left seven platform packages live and `npm install
+  // riftri` on 0.5.0. Say so, or the next operator misreads the failure.
+  const repositoryRoot = await releaseFixture(t);
+  const registry = fakeRegistry({
+    omitAfterPublish: `riftri-win32-x64@${packageVersion}`,
+  });
+  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+
+  await assert.rejects(
+    publishPackages({
+      repositoryRoot,
+      runNpm: registry.runNpm,
+      wait: async () => {},
+      verificationAttempts: 2,
+    }),
+    (error) => {
+      assert.match(error.message, /launcher was therefore not published/);
+      assert.match(error.message, /installs the previous release/);
+      assert.match(error.message, /skips packages that are already live/);
+      return true;
+    },
+  );
+});
+
+test("a post-launcher timeout does not claim the launcher is unpublished", async (t) => {
+  // Same retry budget, opposite conclusion: here the launcher did publish, so
+  // telling the operator npm serves the old release would be false.
+  const repositoryRoot = await releaseFixture(t);
+  const registry = fakeRegistry({
+    omitAfterPublish: `riftri@${packageVersion}`,
+  });
+  const { publishPackages } = await import("../scripts/publish-packages.mjs");
+
+  await assert.rejects(
+    publishPackages({
+      repositoryRoot,
+      runNpm: registry.runNpm,
+      wait: async () => {},
+      verificationAttempts: 2,
+    }),
+    (error) => {
+      assert.match(error.message, /still missing/);
+      assert.doesNotMatch(error.message, /not published/);
+      return true;
+    },
   );
 });
 
