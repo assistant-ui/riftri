@@ -741,6 +741,8 @@ fn destination_readiness(
             }
             // Git creates the destination and any missing parents inside the
             // nearest existing directory, so that one must be writable.
+            #[cfg(not(unix))]
+            let _ = parent;
             #[cfg(unix)]
             if let Some(existing) = parent.ancestors().find(|ancestor| ancestor.is_dir())
                 && rustix::fs::access(existing, rustix::fs::Access::WRITE_OK).is_err()
