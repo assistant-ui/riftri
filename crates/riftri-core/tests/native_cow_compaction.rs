@@ -424,10 +424,17 @@ fn compaction_preserves_private_extended_attributes_by_refusing_replacement() {
     })
     .expect_err("replacement without the private xattr must be refused");
     assert!(
-        error.to_string().contains("content changed"),
+        error.to_string().contains("differs from a fresh checkout"),
         "unexpected: {error}"
     );
-    let repair = recover_incomplete_operations(&state).expect("cancel incomplete compaction");
+    // The command cancels the compaction itself; repair finds nothing to do.
+    assert_eq!(
+        storage_accounting(&state)
+            .expect("inspect cancelled compaction")
+            .pending_compactions,
+        0
+    );
+    let repair = recover_incomplete_operations(&state).expect("repair");
     assert!(repair.errors.is_empty(), "{repair:?}");
     assert_eq!(
         {

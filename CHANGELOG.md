@@ -33,6 +33,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   worktrees still using that base and says to remove them and run
   `riftri gc --apply`. `riftri status` marks such a base as damaged, in text
   and as `damaged` in JSON, until it is collected (#512).
+- `riftri worktree compact` on a worktree that differs from its commit in a
+  way Git does not report (a modified file marked `assume-unchanged` or
+  `skip-worktree`, or an extended attribute) now cancels itself and says so.
+  It used to leave the compaction pending, with its replacement directory, so
+  every other lifecycle command refused until `riftri repair` (#515).
 - A `--state-dir` that runs through a regular file now gets the same
   `invalid-state-directory` policy receipt as one that is a file, instead of an
   operational failure that invited a retry (#510).
