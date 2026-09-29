@@ -422,6 +422,12 @@ pub enum WorktreeError {
 
     #[error("invalid worktree request: {0}")]
     InvalidRequest(String),
+    /// The requested start point is `HEAD`, and `HEAD` names no commit: the
+    /// repository or its current branch has no commits yet. A policy refusal
+    /// like `InvalidRequest`; it is typed separately so the Git shim can hand
+    /// such an add to Git, which may create an orphan worktree.
+    #[error("invalid worktree request: {0}")]
+    UnbornHead(String),
 
     /// A durable journal records an interrupted lifecycle operation, so this
     /// request is refused until `riftri repair` runs against
@@ -4330,16 +4336,15 @@ fn resolve_requested_revision(
     if let Some(resolved) = git.resolve_requested_revision(repository, revision)? {
         return Ok(resolved);
     }
-    Err(WorktreeError::InvalidRequest(
-        if revision == OsStr::new("HEAD") {
-            unresolved_head_message(git, repository)
-        } else {
-            format!(
-                "revision does not name a commit in this repository: {}",
-                revision.to_string_lossy()
-            )
-        },
-    ))
+    if revision == OsStr::new("HEAD") {
+        return Err(WorktreeError::UnbornHead(unresolved_head_message(
+            git, repository,
+        )));
+    }
+    Err(WorktreeError::InvalidRequest(format!(
+        "revision does not name a commit in this repository: {}",
+        revision.to_string_lossy()
+    )))
 }
 
 /// Explain an unresolvable `HEAD`: an orphaned branch in a repository that

@@ -142,7 +142,11 @@ ordinary-Git escape hatch. Interception never hides Git from the caller:
 `git worktree add -h` and `--help` print Git's own usage, and an add carrying
 only global options that cannot change a checkout — `--no-optional-locks`,
 `--no-advice`, `--literal-pathspecs` — runs as ordinary Git instead of failing,
-because editors pass those on every invocation. Without `-b` or `--detach`, a
+because editors pass those on every invocation. An add whose start point is a
+`HEAD` with no commit — a freshly initialized repository, or an orphan branch —
+also runs as ordinary Git: there is no tree to clone, and Git may create an
+orphan worktree there. Riftri refuses it before recording or creating anything,
+then hands the unchanged command to Git. Without `-b` or `--detach`, a
 second positional is optimized only when it names an existing local branch;
 a tag, a raw commit, a remote-tracking ref, or `HEAD` would make ordinary Git
 detach or create a tracking branch, so Riftri refuses before any Git process

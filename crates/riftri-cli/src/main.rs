@@ -1363,7 +1363,7 @@ fn worktree_failure_fields(
             "not-needed",
             "not-required",
         ),
-        WorktreeError::InvalidRequest(_) => (
+        WorktreeError::InvalidRequest(_) | WorktreeError::UnbornHead(_) => (
             "invalid-request",
             "policy",
             None,
