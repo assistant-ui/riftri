@@ -33,6 +33,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri setup` without a terminal now exits 3 (policy refusal) instead of 1,
+  matching its `--json-errors` refusal: nothing was attempted and retrying
+  cannot help (#538).
 - `riftri status`, `riftri worktree list`, and `riftri repair` list Git's
   worktrees once per repository instead of once per managed worktree. They
   slowed quadratically: at 120 worktrees, `status` took 5.4 s and now takes
