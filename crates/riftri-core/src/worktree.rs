@@ -1888,7 +1888,7 @@ fn add_operation_is_retiring(state_directory: &Path, add_operation_id: &str) -> 
     retiring_add_marker(&JournalStore::open(state_directory).path_for(add_operation_id)).is_file()
 }
 
-/// Count, or with `apply` delete, finished journal history (#533).
+/// Count, or with `apply` delete, finished journal history (#536).
 ///
 /// Completed journals were never deleted, and every lifecycle command reads
 /// them all, so a busy repository slowed down for good. A lineage is finished
