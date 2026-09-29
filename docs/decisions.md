@@ -710,6 +710,35 @@ directory, the first entry of `git worktree list`, as the repository.
 Repository-local Git interception (`riftri enable`) still requires a working
 tree and keeps the `bare-repository` policy receipt.
 
+### D043: gc retires finished journal history
+
+Durable journals are recovery authority while an operation can still need
+recovery, not a permanent log. Keeping every completed journal made every
+lifecycle command read the whole history: after 1,000 add and remove cycles
+the state directory held 24 MB of journals, and `status`, `add`, and `remove`
+ran several times slower than on a fresh repository.
+
+`riftri gc --apply` therefore retires a lineage once its worktree is gone for
+good — the add rolled back, or a removal of it completed — deleting its add
+journal together with its finished move, compaction, and removal journals.
+Completed prune and finished collection journals are deleted too. A plan
+(`riftri gc` without `--apply`) only counts them. Nothing belonging to a live
+worktree or to an unfinished operation is touched, each add operation is
+retired under its own lock, and nothing is retired while any journal cannot
+be read, since an unreadable journal may still hold a claim.
+
+The deletion order keeps every interrupted state explained. Finished moves
+and compactions go first, leaving a valid add-and-removal history; the add
+journal is then renamed to `<id>.retired` in one atomic step; completed
+removals that name it are deleted next, then the marker and lock. A completed
+removal whose add journal exists only as that marker is a retirement leftover,
+not a claim, and the next `gc --apply` finishes the retirement. A completed
+removal whose add journal is simply missing is still reported, so manual
+damage stays visible. A run retires only history that was finished before it
+started, so the journals it resumes or writes stay visible until the next run.
+Counts of completed operations in `status` therefore describe the history
+since the last collection.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

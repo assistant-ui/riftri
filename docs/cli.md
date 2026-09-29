@@ -391,6 +391,12 @@ still claims them` (`skipped_protected`) names each base, the operation that
 claims it, and why. `riftri repair` retires those operations when it safely
 can, after which the base becomes collectible.
 
+`--apply` also deletes finished journal history (`retired_journals`; a plan
+reports `retirable_journals`): the journals of worktrees that are gone for
+good and finished prune and collection journals, so the state directory does
+not grow with every worktree ever created. Live worktrees and unfinished
+operations keep theirs. See D043 in [decisions.md](decisions.md).
+
 | Flag | Effect |
 | --- | --- |
 | `--apply` | Apply the collection plan. Without this flag, nothing is deleted |
