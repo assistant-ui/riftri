@@ -33,6 +33,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri worktree add` refuses a destination inside the repository's
+  `.git/worktrees` directory before recording anything. A worktree there is
+  its own Git metadata directory; the add used to fail as `rollback-failed`
+  and stay pending with nothing `riftri repair` could roll back (#542).
 - `riftri setup` without a terminal now exits 3 (policy refusal) instead of 1,
   matching its `--json-errors` refusal: nothing was attempted and retrying
   cannot help (#538).
