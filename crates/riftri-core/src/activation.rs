@@ -541,9 +541,16 @@ fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError
     }
 
     let git = Git::default();
-    let repository = git.inspect_repository(&canonical).map_err(|error| {
-        worktree_binding_error(format!("inspect {}: {error}", canonical.display()))
-    })?;
+    // Only "not a repository" is about the requested path; any other Git
+    // failure (a missing or broken Git) is operational and stays one.
+    let repository = git
+        .inspect_repository(&canonical)
+        .map_err(|error| match error {
+            GitError::RepositoryAbsent { .. } => {
+                worktree_binding_error(format!("inspect {}: {error}", canonical.display()))
+            }
+            error => ActivationError::Git(error),
+        })?;
     let root = repository.root.ok_or_else(|| {
         worktree_binding_error(format!("{} is a bare repository", canonical.display()))
     })?;

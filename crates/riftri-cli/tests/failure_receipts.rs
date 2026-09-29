@@ -1440,3 +1440,51 @@ fn prune_with_an_unregistered_managed_worktree_does_not_suggest_repair() {
     );
     assert!(view.is_dir(), "the managed view must be left alone");
 }
+
+/// `riftri exec --worktree` that does not name a registered worktree root is a
+/// caller mistake: nothing was started and retrying cannot help. It reported
+/// `command-failed`/operational with `cleanup: unknown` and exit 1, the same
+/// misclassification #396, #425 and #510 removed from the other commands.
+#[cfg(unix)]
+#[test]
+fn an_invalid_exec_worktree_binding_is_a_policy_refusal() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    init_repository_with_commit(&repository);
+    let subdirectory = repository.join("sub");
+    std::fs::create_dir(&subdirectory).expect("create subdirectory");
+    let file = fixture.path().join("file");
+    std::fs::write(&file, "not a directory\n").expect("write file");
+    let not_repository = fixture.path().join("plain");
+    std::fs::create_dir(&not_repository).expect("create plain directory");
+    let marker = fixture.path().join("ran");
+    let command = format!("touch '{}'", marker.display());
+
+    for binding in [
+        subdirectory,
+        fixture.path().join("missing"),
+        file,
+        not_repository,
+    ] {
+        let binding_arg = binding.to_str().unwrap();
+        let arguments = [
+            "exec",
+            "--worktree",
+            binding_arg,
+            "--",
+            "/bin/sh",
+            "-c",
+            command.as_str(),
+        ];
+        let (receipt, exit_code) = riftri_json_error(&repository, &arguments);
+        assert_eq!(exit_code, Some(3), "{binding_arg}: {receipt}");
+        assert_eq!(
+            receipt["code"], "invalid-worktree-binding",
+            "{binding_arg}: {receipt}"
+        );
+        assert_eq!(receipt["category"], "policy", "{binding_arg}");
+        assert_eq!(receipt["cleanup"], "not-needed", "{binding_arg}");
+        assert_eq!(receipt["recovery"], "not-required", "{binding_arg}");
+        assert!(!marker.exists(), "{binding_arg}: the command must not run");
+    }
+}

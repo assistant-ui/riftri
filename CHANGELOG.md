@@ -29,6 +29,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri exec --worktree` naming anything but a registered worktree root is
+  now an `invalid-worktree-binding` policy refusal (exit 3) instead of an
+  operational `command-failed` receipt that invited a retry (#523).
 - Without a terminal, `riftri exec` and the Git shim now forward SIGQUIT to
   their child like SIGINT. A PID-directed SIGQUIT used to kill the wrapper and
   leave the scoped command, or the real Git, running as an orphan (#520).
