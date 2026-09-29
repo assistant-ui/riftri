@@ -706,6 +706,30 @@ directory, the first entry of `git worktree list`, as the repository.
 Repository-local Git interception (`riftri enable`) still requires a working
 tree and keeps the `bare-repository` policy receipt.
 
+### D043: release tags are SSH-signed and the workflow enforces it
+
+Distribution artifacts are the one place where a forged tag would be
+consequential: the tag drives which commit becomes eight native archives and
+nine npm packages. `RELEASING.md` therefore asked for `git tag -s` from the
+start, but nothing checked, and v0.4.1, v0.5.0 and v0.5.1 all shipped from
+unsigned annotated tags.
+
+Signing uses SSH keys rather than GPG. Git still spells the setting
+`gpg.format`, but SSH signing needs no GPG installation, agent, or keyring on
+a release machine, and GitHub verifies an SSH signing key registered on the
+tagger's account the same way it verifies a GPG one. A dedicated signing key,
+separate from the authentication key, keeps rotating one from invalidating the
+other.
+
+Enforcement reads GitHub's own `verification.verified` for the tag object
+rather than checking a signature locally: the runner then needs no public key
+material, and the verdict is the same one a reader sees on the release page. A
+lightweight tag is refused before that, since it carries no signature to
+verify. The check is the workflow's first job and everything else depends on
+it, so an unsigned tag costs seconds rather than eight platform builds, and
+nothing is published before it passes. The job itself stays unconditional
+while its only step is push-only, because a skipped job skips its dependents.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
