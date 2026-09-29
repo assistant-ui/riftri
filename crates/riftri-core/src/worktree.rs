@@ -3082,8 +3082,6 @@ fn add_worktree_inner(
         &repository.identity.common_git_dir,
         &compatibility.checkout_profile,
     ));
-    ensure_real_state_directory(&base_directory, "create repository base directory")?;
-    sync_parent(&base_directory)?;
     let operation_id =
         allocate_operation_id(&store, &state_directory, &base_directory, &destination)?;
     let _operation_lock =
@@ -3151,6 +3149,10 @@ fn add_worktree_inner(
             backend,
         )
     };
+    // Created only now: every refusal above leaves no empty bucket behind for
+    // status to report as unexplained.
+    ensure_real_state_directory(&base_directory, "create repository base directory")?;
+    sync_parent(&base_directory)?;
     let journal_path = store.persist(&journal)?;
     progress::emit(ProgressEvent::AddPhase {
         phase: journal.phase,
@@ -3771,6 +3773,9 @@ fn prepare_base(
     sparse_directories: &[String],
 ) -> Result<bool, WorktreeError> {
     let base_parent = base_path.expect_parent()?;
+    // A rolled-back add or cancelled compaction removes its bucket when it is
+    // empty, possibly just after this add created it; bring it back first.
+    ensure_real_state_directory(base_parent, "create repository base directory")?;
     let lock_path = base_parent.join(format!("{}.lock", tree.as_str()));
     let complete_path = base_parent.join(format!("{}.complete", tree.as_str()));
     let read_lock = acquire_base_read_lock(&lock_path)?;
@@ -8508,9 +8513,16 @@ fn resume_compaction(
 /// the bucket sits directly under this state directory's `bases/v1`.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn remove_empty_base_bucket(journal: &DecodedCompactJournal) -> Result<(), WorktreeError> {
-    let Some(bucket) = journal.base_path.parent() else {
-        return Ok(());
-    };
+    match journal.base_path.parent() {
+        Some(bucket) => remove_empty_bucket(bucket),
+        None => Ok(()),
+    }
+}
+
+/// Remove an immutable-base bucket only if it is empty. Removal is
+/// non-recursive, so a bucket holding any base, marker, lock, or another
+/// operation's staging is left exactly as it is.
+fn remove_empty_bucket(bucket: &Path) -> Result<(), WorktreeError> {
     match fs::remove_dir(bucket) {
         Ok(()) => sync_parent(bucket),
         Err(source)
@@ -10030,6 +10042,9 @@ fn rollback_decoded(
     remove_tree_if_present(&journal.scratch)?;
     remove_tree_if_present(&journal.base_staging)?;
     remove_unfinished_base(state_directory, journal)?;
+    if let Some(bucket) = journal.base_path.parent() {
+        remove_empty_bucket(bucket)?;
+    }
     remove_file_if_present(&journal.temporary_index)?;
     remove_file_if_present(&pointer_staging_path(journal))?;
 
@@ -16625,6 +16640,42 @@ mod tests {
         let accounting = storage_accounting(&state).expect("status");
         assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
         assert!(accounting.bases.is_empty(), "{accounting:?}");
+        // No empty base bucket may be left behind for status to report.
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// When Git itself refuses to register the worktree, the add rolls back.
+    /// The base bucket it created up front stayed behind, empty, and `status`
+    /// reported it as unexplained forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_rolled_back_add_leaves_no_empty_base_bucket() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let admin = repository.join(".git/worktrees");
+        let refuse = |destination: &str| {
+            fs::create_dir_all(&admin).unwrap();
+            fs::set_permissions(&admin, fs::Permissions::from_mode(0o555)).unwrap();
+            let refused = add_with_state(&repository, &root.join(destination), &state);
+            fs::set_permissions(&admin, fs::Permissions::from_mode(0o755)).unwrap();
+            refused.expect_err("Git cannot register the worktree");
+        };
+
+        refuse("first");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+
+        // A bucket that holds a real base is never removed.
+        add_with_state(&repository, &root.join("kept"), &state).expect("a later add works");
+        refuse("second");
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        assert_eq!(accounting.bases.len(), 1, "{accounting:?}");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
     }
 
     /// A directory created by a concurrent add between the two probes was
