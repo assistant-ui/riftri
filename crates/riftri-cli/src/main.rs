@@ -973,7 +973,7 @@ fn run(cli: Cli) -> Result<()> {
             let repository = repository_option.unwrap_or(repository);
             if apply {
                 confirm_destructive_action(
-                    "riftri gc --apply permanently deletes every base in the plan.",
+                    "riftri gc --apply permanently deletes every base in the plan and the journals of worktrees that are gone for good.",
                     yes,
                 )?;
             }
@@ -2668,6 +2668,8 @@ fn print_garbage_collection_report(
             "resumed_collections": report.resumed_collections,
             "removed_logical_bytes": report.removed_logical_bytes,
             "removed_allocated_bytes": report.removed_allocated_bytes,
+            "retirable_journals": report.retirable_journals,
+            "retired_journals": report.retired_journals,
         });
         machineln!(
             "{}",
@@ -2721,8 +2723,13 @@ fn print_garbage_collection_report(
         "Removed filesystem-accounted allocated: {}",
         display_byte_count(report.removed_allocated_bytes)
     );
+    if report.applied {
+        outputln!("Retired finished journals: {}", report.retired_journals);
+    } else {
+        outputln!("Finished journals to retire: {}", report.retirable_journals);
+    }
     print_allocation_note();
-    if !report.applied && !report.candidates.is_empty() {
+    if !report.applied && (!report.candidates.is_empty() || report.retirable_journals > 0) {
         let apply = match riftri_core::shell_quoted_path(state_directory) {
             Some(quoted) => format!("`riftri gc --apply --state-dir {quoted}`"),
             None => "riftri gc --apply against the state directory shown above".to_owned(),

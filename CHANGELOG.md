@@ -9,6 +9,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- `riftri gc --apply` retires finished journal history: the journals of
+  worktrees that are gone for good, and finished prune and collection
+  journals. A plan reports `retirable_journals`; an applied run reports
+  `retired_journals`. Completed journals used to accumulate forever, and every
+  command reads them all: 300 cycles left 1,103 state files, and one
+  `gc --apply` reduced them to 2, taking `status` from 54 ms to 7 ms. Live
+  worktrees and unfinished operations keep their journals, and an interrupted
+  retirement is explained and finished by the next run (D043, #536).
 - A cached-creation baseline on a real repository:
   `docs/benchmarks/assistant-ui-cached-creation-2026-09-25.md` records serial and
   ten-way concurrent latencies against an exact-tree assistant-ui export,
