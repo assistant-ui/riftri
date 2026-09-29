@@ -29,6 +29,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri worktree remove` without `--force` refuses a worktree that contains
+  submodules, as `git worktree remove` does. It used to remove it together
+  with the submodule repositories in the worktree's Git directory, because Git
+  skips that check once Riftri has moved the view aside (#507).
 - A `riftri worktree move` that Git refuses, for example for a worktree that
   contains submodules, no longer leaves the worktree stuck behind a pending
   move that `riftri repair` could never finish. When both paths show nothing

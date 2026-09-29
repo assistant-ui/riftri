@@ -466,6 +466,9 @@ forced removal asks for confirmation on a terminal; `--yes` skips that prompt
 and requires `--force`.
 A worktree locked with `git worktree lock` is refused, even with `--force`,
 before anything is recorded. Run `git worktree unlock` first.
+Like `git worktree remove`, a worktree that contains submodules is refused
+without `--force`, because removing it also deletes the submodule repositories
+kept in the worktree's Git directory.
 
 ### `riftri worktree move [OPTIONS] <SOURCE> <DESTINATION>`
 
