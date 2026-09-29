@@ -303,9 +303,16 @@ Inspect Git and show the planned storage path without changing anything.
 Missing leading directories are not a blocker: `riftri worktree add` creates
 them, as `git worktree add` does. Doctor reports a `destination-parent`
 blocker only for a path Git could not create either — an existing ancestor
-that is a regular file, or a dangling symbolic link along the way — and in
-that case does not suggest an add command. Inspection never creates any
-directory itself.
+that is a regular file, a dangling symbolic link along the way, or (on Unix)
+a nearest existing directory the user cannot write to — and in that case does
+not suggest an add command. With `--destination`, the path itself is judged
+exactly as `riftri worktree add` judges it: anything but a missing path or an
+existing empty directory, such as a non-empty directory, a file, or a symbolic
+link, is a `destination` blocker. Inspection never creates any directory
+itself.
+
+A worktree added from inside a cone-mode sparse worktree inherits that cone,
+as with Git, so the source's sparse settings are not a blocker.
 
 The suggested commands retain the inspected repository and use POSIX shell
 quoting on every platform, so they run as shown in `sh`, `bash`, and `zsh` —

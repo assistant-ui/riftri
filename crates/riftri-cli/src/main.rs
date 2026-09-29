@@ -901,8 +901,12 @@ fn run(cli: Cli) -> Result<()> {
             json,
         } => {
             let path = repository.unwrap_or(path);
-            let destination = destination.as_deref().unwrap_or(&path);
-            let report = riftri_core::doctor_for_destination(&path, destination);
+            // Without `--destination`, only the repository's own volume is
+            // probed; it is not judged as a place to add a worktree.
+            let report = match destination.as_deref() {
+                Some(destination) => riftri_core::doctor_for_destination(&path, destination),
+                None => riftri_core::doctor(&path),
+            };
 
             if json {
                 machineln!(

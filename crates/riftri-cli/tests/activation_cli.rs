@@ -2941,3 +2941,124 @@ fn intercepted_worktree_add_accepts_an_existing_empty_directory_like_git() {
             .is_empty()
     );
 }
+
+fn doctor_blocker_kinds(repository: &Path, destination: &Path) -> Vec<String> {
+    let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["doctor", "--json", "--destination"])
+        .arg(destination)
+        .current_dir(repository)
+        .output()
+        .expect("run destination-aware doctor");
+    assert!(doctor.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor JSON");
+    report["destination_readiness"]["blockers"]
+        .as_array()
+        .expect("blockers")
+        .iter()
+        .map(|blocker| blocker["kind"].as_str().expect("kind").to_owned())
+        .collect()
+}
+
+/// `doctor --destination` promised "ready" for destinations the add then
+/// refused: a non-empty directory, a symbolic link, and a parent the user
+/// cannot write. Its verdict must match what the add will do.
+#[cfg(unix)]
+#[test]
+fn doctor_blocks_destinations_the_add_would_refuse() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let root = fixture.directory.path();
+    let full = root.join("full");
+    fs::create_dir(&full).expect("create non-empty directory");
+    fs::write(full.join("file"), "x").expect("populate directory");
+    let target = root.join("target");
+    fs::create_dir(&target).expect("create link target");
+    let link = root.join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+    let empty = root.join("empty");
+    fs::create_dir(&empty).expect("create empty directory");
+
+    for refused in [&full, &link] {
+        let kinds = doctor_blocker_kinds(&fixture.repository, refused);
+        assert!(
+            kinds.iter().any(|kind| kind == "destination"),
+            "{refused:?}: {kinds:?}"
+        );
+        let added = riftri(
+            &fixture.repository,
+            &["worktree", "add", refused.to_str().unwrap(), "--detach"],
+        );
+        assert!(!added.status.success(), "the add refuses {refused:?} too");
+    }
+    // An existing empty directory is accepted by both.
+    let kinds = doctor_blocker_kinds(&fixture.repository, &empty);
+    assert!(!kinds.iter().any(|kind| kind == "destination"), "{kinds:?}");
+
+    let read_only = root.join("read-only");
+    fs::create_dir(&read_only).expect("create read-only parent");
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555)).expect("make read-only");
+    let writable = fs::metadata(&read_only).unwrap().permissions().mode() & 0o200 != 0;
+    // SAFETY: geteuid has no preconditions.
+    if !writable && unsafe { libc::geteuid() } != 0 {
+        let kinds = doctor_blocker_kinds(&fixture.repository, &read_only.join("wt"));
+        assert!(
+            kinds.iter().any(|kind| kind == "destination-parent"),
+            "{kinds:?}"
+        );
+    }
+    fs::set_permissions(&read_only, fs::Permissions::from_mode(0o755)).expect("restore");
+}
+
+/// An add from a cone-mode sparse worktree inherits its cone, as Git does, so
+/// the source's sparse settings block nothing. `doctor` checked them as if
+/// the add ignored the cone and reported the repository blocked.
+#[test]
+fn doctor_accepts_an_add_from_a_cone_mode_sparse_worktree() {
+    let fixture = RepositoryFixture::new();
+    fs::create_dir(fixture.repository.join("sub")).expect("create directory");
+    fs::write(fixture.repository.join("sub/file.txt"), "sub\n").expect("write file");
+    assert!(git(&fixture.repository, &["add", "sub"]).status.success());
+    assert!(
+        git(&fixture.repository, &["commit", "--quiet", "-m", "sub"])
+            .status
+            .success()
+    );
+    assert!(
+        git(
+            &fixture.repository,
+            &["sparse-checkout", "set", "--cone", "sub"]
+        )
+        .status
+        .success()
+    );
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+
+    let kinds = doctor_blocker_kinds(
+        &fixture.repository,
+        &fixture.directory.path().join("from-sparse"),
+    );
+    assert!(
+        !kinds.iter().any(|kind| kind == "sparse-checkout"),
+        "{kinds:?}"
+    );
+}
+
+/// Without `--destination`, `doctor` probes only the repository's own volume;
+/// the repository directory is never judged as a place to add a worktree.
+#[test]
+fn doctor_without_a_destination_does_not_judge_the_repository_as_one() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let doctor = riftri(&fixture.repository, &["doctor", "--json"]);
+    assert!(doctor.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor JSON");
+    let kinds = report["destination_readiness"]["blockers"]
+        .as_array()
+        .expect("blockers")
+        .iter()
+        .map(|blocker| blocker["kind"].as_str().expect("kind").to_owned())
+        .collect::<Vec<_>>();
+    assert!(!kinds.iter().any(|kind| kind == "destination"), "{kinds:?}");
+}

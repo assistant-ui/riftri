@@ -4028,7 +4028,7 @@ fn validate_resolved_compatibility(
 /// list on purpose, leaving the repository compatibility blocker to refuse the
 /// add before any state exists rather than quietly materializing a full tree.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn resolve_sparse_profile(
+pub(crate) fn resolve_sparse_profile(
     git: &Git,
     repository: &Path,
     requested: &[String],
@@ -4323,6 +4323,23 @@ pub(crate) fn inspect_repository_compatibility(
     revision: &OsStr,
 ) -> Result<RepositoryCompatibilityReport, WorktreeError> {
     validate_lifecycle_git_environment()?;
+    // Judge the add that would actually run: with no explicit sparse request
+    // it inherits a cone-mode source's cone, as Git does, and then the
+    // source's sparse settings block nothing.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        let resolved = resolve_requested_revision(git, repository, revision)?;
+        let sparse_directories = resolve_sparse_profile(git, repository, &[])?;
+        Ok(analyze_resolved_repository_compatibility(
+            git,
+            repository,
+            common_git_dir,
+            &resolved,
+            &sparse_directories,
+        )?
+        .report)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
@@ -4362,6 +4379,7 @@ fn unresolved_head_message(git: &Git, repository: &Path) -> String {
     }
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn analyze_repository_compatibility(
     git: &Git,
     repository: &Path,
@@ -5286,6 +5304,12 @@ fn is_empty_real_directory(path: &Path) -> Result<bool, WorktreeError> {
     let mut entries =
         fs::read_dir(path).map_err(|source| io("read worktree destination", path, source))?;
     Ok(entries.next().is_none())
+}
+
+/// The add's own checks on a destination that may already exist: it must be
+/// absent or an empty real directory. `doctor` reports what the add refuses.
+pub(crate) fn validate_new_add_destination(destination: &Path) -> Result<(), WorktreeError> {
+    normalize_new_destination(destination, DestinationRules::WorktreeAdd).map(|_| ())
 }
 
 fn normalize_new_destination(
