@@ -278,10 +278,17 @@ pub fn proxy_git_command(
         GitProxyPlan::Passthrough => Ok(GitProxyOutcome::Passthrough(exit_status_code(
             Git::default().passthrough(arguments)?,
         ))),
-        GitProxyPlan::OptimizedAdd { request, quiet } => Ok(GitProxyOutcome::OptimizedAdd {
-            result: add_worktree(request)?,
-            quiet,
-        }),
+        GitProxyPlan::OptimizedAdd { request, quiet } => match add_worktree(request) {
+            Ok(result) => Ok(GitProxyOutcome::OptimizedAdd { result, quiet }),
+            // `HEAD` has no commit, so there is nothing to clone. The refusal
+            // comes before anything is recorded or created, so let Git decide,
+            // as it would without Riftri: a new repository gets an orphan
+            // worktree, and anything else gets Git's own error.
+            Err(WorktreeError::UnbornHead(_)) => Ok(GitProxyOutcome::Passthrough(
+                exit_status_code(Git::default().passthrough(arguments)?),
+            )),
+            Err(error) => Err(error.into()),
+        },
         GitProxyPlan::OptimizedRemove(request) => {
             Ok(GitProxyOutcome::OptimizedRemove(remove_worktree(request)?))
         }

@@ -25,6 +25,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- In an enabled repository without commits, an intercepted
+  `git worktree add -b <branch>` now runs as ordinary Git, which creates an
+  orphan worktree, instead of being refused. There is no tree to clone, so
+  Riftri hands such adds to Git unchanged (#527).
 - `riftri exec --worktree` naming anything but a registered worktree root is
   now an `invalid-worktree-binding` policy refusal (exit 3) instead of an
   operational `command-failed` receipt that invited a retry (#523).

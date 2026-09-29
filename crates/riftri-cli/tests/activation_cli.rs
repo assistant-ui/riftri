@@ -503,6 +503,55 @@ fn doctor_accepts_missing_destination_parents_without_creating_them() {
 /// without Riftri: Git creates missing leading directories, so enabling
 /// Riftri must not turn that command into a failure (#423). Agent layouts
 /// such as `.worktrees/<task>` hit this on first use.
+/// A freshly initialized repository has no commit, so there is nothing to
+/// clone. Real Git creates the worktree on a new orphan branch (Git 2.42 and
+/// later); the shim refused instead, so an agent starting a new project with
+/// Riftri enabled could not add a worktree at all. Whatever Git does here, the
+/// shim must do the same.
+#[test]
+fn intercepted_add_in_a_repository_without_commits_behaves_like_git() {
+    let directory = writable_tempdir().expect("fixture directory");
+    let repository = directory.path().join("repository");
+    fs::create_dir(&repository).expect("create repository");
+    assert!(git(&repository, &["init", "--quiet"]).status.success());
+    assert!(riftri(&repository, &["enable"]).status.success());
+
+    let plain = git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "plain-task",
+            directory.path().join("plain").to_str().unwrap(),
+        ],
+    );
+    let intercepted = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "add", "-b", "task"])
+        .arg(directory.path().join("intercepted"))
+        .current_dir(&repository)
+        .output()
+        .expect("intercepted add");
+
+    assert_eq!(
+        intercepted.status.success(),
+        plain.status.success(),
+        "plain Git: {}\nintercepted: {}",
+        String::from_utf8_lossy(&plain.stderr),
+        String::from_utf8_lossy(&intercepted.stderr)
+    );
+    if plain.status.success() {
+        let head = git(
+            &directory.path().join("intercepted"),
+            &["symbolic-ref", "HEAD"],
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "refs/heads/task"
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn intercepted_worktree_add_creates_missing_parent_directories_like_git() {
