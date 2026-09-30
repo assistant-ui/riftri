@@ -1032,7 +1032,16 @@ mod overlayfs_helper;
 pub struct RefsBlockCloner;
 
 impl RefsBlockCloner {
-    /// Clone an immutable base and restore owner permissions.
+    /// Clone an immutable base and restore owner permissions in one traversal.
+    #[cfg(target_os = "windows")]
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        refs::clone_tree_owner_writable(source, destination)
+    }
+
+    #[cfg(not(target_os = "windows"))]
     pub fn clone_tree_owner_writable(
         source: &Path,
         destination: &Path,
