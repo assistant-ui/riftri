@@ -396,3 +396,80 @@ test("the launcher keeps its signal handlers until it exits", async () => {
   const exitHandler = source.slice(source.indexOf('child.on("exit"'));
   assert.doesNotMatch(exitHandler, /release|removeListener/);
 });
+
+// Without a terminal, native `riftri exec` forwards SIGINT and SIGQUIT too.
+// The launcher ignored both there, so a harness that interrupted it by PID got
+// no response while the command kept running.
+for (const signal of ["SIGINT", "SIGQUIT"]) {
+  test(
+    `without a terminal the launcher forwards PID-directed ${signal}`,
+    { skip: onWindows, timeout: 15_000 },
+    async (t) => {
+      const directory = await makeScratchDirectory(t);
+      const binary = await writeFakeBinary(
+        directory,
+        [
+          `trap 'exit 41' ${signal.slice(3)}`,
+          "echo ready",
+          "while :; do sleep 0.05; done",
+        ].join("\n"),
+      );
+      const child = spawn(process.execPath, [launcher], {
+        env: { ...process.env, RIFTRI_BINARY: binary },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      t.after(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Already exited on the happy path.
+        }
+      });
+      const exited = once(child, "exit");
+
+      await waitForOutput(child.stdout, "ready");
+      child.kill(signal);
+      const [code, exitSignal] = await exited;
+      assert.equal(exitSignal, null);
+      assert.equal(code, 41);
+    },
+  );
+}
+
+// The native process runs in its own process group without a terminal, so a
+// signal sent to the caller's whole group reaches it exactly once: forwarded
+// by the launcher, never also delivered directly.
+test(
+  "without a terminal a group-directed SIGINT reaches the native process once",
+  { skip: onWindows, timeout: 15_000 },
+  async (t) => {
+    const directory = await makeScratchDirectory(t);
+    const count = path.join(directory, "count");
+    const release = path.join(directory, "release");
+    const binary = await writeFakeBinary(
+      directory,
+      [
+        `trap 'echo x >> "${count}"' INT`,
+        "echo ready",
+        `until [ -e "${release}" ]; do sleep 0.05; done`,
+        "exit 0",
+      ].join("\n"),
+    );
+    const child = spawn(process.execPath, [launcher], {
+      detached: true,
+      env: { ...process.env, RIFTRI_BINARY: binary },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    t.after(() => stopTestProcessTree(child));
+    const exited = once(child, "exit");
+
+    await waitForOutput(child.stdout, "ready");
+    process.kill(-child.pid, "SIGINT");
+    await delay(500);
+    await writeFile(release, "");
+    const [code] = await exited;
+    assert.equal(code, 0);
+    const deliveries = (await readFile(count, "utf8")).trim().split("\n").length;
+    assert.equal(deliveries, 1);
+  },
+);
