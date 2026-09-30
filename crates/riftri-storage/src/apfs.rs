@@ -98,11 +98,21 @@ fn prepare_clone_directory(
             entry.map_err(|source_error| io("read clone source entry", source, source_error))?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path)
-            .map_err(|source_error| io("inspect clone source entry", &source_path, source_error))?;
-        let file_type = metadata.file_type();
+        // APFS directory entries carry their type, and clonefile preserves a
+        // regular file's source metadata. Only directories need a separate
+        // metadata lookup for the mode restored after their children finish.
+        let file_type = entry.file_type().map_err(|source_error| {
+            io(
+                "inspect clone source entry type",
+                &source_path,
+                source_error,
+            )
+        })?;
 
         if file_type.is_dir() {
+            let metadata = fs::symlink_metadata(&source_path).map_err(|source_error| {
+                io("inspect clone source directory", &source_path, source_error)
+            })?;
             prepare_clone_directory(
                 &source_path,
                 &destination_path,
