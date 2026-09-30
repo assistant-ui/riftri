@@ -1914,28 +1914,21 @@ impl Git {
     ) -> Result<Option<ObjectId>, GitError> {
         let mut reference = OsString::from("refs/heads/");
         reference.push(branch);
-        let exists_arguments = [
-            OsString::from("show-ref"),
-            OsString::from("--verify"),
-            OsString::from("--quiet"),
-            reference.clone(),
-        ];
-        let exists = self.output_os(Some(repository), &exists_arguments)?;
-        if exists.status.code() == Some(1) {
-            return Ok(None);
-        }
-        if !exists.status.success() {
-            return Err(command_failed(&exists_arguments, &exists));
-        }
-
+        // A full refname pattern matches only that complete ref. Omitting
+        // `--verify` is intentional: show-ref then returns 1 with no output
+        // for a missing ref, while still printing the object ID for a match,
+        // so existence and target resolution share one process.
         let arguments = [
             OsString::from("show-ref"),
-            OsString::from("--verify"),
             OsString::from("--hash"),
             reference,
         ];
-        let output = self.run_os(Some(repository), &arguments)?;
-        parse_object_output(&output.stdout).map(Some)
+        let output = self.output_os(Some(repository), &arguments)?;
+        match output.status.code() {
+            Some(0) => parse_object_output(&output.stdout).map(Some),
+            Some(1) => Ok(None),
+            _ => Err(command_failed(&arguments, &output)),
+        }
     }
 
     /// Remove the lock on a registered worktree, whether or not its directory
@@ -3592,10 +3585,16 @@ mod tests {
 
         assert!(linked.join(".git").is_file());
         assert!(!linked.join("tracked.txt").exists());
+        let attempts_before = git.process_attempts();
         assert_eq!(
             git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
                 .expect("read branch"),
             Some(revision.commit.clone())
+        );
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "one show-ref call must both detect and resolve an exact local branch"
         );
 
         fs::write(linked.join("tracked.txt"), "tracked\n").expect("materialize linked file");
@@ -3639,6 +3638,25 @@ mod tests {
             git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
                 .expect("check removed branch"),
             None
+        );
+    }
+
+    #[test]
+    fn local_branch_lookup_does_not_match_a_nested_ref_prefix() {
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["branch", "topic/child", "HEAD"]);
+        let git = Git::default();
+
+        let attempts_before = git.process_attempts();
+        assert_eq!(
+            git.local_branch_target(fixture.path(), OsStr::new("topic"))
+                .expect("query absent branch prefix"),
+            None
+        );
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "an absent exact branch must remain one lookup"
         );
     }
 
