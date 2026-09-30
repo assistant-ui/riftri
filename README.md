@@ -73,11 +73,6 @@ Or install through npm, which fetches the binary for your platform:
 npm install --global riftri
 ```
 
-> **Windows on ARM64 is not yet available through npm.** Its platform package
-> is held up in registry review, so npm installs there resolve without a
-> binary. Use the PowerShell installer above until that clears. Every other
-> platform — macOS, Linux, and Windows x64 — installs normally.
-
 ## Quick start
 
 For an interactive walkthrough (v0.3.1 and later), run

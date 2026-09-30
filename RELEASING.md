@@ -53,26 +53,23 @@ package renaming or blind retries.
 GitHub release availability does not imply that `npm install riftri` or
 `npx riftri` is available for the same version.
 
-As of September 25, 2026, `0.5.0` is published for the launcher and seven of
-the eight native packages, from the release workflow rather than by hand.
-`npm install riftri` and `npx riftri` work on macOS, Linux, and Windows x64.
+As of September 30, 2026, `0.5.1` is published for the launcher and all eight
+native packages, from the release workflow rather than by hand, so
+`npm install riftri` and `npx riftri` work on every supported platform.
 
-`riftri-win32-arm64` remains rejected with
-`E403: Package name triggered spam detection`. That one name is blocked at the
-registry; every other name, including `riftri-win32-x64`, publishes normally.
-Windows ARM64 therefore installs the launcher without a binary, so the launcher
-sends those users to the PowerShell installer and the installation guide says
-the same. Do not work around it by creating another tag or advertising npm
-availability for that platform.
+`riftri-win32-arm64` was rejected until then with
+`E403: Package name triggered spam detection`. npm support lifted the block by
+publishing a `0.0.1-security` placeholder and granting the maintainer account
+write access; `0.5.1` was then published by re-running only the v0.5.1
+release's **Publish npm packages** job, which reused that release's native
+artifacts, skipped every version already on npm, and signed provenance.
 
-That name is listed in `UNPUBLISHED_PACKAGES` in `package/lib/platform.js`,
-which both the launcher and `publish-packages.mjs` read. The publish script
-still attempts it every release — that attempt is how a maintainer learns the
-name was accepted — but a repeat refusal no longer aborts the run, so the
-packages sorted behind it still reach npm. Without that, one refused name
-strands the launcher, which is how `v0.2.1` shipped with nothing installable.
-**When npm accepts the name, delete its entry**; the guard test in
-`package/test/platform.test.js` fails once the list is empty.
+Every native package now publishes each release, so any refused publish stops
+the job before the launcher: publishing the launcher without one of its native
+packages would install broken on that platform. If the registry refuses a
+name, resolve it with npm support rather than renaming the package or creating
+another tag, then re-run the publish job while the release's artifacts still
+exist (they are kept for two days).
 
 Releases published through the workflow carry npm provenance:
 `npm view riftri@0.5.0 dist.attestations` reports a

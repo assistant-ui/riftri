@@ -126,17 +126,9 @@ These are exported so a runner can branch on `error.exitCode` directly.
 
 ## Availability
 
-`npm install riftri` works on macOS, Linux, and Windows x64. The package
-pulls the matching native binary as an optional dependency, so the client
-and the CLI arrive together.
-
-Windows on ARM64 is the exception: its native package is not yet on npm, so
-install with the [PowerShell installer](install.md#windows-powershell) and
-point the client at that binary:
-
-```js
-const riftri = new Riftri({ repository, binary: "C:\\path\\to\\riftri.exe" });
-```
+`npm install riftri` works on macOS, Linux, and Windows (x64 and ARM64). The
+package pulls the matching native binary as an optional dependency, so the
+client and the CLI arrive together.
 
 See the [custom harness guide](custom-harness.md) for the lifecycle a runner
 should drive, and [`examples/`](https://github.com/assistant-ui/riftri/tree/main/examples)

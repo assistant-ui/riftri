@@ -10,11 +10,10 @@ test("release-facing documentation matches current guarantees", () => {
   const readme = read("README.md");
   assert.match(readme, /MIT License/);
   assert.doesNotMatch(readme, /Apache License 2\.0/);
-  // npm publication is live as of 0.3.5; only riftri-win32-arm64 is still
-  // held in registry review, so the README must scope the caveat to that
-  // platform rather than claiming the whole channel is unavailable.
+  // npm serves every platform since riftri-win32-arm64 published at 0.5.1;
+  // the README must not keep telling Windows ARM64 users to avoid it.
   assert.match(readme, /npm install --global riftri/);
-  assert.match(readme, /Windows on ARM64 is not yet available through npm/);
+  assert.doesNotMatch(readme, /not yet available through npm/);
   assert.doesNotMatch(readme, /npm launcher is a separate distribution channel/);
 
   const support = read("SUPPORT.md");
@@ -62,7 +61,7 @@ test("both Node API guides describe npm availability the same way", () => {
   for (const guide of ["docs/node-api.md", "website/content/guides/node-api.md"]) {
     const text = read(guide);
     assert.match(text, /npm install riftri/, `${guide} must show the install command`);
-    assert.match(text, /Windows on ARM64|Windows ARM64/, `${guide} must name the exception`);
+    assert.doesNotMatch(text, /native package is not (yet )?on npm/, `${guide} is stale`);
 
     assert.doesNotMatch(text, /blocked pending registry review/, `${guide} is stale`);
     assert.doesNotMatch(text, /does not work yet/, `${guide} is stale`);

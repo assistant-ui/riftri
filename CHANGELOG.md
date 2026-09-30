@@ -16,6 +16,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   worktrees and unfinished operations keep their journals, and an interrupted
   retirement is explained and finished by the next run (D043, #536).
 
+### Changed
+
+- Windows on ARM64 installs through npm like every other platform:
+  `riftri-win32-arm64@0.5.1` is published now that npm lifted its name block.
+  The launcher no longer sends that platform to the PowerShell installer, and
+  the release's publish step treats any refused native package as fatal.
+
 ### Fixed
 
 - `riftri repair` no longer resumes a removal or move another process is
