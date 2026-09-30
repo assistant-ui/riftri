@@ -17,7 +17,7 @@ mod support;
 use support::writable_tempdir as tempdir;
 
 /// Git invocations for an add that must build the immutable base first.
-const COLD_ADD_BUDGET: usize = 22;
+const COLD_ADD_BUDGET: usize = 21;
 /// Git invocations for an add that reuses a verified immutable base.
 const CACHED_ADD_BUDGET: usize = 16;
 

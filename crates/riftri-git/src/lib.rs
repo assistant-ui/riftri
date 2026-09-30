@@ -1299,21 +1299,17 @@ impl Git {
         configuration: &[(String, Vec<u8>)],
         sparse_directories: &[String],
     ) -> Result<(), GitError> {
-        let objects = self.run_path(
+        let output = self.run(
             Some(repository),
             &[
                 "rev-parse",
                 "--path-format=absolute",
                 "--git-path",
                 "objects",
+                "--show-object-format",
             ],
-            "object directory",
         )?;
-        let format = self.run_text(
-            Some(repository),
-            &["rev-parse", "--show-object-format"],
-            "object format",
-        )?;
+        let (objects, format) = parse_checkout_storage(&output.stdout)?;
         let isolated = tempfile::Builder::new()
             .prefix("riftri-checkout-")
             .tempdir()
@@ -2429,6 +2425,39 @@ fn utf8_line(bytes: &[u8], context: &'static str) -> Result<String, GitError> {
     Ok(value.to_owned())
 }
 
+/// Parse the object directory followed by the object format from one
+/// `rev-parse` invocation. Splitting at the final newline preserves every byte
+/// in a native path that itself contains newlines; the format is Git-owned
+/// ASCII and always occupies the final line.
+fn parse_checkout_storage(output: &[u8]) -> Result<(PathBuf, String), GitError> {
+    let output = output.strip_suffix(b"\n").unwrap_or(output);
+    let separator = output
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .ok_or_else(|| GitError::InvalidOutput {
+            context: "checkout object storage",
+            detail: "expected an object directory and object format".to_owned(),
+        })?;
+    let object_directory = &output[..separator];
+    if object_directory.is_empty() {
+        return Err(GitError::InvalidOutput {
+            context: "object directory",
+            detail: "path was empty".to_owned(),
+        });
+    }
+    let format = utf8_line(&output[separator + 1..], "object format")?;
+    if format.is_empty() {
+        return Err(GitError::InvalidOutput {
+            context: "object format",
+            detail: "value was empty".to_owned(),
+        });
+    }
+    Ok((
+        PathBuf::from(os_string_from_git(object_directory, "object directory")?),
+        format,
+    ))
+}
+
 fn trim_line_endings(mut bytes: &[u8]) -> &[u8] {
     while matches!(bytes.last(), Some(b'\n' | b'\r')) {
         bytes = &bytes[..bytes.len() - 1];
@@ -2681,6 +2710,31 @@ mod tests {
         fn path(&self) -> &Path {
             self.directory.path()
         }
+    }
+
+    #[test]
+    fn checkout_storage_parser_preserves_newlines_in_the_object_path() {
+        let (objects, format) =
+            super::parse_checkout_storage(b"/tmp/repository\nname/.git/objects\nsha256\n")
+                .expect("parse checkout storage");
+        assert_eq!(objects, Path::new("/tmp/repository\nname/.git/objects"));
+        assert_eq!(format, "sha256");
+        assert!(super::parse_checkout_storage(b"objects-only\n").is_err());
+        assert!(super::parse_checkout_storage(b"\nsha1\n").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_storage_parser_preserves_non_utf8_object_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (objects, format) =
+            super::parse_checkout_storage(b"/tmp/objects-\xff\nsha1\n").unwrap();
+        assert_eq!(
+            objects,
+            PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/objects-\xff".to_vec()))
+        );
+        assert_eq!(format, "sha1");
     }
 
     /// `git worktree list` dies when a concurrent removal deletes a
