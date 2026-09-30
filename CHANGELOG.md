@@ -5,8 +5,6 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
-## [0.5.1] - 2026-09-29
-
 ### Added
 
 - `riftri gc --apply` retires finished journal history: the journals of
@@ -17,19 +15,6 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `gc --apply` reduced them to 2, taking `status` from 54 ms to 7 ms. Live
   worktrees and unfinished operations keep their journals, and an interrupted
   retirement is explained and finished by the next run (D043, #536).
-- A cached-creation baseline on a real repository:
-  `docs/benchmarks/assistant-ui-cached-creation-2026-09-25.md` records serial and
-  ten-way concurrent latencies against an exact-tree assistant-ui export,
-  reports riftri's allocation accounting separately from whole-volume deltas, and
-  retains its outliers. It also records that the unmodified repository is now
-  accepted, which the 2026-09-12 experiment could not certify.
-- A cached-creation baseline benchmark records serial and ten-way concurrent
-  creation latencies against one warm base, for #211. CI uploads it as
-  `cached-creation-baseline-macos-apfs`.
-- A sparse monorepo benchmark measures allocation and creation costs for a cone
-  against the full tree, closing Milestone 6's outstanding measurement for
-  sparse-checkout profiles. CI records it on a disposable APFS volume and
-  uploads it as `sparse-monorepo-benchmark-macos-apfs`.
 
 ### Fixed
 
@@ -74,6 +59,27 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `git worktree add -b <branch>` now runs as ordinary Git, which creates an
   orphan worktree, instead of being refused. There is no tree to clone, so
   Riftri hands such adds to Git unchanged (#527).
+
+## [0.5.1] - 2026-09-29
+
+### Added
+
+- A cached-creation baseline on a real repository:
+  `docs/benchmarks/assistant-ui-cached-creation-2026-09-25.md` records serial and
+  ten-way concurrent latencies against an exact-tree assistant-ui export,
+  reports riftri's allocation accounting separately from whole-volume deltas, and
+  retains its outliers. It also records that the unmodified repository is now
+  accepted, which the 2026-09-12 experiment could not certify.
+- A cached-creation baseline benchmark records serial and ten-way concurrent
+  creation latencies against one warm base, for #211. CI uploads it as
+  `cached-creation-baseline-macos-apfs`.
+- A sparse monorepo benchmark measures allocation and creation costs for a cone
+  against the full tree, closing Milestone 6's outstanding measurement for
+  sparse-checkout profiles. CI records it on a disposable APFS volume and
+  uploads it as `sparse-monorepo-benchmark-macos-apfs`.
+
+### Fixed
+
 - `riftri exec --worktree` naming anything but a registered worktree root is
   now an `invalid-worktree-binding` policy refusal (exit 3) instead of an
   operational `command-failed` receipt that invited a retry (#523).
