@@ -40,6 +40,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   move was then left pending until `riftri repair`. Vanished paths now count as
   nothing, and journal reads retry an in-flight replace and skip a retired
   journal (#544).
+- Listing Git's worktrees is retried briefly: `git worktree list` exits 128
+  when a concurrent removal deletes a worktree's metadata mid-listing, which
+  made unrelated Riftri commands fail at random (#546).
 - `riftri worktree add` refuses a destination inside the repository's
   `.git/worktrees` directory before recording anything. A worktree there is
   its own Git metadata directory; the add used to fail as `rollback-failed`
