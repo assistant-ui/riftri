@@ -1901,6 +1901,71 @@ fn garbage_collect_inner(
     Ok(report)
 }
 
+/// The journals of one finished lineage, read while its add lock is held.
+struct RetirableLineage {
+    /// Completed removals, deleted after the add journal becomes its marker.
+    removals: Vec<PathBuf>,
+    /// Finished moves and compactions, deleted first.
+    dependents: Vec<PathBuf>,
+}
+
+/// Re-read one add operation's lineage under its lock and return it only if
+/// it is still finished: the worktree is gone for good and nothing of its
+/// history is unfinished. `None` leaves it for a later run.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn locked_retirable_lineage(
+    state_directory: &Path,
+    add_operation_id: &str,
+) -> Result<Option<RetirableLineage>, WorktreeError> {
+    let Ok(add) = JournalStore::open(state_directory).load_operation(add_operation_id) else {
+        return Ok(None);
+    };
+    let removals = RemovalJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| journal.source_add_operation_id == add_operation_id)
+        .collect::<Vec<_>>();
+    let moves = MoveJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| journal.source_add_operation_id == add_operation_id)
+        .collect::<Vec<_>>();
+    let compactions = CompactJournalStore::open(state_directory)
+        .load_all()?
+        .into_iter()
+        .filter(|journal| journal.source_add_operation_id == add_operation_id)
+        .collect::<Vec<_>>();
+    let removal_completed = removals
+        .iter()
+        .any(|removal| removal.phase == RemoveWorktreePhase::Complete);
+    let gone_for_good = add.phase == AddWorktreePhase::RolledBack
+        || (add.phase == AddWorktreePhase::Active && removal_completed);
+    let history_finished = removals
+        .iter()
+        .all(|removal| removal.phase == RemoveWorktreePhase::Complete)
+        && moves.iter().all(|journal| journal.phase.is_finished())
+        && compactions.iter().all(|journal| {
+            matches!(
+                journal.phase,
+                CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+            )
+        });
+    if !gone_for_good || !history_finished {
+        return Ok(None);
+    }
+    Ok(Some(RetirableLineage {
+        removals: removals
+            .into_iter()
+            .map(|journal| journal.journal_path)
+            .collect(),
+        dependents: moves
+            .into_iter()
+            .map(|journal| journal.journal_path)
+            .chain(compactions.into_iter().map(|journal| journal.journal_path))
+            .collect(),
+    }))
+}
+
 /// Beside an add journal: its retirement has started. See
 /// `retire_finished_journals`.
 fn retiring_add_marker(add_journal: &Path) -> PathBuf {
@@ -1960,8 +2025,8 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
             else {
                 continue;
             };
-            let leftovers = removals
-                .journals
+            let leftovers = RemovalJournalStore::open(state_directory)
+                .load_all()?
                 .iter()
                 .filter(|removal| {
                     removal.source_add_operation_id == operation_id
@@ -2015,37 +2080,45 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
         if !gone_for_good || !history_finished {
             continue;
         }
-        let count = 1 + own_removals.len() + own_moves.len() + own_compactions.len();
         if !apply {
-            retired += count;
+            retired += 1 + own_removals.len() + own_moves.len() + own_compactions.len();
             continue;
         }
         // Another process may still be finishing this operation.
         let Some(_lock) = try_lock_add_operation(&add.journal_path)? else {
             continue;
         };
-        for path in own_moves
-            .iter()
-            .map(|journal| &journal.journal_path)
-            .chain(own_compactions.iter().map(|journal| &journal.journal_path))
-        {
+        #[cfg(test)]
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::JournalRetirementLocked,
+            &add.journal_path,
+        );
+        // Decide again under the lock, from journals read now. The snapshot
+        // above predates it: a concurrent repair may since have recorded
+        // another removal of this worktree, and deleting only what the
+        // snapshot knew left that one behind with no add journal, which then
+        // failed every lifecycle command in the state directory.
+        let Some(lineage) = locked_retirable_lineage(state_directory, &add.operation_id)? else {
+            continue;
+        };
+        for path in &lineage.dependents {
             remove_file_if_present(path)?;
         }
         let marker = retiring_add_marker(&add.journal_path);
-        if own_removals.is_empty() {
+        if lineage.removals.is_empty() {
             remove_file_if_present(&add.journal_path)?;
         } else {
             fs::rename(&add.journal_path, &marker)
                 .map_err(|source| io("mark add journal for retirement", &marker, source))?;
             sync_parent(&marker)?;
-            for removal in &own_removals {
-                remove_file_if_present(&removal.journal_path)?;
+            for removal in &lineage.removals {
+                remove_file_if_present(removal)?;
             }
             remove_file_if_present(&marker)?;
         }
         remove_file_if_present(&add.journal_path.with_extension("lock"))?;
         sync_parent(&add.journal_path)?;
-        retired += count;
+        retired += 1 + lineage.removals.len() + lineage.dependents.len();
     }
 
     for path in prunes
@@ -7687,6 +7760,17 @@ fn retire_vanished_add_journal(
         )));
     }
 
+    // The caller's removal snapshot predates this operation's lock: a removal
+    // may have finished since, which is why the destination vanished. A second
+    // record for the same worktree is never needed, and one written while
+    // `gc --apply` retired the first was left behind with no add journal.
+    if RemovalJournalStore::open(state_directory)
+        .load_all()?
+        .iter()
+        .any(|removal| removal.source_add_operation_id == journal.operation_id)
+    {
+        return Ok(());
+    }
     let store = RemovalJournalStore::create(state_directory)?;
     let operation_id = allocate_removal_operation_id(&store)?;
     let mut record = RemovalJournalRecord::new(
@@ -8312,6 +8396,16 @@ pub fn recover_incomplete_operations(
         // Reload only after gaining exclusive ownership, then choose a phase.
         let journal = match store.load_operation(&journal.operation_id) {
             Ok(journal) => journal,
+            // `gc --apply` retired this finished operation (D043) while the
+            // pass waited for its lock. Taking the lock re-created the lock
+            // file, so remove that again rather than leave it behind.
+            Err(JournalError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound
+                    && !journal.journal_path.exists() =>
+            {
+                let _ = fs::remove_file(journal.journal_path.with_extension("lock"));
+                continue;
+            }
             Err(error) => {
                 report
                     .errors
@@ -8394,6 +8488,38 @@ pub fn recover_incomplete_operations(
             report.completed_removals += 1;
             continue;
         }
+        // A running `riftri worktree remove` holds its worktree's add lock for
+        // the whole transaction; resuming its journal concurrently drove one
+        // removal from two processes. Skip it while busy, as for compaction,
+        // and re-read it under the lock in case its owner just finished.
+        let _operation_lock = match try_lock_add_operation(
+            &JournalStore::open(&state_directory).path_for(&journal.source_add_operation_id),
+        ) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                report.busy_adds += 1;
+                continue;
+            }
+            Err(error) => {
+                report.errors.push(format!(
+                    "removal operation {}: {error}",
+                    journal.operation_id
+                ));
+                continue;
+            }
+        };
+        let journal = match removal_store
+            .load_all()?
+            .into_iter()
+            .find(|candidate| candidate.operation_id == journal.operation_id)
+        {
+            Some(journal) if journal.phase != RemoveWorktreePhase::Complete => journal,
+            Some(_) => {
+                report.completed_removals += 1;
+                continue;
+            }
+            None => continue,
+        };
         progress::emit(ProgressEvent::RepairRecovering {
             kind: "removal",
             operation_id: journal.operation_id.clone(),
@@ -8420,6 +8546,36 @@ pub fn recover_incomplete_operations(
             MoveWorktreePhase::Cancelled => continue,
             _ => {}
         }
+        // A running `riftri worktree move` holds the same lock; see removals.
+        let _operation_lock = match try_lock_add_operation(
+            &JournalStore::open(&state_directory).path_for(&journal.source_add_operation_id),
+        ) {
+            Ok(Some(lock)) => lock,
+            Ok(None) => {
+                report.busy_adds += 1;
+                continue;
+            }
+            Err(error) => {
+                report
+                    .errors
+                    .push(format!("move operation {}: {error}", journal.operation_id));
+                continue;
+            }
+        };
+        let journal = match move_store
+            .load_all()?
+            .into_iter()
+            .find(|candidate| candidate.operation_id == journal.operation_id)
+        {
+            Some(journal) if !journal.phase.is_finished() => journal,
+            Some(journal) => {
+                if journal.phase == MoveWorktreePhase::Complete {
+                    report.completed_moves += 1;
+                }
+                continue;
+            }
+            None => continue,
+        };
         progress::emit(ProgressEvent::RepairRecovering {
             kind: "move",
             operation_id: journal.operation_id.clone(),
@@ -18027,6 +18183,143 @@ mod tests {
         fs::write(directory.join("file"), "12345").unwrap();
         let (logical, _) = super::tree_usage(&directory).unwrap();
         assert_eq!(logical, 5);
+    }
+
+    /// A copy of `removal` under another operation ID: what a concurrent
+    /// `riftri repair` wrote when it retired an add journal whose removal had
+    /// just finished.
+    fn write_duplicate_removal(removal: &Path) -> PathBuf {
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(removal).unwrap()).unwrap();
+        let id = record["operation_id"].as_str().unwrap().to_owned();
+        let duplicate_id = format!("{}9", &id[..id.len() - 1]);
+        record["operation_id"] = serde_json::Value::String(duplicate_id.clone());
+        let path = removal.with_file_name(format!("{duplicate_id}.json"));
+        fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+        path
+    }
+
+    /// `gc --apply` decided what to retire from journals read before it took
+    /// the add operation's lock. A removal recorded in between (a concurrent
+    /// repair retiring the same worktree) was left with no add journal, and
+    /// every lifecycle command then failed on it. The lineage is re-read
+    /// under the lock.
+    #[test]
+    fn journal_retirement_deletes_a_removal_recorded_after_its_snapshot() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        add_with_state(&repository, &root.join("view"), &state).expect("add");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: root.join("view"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove");
+        let removal = fs::read_dir(state.join("removals"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .next()
+            .unwrap();
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::JournalRetirementLocked,
+            move |_| {
+                write_duplicate_removal(&removal);
+            },
+        );
+
+        super::garbage_collect(&state, true).expect("apply");
+
+        assert!(journal_files(&state, "removals").is_empty());
+        assert!(journal_files(&state, "operations").is_empty());
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// Repair retires an add journal whose worktree vanished by recording a
+    /// completed removal. When the worktree vanished because a removal had
+    /// just finished, a second record is never needed.
+    #[test]
+    fn retiring_a_vanished_worktree_records_no_second_removal() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let added = add_with_state(&repository, &root.join("view"), &state).expect("add");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: root.join("view"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove");
+        let state = fs::canonicalize(&state).unwrap();
+        let add = JournalStore::open(&state)
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .find(|journal| journal.journal_path.file_name() == added.journal_path.file_name())
+            .unwrap();
+
+        super::retire_vanished_add_journal(&riftri_git::Git::default(), &state, &add)
+            .expect("nothing to retire");
+
+        assert_eq!(journal_files(&state, "removals").len(), 1);
+    }
+
+    /// A running removal or move holds its worktree's add lock for the whole
+    /// transaction. `riftri repair` resumed such journals anyway, so a repair
+    /// that ran alongside a live `remove` or `move` drove the same journal
+    /// from two processes. It now skips them while the lock is held.
+    #[test]
+    fn repair_leaves_a_removal_or_move_its_owner_is_running() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let removed = add_with_state(&repository, &root.join("removed"), &state).expect("add");
+        let moved = add_with_state(&repository, &root.join("moved"), &state).expect("add");
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: root.join("removed"),
+                state_dir: Some(state.clone()),
+            },
+            Some(RemoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("stop after the removal intent");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: root.join("moved"),
+                destination: root.join("moved-to"),
+                state_dir: Some(state.clone()),
+            },
+            Some(MoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("stop after the move intent");
+
+        {
+            // Stand in for the running owners.
+            let _removal_owner = super::try_lock_add_operation(&removed.journal_path)
+                .unwrap()
+                .expect("lock");
+            let _move_owner = super::try_lock_add_operation(&moved.journal_path)
+                .unwrap()
+                .expect("lock");
+            let report = recover_incomplete_operations(&state).expect("repair");
+            assert!(report.errors.is_empty(), "{report:?}");
+            // The add pass counts the same two locked operations as busy too.
+            assert!(report.busy_adds >= 2, "{report:?}");
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(accounting.pending_removals, 1, "{accounting:?}");
+            assert_eq!(accounting.pending_moves, 1, "{accounting:?}");
+        }
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_removals, 0, "{accounting:?}");
+        assert_eq!(accounting.pending_moves, 0, "{accounting:?}");
+        assert!(root.join("moved-to").is_dir());
+        assert!(!root.join("removed").exists());
     }
 
     #[test]

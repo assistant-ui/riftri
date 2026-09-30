@@ -33,6 +33,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri repair` no longer resumes a removal or move another process is
+  running (it now takes the worktree's add lock, as for compactions), no longer
+  records a second removal for a worktree that was just removed, and skips an
+  add journal `gc --apply` retired meanwhile. `gc --apply` re-reads a lineage
+  under its lock before retiring it. Together these races could leave a
+  removal journal with no add journal, after which every lifecycle command in
+  the state directory failed (#550).
 - Commands no longer fail because another Riftri command is running. `status`
   and `worktree list` exited 1 when a view vanished mid-scan (removed, moved, or
   swapped by a compaction), and lifecycle commands failed when a journal they
