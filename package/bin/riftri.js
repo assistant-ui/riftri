@@ -3,6 +3,7 @@
 "use strict";
 
 const { spawn } = require("node:child_process");
+const tty = require("node:tty");
 const { resolveBinary } = require("../lib/platform.js");
 const { signalExitCode } = require("../lib/signals.js");
 
@@ -29,8 +30,21 @@ try {
 // same contract downstream to the scoped command. Windows has no equivalent
 // to preserve: the console already delivers Ctrl-C events to every attached
 // process, and a hard TerminateProcess cannot be intercepted.
-const ignoredSignals = ["SIGINT", "SIGQUIT"];
-const forwardedSignals = ["SIGTERM", "SIGHUP"];
+//
+// Without a terminal (an agent harness, CI, or a script), native `riftri
+// exec` forwards SIGINT and SIGQUIT as well and runs its child in its own
+// process group. The launcher does the same there: otherwise a PID-directed
+// SIGINT was ignored outright and the command ran on, where the native binary
+// would have stopped it. The native process gets its own group so that a
+// signal sent to the caller's whole group reaches it once, through here, and
+// not a second time directly. `isatty` is used rather than `process.stdin`,
+// whose initialization can switch the inherited descriptor to non-blocking.
+const supervised =
+  process.platform !== "win32" && ![0, 1, 2].some((descriptor) => tty.isatty(descriptor));
+const ignoredSignals = supervised ? [] : ["SIGINT", "SIGQUIT"];
+const forwardedSignals = supervised
+  ? ["SIGTERM", "SIGHUP", "SIGINT", "SIGQUIT"]
+  : ["SIGTERM", "SIGHUP"];
 const ignoreSignal = () => {};
 let child;
 const pendingForwardedSignals = [];
@@ -59,6 +73,7 @@ if (process.platform !== "win32") {
 child = spawn(binary, process.argv.slice(2), {
   stdio: "inherit",
   windowsHide: false,
+  detached: supervised,
 });
 for (const signal of pendingForwardedSignals) {
   child.kill(signal);
