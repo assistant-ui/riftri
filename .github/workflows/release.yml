@@ -200,7 +200,7 @@ jobs:
 
   publish:
     name: Publish npm packages
-    # Enable only after npm resolves the documented package-name security rejection.
+    # NPM_PUBLISH_ENABLED keeps a deliberate off switch for npm publication.
     if: github.event_name == 'push' && vars.NPM_PUBLISH_ENABLED == 'true'
     needs: stage
     runs-on: ubuntu-24.04

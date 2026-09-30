@@ -300,12 +300,6 @@ The `riftri` package is a small launcher; npm resolves the matching native
 package for your platform through optional dependencies, so only one binary is
 downloaded. `npx riftri doctor` works without a global install.
 
-**Windows on ARM64 is the one exception.** `riftri-win32-arm64` is held in
-registry review, so npm there installs the launcher without a binary and the
-command fails at runtime. Use the [PowerShell installer](#windows-powershell)
-on that platform until the package is published. macOS, Linux, and Windows
-x64 all install normally.
-
 GitHub downloads and npm packages contain the same native CLI for a given tag,
 but publication status is independent: a GitHub release does not by itself mean
 the corresponding npm packages finished publishing, and the versions available
