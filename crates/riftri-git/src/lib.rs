@@ -2771,8 +2771,8 @@ mod tests {
         .expect("write stand-in");
         fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("chmod");
 
-        let listed = super::Git::new(&stand_in)
-            .list_worktrees(&repository)
+        let git = super::Git::new(&stand_in);
+        let listed = retry_while_wrapper_is_busy(|| git.list_worktrees(&repository))
             .expect("the retried listing succeeds");
 
         assert!(marker.exists(), "the first listing did fail");
