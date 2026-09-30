@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 const MAX_FILE_CLONE_WORKERS: usize = 8;
 
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "macos")]
+const MAX_FILE_CLONE_WORKERS: usize = 4;
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) fn file_clone_parallelism() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
