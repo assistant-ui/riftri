@@ -24,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use riftri_git::WorktreeHead;
-use riftri_git::{Git, GitAttribute, GitError, ObjectId, ResolvedRevision};
+use riftri_git::{ConfigValues, Git, GitAttribute, GitError, ObjectId, ResolvedRevision};
 #[cfg(target_os = "macos")]
 use riftri_storage::ApfsCloner as NativeCowCloner;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -72,6 +72,30 @@ use crate::{
 static OPERATION_NONCE: AtomicU64 = AtomicU64::new(0);
 
 const STATE_DIRECTORY_CONFIG_KEY: &str = "riftri.stateDirectory";
+
+/// Every configuration key that can affect checkout compatibility or the
+/// immutable-base profile. Capturing the superset once lets add preflight use
+/// the sparse settings and the compatibility values from one coherent Git
+/// snapshot; LFS-only values remain ignored unless the exact tree uses LFS.
+const CHECKOUT_CONFIG_KEYS: &[&str] = &[
+    "core.attributesfile",
+    "core.sparsecheckout",
+    "core.sparsecheckoutcone",
+    "core.autocrlf",
+    "core.eol",
+    "core.symlinks",
+    "core.filemode",
+    "core.ignorecase",
+    "core.precomposeunicode",
+    "core.protecthfs",
+    "core.protectntfs",
+    "filter.lfs.clean",
+    "filter.lfs.smudge",
+    "filter.lfs.process",
+    "filter.lfs.required",
+    "lfs.storage",
+    "core.hookspath",
+];
 
 struct CompatibilityAnalysis {
     report: RepositoryCompatibilityReport,
@@ -589,6 +613,7 @@ pub fn validate_new_worktree_destination(
         &repository.identity.common_git_dir,
         &resolved,
         &[],
+        None,
     )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)
 }
@@ -3000,6 +3025,7 @@ fn compact_worktree_inner(
         &repository.identity.common_git_dir,
         &resolved,
         &sparse_directories,
+        None,
     )?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
     verify_compaction_checkout_shape(&destination, &compatibility.checkout_paths)?;
@@ -3223,7 +3249,14 @@ fn add_worktree_inner(
         }
         WorktreeMode::NewBranch(_) | WorktreeMode::Detached => request.revision.clone(),
     };
-    let resolved = resolve_requested_revision(&git, &repository_root, &requested)?;
+    let resolved = if requested == OsStr::new("HEAD") {
+        match repository.head_commit.clone() {
+            Some(commit) => git.resolve_commit_tree(&repository_root, commit)?,
+            None => resolve_requested_revision(&git, &repository_root, &requested)?,
+        }
+    } else {
+        resolve_requested_revision(&git, &repository_root, &requested)?
+    };
     // The mirror of the existing-branch check below. Git enforces this too,
     // but only after Riftri has journaled the add, so the refusal arrived as
     // an operational `git-failed` with unknown cleanup — and re-running a task
@@ -3272,14 +3305,20 @@ fn add_worktree_inner(
             destination.display()
         )));
     }
-    let sparse_directories =
-        resolve_sparse_profile(&git, &repository_root, &request.sparse_directories)?;
+    let checkout_config = git.config_values(&repository_root, CHECKOUT_CONFIG_KEYS)?;
+    let sparse_directories = resolve_sparse_profile(
+        &git,
+        &repository_root,
+        &request.sparse_directories,
+        Some(&checkout_config),
+    )?;
     let compatibility = validate_resolved_compatibility(
         &git,
         &repository_root,
         &repository.identity.common_git_dir,
         &resolved,
         &sparse_directories,
+        Some(checkout_config),
     )?;
     let hooks_path = resolve_post_checkout_hooks_path(&git, compatibility.hooks_path.as_deref())?;
     validate_destination_path_semantics(&compatibility.checkout_paths, &destination)?;
@@ -4225,6 +4264,7 @@ fn validate_resolved_compatibility(
     common_git_dir: &Path,
     resolved: &ResolvedRevision,
     sparse_directories: &[String],
+    checkout_config: Option<ConfigValues>,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let analysis = analyze_resolved_repository_compatibility(
         git,
@@ -4232,6 +4272,7 @@ fn validate_resolved_compatibility(
         common_git_dir,
         resolved,
         sparse_directories,
+        checkout_config,
     )?;
     if let Some(blocker) = analysis.report.blockers.first() {
         return Err(WorktreeError::Unsupported(blocker.explanation.clone()));
@@ -4257,11 +4298,15 @@ pub(crate) fn resolve_sparse_profile(
     git: &Git,
     repository: &Path,
     requested: &[String],
+    checkout_config: Option<&ConfigValues>,
 ) -> Result<Vec<String>, WorktreeError> {
     if !requested.is_empty() {
         return canonicalize_sparse_directories(requested);
     }
-    let state = git.sparse_checkout_state(repository)?;
+    let state = match checkout_config {
+        Some(config) => git.sparse_checkout_state_with_config(repository, config)?,
+        None => git.sparse_checkout_state(repository)?,
+    };
     if !state.enabled || !state.cone || state.directories.is_empty() {
         return Ok(Vec::new());
     }
@@ -4554,13 +4599,14 @@ pub(crate) fn inspect_repository_compatibility(
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     {
         let resolved = resolve_requested_revision(git, repository, revision)?;
-        let sparse_directories = resolve_sparse_profile(git, repository, &[])?;
+        let sparse_directories = resolve_sparse_profile(git, repository, &[], None)?;
         Ok(analyze_resolved_repository_compatibility(
             git,
             repository,
             common_git_dir,
             &resolved,
             &sparse_directories,
+            None,
         )?
         .report)
     }
@@ -4612,7 +4658,7 @@ fn analyze_repository_compatibility(
     revision: &OsStr,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let resolved = resolve_requested_revision(git, repository, revision)?;
-    analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[])
+    analyze_resolved_repository_compatibility(git, repository, common_git_dir, &resolved, &[], None)
 }
 
 /// Where Git would look for `post-checkout` when invoked from `repository`.
@@ -4762,6 +4808,7 @@ fn analyze_resolved_repository_compatibility(
     common_git_dir: &Path,
     resolved: &ResolvedRevision,
     sparse_directories: &[String],
+    captured_config: Option<ConfigValues>,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
@@ -4944,7 +4991,10 @@ fn analyze_resolved_repository_compatibility(
         config_keys.extend(lfs_config_keys);
     }
     config_keys.push("core.hookspath");
-    let config = git.config_values(repository, &config_keys)?;
+    let config = match captured_config {
+        Some(config) => config,
+        None => git.config_values(repository, &config_keys)?,
+    };
     if config.has_conditional_includes
         && !git.conditional_config_has_only(
             repository,
@@ -12825,6 +12875,10 @@ mod tests {
                 &common_git_dir,
                 &resolved,
                 &[],
+                Some(
+                    git.config_values(repository, super::CHECKOUT_CONFIG_KEYS)
+                        .unwrap(),
+                ),
             )
             .unwrap();
             // Reconstruct the previous, individual-read profile independently.

@@ -429,6 +429,20 @@ impl Git {
         revision: &OsStr,
     ) -> Result<ResolvedRevision, GitError> {
         let commit = self.resolve_required_object(path, revision, "^{commit}")?;
+        self.resolve_commit_tree(path, commit)
+    }
+
+    /// Resolve the tree for a commit ID the caller already obtained from Git.
+    ///
+    /// Repository inspection resolves `HEAD^{commit}` both as a report value
+    /// and as an object-store health check. Callers adding from that exact
+    /// `HEAD` can reuse the validated commit while still asking Git for its
+    /// tree, avoiding a duplicate commit lookup without trusting a ref name.
+    pub fn resolve_commit_tree(
+        &self,
+        path: &Path,
+        commit: ObjectId,
+    ) -> Result<ResolvedRevision, GitError> {
         let tree = self.resolve_required_object(path, OsStr::new(commit.as_str()), "^{tree}")?;
         Ok(ResolvedRevision { commit, tree })
     }
@@ -1614,6 +1628,20 @@ impl Git {
             worktree,
             &["core.sparsecheckout", "core.sparsecheckoutcone"],
         )?;
+        self.sparse_checkout_state_with_config(worktree, &config)
+    }
+
+    /// Read sparse-checkout state from an operation-local configuration
+    /// snapshot that the caller already needs for checkout compatibility.
+    ///
+    /// Keeping the directory-list query here preserves Git as the source of
+    /// truth for active cone selections while avoiding a second configuration
+    /// process on callers that captured the relevant keys together.
+    pub fn sparse_checkout_state_with_config(
+        &self,
+        worktree: &Path,
+        config: &ConfigValues,
+    ) -> Result<SparseCheckoutState, GitError> {
         let enabled_value = |key: &str| {
             config
                 .values
