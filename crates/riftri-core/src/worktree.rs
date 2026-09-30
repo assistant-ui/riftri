@@ -5147,11 +5147,12 @@ fn analyze_resolved_repository_compatibility(
                 .iter()
                 .any(|accepted| value.eq_ignore_ascii_case(accepted))
         {
+            let sources = checkout_config_source_diagnostic(git, repository, key);
             blockers.push(RepositoryCompatibilityBlocker {
                 kind,
                 explanation: format!(
-                    "Git configuration {key}={} can change checkout bytes and is not supported yet",
-                    String::from_utf8_lossy(&value)
+                    "Git configuration {key}={} can change checkout bytes and is not supported yet{sources}",
+                    String::from_utf8_lossy(&value),
                 ),
             });
         }
@@ -5316,6 +5317,30 @@ fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
         b"diff" | b"merge" => attribute.value == b"unset",
         name => is_checkout_neutral_metadata_attribute(name, &attribute.value),
     }
+}
+
+fn checkout_config_source_diagnostic(git: &Git, repository: &Path, key: &str) -> String {
+    let Ok(origins) = git.config_value_origins(repository, key) else {
+        // Origin lookup is supplementary. A malformed or changing config must
+        // not hide the deterministic-checkout refusal that prompted it.
+        return String::new();
+    };
+    if origins.is_empty() {
+        return String::new();
+    }
+    let sources = origins
+        .iter()
+        .map(|origin| {
+            format!(
+                "{} {}={}",
+                String::from_utf8_lossy(&origin.scope),
+                String::from_utf8_lossy(&origin.origin),
+                String::from_utf8_lossy(&origin.value),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("; configuration sources: {sources}")
 }
 
 /// GitHub linguist metadata attributes are read only by hosting-side tooling;
@@ -13062,12 +13087,22 @@ mod tests {
             assert_eq!(analysis.checkout_config, captured);
             assert_eq!(analysis.report.compatible, compatible);
             if !compatible {
+                let blocker = analysis
+                    .report
+                    .blockers
+                    .iter()
+                    .find(|blocker| blocker.explanation.contains("core.autocrlf=true"))
+                    .expect("autocrlf blocker");
+                let sources = blocker
+                    .explanation
+                    .split_once("configuration sources: ")
+                    .expect("config source diagnostic")
+                    .1;
                 assert!(
-                    analysis
-                        .report
-                        .blockers
-                        .iter()
-                        .any(|blocker| blocker.explanation.contains("core.autocrlf=true"))
+                    sources.split(", ").any(|source| {
+                        source.starts_with("local ") && source.ends_with("=true")
+                    }),
+                    "{sources}"
                 );
             }
             assert!(
