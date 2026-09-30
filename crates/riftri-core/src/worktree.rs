@@ -3310,12 +3310,6 @@ fn add_worktree_inner(
     // bare name would pick the tag and then refuse because "the branch moved".
     let requested = match &request.mode {
         WorktreeMode::ExistingBranch(branch) => {
-            if git.local_branch_target(&repository_root, branch)?.is_none() {
-                return Err(WorktreeError::InvalidRequest(format!(
-                    "existing local branch does not exist: {}",
-                    branch.to_string_lossy()
-                )));
-            }
             let mut qualified = OsString::from("refs/heads/");
             qualified.push(branch);
             qualified
@@ -3327,6 +3321,18 @@ fn add_worktree_inner(
             (Some(commit), Some(tree)) => ResolvedRevision { commit, tree },
             _ => resolve_requested_revision(&git, &repository_root, &requested)?,
         }
+    } else if let WorktreeMode::ExistingBranch(branch) = &request.mode {
+        // Resolving the fully qualified branch already answers whether it
+        // exists. Keep the later target lookup as a race-safety recheck, but
+        // do not spawn an earlier existence-only process whose answer would
+        // immediately be discarded.
+        git.resolve_requested_revision(&repository_root, &requested)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidRequest(format!(
+                    "existing local branch does not exist: {}",
+                    branch.to_string_lossy()
+                ))
+            })?
     } else {
         resolve_requested_revision(&git, &repository_root, &requested)?
     };
