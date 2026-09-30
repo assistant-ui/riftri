@@ -10,6 +10,7 @@ pub(crate) enum FilesystemRacePoint {
     ForceRemovalRevalidation,
     RemovalQuarantined,
     RollbackGitRemoval,
+    JournalRetirementLocked,
 }
 
 type Hook = Box<dyn FnOnce(&Path)>;
