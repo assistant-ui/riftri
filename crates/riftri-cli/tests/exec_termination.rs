@@ -154,28 +154,32 @@ mod unix {
         }
     }
 
-    /// Install `SIG_IGN` for `signals` in a forked child before it execs,
-    /// reproducing what `nohup` does for SIGHUP and what a shell without job
-    /// control does to SIGINT and SIGQUIT before starting an asynchronous
-    /// command. An ignored disposition survives exec, so the spawned `riftri`
-    /// really does inherit it.
+    /// Give a forked child explicit termination dispositions before it execs.
+    ///
+    /// Signals named in `ignored` receive `SIG_IGN`, reproducing `nohup` and
+    /// background-shell behavior. The other signals Riftri handles receive
+    /// `SIG_DFL`, so the default scenarios do not silently inherit an ignore
+    /// from the test runner or its parent shell. Ignored dispositions survive
+    /// exec, so the spawned `riftri` observes exactly the scenario requested.
     ///
     /// # Safety
     ///
     /// The returned closure runs between fork and exec and calls only the
     /// async-signal-safe `signal(2)`.
-    unsafe fn ignore_before_exec<'command>(
+    unsafe fn set_dispositions_before_exec<'command>(
         command: &'command mut Command,
-        signals: &'static [libc::c_int],
+        ignored: &'static [libc::c_int],
     ) -> &'command mut Command {
-        if signals.is_empty() {
-            return command;
-        }
         // SAFETY: delegated to this function's own safety contract.
         unsafe {
             command.pre_exec(move || {
-                for &signal in signals {
-                    if libc::signal(signal, libc::SIG_IGN) == libc::SIG_ERR {
+                for signal in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
+                    let disposition = if ignored.contains(&signal) {
+                        libc::SIG_IGN
+                    } else {
+                        libc::SIG_DFL
+                    };
+                    if libc::signal(signal, disposition) == libc::SIG_ERR {
                         return Err(std::io::Error::last_os_error());
                     }
                 }
@@ -262,7 +266,7 @@ mod unix {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             // SAFETY: the installed closure calls only async-signal-safe code.
-            let riftri = unsafe { ignore_before_exec(&mut command, ignored) }
+            let riftri = unsafe { set_dispositions_before_exec(&mut command, ignored) }
                 .spawn()
                 .expect("start riftri exec");
             SupervisedExec {
@@ -371,7 +375,13 @@ mod unix {
     /// process group, with the temporary Git shim never removed.
     #[test]
     fn sigquit_to_riftri_stops_scoped_child() {
-        let mut exec = SupervisedExec::spawn("echo \"$$\"; exec /bin/sleep 30");
+        // Catch SIGQUIT in the stand-in and exit with its conventional status.
+        // A default SIGQUIT can enter the host's crash-reporting path before
+        // wait(2) observes the death, making this forwarding test depend on an
+        // unrelated core-dump service. Signal-to-status mapping is covered by
+        // `scoped_child_signal_death_maps_to_exit_status` below.
+        let mut exec =
+            SupervisedExec::spawn("trap 'exit 131' QUIT; echo \"$$\"; while :; do :; done");
         let pids = exec.read_pids(1);
         let riftri_pid = i32::try_from(exec.riftri.id()).expect("riftri PID fits i32");
         signal(riftri_pid, libc::SIGQUIT);
@@ -489,7 +499,7 @@ mod unix {
                 });
             }
             // SAFETY: the installed closure calls only async-signal-safe code.
-            let riftri = unsafe { ignore_before_exec(&mut command, ignored) }
+            let riftri = unsafe { set_dispositions_before_exec(&mut command, ignored) }
                 .spawn()
                 .expect("start riftri exec on a pty");
             let master_fd = master.as_raw_fd();
