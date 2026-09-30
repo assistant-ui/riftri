@@ -7339,17 +7339,38 @@ fn retained_base_paths(
     Ok(bases)
 }
 
+/// Logical and allocated bytes under `path`.
+///
+/// Accounting is a snapshot taken while other lifecycle operations run: a
+/// removal, a move, a compaction's directory swap, or a collection can take a
+/// path away between listing it and measuring it. What vanished that way
+/// counts as nothing; failing instead made `status` and `worktree list` exit 1
+/// whenever another operation happened to be in flight.
 fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|source| io("inspect storage accounting path", path, source))?;
+    let vanished = |source: &std::io::Error| source.kind() == std::io::ErrorKind::NotFound;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if vanished(&source) => return Ok((0, 0)),
+        Err(source) => return Err(io("inspect storage accounting path", path, source)),
+    };
     let mut logical_bytes = if metadata.is_dir() { 0 } else { metadata.len() };
-    let mut allocated_bytes = allocated_bytes(path, &metadata)?;
+    let mut allocated_bytes = match allocated_bytes(path, &metadata) {
+        Ok(bytes) => bytes,
+        Err(WorktreeError::Io { source, .. }) if vanished(&source) => return Ok((0, 0)),
+        Err(error) => return Err(error),
+    };
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        for entry in fs::read_dir(path)
-            .map_err(|source| io("read storage accounting directory", path, source))?
-        {
-            let entry =
-                entry.map_err(|source| io("read storage accounting entry", path, source))?;
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(source) if vanished(&source) => return Ok((logical_bytes, allocated_bytes)),
+            Err(source) => return Err(io("read storage accounting directory", path, source)),
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(source) if vanished(&source) => continue,
+                Err(source) => return Err(io("read storage accounting entry", path, source)),
+            };
             let (entry_logical, entry_allocated) = tree_usage(&entry.path())?;
             logical_bytes = logical_bytes.saturating_add(entry_logical);
             allocated_bytes = allocated_bytes.saturating_add(entry_allocated);
@@ -17935,6 +17956,23 @@ mod tests {
         // Elsewhere in `.git`, as with Git, the add works.
         add_with_state(&repository, &repository.join(".git/elsewhere"), &state)
             .expect("Git accepts this, so Riftri does too");
+    }
+
+    /// A view removed, moved, or swapped by another lifecycle operation while
+    /// `status` measures it counts as nothing instead of failing the report.
+    #[test]
+    fn accounting_counts_a_path_that_vanished_mid_scan_as_empty() {
+        let fixture = tempdir().expect("fixture");
+        assert_eq!(
+            super::tree_usage(&fixture.path().join("gone")).unwrap(),
+            (0, 0)
+        );
+
+        let directory = fixture.path().join("present");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("file"), "12345").unwrap();
+        let (logical, _) = super::tree_usage(&directory).unwrap();
+        assert_eq!(logical, 5);
     }
 
     #[test]
