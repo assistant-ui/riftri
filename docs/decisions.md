@@ -644,10 +644,15 @@ collection retain exclusive ownership of the same file.
 A cache miss releases shared ownership before requesting exclusive ownership;
 in-place lock upgrades are not used. The creator repeats all base and marker
 checks under the exclusive lock because a builder or collector may have run in
-that gap. The read guard explicitly unlocks on drop so a concurrent Unix fork's
+that gap. If a completed base appeared while it waited, the caller releases
+exclusive ownership before hashing it, reacquires shared ownership, and repeats
+the full integrity check so other post-build waiters can verify concurrently.
+A shared miss then reacquires exclusivity and revalidates again before any
+rebuild. The read guard explicitly unlocks on drop so a concurrent Unix fork's
 inherited descriptor cannot retain ownership while the parent waits to build.
-Durable add references continue to protect the base after preparation, including
-during view cloning. Git-metadata and operation locks remain unchanged.
+Durable add references continue to protect the base after preparation,
+including during view cloning. Git-metadata and operation locks remain
+unchanged.
 
 This is compatible with older coordinators that take the same base lock
 exclusively: they still exclude new readers. It changes neither cache keys nor

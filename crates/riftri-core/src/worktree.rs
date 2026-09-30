@@ -4267,15 +4267,47 @@ fn prepare_base(
         progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
     }
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::BaseReadMiss,
+        base_path,
+    );
     // Never upgrade a held shared lock: concurrent cold callers could deadlock.
     // Another builder or collector may run in the gap, so revalidate all state
     // after acquiring the same stable lock file exclusively.
     drop(read_lock);
-    let _write_lock = acquire_coordination_lock(
+    let mut write_lock = acquire_coordination_lock(
         &lock_path,
         "open immutable-base lock",
         "lock immutable base",
     )?;
+    if completed_base_paths_present(base_path, &complete_path)? {
+        // A builder may have completed the base while this caller waited for
+        // exclusive ownership. Do not hash that base while retaining the
+        // writer lock: release it and repeat the full integrity check under a
+        // shared lock so every waiter can verify concurrently. A collection,
+        // legacy marker, or incomplete replacement can still intervene in the
+        // gap, so a shared miss falls back to a fresh exclusive acquisition
+        // and the existing mandatory revalidation below.
+        drop(write_lock);
+        let read_lock = acquire_base_read_lock(&lock_path)?;
+        #[cfg(test)]
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::BaseReuseAfterExclusiveWait,
+            base_path,
+        );
+        if verify_existing_base(base_path, &complete_path)? {
+            progress::emit(ProgressEvent::BaseReused);
+            return Ok(true);
+        }
+        drop(read_lock);
+        write_lock = acquire_coordination_lock(
+            &lock_path,
+            "open immutable-base lock",
+            "lock immutable base",
+        )?;
+    }
+    let _write_lock = write_lock;
     if verify_existing_base(base_path, &complete_path)? {
         progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
@@ -4334,6 +4366,28 @@ fn prepare_base(
         .map_err(|source| io("sync immutable-base marker", &complete_path, source))?;
     sync_parent(base_path)?;
     Ok(false)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn completed_base_paths_present(
+    base_path: &Path,
+    complete_path: &Path,
+) -> Result<bool, WorktreeError> {
+    let base_exists = base_path
+        .try_exists()
+        .map_err(|source| io("inspect immutable base", base_path, source))?;
+    let complete_exists = match fs::symlink_metadata(complete_path) {
+        Ok(_) => true,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(io(
+                "inspect immutable-base completion marker",
+                complete_path,
+                source,
+            ));
+        }
+    };
+    Ok(base_exists && complete_exists)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
