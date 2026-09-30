@@ -225,12 +225,23 @@ fn hash_entry(
 
     if metadata.is_dir() {
         digest.update(b"directory");
-        let mut entries = fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
-        entries.sort_unstable_by_key(|entry| entry.file_name());
+        // Keep each native name and its path once. `sort_unstable_by_key` on
+        // `DirEntry::file_name()` rebuilt an owned `OsString` for every key
+        // comparison, then the hashing loop allocated both values again.
+        let mut entries = fs::read_dir(path)?
+            .map(|entry| {
+                entry.map(|entry| {
+                    let name = entry.file_name();
+                    let path = path.join(&name);
+                    (name, path)
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         digest.update((entries.len() as u64).to_le_bytes());
-        for entry in entries {
-            hash_native(&entry.file_name(), digest);
-            hash_entry(&entry.path(), digest, version, scratch)?;
+        for (name, path) in entries {
+            hash_native(&name, digest);
+            hash_entry(&path, digest, version, scratch)?;
         }
     } else if metadata.is_file() {
         digest.update(b"file");
