@@ -1707,7 +1707,10 @@ impl Git {
         self.run(Some(worktree), &arguments)?;
         self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
         self.run(Some(worktree), &["sparse-checkout", "reapply"])?;
-        self.run(Some(worktree), &["update-index", "--refresh"])?;
+        // As with a full worktree, the caller's mandatory clean `git status`
+        // performs the stat-and-content refresh and fails closed on any
+        // divergence. The sparse commands above still establish the exact
+        // cone configuration and skip-worktree bits.
         Ok(())
     }
 
@@ -3455,6 +3458,59 @@ mod tests {
                 .expect("check removed branch"),
             None
         );
+    }
+
+    #[test]
+    fn sparse_index_synchronization_leaves_refresh_to_the_paired_clean_check() {
+        let fixture = RepositoryFixture::committed();
+        fs::create_dir(fixture.path().join("selected")).expect("create selected directory");
+        fs::create_dir(fixture.path().join("omitted")).expect("create omitted directory");
+        fs::write(fixture.path().join("selected/file.txt"), "selected\n")
+            .expect("write selected file");
+        fs::write(fixture.path().join("omitted/file.txt"), "omitted\n")
+            .expect("write omitted file");
+        git(fixture.path(), &["add", "--", "selected", "omitted"]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "sparse fixture"],
+        );
+
+        let linked_parent = tempdir().expect("linked parent");
+        let linked = linked_parent.path().join("sparse");
+        let git = Git::default();
+        git.add_worktree_no_checkout(
+            fixture.path(),
+            &linked,
+            OsStr::new("HEAD"),
+            WorktreeHead::NewBranch(OsStr::new("feature/sparse-suppressed")),
+        )
+        .expect("add no-checkout worktree");
+        fs::create_dir(linked.join("selected")).expect("materialize selected directory");
+        fs::write(linked.join("tracked.txt"), "tracked\n").expect("materialize root file");
+        fs::write(linked.join("selected/file.txt"), "selected\n")
+            .expect("materialize selected file");
+
+        let attempts_before = git.process_attempts();
+        git.synchronize_sparse_worktree_index(&linked, &["selected".to_owned()])
+            .expect("synchronize sparse index");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            3,
+            "sparse index synchronization needs set, reset, and reapply; the paired clean check performs the refresh"
+        );
+        assert!(git.worktree_is_clean(&linked).expect("check clean"));
+        let tags = git
+            .run_text(Some(&linked), &["ls-files", "-t"], "sparse index tags")
+            .expect("read sparse index tags");
+        assert!(tags.contains("H selected/file.txt"), "{tags}");
+        assert!(tags.contains("S omitted/file.txt"), "{tags}");
+
+        fs::write(linked.join("selected/file.txt"), "changed\n").expect("modify selected file");
+        assert!(!git.worktree_is_clean(&linked).expect("check dirty"));
+        git.remove_worktree_force(fixture.path(), &linked)
+            .expect("remove linked worktree");
+        git.delete_branch_force(fixture.path(), OsStr::new("feature/sparse-suppressed"))
+            .expect("delete rollback branch");
     }
 
     #[test]
