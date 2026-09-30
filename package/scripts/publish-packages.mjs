@@ -63,14 +63,30 @@ function lookupExactVersion(runNpm, identifier) {
   throw new Error(`could not determine whether ${identifier} exists`);
 }
 
+// Ten attempts (~4 minutes) then flunked v0.5.1, whose packages were all
+// published and merely not yet readable; eighteen give ~12 minutes a phase.
+// Two phases plus the publishes themselves must still fit the release
+// workflow's job timeout, which `workflow-timeouts.test.js` enforces.
+export const VERIFICATION_ATTEMPTS = 18;
+
+/**
+ * Milliseconds to wait before each retry after the first.
+ *
+ * Exponential, capped so late attempts probe once a minute instead of
+ * doubling past the propagation window they exist to ride out.
+ */
+export function verificationWaits(attempts = VERIFICATION_ATTEMPTS) {
+  return Array.from(
+    { length: Math.max(attempts - 1, 0) },
+    (_unused, index) => Math.min(2 ** index, 60) * 1_000,
+  );
+}
+
 export async function publishPackages({
   repositoryRoot = defaultRepositoryRoot,
   runNpm = defaultRunNpm,
   wait = defaultWait,
-  // Ten attempts with the step below give roughly a four-minute budget.
-  // Five attempts (15 seconds total) flunked two fully-successful publishes
-  // for v0.4.0: npm's read API takes minutes to reflect a fresh publish.
-  verificationAttempts = 10,
+  verificationAttempts = VERIFICATION_ATTEMPTS,
 } = {}) {
   if (!Number.isInteger(verificationAttempts) || verificationAttempts < 1) {
     throw new Error("verificationAttempts must be a positive integer");
@@ -83,7 +99,12 @@ export async function publishPackages({
     // install step. Gate the public launcher on *visible* platform versions,
     // not merely successful publish exits, so first-time installs can run.
     if (packageDirectory === packages.at(-1)) {
-      await verifyVersions(expected, { runNpm, wait, verificationAttempts });
+      await verifyVersions(expected, {
+        runNpm,
+        wait,
+        verificationAttempts,
+        launcherPublished: false,
+      });
     }
     const manifest = await packageManifest(packageDirectory);
     const identifier = `${manifest.name}@${manifest.version}`;
@@ -131,14 +152,23 @@ export async function publishPackages({
     }
   }
 
-  await verifyVersions(expected, { runNpm, wait, verificationAttempts });
+  await verifyVersions(expected, {
+    runNpm,
+    wait,
+    verificationAttempts,
+    launcherPublished: true,
+  });
   process.stdout.write(
     `verified ${expected.length} exact npm package versions after publication\n`,
   );
   return expected.map(({ identifier }) => identifier);
 }
 
-async function verifyVersions(expected, { runNpm, wait, verificationAttempts }) {
+async function verifyVersions(
+  expected,
+  { runNpm, wait, verificationAttempts, launcherPublished },
+) {
+  const waits = verificationWaits(verificationAttempts);
   let missing = [];
   for (let attempt = 1; attempt <= verificationAttempts; attempt += 1) {
     missing = [];
@@ -155,15 +185,19 @@ async function verifyVersions(expected, { runNpm, wait, verificationAttempts }) 
       }
     }
     if (missing.length === 0) break;
-    if (attempt < verificationAttempts) {
-      // Exponential, capped so late attempts probe once a minute instead of
-      // doubling past the propagation window they exist to ride out.
-      await wait(Math.min(2 ** (attempt - 1), 60) * 1_000);
-    }
+    if (attempt < verificationAttempts) await wait(waits[attempt - 1]);
   }
   if (missing.length > 0) {
+    // Name the consequence, not just the slow package. The operator who reads
+    // this is looking at a red release whose platform packages all published;
+    // without this line the obvious reading is that the named package failed.
+    const consequence = launcherPublished
+      ? ""
+      : " -- the riftri launcher was therefore not published, so npm still " +
+        "installs the previous release. Re-run this job once the registry " +
+        "catches up: publishing skips packages that are already live.";
     throw new Error(
-      `${missing.join(", ")} still missing after the publish verification retries`,
+      `${missing.join(", ")} still missing after the publish verification retries${consequence}`,
     );
   }
 }
