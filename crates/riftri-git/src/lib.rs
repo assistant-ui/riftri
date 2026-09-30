@@ -1069,17 +1069,21 @@ impl Git {
 
     /// Remove a repository-local configuration key. Missing keys are accepted.
     pub fn unset_local_config(&self, path: &Path, key: &str) -> Result<(), GitError> {
-        if self.local_config_value(path, key)?.is_none() {
-            return Ok(());
-        }
         let arguments = [
             OsString::from("config"),
             OsString::from("--local"),
             OsString::from("--unset-all"),
             OsString::from(key),
         ];
-        self.run_os(Some(path), &arguments)?;
-        Ok(())
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() || output.status.code() == Some(5) {
+            // `git config --unset-all` exits 5 when the key has no matching
+            // value. Accept that documented missing-key disposition directly
+            // instead of probing the key in a separate process first.
+            Ok(())
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
     }
 
     /// Resolve the repository-specific attributes file through Git so linked
@@ -4232,12 +4236,26 @@ mod tests {
             Some(true)
         );
 
+        let attempts_before = git.process_attempts();
         git.unset_local_config(fixture.path(), "riftri.enabled")
             .expect("disable repository");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "removing a present key should not require a separate existence query"
+        );
         assert_eq!(
             git.local_config_value(fixture.path(), "riftri.enabled")
                 .expect("read removed local configuration"),
             None
+        );
+        let attempts_before = git.process_attempts();
+        git.unset_local_config(fixture.path(), "riftri.enabled")
+            .expect("missing local configuration is already removed");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "a missing key should use the same direct removal attempt"
         );
 
         let first = fixture.path().join("state one");
