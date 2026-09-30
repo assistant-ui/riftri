@@ -18205,7 +18205,7 @@ mod tests {
             .find(|journal| journal.journal_path.file_name() == added.journal_path.file_name())
             .unwrap();
 
-        super::retire_vanished_add_journal(&Git::default(), &state, &add)
+        super::retire_vanished_add_journal(&riftri_git::Git::default(), &state, &add)
             .expect("nothing to retire");
 
         assert_eq!(journal_files(&state, "removals").len(), 1);
