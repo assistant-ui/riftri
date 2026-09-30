@@ -489,6 +489,15 @@ exclusive and rechecks durable references, which protect live and incomplete
 adds after the preparation lock is released. No cache format, integrity check,
 or journal durability step changes.
 
+When a caller finds a cache miss but another builder completes the base while
+that caller waits for exclusive ownership, it does not retain the writer lock
+while hashing the newly completed tree. It releases exclusivity, reacquires the
+same stable lock for shared ownership, and recomputes the complete integrity
+marker there, allowing the other post-build waiters to verify alongside it. A
+miss after that ownership gap acquires exclusivity again and repeats the full
+revalidation before rebuilding, so collection and legacy-marker migration keep
+the same fail-closed behavior.
+
 Native `clonefile` is used for every regular file in an APFS view. An error is
 returned if APFS cannot clone; there is no byte-copy path. Directory structure,
 symlinks, and executable modes are preserved. The base is made read-only and the
