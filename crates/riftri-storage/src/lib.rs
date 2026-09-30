@@ -7,7 +7,7 @@ use thiserror::Error;
 
 #[cfg(any(test, target_os = "windows"))]
 mod exact_copy;
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod parallel;
 
 /// Errors from concrete native storage operations.
