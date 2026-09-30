@@ -339,15 +339,77 @@ fn load_status_journals<T>(
     let mut journals = Vec::new();
     let mut issues = Vec::new();
     for path in paths {
-        match load(path.clone()) {
-            Ok(journal) => journals.push(journal),
-            Err(error) => issues.push(JournalLoadIssue {
+        match read_listed_journal(&path, &mut load) {
+            ListedJournal::Loaded(journal) => journals.push(journal),
+            ListedJournal::Retired => {}
+            ListedJournal::Failed(error) => issues.push(JournalLoadIssue {
                 path,
                 reason: error.to_string(),
             }),
         }
     }
     StatusJournalLoad { journals, issues }
+}
+
+/// How reading one listed journal ended.
+enum ListedJournal<T> {
+    Loaded(T),
+    /// Gone for good since the listing: `gc --apply` retired it, and a
+    /// retired journal holds no claim.
+    Retired,
+    Failed(JournalError),
+}
+
+/// Read one journal from a directory listing while other processes work:
+/// owners replace journals atomically as their phases advance, and
+/// `gc --apply` deletes finished ones (D043). A read that races a replace is
+/// retried briefly, as for a reconciling scan; a path that stays absent was
+/// retired. Before this, either race failed whole lifecycle commands, or
+/// reported a spurious state issue.
+fn read_listed_journal<T>(
+    path: &Path,
+    load: &mut impl FnMut(PathBuf) -> Result<T, JournalError>,
+) -> ListedJournal<T> {
+    let mut result = load(path.to_path_buf());
+    for _ in 0..IN_FLIGHT_READ_ATTEMPTS {
+        match &result {
+            Err(error) if journal_error_is_in_flight(error) => {
+                std::thread::sleep(IN_FLIGHT_READ_DELAY);
+                result = load(path.to_path_buf());
+            }
+            _ => break,
+        }
+    }
+    match result {
+        Ok(journal) => ListedJournal::Loaded(journal),
+        Err(JournalError::Io { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound
+                && matches!(
+                    fs::symlink_metadata(path),
+                    Err(missing) if missing.kind() == std::io::ErrorKind::NotFound
+                ) =>
+        {
+            ListedJournal::Retired
+        }
+        Err(error) => ListedJournal::Failed(error),
+    }
+}
+
+/// Every journal a directory listing names, for a lifecycle command. See
+/// `read_listed_journal`; anything that cannot be read still fails closed.
+fn load_listed_journals<T>(
+    paths: Vec<PathBuf>,
+    mut load: impl FnMut(PathBuf) -> Result<T, JournalError>,
+) -> Result<Vec<T>, JournalError> {
+    let mut journals = Vec::with_capacity(paths.len());
+    for path in paths {
+        match read_listed_journal(&path, &mut load) {
+            ListedJournal::Loaded(journal) => journals.push(journal),
+            ListedJournal::Retired => {}
+            ListedJournal::Failed(error) => return Err(error),
+        }
+    }
+    Ok(journals)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1301,10 +1363,7 @@ impl JournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedJournal>, JournalError> {
-        journal_paths(&self.directory)?
-            .into_iter()
-            .map(|path| self.load_path(path))
-            .collect()
+        load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
     }
 
     pub fn load_operation(&self, operation_id: &str) -> Result<DecodedJournal, JournalError> {
@@ -1676,10 +1735,7 @@ impl RemovalJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedRemovalJournal>, JournalError> {
-        journal_paths(&self.directory)?
-            .into_iter()
-            .map(|path| self.load_path(path))
-            .collect()
+        load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
     }
 
     pub fn load_all_for_status(
@@ -1769,10 +1825,7 @@ impl MoveJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedMoveJournal>, JournalError> {
-        journal_paths(&self.directory)?
-            .into_iter()
-            .map(|path| self.load_path(path))
-            .collect()
+        load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
     }
 
     pub fn load_all_for_status(
@@ -1865,10 +1918,7 @@ impl CompactJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedCompactJournal>, JournalError> {
-        journal_paths(&self.directory)?
-            .into_iter()
-            .map(|path| self.load_path(path))
-            .collect()
+        load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
     }
 
     pub fn load_all_for_status(
@@ -1961,10 +2011,7 @@ impl PruneJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedPruneJournal>, JournalError> {
-        journal_paths(&self.directory)?
-            .into_iter()
-            .map(|path| self.load_path(path))
-            .collect()
+        load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
     }
 
     pub fn load_all_for_status(
@@ -2057,10 +2104,7 @@ impl CollectionJournalStore {
     }
 
     pub fn load_all(&self) -> Result<Vec<DecodedCollectionJournal>, JournalError> {
-        journal_paths(&self.directory)?
-            .into_iter()
-            .map(|path| self.load_path(path))
-            .collect()
+        load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
     }
 
     pub fn load_all_for_status(
@@ -2180,6 +2224,34 @@ mod tests {
     use crate::{
         CompactWorktreePhase, GarbageCollectionPhase, MoveWorktreePhase, PruneWorktreesPhase,
     };
+
+    /// A lifecycle command lists journals and then reads each one. Another
+    /// process may retire a listed journal in between (`gc --apply`, D043);
+    /// that journal is skipped, not a failure of the whole command, and a
+    /// status read does not report it as an issue. A journal that is present
+    /// but unreadable still fails closed.
+    #[test]
+    fn a_listed_journal_retired_before_it_is_read_is_skipped() {
+        let directory = tempdir().unwrap();
+        let present = directory.path().join("present.json");
+        std::fs::write(&present, "{}").unwrap();
+        let retired = directory.path().join("retired.json");
+        let read = |path: std::path::PathBuf| {
+            std::fs::read(&path)
+                .map_err(|source| super::io("read operation journal", &path, source))
+        };
+
+        let loaded = super::load_listed_journals(vec![present.clone(), retired.clone()], read)
+            .expect("a retired journal is skipped");
+        assert_eq!(loaded.len(), 1);
+        let status = super::load_status_journals(vec![present.clone(), retired], read);
+        assert_eq!(status.journals.len(), 1);
+        assert!(status.issues.is_empty());
+
+        let unreadable = directory.path().join("unreadable.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(super::load_listed_journals(vec![present, unreadable], read).is_err());
+    }
 
     #[test]
     fn journal_store_rejects_a_symlinked_state_directory() {

@@ -33,6 +33,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Commands no longer fail because another Riftri command is running. `status`
+  and `worktree list` exited 1 when a view vanished mid-scan (removed, moved, or
+  swapped by a compaction), and lifecycle commands failed when a journal they
+  had just listed was retired by `gc --apply` or replaced by its owner. A failed
+  move was then left pending until `riftri repair`. Vanished paths now count as
+  nothing, and journal reads retry an in-flight replace and skip a retired
+  journal (#544).
 - `riftri worktree add` refuses a destination inside the repository's
   `.git/worktrees` directory before recording anything. A worktree there is
   its own Git metadata directory; the add used to fail as `rollback-failed`
