@@ -313,6 +313,27 @@ impl Git {
 
     /// Inspect a normal, linked, unborn, detached, or bare repository.
     pub fn inspect_repository(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
+        self.inspect_repository_inner(path, false)
+    }
+
+    /// Inspect a repository and resolve HEAD's commit and tree together.
+    ///
+    /// Lifecycle callers that need both values use one structured `git show`
+    /// instead of resolving the commit and then starting Git again for its
+    /// tree. Callers that need only the commit keep the narrower
+    /// [`Self::inspect_repository`] path.
+    pub fn inspect_repository_with_head_tree(
+        &self,
+        path: &Path,
+    ) -> Result<RepositoryInfo, GitError> {
+        self.inspect_repository_inner(path, true)
+    }
+
+    fn inspect_repository_inner(
+        &self,
+        path: &Path,
+        include_head_tree: bool,
+    ) -> Result<RepositoryInfo, GitError> {
         // One invocation answers both identity questions; each Git subprocess
         // costs more in spawn and startup than in work. The bare flag is a
         // fixed `true`/`false` first line, so everything after it stays
@@ -393,11 +414,16 @@ impl Git {
         // Resolving HEAD's commit does double duty: it is the value `riftri
         // doctor` reports and the probe that surfaces a corrupt object store
         // as an inspection failure (relied on to fail lifecycle commands
-        // closed on an unhealthy repository). HEAD's tree, in contrast, is read
-        // only by doctor's JSON, so it is left for `inspect_repository_for_report`
-        // rather than resolved on every lifecycle operation's hot path.
-        let head_commit = self.resolve_optional_object(path, "HEAD^{commit}")?;
-        let head_tree = None;
+        // closed on an unhealthy repository). Most callers do not need its
+        // tree, while add can request both from one Git process.
+        let (head_commit, head_tree) = if include_head_tree {
+            match self.resolve_optional_head_revision(path)? {
+                Some(resolved) => (Some(resolved.commit), Some(resolved.tree)),
+                None => (None, None),
+            }
+        } else {
+            (self.resolve_optional_object(path, "HEAD^{commit}")?, None)
+        };
         Ok(RepositoryInfo {
             root,
             identity: RepositoryIdentity { common_git_dir },
@@ -419,16 +445,20 @@ impl Git {
     /// pay for and discard.
     /// Inspect a repository and additionally resolve the report-only fields
     /// that `inspect_repository` skips — working-tree cleanliness and HEAD's
-    /// tree — each of which costs a `git` subprocess and is read only by
-    /// `riftri doctor`.
+    /// tree. Commit and tree resolution share one Git subprocess; cleanliness
+    /// remains a separate full traversal used only by `riftri doctor`.
     pub fn inspect_repository_for_report(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
-        let mut info = self.inspect_repository(path)?;
+        let mut info = self.inspect_repository_with_head_tree(path)?;
         if !info.is_bare {
             // `worktree_is_clean` passes `--untracked-files=all`, which
             // overrides a `status.showUntrackedFiles=no` that would otherwise
             // hide untracked content.
             info.clean = Some(self.worktree_is_clean(path)?);
-            info.head_tree = self.resolve_optional_object(path, "HEAD^{tree}")?;
+        } else {
+            // Preserve the report contract: cleanliness and tree are
+            // worktree-only diagnostics even though the combined resolution
+            // made the bare repository's tree available at no extra cost.
+            info.head_tree = None;
         }
         Ok(info)
     }
@@ -439,8 +469,9 @@ impl Git {
         path: &Path,
         revision: &OsStr,
     ) -> Result<ResolvedRevision, GitError> {
-        let commit = self.resolve_required_object(path, revision, "^{commit}")?;
-        self.resolve_commit_tree(path, commit)
+        let arguments = resolved_revision_arguments(revision);
+        let output = self.run_os(Some(path), &arguments)?;
+        parse_resolved_revision_output(&output.stdout)
     }
 
     /// Resolve the tree for a commit ID the caller already obtained from Git.
@@ -2003,6 +2034,29 @@ impl Git {
         Err(command_failed(&base_arguments.map(OsString::from), &probe))
     }
 
+    /// Resolve HEAD's commit and tree in one process, preserving the same
+    /// unborn-versus-corrupt distinction as `resolve_optional_object`.
+    fn resolve_optional_head_revision(
+        &self,
+        path: &Path,
+    ) -> Result<Option<ResolvedRevision>, GitError> {
+        let arguments = resolved_revision_arguments(OsStr::new("HEAD"));
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            return parse_resolved_revision_output(&output.stdout).map(Some);
+        }
+
+        // `git show` has no quiet missing-revision disposition. Reuse the
+        // established optional-object probe only on this failure path: it
+        // returns None for an unborn HEAD, reports an unreadable commit as
+        // corruption, and lets every other failure retain the original show
+        // diagnostic.
+        match self.resolve_optional_object(path, "HEAD^{commit}")? {
+            None => Ok(None),
+            Some(_) => Err(command_failed(&arguments, &output)),
+        }
+    }
+
     fn resolve_required_object(
         &self,
         path: &Path,
@@ -2351,6 +2405,37 @@ pub fn parse_worktree_porcelain(input: &[u8]) -> Result<Vec<WorktreeInfo>, GitEr
 
 fn parse_object_output(bytes: &[u8]) -> Result<ObjectId, GitError> {
     parse_object_bytes(trim_line_endings(bytes))
+}
+
+fn resolved_revision_arguments(revision: &OsStr) -> [OsString; 8] {
+    let mut expression = revision.to_os_string();
+    expression.push("^{commit}");
+    [
+        OsString::from("show"),
+        OsString::from("--no-patch"),
+        OsString::from("--no-notes"),
+        OsString::from("--no-show-signature"),
+        OsString::from("--format=format:%H%x00%T%x00"),
+        OsString::from("--end-of-options"),
+        expression,
+        OsString::from("--"),
+    ]
+}
+
+fn parse_resolved_revision_output(bytes: &[u8]) -> Result<ResolvedRevision, GitError> {
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let commit = fields.next().unwrap_or_default();
+    let tree = fields.next().unwrap_or_default();
+    if fields.next() != Some(&[][..]) || fields.next().is_some() {
+        return Err(GitError::InvalidOutput {
+            context: "resolved revision",
+            detail: "expected exactly two NUL-delimited object IDs".to_owned(),
+        });
+    }
+    Ok(ResolvedRevision {
+        commit: parse_object_bytes(commit)?,
+        tree: parse_object_bytes(tree)?,
+    })
 }
 
 fn parse_object_bytes(bytes: &[u8]) -> Result<ObjectId, GitError> {
@@ -3221,9 +3306,15 @@ mod tests {
         let fixture = RepositoryFixture::committed();
         let git = Git::default();
 
+        let attempts_before = git.process_attempts();
         let resolved = git
             .resolve_revision(fixture.path(), OsStr::new("HEAD"))
             .expect("resolve HEAD");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "one structured Git call must resolve both object IDs"
+        );
         // `inspect_repository` resolves HEAD's commit; the tree comes from the
         // report method.
         let repository = git
@@ -3231,12 +3322,49 @@ mod tests {
             .expect("inspect repository");
         assert_eq!(repository.head_commit, Some(resolved.commit.clone()));
         assert!(repository.head_tree.is_none());
+        let repository_with_tree = git
+            .inspect_repository_with_head_tree(fixture.path())
+            .expect("inspect repository with HEAD tree");
+        assert_eq!(
+            repository_with_tree.head_commit,
+            Some(resolved.commit.clone())
+        );
+        assert_eq!(repository_with_tree.head_tree, Some(resolved.tree.clone()));
         let reported = git
             .inspect_repository_for_report(fixture.path())
             .expect("inspect for report");
         assert_eq!(reported.head_commit, Some(resolved.commit));
         assert_eq!(reported.head_tree, Some(resolved.tree));
         assert_eq!(reported.clean, Some(true));
+    }
+
+    #[test]
+    fn resolved_revision_parser_requires_exact_nul_delimited_ids() {
+        let oid = b"0123456789012345678901234567890123456789";
+        let mut valid = Vec::new();
+        valid.extend_from_slice(oid);
+        valid.push(0);
+        valid.extend_from_slice(oid);
+        valid.push(0);
+        let resolved = super::parse_resolved_revision_output(&valid).expect("parse exact record");
+        assert_eq!(
+            resolved.commit.as_str(),
+            "0123456789012345678901234567890123456789"
+        );
+        assert_eq!(
+            resolved.tree.as_str(),
+            "0123456789012345678901234567890123456789"
+        );
+
+        valid.extend_from_slice(b"unexpected");
+        assert!(
+            super::parse_resolved_revision_output(&valid).is_err(),
+            "trailing output must fail closed"
+        );
+        assert!(
+            super::parse_resolved_revision_output(oid).is_err(),
+            "missing delimiters must fail closed"
+        );
     }
 
     /// Spawning a freshly written script can fail with ETXTBSY when a
@@ -3274,7 +3402,7 @@ mod tests {
         fs::write(fixture.path().join("tracked.txt"), "new tree\n").expect("change tree");
         git(fixture.path(), &["commit", "-am", "second", "--quiet"]);
         let wrapper = fixture.path().join("moving-git");
-        fs::write(&wrapper, "#!/bin/sh\nif [ \"$4\" = 'moving^{commit}' ]; then\n  git \"$@\" || exit\n  git update-ref refs/heads/moving HEAD\nelse\n  exec git \"$@\"\nfi\n")
+        fs::write(&wrapper, "#!/bin/sh\nif [ \"$1\" = show ]; then\n  git \"$@\" || exit\n  git update-ref refs/heads/moving HEAD\nelse\n  exec git \"$@\"\nfi\n")
             .expect("write Git wrapper");
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
 

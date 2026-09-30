@@ -3297,7 +3297,7 @@ fn add_worktree_inner(
     rollback_on_error: bool,
 ) -> Result<AddWorktreeResult, WorktreeError> {
     let git = Git::default();
-    let repository = git.inspect_repository(&request.repository)?;
+    let repository = git.inspect_repository_with_head_tree(&request.repository)?;
     let repository_root = git_command_root(&repository)
         .map(Path::to_path_buf)
         .ok_or_else(|| {
@@ -3323,9 +3323,9 @@ fn add_worktree_inner(
         WorktreeMode::NewBranch(_) | WorktreeMode::Detached => request.revision.clone(),
     };
     let resolved = if requested == OsStr::new("HEAD") {
-        match repository.head_commit.clone() {
-            Some(commit) => git.resolve_commit_tree(&repository_root, commit)?,
-            None => resolve_requested_revision(&git, &repository_root, &requested)?,
+        match (repository.head_commit.clone(), repository.head_tree.clone()) {
+            (Some(commit), Some(tree)) => ResolvedRevision { commit, tree },
+            _ => resolve_requested_revision(&git, &repository_root, &requested)?,
         }
     } else {
         resolve_requested_revision(&git, &repository_root, &requested)?
