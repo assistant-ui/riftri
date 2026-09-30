@@ -3295,6 +3295,7 @@ fn add_worktree_inner(
             ));
         }
     }
+    refuse_destination_in_git_worktree_admin(&repository.identity.common_git_dir, &destination)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
@@ -5587,6 +5588,28 @@ fn normalize_new_destination(
         )));
     }
     Ok(normalized)
+}
+
+/// Refuse a destination inside `<common-git-dir>/worktrees`, where Git keeps
+/// each linked worktree's metadata under the worktree's name. There a new
+/// worktree named `w` would be its own metadata directory: Git writes its
+/// files into the destination, the view cannot replace them, and the add was
+/// left pending with nothing `riftri repair` could roll back. Elsewhere in the
+/// Git directory, Riftri accepts what Git accepts.
+fn refuse_destination_in_git_worktree_admin(
+    common_git_dir: &Path,
+    destination: &Path,
+) -> Result<(), WorktreeError> {
+    let common = fs::canonicalize(common_git_dir).unwrap_or_else(|_| common_git_dir.to_path_buf());
+    let admin = common.join("worktrees");
+    if destination.starts_with(&admin) {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} would be inside Git's linked-worktree metadata directory {}; choose a destination outside it",
+            destination.display(),
+            admin.display()
+        )));
+    }
+    Ok(())
 }
 
 /// The state directory an add will create, spelled without `.` components or
@@ -17877,6 +17900,41 @@ mod tests {
         .expect_err("that state directory does not manage it");
         assert!(!error.to_string().contains("registered"), "{error}");
         assert!(worktree.is_dir());
+    }
+
+    /// A worktree named `w` inside `.git/worktrees` would be its own Git
+    /// metadata directory. The add failed there as `rollback-failed` and stayed
+    /// pending, and `riftri repair` could not roll it back. It is refused before
+    /// anything is recorded; elsewhere in `.git`, Riftri accepts what Git does.
+    #[test]
+    fn a_destination_inside_git_worktree_metadata_is_refused_up_front() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        add_with_state(&repository, &root.join("first"), &state).expect("add");
+        let inside_admin = repository.join(".git/worktrees/view");
+
+        let error = add_with_state(&repository, &inside_admin, &state)
+            .expect_err("Git's worktree metadata directory is refused");
+
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{error}"
+        );
+        assert!(!inside_admin.exists());
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&listed.stdout).contains("worktrees/view"));
+
+        // Elsewhere in `.git`, as with Git, the add works.
+        add_with_state(&repository, &repository.join(".git/elsewhere"), &state)
+            .expect("Git accepts this, so Riftri does too");
     }
 
     #[test]

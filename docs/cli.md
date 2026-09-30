@@ -465,6 +465,9 @@ it, the directory is left as it was. If the add fails after that, the worktree i
 created directories are left in place, which is also what Git does.
 `riftri worktree move` does not create a missing parent, matching
 `git worktree move`.
+A destination inside the repository's `.git/worktrees` directory, where Git
+keeps each linked worktree's metadata, is refused before anything is
+recorded: a worktree there would be its own metadata directory.
 A `PATH` that Git still registers as a worktree, for example one whose
 directory was deleted without `git worktree prune`, is refused before anything
 is recorded. Run `git worktree prune` first, after `git worktree unlock` if it
