@@ -49,8 +49,9 @@ pub(crate) const MARKER_V2_PREFIX: &[u8] = b"riftri-base-sha256-v2\n";
 /// forced-removal snapshot formats compose it.
 pub(crate) fn marker(root: &Path) -> io::Result<Vec<u8>> {
     let mut digest = Sha256::new();
+    let mut scratch = HashScratch::new();
     digest.update(b"riftri-base-content-v1\0");
-    hash_entry(root, &mut digest, MarkerVersion::V1)?;
+    hash_entry(root, &mut digest, MarkerVersion::V1, &mut scratch)?;
     Ok(format!("riftri-base-sha256-v1\n{}\n", hex_lower(digest.finalize())).into_bytes())
 }
 
@@ -62,8 +63,9 @@ pub(crate) fn marker(root: &Path) -> io::Result<Vec<u8>> {
 /// what the ReFS cloner propagates.
 pub(crate) fn marker_v2(root: &Path) -> io::Result<Vec<u8>> {
     let mut digest = Sha256::new();
+    let mut scratch = HashScratch::new();
     digest.update(b"riftri-base-content-v2\0");
-    hash_entry(root, &mut digest, MarkerVersion::V2)?;
+    hash_entry(root, &mut digest, MarkerVersion::V2, &mut scratch)?;
     Ok(format!("riftri-base-sha256-v2\n{}\n", hex_lower(digest.finalize())).into_bytes())
 }
 
@@ -71,6 +73,30 @@ pub(crate) fn marker_v2(root: &Path) -> io::Result<Vec<u8>> {
 enum MarkerVersion {
     V1,
     V2,
+}
+
+/// Operation-local buffers reused across every entry in one integrity walk.
+/// A representative base has thousands of files, so allocating the file and
+/// extended-attribute buffers per entry adds allocator work without adding any
+/// isolation: each read fully overwrites the relevant buffer before hashing.
+struct HashScratch {
+    file_bytes: Vec<u8>,
+    #[cfg(unix)]
+    xattr_names: Vec<u8>,
+    #[cfg(unix)]
+    xattr_value: Vec<u8>,
+}
+
+impl HashScratch {
+    fn new() -> Self {
+        Self {
+            file_bytes: vec![0; 64 * 1024],
+            #[cfg(unix)]
+            xattr_names: Vec::with_capacity(64 * 1024),
+            #[cfg(unix)]
+            xattr_value: Vec::with_capacity(256 * 1024),
+        }
+    }
 }
 
 /// sha2 0.11 digest outputs no longer implement `LowerHex`, so render the
@@ -110,12 +136,17 @@ fn hash_native(value: &OsStr, digest: &mut Sha256) {
 /// read-only attribute only — the ReFS cloner propagates no other permission
 /// metadata from a base into a view. Symlink entries are included: APFS
 /// clonefile copies their mode and extended attributes verbatim.
-fn hash_v2_metadata(path: &Path, metadata: &fs::Metadata, digest: &mut Sha256) -> io::Result<()> {
+fn hash_v2_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+    digest: &mut Sha256,
+    scratch: &mut HashScratch,
+) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         digest.update(metadata.mode().to_le_bytes());
-        hash_xattrs(path, digest)?;
+        hash_xattrs(path, digest, scratch)?;
     }
     #[cfg(target_os = "macos")]
     digest.update([u8::from(
@@ -124,6 +155,7 @@ fn hash_v2_metadata(path: &Path, metadata: &fs::Metadata, digest: &mut Sha256) -
     #[cfg(windows)]
     {
         let _ = path;
+        let _ = scratch;
         digest.update([u8::from(metadata.permissions().readonly())]);
     }
     Ok(())
@@ -133,13 +165,17 @@ fn hash_v2_metadata(path: &Path, metadata: &fs::Metadata, digest: &mut Sha256) -
 /// in sorted-name order. The byte layout matches the forced-removal metadata
 /// snapshot so both features attest the same facts the same way.
 #[cfg(unix)]
-fn hash_xattrs(path: &Path, digest: &mut Sha256) -> io::Result<()> {
+fn hash_xattrs(path: &Path, digest: &mut Sha256, scratch: &mut HashScratch) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
-    let mut name_buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
-    rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(&mut name_buffer))
-        .map_err(io::Error::from)?;
-    let mut names = name_buffer
+    scratch.xattr_names.clear();
+    rustix::fs::llistxattr(
+        path,
+        rustix::buffer::spare_capacity(&mut scratch.xattr_names),
+    )
+    .map_err(io::Error::from)?;
+    let mut names = scratch
+        .xattr_names
         .split(|byte| *byte == 0)
         .filter(|name| !name.is_empty())
         .map(<[u8]>::to_vec)
@@ -147,25 +183,30 @@ fn hash_xattrs(path: &Path, digest: &mut Sha256) -> io::Result<()> {
     names.sort_unstable();
     digest.update((names.len() as u64).to_le_bytes());
     for name in names {
-        let mut value_buffer: Vec<u8> = Vec::with_capacity(256 * 1024);
+        scratch.xattr_value.clear();
         rustix::fs::lgetxattr(
             path,
             OsStr::from_bytes(&name),
-            rustix::buffer::spare_capacity(&mut value_buffer),
+            rustix::buffer::spare_capacity(&mut scratch.xattr_value),
         )
         .map_err(io::Error::from)?;
         digest.update((name.len() as u64).to_le_bytes());
         digest.update(&name);
-        digest.update((value_buffer.len() as u64).to_le_bytes());
-        digest.update(value_buffer);
+        digest.update((scratch.xattr_value.len() as u64).to_le_bytes());
+        digest.update(&scratch.xattr_value);
     }
     Ok(())
 }
 
-fn hash_entry(path: &Path, digest: &mut Sha256, version: MarkerVersion) -> io::Result<()> {
+fn hash_entry(
+    path: &Path,
+    digest: &mut Sha256,
+    version: MarkerVersion,
+    scratch: &mut HashScratch,
+) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if version == MarkerVersion::V2 {
-        hash_v2_metadata(path, &metadata, digest)?;
+        hash_v2_metadata(path, &metadata, digest, scratch)?;
     }
     if metadata.file_type().is_symlink() {
         digest.update(b"link");
@@ -189,28 +230,32 @@ fn hash_entry(path: &Path, digest: &mut Sha256, version: MarkerVersion) -> io::R
         digest.update((entries.len() as u64).to_le_bytes());
         for entry in entries {
             hash_native(&entry.file_name(), digest);
-            hash_entry(&entry.path(), digest, version)?;
+            hash_entry(&entry.path(), digest, version, scratch)?;
         }
     } else if metadata.is_file() {
         digest.update(b"file");
         digest.update(metadata.len().to_le_bytes());
-        hash_file_bytes(path, metadata.len(), digest)?;
+        hash_file_bytes(path, metadata.len(), digest, &mut scratch.file_bytes)?;
     } else {
         return Err(io::Error::other("unsupported entry in immutable base"));
     }
     Ok(())
 }
 
-/// Hash a regular file's bytes. Kept out of line, with its buffer on the heap,
-/// because `hash_entry` recurses once per directory level: a 64 KiB stack
-/// buffer in every frame overflowed the stack a few hundred levels deep.
+/// Hash a regular file's bytes. The caller owns one heap buffer for the whole
+/// operation because `hash_entry` recurses once per directory level: a 64 KiB
+/// stack buffer in every frame overflowed the stack a few hundred levels deep.
 #[inline(never)]
-fn hash_file_bytes(path: &Path, expected_length: u64, digest: &mut Sha256) -> io::Result<()> {
+fn hash_file_bytes(
+    path: &Path,
+    expected_length: u64,
+    digest: &mut Sha256,
+    buffer: &mut [u8],
+) -> io::Result<()> {
     let mut file = open_regular(path)?;
-    let mut buffer = vec![0; 64 * 1024];
     let mut length = 0;
     loop {
-        let count = file.read(&mut buffer)?;
+        let count = file.read(buffer)?;
         if count == 0 {
             break;
         }
@@ -228,6 +273,48 @@ mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::time::Instant;
+
+    /// Repeatable microbenchmark for the many-file immutable-base integrity
+    /// path. Kept threshold-free because filesystem caches and host load move
+    /// absolute timings; before/after work should compare alternating release
+    /// builds on the same fixture and retain every sample.
+    #[test]
+    #[ignore = "manual release-mode immutable-base integrity benchmark"]
+    fn reports_many_file_integrity_latency() {
+        const DIRECTORIES: usize = 96;
+        const FILES_PER_DIRECTORY: usize = 64;
+        const PAYLOAD_BYTES: usize = 12 * 1024;
+        const ROUNDS: usize = 5;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let payload = vec![b'x'; PAYLOAD_BYTES];
+        for directory in 0..DIRECTORIES {
+            let directory = fixture.path().join(format!("directory-{directory:03}"));
+            fs::create_dir(&directory).expect("benchmark directory");
+            for file in 0..FILES_PER_DIRECTORY {
+                fs::write(directory.join(format!("file-{file:03}")), &payload)
+                    .expect("benchmark file");
+            }
+        }
+
+        let expected = marker_v2(fixture.path()).expect("warm integrity marker");
+        let mut samples = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            assert_eq!(marker_v2(fixture.path()).unwrap(), expected);
+            samples.push(started.elapsed().as_micros());
+        }
+        let mut sorted = samples.clone();
+        sorted.sort_unstable();
+        println!(
+            "RIFTRI_INTEGRITY_BENCHMARK files={} logical_bytes={} marker={} median_microseconds={} samples_microseconds={samples:?}",
+            DIRECTORIES * FILES_PER_DIRECTORY,
+            DIRECTORIES * FILES_PER_DIRECTORY * PAYLOAD_BYTES,
+            String::from_utf8_lossy(&expected).replace('\n', ":"),
+            sorted[ROUNDS / 2],
+        );
+    }
 
     /// Every recursion level used to reserve the 64 KiB read buffer on the
     /// stack, so a tree a few hundred directories deep, which Git checks out
