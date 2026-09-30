@@ -479,8 +479,8 @@ fn reports_sparse_cone_costs_on_a_monorepo_shape() {
 /// that hides the tail.
 ///
 /// Git invocation counts are already a hard contract elsewhere —
-/// `crates/riftri-cli/tests/git_invocation_budget.rs` caps a cold add at 24 and
-/// a cached add at 18 — so this measures time and leaves the counts to the test
+/// `crates/riftri-cli/tests/git_invocation_budget.rs` caps a cold add at 22 and
+/// a cached add at 16 — so this measures time and leaves the counts to the test
 /// that fails when they grow.
 #[test]
 #[ignore = "repeatable cached-creation baseline; run on a supported quiet volume"]
