@@ -71,6 +71,54 @@ test("release binaries ship the tui feature and are stripped", async () => {
   assert.match(releaseProfile[1], /^strip = true$/m);
 });
 
+test("an unsigned or lightweight release tag stops the release", async () => {
+  // Three releases shipped from unsigned tags while RELEASING.md asked for
+  // `git tag -s`: a convention no job enforces is not a guarantee.
+  const workflow = await readFile(
+    path.join(__dirname, "..", "..", ".github/workflows/release.yml"),
+    "utf8",
+  );
+  const verify = jobSource(workflow, "verify-tag");
+
+  assert.match(verify, /verification\.verified/, "the check must read GitHub's own verdict");
+  assert.match(verify, /\.object\.type/, "a lightweight tag has no signature to verify");
+  assert.ok(
+    /if:\s*github\.event_name == 'push'/.test(verify),
+    "a rehearsal has no tag, so the step must be push-only",
+  );
+
+  // The gate is worthless if the jobs that publish can reach main without it.
+  for (const dependent of ["build", "stage", "publish", "github-release"]) {
+    const source = jobSource(workflow, dependent);
+    assert.match(
+      source,
+      /needs: /,
+      `${dependent} must depend on something that leads back to verify-tag`,
+    );
+  }
+  assert.match(
+    jobSource(workflow, "build"),
+    /needs: verify-tag/,
+    "build must wait for the signature check, or an unsigned tag burns eight builds first",
+  );
+});
+
+test("the signature gate cannot be skipped into a green release", async () => {
+  // A skipped `needs` dependency skips its dependents, so the job must stay
+  // unconditional even though its only step is push-only.
+  const workflow = await readFile(
+    path.join(__dirname, "..", "..", ".github/workflows/release.yml"),
+    "utf8",
+  );
+  const verify = jobSource(workflow, "verify-tag");
+  const jobLevelCondition = /^ {4}if:/m.test(verify);
+  assert.equal(
+    jobLevelCondition,
+    false,
+    "a job-level if: on verify-tag would skip build, stage, and both publishers with it",
+  );
+});
+
 test("manual release rehearsals cannot receive publishing permissions", async () => {
   const workflow = await releaseWorkflow();
   const stage = jobSource(workflow, "stage");

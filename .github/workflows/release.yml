@@ -11,8 +11,40 @@ permissions:
   contents: read
 
 jobs:
+  verify-tag:
+    name: Verify release tag signature
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      # First job in the workflow, so an unsigned tag costs seconds instead of
+      # eight platform builds. A rehearsal has no tag to check, but the job
+      # must still succeed then: a skipped job skips everything that needs it.
+      - name: Require a verified signature on the release tag
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")
+          if [[ "$(jq -r '.object.type' <<<"${reference}")" != "tag" ]]; then
+            echo "::error::${TAG} is a lightweight tag. A release tag must be annotated and signed."
+            exit 1
+          fi
+          tag_sha=$(jq -r '.object.sha' <<<"${reference}")
+          object=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}")
+          reason=$(jq -r '.verification.reason' <<<"${object}")
+          if [[ "$(jq -r '.verification.verified' <<<"${object}")" != "true" ]]; then
+            echo "::error::${TAG} carries no verified signature (${reason}). Sign it with a key registered on the tagger's GitHub account, then delete and re-push the tag."
+            exit 1
+          fi
+          echo "${TAG} carries a verified signature (${reason})."
+
   build:
     name: Build ${{ matrix.package }}
+    needs: verify-tag
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:

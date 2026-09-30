@@ -185,6 +185,44 @@ copies identical and generator-faithful, and the scheduled Homebrew freshness
 workflow fails when either the version or a pinned checksum stops matching the
 latest published release.
 
+## Tag signing
+
+The release workflow refuses any tag GitHub does not report as carrying a
+verified signature, and refuses a lightweight tag outright. That check is the
+first job, so an unsigned tag fails in seconds instead of after eight platform
+builds. Three releases shipped from unsigned tags before the check existed;
+signing is a requirement now, not a preference.
+
+Releases are signed with SSH rather than GPG. Git's setting is still named
+`gpg.format`, but no GPG installation, agent, or keyring is involved.
+
+One-time setup, using a signing key kept separate from your authentication key:
+
+```console
+$ ssh-keygen -t ed25519 -C "you@example.com (riftri release signing)" \
+    -f ~/.ssh/id_ed25519_signing
+$ git config --global gpg.format ssh
+$ git config --global user.signingkey ~/.ssh/id_ed25519_signing.pub
+$ git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
+$ git -C <riftri checkout> config --local tag.gpgsign true
+```
+
+To verify signatures locally, add yourself to the allowed-signers file. The
+`namespaces="git"` field keeps the key usable for Git objects only:
+
+```console
+$ printf '%s namespaces="git" %s\n' you@example.com \
+    "$(cat ~/.ssh/id_ed25519_signing.pub)" >> ~/.config/git/allowed_signers
+$ git verify-tag v0.1.0
+```
+
+Finally, register the **public** key on GitHub under *Settings, SSH and GPG
+keys, New SSH key*, with key type **Signing Key** — not an authentication key.
+GitHub reports `verification.verified` as false until that registration exists,
+and the workflow's check reads exactly that field, so a tag signed with an
+unregistered key fails the release. The email in the tagger identity must also
+be one GitHub knows for the account.
+
 ## Cutting a release
 
 1. Update the version in the root `Cargo.toml`, root `package.json`, every
@@ -220,7 +258,9 @@ latest published release.
 4. Open and squash-merge a conventional release pull request such as
    `chore: release v0.1.0`. The pull request title becomes the release commit
    subject on `main`.
-5. From the updated `main`, create and push the matching signed tag:
+5. From the updated `main`, create and push the matching signed annotated tag.
+   `git tag -s` needs the signing setup above; without it the tag is rejected
+   by the workflow's first job rather than published unsigned:
 
    ```console
    $ git switch main
@@ -228,6 +268,10 @@ latest published release.
    $ git tag -s v0.1.0 -m "Riftri 0.1.0"
    $ git push origin v0.1.0
    ```
+
+   A tag that fails the signature check is fixed by deleting it locally and on
+   the remote, then re-tagging the same commit with a registered key. Nothing
+   is published before that check passes, so no partial release needs undoing.
 
 The tag version must exactly match every manifest. The release workflow refuses
 version mismatches or missing platform artifacts instead of publishing a
