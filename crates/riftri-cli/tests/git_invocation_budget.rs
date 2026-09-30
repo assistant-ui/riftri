@@ -159,3 +159,96 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         .is_empty()
     );
 }
+
+fn run_with_counted_git(
+    repository: &Path,
+    arguments: &[&str],
+    shim_directory: &Path,
+    real_git: &Path,
+    log: &Path,
+) -> Vec<String> {
+    let mut shim_path = shim_directory.as_os_str().to_os_string();
+    shim_path.push(":");
+    shim_path.push(std::env::var_os("PATH").expect("PATH is set"));
+    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(arguments)
+        .current_dir(repository)
+        .env("PATH", shim_path)
+        .env("RIFTRI_TEST_REAL_GIT", real_git)
+        .env("RIFTRI_TEST_GIT_LOG", log)
+        .output()
+        .expect("run Riftri CLI");
+    assert!(
+        output.status.success(),
+        "riftri {arguments:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `status`, `worktree list`, and `repair` listed Git's worktrees once per
+/// managed worktree, and each listing names every worktree, so they slowed
+/// quadratically: about five seconds at 120 worktrees. One listing per
+/// repository answers every healthy worktree.
+#[test]
+fn inspection_lists_git_worktrees_a_constant_number_of_times() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let shim_directory = fixture.path().join("shim");
+    fs::create_dir(&repository).expect("create repository");
+    fs::create_dir(&shim_directory).expect("create shim directory");
+    for arguments in [
+        &["init", "--quiet"][..],
+        &["config", "user.name", "Riftri Tests"][..],
+        &["config", "user.email", "riftri@example.invalid"][..],
+        &["config", "core.autocrlf", "false"][..],
+    ] {
+        git(&repository, arguments);
+    }
+    fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
+    git(&repository, &["add", "--", "tracked.txt"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+    for index in 0..6 {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "add", "--detach"])
+            .arg(fixture.path().join(format!("view-{index}")))
+            .args(["HEAD", "--no-progress", "--state-dir"])
+            .arg(&state)
+            .current_dir(&repository)
+            .output()
+            .expect("add a managed worktree");
+        assert!(output.status.success());
+    }
+    let real_git = real_git();
+    install_counting_shim(&shim_directory);
+    let state_argument = state.to_str().expect("UTF-8 fixture path");
+
+    for (name, arguments) in [
+        (
+            "status",
+            &["status", "--json", "--state-dir", state_argument][..],
+        ),
+        (
+            "list",
+            &["worktree", "list", "--json", "--state-dir", state_argument][..],
+        ),
+        ("repair", &["repair", "--state-dir", state_argument][..]),
+    ] {
+        let log = fixture.path().join(format!("{name}-invocations"));
+        let calls = run_with_counted_git(&repository, arguments, &shim_directory, &real_git, &log);
+        let listings = calls
+            .iter()
+            .filter(|call| call.contains("worktree list"))
+            .count();
+        assert!(
+            listings <= 2,
+            "{name} listed Git worktrees {listings} times for 6 worktrees:\n{}",
+            calls.join("\n")
+        );
+    }
+}

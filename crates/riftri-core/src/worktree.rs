@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::{Component, Path, PathBuf};
@@ -309,6 +309,12 @@ pub struct GarbageCollectionReport {
     pub resumed_collections: usize,
     pub removed_logical_bytes: u64,
     pub removed_allocated_bytes: u64,
+    /// Finished journals an `--apply` run would delete: the history of
+    /// worktrees that are gone for good, and finished prune and collection
+    /// records. Planned only; see `retired_journals`.
+    pub retirable_journals: usize,
+    /// Finished journals this run deleted.
+    pub retired_journals: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -422,6 +428,12 @@ pub enum WorktreeError {
 
     #[error("invalid worktree request: {0}")]
     InvalidRequest(String),
+    /// The requested start point is `HEAD`, and `HEAD` names no commit: the
+    /// repository or its current branch has no commits yet. A policy refusal
+    /// like `InvalidRequest`; it is typed separately so the Git shim can hand
+    /// such an add to Git, which may create an orphan worktree.
+    #[error("invalid worktree request: {0}")]
+    UnbornHead(String),
 
     /// A durable journal records an interrupted lifecycle operation, so this
     /// request is refused until `riftri repair` runs against
@@ -1379,6 +1391,11 @@ pub fn storage_accounting(
             &loaded_add_journals,
         ) {
             Ok(()) => removal_journals.push(journal),
+            // A leftover of an interrupted retirement: finished, and named by
+            // its add journal's `.retired` marker.
+            Err(_) if retired_removal_leftover(&state_directory, &journal, &loaded_add_journals) => {
+                removal_journals.push(journal)
+            }
             Err(error) => invalid_removal_journals.push(StateDiagnosticIssue {
                 path: journal.journal_path.clone(),
                 reason: format!(
@@ -1399,6 +1416,9 @@ pub fn storage_accounting(
     // here; the per-journal validation below already surfaces them.
     let mut unresolvable_worktree_issues = Vec::new();
     let mut inspected_repositories = HashSet::new();
+    // One listing per repository serves every journal below: listing again
+    // per journal made status quadratic in the number of worktrees.
+    let mut inventories = HashMap::new();
     for journal in &loaded_add_journals {
         if !inspected_repositories.insert(journal.repository.clone()) {
             continue;
@@ -1406,6 +1426,7 @@ pub fn storage_accounting(
         let Ok(registered) = git.list_worktrees(&journal.repository) else {
             continue;
         };
+        inventories.insert(journal.repository.clone(), registered.clone());
         for worktree in registered {
             if worktree.head_unresolvable {
                 unresolvable_worktree_issues.push(StateDiagnosticIssue {
@@ -1425,6 +1446,7 @@ pub fn storage_accounting(
     for journal in loaded_add_journals {
         match validate_status_add_journal(
             &git,
+            &inventories,
             &state_directory,
             &journal,
             completed.contains(&journal.operation_id),
@@ -1667,6 +1689,7 @@ enum StatusAddJournal {
 
 fn validate_status_add_journal(
     git: &Git,
+    inventories: &HashMap<PathBuf, Vec<riftri_git::WorktreeInfo>>,
     state_directory: &Path,
     journal: &DecodedJournal,
     removal_complete: bool,
@@ -1682,13 +1705,22 @@ fn validate_status_add_journal(
             journal.repository.display()
         )));
     }
-    let inventory = git.list_worktrees(&journal.repository)?;
+    // A repository whose listing failed above is listed again here, so its
+    // error is reported against this journal exactly as before.
+    let listed;
+    let inventory = match inventories.get(&journal.repository) {
+        Some(inventory) => inventory,
+        None => {
+            listed = git.list_worktrees(&journal.repository)?;
+            &listed
+        }
+    };
     let Some(registered) = inventory
         .iter()
         .find(|worktree| paths_match(&worktree.path, &journal.destination))
         .cloned()
     else {
-        return unregistered_destination_advice(&inventory, claimed, journal)
+        return unregistered_destination_advice(inventory, claimed, journal)
             .map(StatusAddJournal::Unregistered);
     };
     if registered.head_unresolvable {
@@ -1777,6 +1809,13 @@ fn garbage_collect_inner(
         });
     };
 
+    // History finished before this run is retired first, so the journals
+    // this run resumes or writes stay visible until the next run.
+    let retired_journals = if apply {
+        retire_finished_journals(&state_directory, true)?
+    } else {
+        0
+    };
     let resumed_collections = if apply {
         recover_collection_journals(&state_directory)?
     } else {
@@ -1794,6 +1833,7 @@ fn garbage_collect_inner(
         ..GarbageCollectionReport::default()
     };
     if !apply {
+        report.retirable_journals = retire_finished_journals(&state_directory, false)?;
         return Ok(report);
     }
 
@@ -1832,7 +1872,181 @@ fn garbage_collect_inner(
             report.skipped_in_use.push(candidate.base_path);
         }
     }
+    report.retired_journals = retired_journals;
     Ok(report)
+}
+
+/// Beside an add journal: its retirement has started. See
+/// `retire_finished_journals`.
+fn retiring_add_marker(add_journal: &Path) -> PathBuf {
+    add_journal.with_extension("retired")
+}
+
+/// Whether the add operation `add_operation_id` is being retired: a finished
+/// journal that names it is then a leftover of that retirement, not a claim.
+fn add_operation_is_retiring(state_directory: &Path, add_operation_id: &str) -> bool {
+    retiring_add_marker(&JournalStore::open(state_directory).path_for(add_operation_id)).is_file()
+}
+
+/// Count, or with `apply` delete, finished journal history (#536).
+///
+/// Completed journals were never deleted, and every lifecycle command reads
+/// them all, so a busy repository slowed down for good. A lineage is finished
+/// once its worktree is gone for good: the add rolled back, or a removal
+/// completed. Then its add journal, its finished moves and compactions, and
+/// its completed removals are deleted, along with completed prune and
+/// finished collection journals. Nothing is retired while any journal cannot
+/// be read, since an unreadable journal may still hold a claim.
+///
+/// The order keeps every interrupted state explained. Finished moves and
+/// compactions go first, leaving a valid add-plus-removal history. The add
+/// journal is then renamed to `<id>.retired` in one atomic step, which marks
+/// the completed removals that still name it as leftovers; they go next, and
+/// the marker and lock last. A later run finishes any retirement it finds.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize, WorktreeError> {
+    let adds = JournalStore::open(state_directory).load_all_for_status()?;
+    let removals = RemovalJournalStore::open(state_directory).load_all_for_status()?;
+    let moves = MoveJournalStore::open(state_directory).load_all_for_status()?;
+    let compactions = CompactJournalStore::open(state_directory).load_all_for_status()?;
+    let prunes = PruneJournalStore::open(state_directory).load_all_for_status()?;
+    let collections = CollectionJournalStore::open(state_directory).load_all_for_status()?;
+    if !(adds.issues.is_empty()
+        && removals.issues.is_empty()
+        && moves.issues.is_empty()
+        && compactions.issues.is_empty()
+        && prunes.issues.is_empty()
+        && collections.issues.is_empty())
+    {
+        return Ok(0);
+    }
+    let mut retired = 0;
+
+    // Finish retirements an earlier run started.
+    let operations = state_directory.join("operations");
+    if is_real_directory_if_present(&operations)? {
+        for marker in child_paths(&operations, "read Riftri journal directory")? {
+            let Some(operation_id) = marker
+                .extension()
+                .filter(|extension| *extension == OsStr::new("retired"))
+                .and(marker.file_stem())
+                .and_then(OsStr::to_str)
+                .filter(|stem| journal_identifier_like(stem))
+            else {
+                continue;
+            };
+            let leftovers = removals
+                .journals
+                .iter()
+                .filter(|removal| {
+                    removal.source_add_operation_id == operation_id
+                        && removal.phase == RemoveWorktreePhase::Complete
+                })
+                .map(|removal| removal.journal_path.clone())
+                .collect::<Vec<_>>();
+            retired += leftovers.len() + 1;
+            if apply {
+                for leftover in &leftovers {
+                    remove_file_if_present(leftover)?;
+                }
+                remove_file_if_present(&marker)?;
+                remove_file_if_present(&marker.with_extension("lock"))?;
+                sync_parent(&marker)?;
+            }
+        }
+    }
+
+    for add in &adds.journals {
+        let own_removals = removals
+            .journals
+            .iter()
+            .filter(|removal| removal.source_add_operation_id == add.operation_id)
+            .collect::<Vec<_>>();
+        let own_moves = moves
+            .journals
+            .iter()
+            .filter(|journal| journal.source_add_operation_id == add.operation_id)
+            .collect::<Vec<_>>();
+        let own_compactions = compactions
+            .journals
+            .iter()
+            .filter(|journal| journal.source_add_operation_id == add.operation_id)
+            .collect::<Vec<_>>();
+        let removal_completed = own_removals
+            .iter()
+            .any(|removal| removal.phase == RemoveWorktreePhase::Complete);
+        let gone_for_good = add.phase == AddWorktreePhase::RolledBack
+            || (add.phase == AddWorktreePhase::Active && removal_completed);
+        let history_finished = own_removals
+            .iter()
+            .all(|removal| removal.phase == RemoveWorktreePhase::Complete)
+            && own_moves.iter().all(|journal| journal.phase.is_finished())
+            && own_compactions.iter().all(|journal| {
+                matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+            });
+        if !gone_for_good || !history_finished {
+            continue;
+        }
+        let count = 1 + own_removals.len() + own_moves.len() + own_compactions.len();
+        if !apply {
+            retired += count;
+            continue;
+        }
+        // Another process may still be finishing this operation.
+        let Some(_lock) = try_lock_add_operation(&add.journal_path)? else {
+            continue;
+        };
+        for path in own_moves
+            .iter()
+            .map(|journal| &journal.journal_path)
+            .chain(own_compactions.iter().map(|journal| &journal.journal_path))
+        {
+            remove_file_if_present(path)?;
+        }
+        let marker = retiring_add_marker(&add.journal_path);
+        if own_removals.is_empty() {
+            remove_file_if_present(&add.journal_path)?;
+        } else {
+            fs::rename(&add.journal_path, &marker)
+                .map_err(|source| io("mark add journal for retirement", &marker, source))?;
+            sync_parent(&marker)?;
+            for removal in &own_removals {
+                remove_file_if_present(&removal.journal_path)?;
+            }
+            remove_file_if_present(&marker)?;
+        }
+        remove_file_if_present(&add.journal_path.with_extension("lock"))?;
+        sync_parent(&add.journal_path)?;
+        retired += count;
+    }
+
+    for path in prunes
+        .journals
+        .iter()
+        .filter(|journal| journal.phase == PruneWorktreesPhase::Complete)
+        .map(|journal| &journal.journal_path)
+        .chain(
+            collections
+                .journals
+                .iter()
+                .filter(|journal| {
+                    matches!(
+                        journal.phase,
+                        GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
+                    )
+                })
+                .map(|journal| &journal.journal_path),
+        )
+    {
+        retired += 1;
+        if apply {
+            remove_file_if_present(path)?;
+        }
+    }
+    Ok(retired)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -2415,17 +2629,24 @@ fn remove_worktree_with_mode(
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
+    let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let destination = existing_managed_destination(&request.destination, &requested_state)?;
-    let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
+    let state_directory = existing_state_directory_for_worktree(
+        &request.repository,
+        &requested_state,
+        state_given,
+        &destination,
+    )?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            destination.display(),
-            state_directory.display()
-        ))
+        not_managed_in_state_directory(
+            &request.repository,
+            &destination,
+            &state_directory,
+            state_given,
+        )
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     // Claim the worktree before reading any state that decides what to mutate,
@@ -2562,19 +2783,21 @@ fn move_worktree_inner(
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
+    let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let source = existing_managed_destination(&request.source, &requested_state)?;
     let destination =
         normalize_new_destination(&request.destination, DestinationRules::WorktreeMove)?;
-    let state_directory = existing_state_directory_for_worktree(&requested_state, &source)?;
+    let state_directory = existing_state_directory_for_worktree(
+        &request.repository,
+        &requested_state,
+        state_given,
+        &source,
+    )?;
     let managed = find_managed_add_journal(&state_directory, &source)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            source.display(),
-            state_directory.display()
-        ))
+        not_managed_in_state_directory(&request.repository, &source, &state_directory, state_given)
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     // Claim the worktree before reading any state that decides what to mutate,
@@ -2685,17 +2908,24 @@ fn compact_worktree_inner(
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
     let repository_root = stable_repository_root(&git, &repository_root)?;
+    let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
     let destination = existing_managed_destination(&request.destination, &requested_state)?;
-    let state_directory = existing_state_directory_for_worktree(&requested_state, &destination)?;
+    let state_directory = existing_state_directory_for_worktree(
+        &request.repository,
+        &requested_state,
+        state_given,
+        &destination,
+    )?;
     let managed = find_managed_add_journal(&state_directory, &destination)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            destination.display(),
-            state_directory.display()
-        ))
+        not_managed_in_state_directory(
+            &request.repository,
+            &destination,
+            &state_directory,
+            state_given,
+        )
     })?;
     validate_recovery_paths(&state_directory, &managed)?;
     if managed.backend == BackendKind::OverlayFs {
@@ -3065,6 +3295,7 @@ fn add_worktree_inner(
             ));
         }
     }
+    refuse_destination_in_git_worktree_admin(&repository.identity.common_git_dir, &destination)?;
     let requested_state = request
         .state_dir
         .unwrap_or_else(|| repository.identity.common_git_dir.join("riftri"));
@@ -4022,7 +4253,7 @@ fn validate_resolved_compatibility(
 /// list on purpose, leaving the repository compatibility blocker to refuse the
 /// add before any state exists rather than quietly materializing a full tree.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn resolve_sparse_profile(
+pub(crate) fn resolve_sparse_profile(
     git: &Git,
     repository: &Path,
     requested: &[String],
@@ -4317,6 +4548,23 @@ pub(crate) fn inspect_repository_compatibility(
     revision: &OsStr,
 ) -> Result<RepositoryCompatibilityReport, WorktreeError> {
     validate_lifecycle_git_environment()?;
+    // Judge the add that would actually run: with no explicit sparse request
+    // it inherits a cone-mode source's cone, as Git does, and then the
+    // source's sparse settings block nothing.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        let resolved = resolve_requested_revision(git, repository, revision)?;
+        let sparse_directories = resolve_sparse_profile(git, repository, &[])?;
+        Ok(analyze_resolved_repository_compatibility(
+            git,
+            repository,
+            common_git_dir,
+            &resolved,
+            &sparse_directories,
+        )?
+        .report)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
 }
 
@@ -4330,16 +4578,15 @@ fn resolve_requested_revision(
     if let Some(resolved) = git.resolve_requested_revision(repository, revision)? {
         return Ok(resolved);
     }
-    Err(WorktreeError::InvalidRequest(
-        if revision == OsStr::new("HEAD") {
-            unresolved_head_message(git, repository)
-        } else {
-            format!(
-                "revision does not name a commit in this repository: {}",
-                revision.to_string_lossy()
-            )
-        },
-    ))
+    if revision == OsStr::new("HEAD") {
+        return Err(WorktreeError::UnbornHead(unresolved_head_message(
+            git, repository,
+        )));
+    }
+    Err(WorktreeError::InvalidRequest(format!(
+        "revision does not name a commit in this repository: {}",
+        revision.to_string_lossy()
+    )))
 }
 
 /// Explain an unresolvable `HEAD`: an orphaned branch in a repository that
@@ -4357,6 +4604,7 @@ fn unresolved_head_message(git: &Git, repository: &Path) -> String {
     }
 }
 
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn analyze_repository_compatibility(
     git: &Git,
     repository: &Path,
@@ -5283,6 +5531,12 @@ fn is_empty_real_directory(path: &Path) -> Result<bool, WorktreeError> {
     Ok(entries.next().is_none())
 }
 
+/// The add's own checks on a destination that may already exist: it must be
+/// absent or an empty real directory. `doctor` reports what the add refuses.
+pub(crate) fn validate_new_add_destination(destination: &Path) -> Result<(), WorktreeError> {
+    normalize_new_destination(destination, DestinationRules::WorktreeAdd).map(|_| ())
+}
+
 fn normalize_new_destination(
     destination: &Path,
     rules: DestinationRules,
@@ -5334,6 +5588,28 @@ fn normalize_new_destination(
         )));
     }
     Ok(normalized)
+}
+
+/// Refuse a destination inside `<common-git-dir>/worktrees`, where Git keeps
+/// each linked worktree's metadata under the worktree's name. There a new
+/// worktree named `w` would be its own metadata directory: Git writes its
+/// files into the destination, the view cannot replace them, and the add was
+/// left pending with nothing `riftri repair` could roll back. Elsewhere in the
+/// Git directory, Riftri accepts what Git accepts.
+fn refuse_destination_in_git_worktree_admin(
+    common_git_dir: &Path,
+    destination: &Path,
+) -> Result<(), WorktreeError> {
+    let common = fs::canonicalize(common_git_dir).unwrap_or_else(|_| common_git_dir.to_path_buf());
+    let admin = common.join("worktrees");
+    if destination.starts_with(&admin) {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} would be inside Git's linked-worktree metadata directory {}; choose a destination outside it",
+            destination.display(),
+            admin.display()
+        )));
+    }
+    Ok(())
 }
 
 /// The state directory an add will create, spelled without `.` components or
@@ -5520,17 +5796,45 @@ fn resolve_real_state_directory(path: &Path) -> Result<PathBuf, WorktreeError> {
 /// read still fails as the I/O error it is.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn existing_state_directory_for_worktree(
+    repository: &Path,
     requested_state: &Path,
+    state_given: bool,
     target: &Path,
 ) -> Result<PathBuf, WorktreeError> {
     let requested_state = absolute_path(requested_state)?;
     resolve_real_state_directory_if_present(&requested_state)?.ok_or_else(|| {
-        WorktreeError::InvalidRequest(format!(
-            "{} is not an active Riftri-managed worktree in {}",
-            target.display(),
-            requested_state.display()
-        ))
+        not_managed_in_state_directory(repository, target, &requested_state, state_given)
     })
+}
+
+/// Refuse a worktree the selected state directory does not manage. Without
+/// `--state-dir`, only the default location is read (D026), but the worktree
+/// may be managed in a state directory the repository registers; then say
+/// which, instead of implying the worktree is not managed at all.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn not_managed_in_state_directory(
+    repository: &Path,
+    target: &Path,
+    state_directory: &Path,
+    state_given: bool,
+) -> WorktreeError {
+    let mut message = format!(
+        "{} is not an active Riftri-managed worktree in {}",
+        target.display(),
+        state_directory.display()
+    );
+    if !state_given
+        && let Ok(Some(owner)) = managed_worktree_state_directory(repository, target)
+        && !paths_match(&owner, state_directory)
+    {
+        let flag =
+            crate::shell::shell_quoted_path(&owner).unwrap_or_else(|| owner.display().to_string());
+        message.push_str(&format!(
+            "; it is managed in the registered state directory {}, so pass --state-dir {flag}",
+            owner.display()
+        ));
+    }
+    WorktreeError::InvalidRequest(message)
 }
 
 fn resolve_real_state_directory_if_present(path: &Path) -> Result<Option<PathBuf>, WorktreeError> {
@@ -6429,6 +6733,17 @@ fn journal_identifier_like(name: &str) -> bool {
 /// same inode), so they outlive their journal and must not be reported as
 /// foreign files.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+/// An add journal renamed while `gc --apply` retires its finished history;
+/// see `retire_finished_journals`.
+fn is_add_retirement_marker(path: &Path) -> bool {
+    path.extension() == Some(OsStr::new("retired"))
+        && path.parent().and_then(Path::file_name) == Some(OsStr::new("operations"))
+        && path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .is_some_and(journal_identifier_like)
+}
+
 fn is_operation_coordination_lock(path: &Path) -> bool {
     path.extension() == Some(OsStr::new("lock"))
         && path
@@ -6608,7 +6923,7 @@ fn diagnose_journal_directory(
                     "an interrupted Riftri journal write left this temporary file; it holds no operation and Riftri preserves it"
                 };
                 add_state_issue(issues, path, advice);
-            } else if !is_operation_coordination_lock(&path) {
+            } else if !is_operation_coordination_lock(&path) && !is_add_retirement_marker(&path) {
                 add_state_issue(
                     issues,
                     path,
@@ -7500,6 +7815,13 @@ fn reconcile_active_add_journals(
         .filter(|removal| removal.phase != RemoveWorktreePhase::Complete)
         .map(|removal| removal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
+    // One listing per repository, taken on first use, confirms every journal
+    // whose worktree Git still registers: those need nothing. Anything else is
+    // decided on a fresh listing under that journal's lock, as before. A
+    // stale snapshot cannot make a moved worktree look registered (the
+    // reloaded journal names its new path), and one removed since is merely
+    // left for the next pass. Listing per journal made repair quadratic.
+    let mut inventories = HashMap::new();
     let mut retired = 0;
     let mut relocations = Vec::new();
     let mut errors = Vec::new();
@@ -7534,6 +7856,22 @@ fn reconcile_active_add_journals(
             }
         };
         if journal.phase != AddWorktreePhase::Active {
+            continue;
+        }
+        if !inventories.contains_key(&journal.repository)
+            && let Ok(listed) = git.list_worktrees(&journal.repository)
+        {
+            inventories.insert(journal.repository.clone(), listed);
+        }
+        if inventories
+            .get(&journal.repository)
+            .is_some_and(|inventory| {
+                matches!(
+                    classify_active_destination(inventory, &claimed, &journal),
+                    Ok(ActiveDestinationState::Registered)
+                )
+            })
+        {
             continue;
         }
         let registered = match git.list_worktrees(&journal.repository) {
@@ -7799,6 +8137,10 @@ pub fn recover_incomplete_operations(
     for journal in loaded_removal_journals {
         match validate_removal_against_add_journals(&state_directory, &journal, &journals) {
             Ok(()) => removal_journals.push(journal),
+            // Finished, and named by a retirement marker: nothing to recover.
+            Err(_) if retired_removal_leftover(&state_directory, &journal, &journals) => {
+                removal_journals.push(journal)
+            }
             Err(error) => invalid_removal_journals.push((journal.operation_id.clone(), error)),
         }
     }
@@ -8176,12 +8518,30 @@ fn validated_completed_removal_ids(
 ) -> Result<HashSet<String>, WorktreeError> {
     let mut completed = HashSet::new();
     for journal in removal_journals {
+        // A retirement leftover names no live add operation and holds no claim.
+        if retired_removal_leftover(state_directory, journal, add_journals) {
+            continue;
+        }
         validate_removal_against_add_journals(state_directory, journal, add_journals)?;
         if journal.phase == RemoveWorktreePhase::Complete {
             completed.insert(journal.source_add_operation_id.clone());
         }
     }
     Ok(completed)
+}
+
+/// A completed removal whose add journal has been renamed to its retirement
+/// marker: a leftover `gc --apply` deletes, holding no claim.
+fn retired_removal_leftover(
+    state_directory: &Path,
+    journal: &DecodedRemovalJournal,
+    add_journals: &[DecodedJournal],
+) -> bool {
+    journal.phase == RemoveWorktreePhase::Complete
+        && !add_journals
+            .iter()
+            .any(|candidate| candidate.operation_id == journal.source_add_operation_id)
+        && add_operation_is_retiring(state_directory, &journal.source_add_operation_id)
 }
 
 fn validate_removal_against_add_journals(
@@ -17355,6 +17715,226 @@ mod tests {
         })
         .expect("forced removal without a repair first");
         assert!(!view.exists());
+    }
+
+    fn journal_files(state: &Path, directory: &str) -> Vec<String> {
+        let mut names = fs::read_dir(state.join(directory))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Finished journal history was never deleted, and every command reads all
+    /// of it: after 1,000 add/remove cycles, status and add ran several times
+    /// slower. `gc --apply` retires a lineage once its worktree is gone for
+    /// good, and never touches a live one.
+    #[test]
+    fn gc_retires_finished_journal_history_and_keeps_live_history() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        add_with_state(&repository, &root.join("first"), &state).expect("add");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: root.join("first"),
+                destination: root.join("moved"),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move");
+        super::compact_worktree(CompactWorktreeRequest {
+            repository: repository.clone(),
+            destination: root.join("moved"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("compact");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: root.join("moved"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove");
+        let live = add_with_state(&repository, &root.join("live"), &state).expect("live add");
+        let live_journal = live
+            .journal_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let plan = super::garbage_collect(&state, false).expect("plan");
+        assert_eq!(plan.retirable_journals, 4, "{plan:?}");
+        assert_eq!(plan.retired_journals, 0, "{plan:?}");
+        assert_eq!(
+            journal_files(&state, "removals").len(),
+            1,
+            "a plan deletes nothing"
+        );
+
+        let applied = super::garbage_collect(&state, true).expect("apply");
+        assert_eq!(applied.retired_journals, 4, "{applied:?}");
+        for directory in ["removals", "moves", "compactions"] {
+            assert!(journal_files(&state, directory).is_empty(), "{directory}");
+        }
+        let operations = journal_files(&state, "operations");
+        assert!(operations.contains(&live_journal), "{operations:?}");
+        assert_eq!(
+            operations.len(),
+            2,
+            "the live journal and its lock: {operations:?}"
+        );
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+        assert!(
+            recover_incomplete_operations(&state)
+                .expect("repair")
+                .errors
+                .is_empty()
+        );
+
+        // The live worktree's own history is retired once it is gone too.
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: root.join("live"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove the live worktree");
+        let applied = super::garbage_collect(&state, true).expect("second apply");
+        assert_eq!(applied.collected.len(), 1, "{applied:?}");
+        assert!(journal_files(&state, "operations").is_empty());
+        assert!(journal_files(&state, "removals").is_empty());
+        // This run's own collection journal stays visible until the next run.
+        assert_eq!(journal_files(&state, "collections").len(), 1);
+        let third = super::garbage_collect(&state, true).expect("third apply");
+        assert_eq!(third.retired_journals, 1, "{third:?}");
+        assert!(journal_files(&state, "collections").is_empty());
+        assert!(
+            storage_accounting(&state)
+                .unwrap()
+                .diagnostic_issues
+                .is_empty()
+        );
+    }
+
+    /// A retirement interrupted after its add journal became `<id>.retired`
+    /// leaves a finished removal without its add journal. That state is
+    /// explained, not an issue, and the next `gc --apply` finishes it. Without
+    /// the marker, the same removal still reports its missing add journal.
+    #[test]
+    fn an_interrupted_journal_retirement_is_explained_and_finished_later() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let added = add_with_state(&repository, &root.join("view"), &state).expect("add");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: root.join("view"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove");
+        fs::rename(
+            &added.journal_path,
+            added.journal_path.with_extension("retired"),
+        )
+        .expect("simulate the interrupted rename");
+
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        let repair = recover_incomplete_operations(&state).expect("repair");
+        assert!(repair.errors.is_empty(), "{repair:?}");
+        let applied = super::garbage_collect(&state, true).expect("apply");
+        assert!(applied.retired_journals >= 1, "{applied:?}");
+        assert!(journal_files(&state, "operations").is_empty());
+        assert!(journal_files(&state, "removals").is_empty());
+
+        // A missing add journal with no retirement marker is still reported.
+        let second = add_with_state(&repository, &root.join("other"), &state).expect("add");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: root.join("other"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove");
+        fs::remove_file(&second.journal_path).expect("lose the add journal");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.diagnostic_issues.len(), 1, "{accounting:?}");
+    }
+
+    /// Without `--state-dir`, lifecycle commands read only the default state
+    /// directory (D026). A worktree managed in a registered custom state
+    /// directory was then reported as "not an active Riftri-managed
+    /// worktree", although the repository records exactly where it is managed.
+    #[test]
+    fn a_refusal_names_the_registered_state_directory_that_manages_the_worktree() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let custom = root.join("custom-state");
+        let worktree = root.join("view");
+        add_with_state(&repository, &worktree, &custom).expect("add with a custom state");
+        let custom = fs::canonicalize(&custom).unwrap();
+
+        let error = super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: worktree.clone(),
+            state_dir: None,
+        })
+        .expect_err("the default state directory does not manage it");
+        let message = error.to_string();
+        assert!(message.contains(custom.to_str().unwrap()), "{message}");
+        assert!(message.contains("--state-dir"), "{message}");
+
+        // An explicit, different state directory keeps the plain refusal.
+        let error = super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: worktree.clone(),
+            state_dir: Some(root.join("other-state")),
+        })
+        .expect_err("that state directory does not manage it");
+        assert!(!error.to_string().contains("registered"), "{error}");
+        assert!(worktree.is_dir());
+    }
+
+    /// A worktree named `w` inside `.git/worktrees` would be its own Git
+    /// metadata directory. The add failed there as `rollback-failed` and stayed
+    /// pending, and `riftri repair` could not roll it back. It is refused before
+    /// anything is recorded; elsewhere in `.git`, Riftri accepts what Git does.
+    #[test]
+    fn a_destination_inside_git_worktree_metadata_is_refused_up_front() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        add_with_state(&repository, &root.join("first"), &state).expect("add");
+        let inside_admin = repository.join(".git/worktrees/view");
+
+        let error = add_with_state(&repository, &inside_admin, &state)
+            .expect_err("Git's worktree metadata directory is refused");
+
+        assert!(
+            matches!(error, super::WorktreeError::InvalidRequest(_)),
+            "{error}"
+        );
+        assert!(!inside_admin.exists());
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&listed.stdout).contains("worktrees/view"));
+
+        // Elsewhere in `.git`, as with Git, the add works.
+        add_with_state(&repository, &repository.join(".git/elsewhere"), &state)
+            .expect("Git accepts this, so Riftri does too");
     }
 
     #[test]

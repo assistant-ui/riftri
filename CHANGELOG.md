@@ -9,6 +9,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Added
 
+- `riftri gc --apply` retires finished journal history: the journals of
+  worktrees that are gone for good, and finished prune and collection
+  journals. A plan reports `retirable_journals`; an applied run reports
+  `retired_journals`. Completed journals used to accumulate forever, and every
+  command reads them all: 300 cycles left 1,103 state files, and one
+  `gc --apply` reduced them to 2, taking `status` from 54 ms to 7 ms. Live
+  worktrees and unfinished operations keep their journals, and an interrupted
+  retirement is explained and finished by the next run (D043, #536).
 - A cached-creation baseline on a real repository:
   `docs/benchmarks/assistant-ui-cached-creation-2026-09-25.md` records serial and
   ten-way concurrent latencies against an exact-tree assistant-ui export,
@@ -25,6 +33,30 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri worktree add` refuses a destination inside the repository's
+  `.git/worktrees` directory before recording anything. A worktree there is
+  its own Git metadata directory; the add used to fail as `rollback-failed`
+  and stay pending with nothing `riftri repair` could roll back (#542).
+- `riftri setup` without a terminal now exits 3 (policy refusal) instead of 1,
+  matching its `--json-errors` refusal: nothing was attempted and retrying
+  cannot help (#538).
+- `riftri worktree remove`, `move`, and `compact` without `--state-dir` now
+  name the registered state directory that manages the worktree, and the
+  `--state-dir` to pass, instead of only saying it is not managed in the
+  default location (#540).
+- `riftri status`, `riftri worktree list`, and `riftri repair` list Git's
+  worktrees once per repository instead of once per managed worktree. They
+  slowed quadratically: at 120 worktrees, `status` took 5.4 s and now takes
+  0.39 s, and `repair` went from 3.7 s to 0.12 s (#531).
+- `riftri doctor --destination` now agrees with `riftri worktree add`. It
+  blocks a non-empty directory, a symbolic link, or a destination whose nearest
+  existing directory is not writable, all of which it used to report as ready,
+  and no longer blocks an add from a cone-mode sparse worktree, which inherits
+  that cone (#529).
+- In an enabled repository without commits, an intercepted
+  `git worktree add -b <branch>` now runs as ordinary Git, which creates an
+  orphan worktree, instead of being refused. There is no tree to clone, so
+  Riftri hands such adds to Git unchanged (#527).
 - `riftri exec --worktree` naming anything but a registered worktree root is
   now an `invalid-worktree-binding` policy refusal (exit 3) instead of an
   operational `command-failed` receipt that invited a retry (#523).

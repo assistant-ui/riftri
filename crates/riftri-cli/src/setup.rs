@@ -92,9 +92,14 @@ pub(super) fn run(
         || !std::io::stdout().is_terminal()
         || !std::io::stderr().is_terminal()
     {
-        bail!(
+        // The same refusal shape as `--json-errors` above: nothing was
+        // attempted and only an interactive terminal can succeed, so exit 3
+        // (policy), not 1, which tells a harness to retry.
+        return Err(riftri_core::WorktreeError::InvalidRequest(
             "setup requires an interactive terminal; use riftri doctor and riftri worktree add for automation"
-        );
+                .to_owned(),
+        )
+        .into());
     }
 
     // Drop terminal locks before handing the terminal to the chosen child.

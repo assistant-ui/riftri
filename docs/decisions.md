@@ -142,7 +142,11 @@ ordinary-Git escape hatch. Interception never hides Git from the caller:
 `git worktree add -h` and `--help` print Git's own usage, and an add carrying
 only global options that cannot change a checkout — `--no-optional-locks`,
 `--no-advice`, `--literal-pathspecs` — runs as ordinary Git instead of failing,
-because editors pass those on every invocation. Without `-b` or `--detach`, a
+because editors pass those on every invocation. An add whose start point is a
+`HEAD` with no commit — a freshly initialized repository, or an orphan branch —
+also runs as ordinary Git: there is no tree to clone, and Git may create an
+orphan worktree there. Riftri refuses it before recording or creating anything,
+then hands the unchanged command to Git. Without `-b` or `--detach`, a
 second positional is optimized only when it names an existing local branch;
 a tag, a raw commit, a remote-tracking ref, or `HEAD` would make ordinary Git
 detach or create a tracking branch, so Riftri refuses before any Git process
@@ -706,7 +710,36 @@ directory, the first entry of `git worktree list`, as the repository.
 Repository-local Git interception (`riftri enable`) still requires a working
 tree and keeps the `bare-repository` policy receipt.
 
-### D043: release tags are SSH-signed and the workflow enforces it
+### D043: gc retires finished journal history
+
+Durable journals are recovery authority while an operation can still need
+recovery, not a permanent log. Keeping every completed journal made every
+lifecycle command read the whole history: after 1,000 add and remove cycles
+the state directory held 24 MB of journals, and `status`, `add`, and `remove`
+ran several times slower than on a fresh repository.
+
+`riftri gc --apply` therefore retires a lineage once its worktree is gone for
+good — the add rolled back, or a removal of it completed — deleting its add
+journal together with its finished move, compaction, and removal journals.
+Completed prune and finished collection journals are deleted too. A plan
+(`riftri gc` without `--apply`) only counts them. Nothing belonging to a live
+worktree or to an unfinished operation is touched, each add operation is
+retired under its own lock, and nothing is retired while any journal cannot
+be read, since an unreadable journal may still hold a claim.
+
+The deletion order keeps every interrupted state explained. Finished moves
+and compactions go first, leaving a valid add-and-removal history; the add
+journal is then renamed to `<id>.retired` in one atomic step; completed
+removals that name it are deleted next, then the marker and lock. A completed
+removal whose add journal exists only as that marker is a retirement leftover,
+not a claim, and the next `gc --apply` finishes the retirement. A completed
+removal whose add journal is simply missing is still reported, so manual
+damage stays visible. A run retires only history that was finished before it
+started, so the journals it resumes or writes stay visible until the next run.
+Counts of completed operations in `status` therefore describe the history
+since the last collection.
+
+### D044: release tags are SSH-signed and the workflow enforces it
 
 Distribution artifacts are the one place where a forged tag would be
 consequential: the tag drives which commit becomes eight native archives and

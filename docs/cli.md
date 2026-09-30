@@ -303,9 +303,16 @@ Inspect Git and show the planned storage path without changing anything.
 Missing leading directories are not a blocker: `riftri worktree add` creates
 them, as `git worktree add` does. Doctor reports a `destination-parent`
 blocker only for a path Git could not create either — an existing ancestor
-that is a regular file, or a dangling symbolic link along the way — and in
-that case does not suggest an add command. Inspection never creates any
-directory itself.
+that is a regular file, a dangling symbolic link along the way, or (on Unix)
+a nearest existing directory the user cannot write to — and in that case does
+not suggest an add command. With `--destination`, the path itself is judged
+exactly as `riftri worktree add` judges it: anything but a missing path or an
+existing empty directory, such as a non-empty directory, a file, or a symbolic
+link, is a `destination` blocker. Inspection never creates any directory
+itself.
+
+A worktree added from inside a cone-mode sparse worktree inherits that cone,
+as with Git, so the source's sparse settings are not a blocker.
 
 The suggested commands retain the inspected repository and use POSIX shell
 quoting on every platform, so they run as shown in `sh`, `bash`, and `zsh` —
@@ -384,6 +391,12 @@ still claims them` (`skipped_protected`) names each base, the operation that
 claims it, and why. `riftri repair` retires those operations when it safely
 can, after which the base becomes collectible.
 
+`--apply` also deletes finished journal history (`retired_journals`; a plan
+reports `retirable_journals`): the journals of worktrees that are gone for
+good and finished prune and collection journals, so the state directory does
+not grow with every worktree ever created. Live worktrees and unfinished
+operations keep theirs. See D043 in [decisions.md](decisions.md).
+
 | Flag | Effect |
 | --- | --- |
 | `--apply` | Apply the collection plan. Without this flag, nothing is deleted |
@@ -452,6 +465,9 @@ it, the directory is left as it was. If the add fails after that, the worktree i
 created directories are left in place, which is also what Git does.
 `riftri worktree move` does not create a missing parent, matching
 `git worktree move`.
+A destination inside the repository's `.git/worktrees` directory, where Git
+keeps each linked worktree's metadata, is refused before anything is
+recorded: a worktree there would be its own metadata directory.
 A `PATH` that Git still registers as a worktree, for example one whose
 directory was deleted without `git worktree prune`, is refused before anything
 is recorded. Run `git worktree prune` first, after `git worktree unlock` if it
