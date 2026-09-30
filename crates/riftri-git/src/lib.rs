@@ -509,9 +509,26 @@ impl Git {
     }
 
     /// Return Git's stable, NUL-delimited worktree inventory.
+    ///
+    /// `git worktree list` reads each worktree's administrative files one at a
+    /// time and exits 128 when a concurrent `git worktree remove` deletes one
+    /// in between ("failed to read '.git/worktrees/<name>/locked'"). Listing is
+    /// read-only, so a failure is retried briefly before it is reported:
+    /// otherwise any Riftri command could fail because another worktree was
+    /// being removed at that moment.
     pub fn list_worktrees(&self, path: &Path) -> Result<Vec<WorktreeInfo>, GitError> {
-        let output = self.run(Some(path), &["worktree", "list", "--porcelain", "-z"])?;
-        parse_worktree_porcelain(&output.stdout)
+        const ATTEMPTS: u32 = 4;
+        let mut attempt = 1;
+        loop {
+            match self.run(Some(path), &["worktree", "list", "--porcelain", "-z"]) {
+                Ok(output) => return parse_worktree_porcelain(&output.stdout),
+                Err(GitError::CommandFailed { .. }) if attempt < ATTEMPTS => {
+                    std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt)));
+                    attempt += 1;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Resolve Git's unique path suffix before falling back to a filesystem path.
@@ -2562,6 +2579,48 @@ mod tests {
         fn path(&self) -> &Path {
             self.directory.path()
         }
+    }
+
+    /// `git worktree list` dies when a concurrent removal deletes a
+    /// worktree's administrative file mid-listing. The inventory is retried,
+    /// so one such race no longer fails the caller.
+    #[cfg(unix)]
+    #[test]
+    fn worktree_listing_retries_a_listing_that_raced_a_removal() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        fs::create_dir(&repository).expect("create repository");
+        let init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repository)
+            .status()
+            .expect("init");
+        assert!(init.success());
+        let real = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("locate git");
+        let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+        let marker = fixture.path().join("already-failed");
+        let stand_in = fixture.path().join("git");
+        fs::write(
+            &stand_in,
+            format!(
+                "#!/bin/sh\nif [ \"$1 $2\" = \"worktree list\" ] && [ ! -e '{marker}' ]; then\n  : > '{marker}'\n  echo \"fatal: failed to read '.git/worktrees/gone/locked': No such file or directory\" >&2\n  exit 128\nfi\nexec '{real}' \"$@\"\n",
+                marker = marker.display()
+            ),
+        )
+        .expect("write stand-in");
+        fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+        let listed = super::Git::new(&stand_in)
+            .list_worktrees(&repository)
+            .expect("the retried listing succeeds");
+
+        assert!(marker.exists(), "the first listing did fail");
+        assert_eq!(listed.len(), 1, "{listed:?}");
     }
 
     #[test]
