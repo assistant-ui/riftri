@@ -172,7 +172,16 @@ pub fn has_macos_acl(path: &Path) -> Result<bool, StorageError> {
 pub struct ReflinkCloner;
 
 impl ReflinkCloner {
-    /// Clone an immutable base and restore owner permissions.
+    /// Clone an immutable base and restore owner permissions in one traversal.
+    #[cfg(target_os = "linux")]
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        reflink::clone_tree_owner_writable(source, destination)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     pub fn clone_tree_owner_writable(
         source: &Path,
         destination: &Path,
