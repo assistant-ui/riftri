@@ -122,6 +122,17 @@ pub struct ConfigValues {
     pub has_conditional_includes: bool,
 }
 
+/// One source contributing a value to Git's effective configuration.
+///
+/// The fields remain raw because an origin can contain a native path and a
+/// configuration value is not required to be UTF-8.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigValueOrigin {
+    pub scope: Vec<u8>,
+    pub origin: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
 /// Sparse-checkout state of an existing worktree.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SparseCheckoutState {
@@ -835,31 +846,7 @@ impl Git {
         }
         let keys = keys
             .iter()
-            .map(|key| {
-                let components = key.split('.').collect::<Vec<_>>();
-                let valid = components.len() >= 2
-                    && components.iter().all(|component| {
-                        !component.is_empty()
-                            && component
-                                .bytes()
-                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-                    })
-                    && components
-                        .last()
-                        .and_then(|variable| variable.as_bytes().first())
-                        .is_some_and(u8::is_ascii_alphabetic);
-                if !valid {
-                    return Err(GitError::InvalidOutput {
-                        context: "configuration keys",
-                        detail: "batch reads require simple section.variable keys".to_owned(),
-                    });
-                }
-                let mut key = (*key).to_owned();
-                key[..components[0].len()].make_ascii_lowercase();
-                let variable = key.rfind('.').expect("validated configuration key") + 1;
-                key[variable..].make_ascii_lowercase();
-                Ok(key)
-            })
+            .map(|key| normalize_config_key(key))
             .collect::<Result<Vec<_>, _>>()?;
         // Validation above excludes regexp metacharacters other than the one
         // separating dot. Anchor the allowlist so unrelated settings cannot match.
@@ -881,6 +868,35 @@ impl Git {
             parse_config_values(&output.stdout, &keys)
         } else if output.status.code() == Some(1) && output.stdout.is_empty() {
             Ok(ConfigValues::default())
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
+    }
+
+    /// Read every source contributing to one effective configuration key.
+    ///
+    /// Git returns records in precedence order. This is intended for
+    /// failure-only diagnostics: normal configuration reads should continue
+    /// using `config_values` so successful operations need only one process.
+    pub fn config_value_origins(
+        &self,
+        path: &Path,
+        key: &str,
+    ) -> Result<Vec<ConfigValueOrigin>, GitError> {
+        let key = normalize_config_key(key)?;
+        let arguments = [
+            OsString::from("config"),
+            OsString::from("--null"),
+            OsString::from("--show-origin"),
+            OsString::from("--show-scope"),
+            OsString::from("--get-all"),
+            OsString::from(key),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            parse_config_value_origins(&output.stdout)
+        } else if output.status.code() == Some(1) && output.stdout.is_empty() {
+            Ok(Vec::new())
         } else {
             Err(command_failed(&arguments, &output))
         }
@@ -2496,6 +2512,61 @@ fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, G
     Ok(config)
 }
 
+fn normalize_config_key(key: &str) -> Result<String, GitError> {
+    let components = key.split('.').collect::<Vec<_>>();
+    let valid = components.len() >= 2
+        && components.iter().all(|component| {
+            !component.is_empty()
+                && component
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        && components
+            .last()
+            .and_then(|variable| variable.as_bytes().first())
+            .is_some_and(u8::is_ascii_alphabetic);
+    if !valid {
+        return Err(GitError::InvalidOutput {
+            context: "configuration keys",
+            detail: "reads require simple section.variable keys".to_owned(),
+        });
+    }
+    let mut key = key.to_owned();
+    key[..components[0].len()].make_ascii_lowercase();
+    let variable = key.rfind('.').expect("validated configuration key") + 1;
+    key[variable..].make_ascii_lowercase();
+    Ok(key)
+}
+
+fn parse_config_value_origins(output: &[u8]) -> Result<Vec<ConfigValueOrigin>, GitError> {
+    let invalid = || GitError::InvalidOutput {
+        context: "configuration value origins",
+        detail: "expected NUL-terminated scope, origin, and value fields".to_owned(),
+    };
+    if output.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = output.strip_suffix(&[0]).ok_or_else(invalid)?;
+    let fields = records.split(|byte| *byte == 0).collect::<Vec<_>>();
+    let (records, remainder) = fields.as_slice().as_chunks::<3>();
+    if !remainder.is_empty() {
+        return Err(invalid());
+    }
+    records
+        .iter()
+        .map(|record| {
+            if record[0].is_empty() || record[1].is_empty() {
+                return Err(invalid());
+            }
+            Ok(ConfigValueOrigin {
+                scope: record[0].to_vec(),
+                origin: record[1].to_vec(),
+                value: record[2].to_vec(),
+            })
+        })
+        .collect()
+}
+
 fn display_arguments(arguments: &[OsString]) -> String {
     arguments
         .iter()
@@ -3642,6 +3713,56 @@ mod tests {
             before,
             "read must not alter config"
         );
+    }
+
+    #[test]
+    fn configuration_value_origins_preserve_structured_raw_records() {
+        let fixture = RepositoryFixture::unborn();
+        let git = Git::default();
+        git.set_local_config(fixture.path(), "core.autocrlf", OsStr::new("true"))
+            .unwrap();
+
+        let origins = git
+            .config_value_origins(fixture.path(), "core.autocrlf")
+            .expect("read config origins");
+        assert!(origins.iter().any(|origin| {
+            origin.scope == b"local"
+                && origin.origin == b"file:.git/config"
+                && origin.value == b"true"
+        }));
+
+        assert_eq!(
+            super::parse_config_value_origins(
+                b"system\0file:/etc/gitconfig\0false\0local\0file:.git/conf\xffg\0true\xff\0"
+            )
+            .unwrap(),
+            vec![
+                super::ConfigValueOrigin {
+                    scope: b"system".to_vec(),
+                    origin: b"file:/etc/gitconfig".to_vec(),
+                    value: b"false".to_vec(),
+                },
+                super::ConfigValueOrigin {
+                    scope: b"local".to_vec(),
+                    origin: b"file:.git/conf\xffg".to_vec(),
+                    value: b"true\xff".to_vec(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn configuration_value_origin_parser_rejects_incomplete_records() {
+        for output in [
+            b"local\0file:.git/config\0true".as_slice(),
+            b"local\0file:.git/config\0".as_slice(),
+            b"local\0file:.git/config\0true\0extra\0".as_slice(),
+        ] {
+            assert!(
+                super::parse_config_value_origins(output).is_err(),
+                "{output:?}"
+            );
+        }
     }
 
     #[test]
