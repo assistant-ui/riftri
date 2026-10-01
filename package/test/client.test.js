@@ -282,7 +282,20 @@ test("listing every state never also names the configured one", { skip: onWindow
   await riftri.worktree.list({ allStates: true });
   assert.deepEqual(stub.argv(), ["worktree", "list", "--all-states", "--json", "--json-errors"]);
   await riftri.worktree.list();
-  assert.ok(stub.argv().includes("state"), stub.argv().join(" "));
+  assert.ok(stub.argv().includes("--state-dir=state"), stub.argv().join(" "));
+});
+
+test("a relative binary is relative to the caller, not the repository", { skip: onWindows }, async (t) => {
+  // spawn resolves a relative command against its cwd, so this failed with
+  // ENOENT whenever `repository` was not the caller's own directory.
+  const directory = scratch(t);
+  const repository = path.join(directory, "repository");
+  fs.mkdirSync(repository);
+  const stub = argvBinary(directory);
+  const binary = path.relative(process.cwd(), stub.binary);
+  assert.ok(!path.isAbsolute(binary) && binary.includes(path.sep), binary);
+  await new Riftri({ repository, binary }).run(["status"], { json: false });
+  assert.deepEqual(stub.argv(), ["status", "--json-errors"]);
 });
 
 test("a command with no payload still receives its flags last", { skip: onWindows }, async (t) => {

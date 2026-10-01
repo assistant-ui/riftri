@@ -142,7 +142,10 @@ export interface AddOptions {
 export interface RiftriOptions {
   /** Working directory for every command. Defaults to `process.cwd()`. */
   repository?: string;
-  /** Explicit executable; defaults to the installed platform binary. */
+  /**
+   * Explicit executable; defaults to the installed platform binary. A
+   * relative path is relative to `process.cwd()`, not `repository`.
+   */
   binary?: string;
   /** Passed as `--state-dir` where the command supports it. */
   stateDir?: string;

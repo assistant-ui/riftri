@@ -25,6 +25,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Node client: `worktree.list({ allStates: true })` no longer fails as a
+  usage error on a client built with `stateDir`; a relative `binary` is
+  resolved against the caller's directory, as `RIFTRI_BINARY` is, not against
+  `repository`; and the `FailureReceipt` types admit the `usage` category and
+  null `operation` that usage-error receipts carry (#584).
 - The Node client passes paths after `--` and option values as `--name=value`,
   so a relative path such as `-scratch`, or a value starting with `-`, is no
   longer parsed as flags and rejected as a usage error (#581).

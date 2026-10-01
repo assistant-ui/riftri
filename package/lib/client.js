@@ -8,6 +8,7 @@
 // failure. Nothing here reimplements Riftri behaviour.
 
 const { spawn } = require("node:child_process");
+const path = require("node:path");
 const { resolveBinary } = require("./platform.js");
 const { signalExitCode } = require("./signals.js");
 
@@ -108,7 +109,11 @@ class Riftri {
    */
   constructor(options = {}) {
     this.repository = options.repository ?? process.cwd();
-    this.binary = options.binary ?? null;
+    // A relative path is relative to this process, as RIFTRI_BINARY is.
+    // Otherwise spawn resolves it against `repository`, the child's cwd. A
+    // bare name is still looked up on PATH.
+    const binary = options.binary ?? null;
+    this.binary = binary && /[\\/]/.test(binary) ? path.resolve(binary) : binary;
     this.stateDir = options.stateDir ?? null;
     this.worktree = {
       add: this.#worktreeAdd.bind(this),
