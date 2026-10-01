@@ -149,6 +149,35 @@ test("a policy refusal becomes a typed error carrying its receipt", { skip: onWi
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
+test("a receipt after other stderr output is still parsed", { skip: onWindows }, async () => {
+  // The receipt is the last line of stderr; a hook or a Git warning may have
+  // written there first, and that must not strip the error of its code.
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
+  const receipt = {
+    schemaVersion: 1,
+    outcome: "failed",
+    code: "invalid-request",
+    category: "policy",
+    message: "invalid worktree request: destination already exists",
+    cleanup: "not-needed",
+    recovery: "not-required",
+  };
+  // Real newlines: fakeBinary's printf '%s' would print "\\n" literally.
+  const binary = path.join(directory, "noisy-riftri");
+  fs.writeFileSync(
+    binary,
+    "#!/bin/sh\nprintf '%s\\n' 'warning: something Git printed' 'hook output' " +
+      `'${JSON.stringify(receipt)}' >&2\nexit ${EXIT_POLICY}\n`,
+  );
+  fs.chmodSync(binary, 0o755);
+  await assert.rejects(new Riftri({ repository: directory, binary }).status(), (error) => {
+    assert.ok(error instanceof RiftriError);
+    assert.equal(error.receipt?.code, "invalid-request");
+    assert.equal(error.isPolicyRefusal, true);
+    return true;
+  });
+});
+
 test("a full volume is distinguished before recovery", { skip: onWindows }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
   const binary = fakeBinary(directory, {

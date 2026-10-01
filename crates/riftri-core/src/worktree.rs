@@ -4846,6 +4846,13 @@ fn run_post_checkout_hook(
     ] {
         command.env_remove(leaked);
     }
+    // As Git runs it: no stdin, and stdout sent to stderr. A hook printing on
+    // stdout corrupted the `--json` document there, so a harness parsing it
+    // saw a successful add fail; one reading stdin consumed the caller's input.
+    command.stdin(std::process::Stdio::null());
+    if let Some(stderr) = stderr_for_child_stdout() {
+        command.stdout(stderr);
+    }
     match command.status() {
         Ok(status) => PostCheckoutOutcome {
             hook: hook.to_path_buf(),
@@ -4857,6 +4864,33 @@ fn run_post_checkout_hook(
             exit_code: None,
             started: false,
         },
+    }
+}
+
+/// A duplicate of this process's stderr to give a child as its stdout, or
+/// `None` when there is no stderr to duplicate (the child then inherits).
+fn stderr_for_child_stdout() -> Option<std::process::Stdio> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd;
+        std::io::stderr()
+            .as_fd()
+            .try_clone_to_owned()
+            .ok()
+            .map(std::process::Stdio::from)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle;
+        std::io::stderr()
+            .as_handle()
+            .try_clone_to_owned()
+            .ok()
+            .map(std::process::Stdio::from)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
     }
 }
 

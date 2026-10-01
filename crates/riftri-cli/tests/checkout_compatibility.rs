@@ -711,3 +711,66 @@ fn unsafe_checkout_inputs_are_diagnosed_and_rejected_without_mutation() {
         );
     }
 }
+
+/// Git runs `post-checkout` with its stdout on stderr and no stdin. Riftri let
+/// the hook inherit both, so a hook that printed anything corrupted the
+/// `--json` document on stdout: the Node client then rejected an add that had
+/// succeeded. A hook reading stdin could also consume the caller's input.
+#[cfg(unix)]
+#[test]
+fn post_checkout_hook_output_stays_off_json_stdout_like_git() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    let fixture = RepositoryFixture::new();
+    let hook = fixture.repository.join(".git/hooks/post-checkout");
+    fs::write(
+        &hook,
+        "#!/bin/sh\necho 'hook on stdout'\necho 'hook on stderr' >&2\ncat > \"$(pwd)/hook-stdin\"\n",
+    )
+    .expect("write hook");
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).expect("chmod hook");
+    let parent = fixture.repository.parent().unwrap();
+    let destination = parent.join("hooked");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "worktree",
+            "add",
+            destination.to_str().unwrap(),
+            "--detach",
+            "--json",
+            "--no-progress",
+            "--state-dir",
+            parent.join("state").to_str().unwrap(),
+        ])
+        .current_dir(&fixture.repository)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run add");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"caller input\n")
+        .expect("offer stdin");
+    let output = child.wait_with_output().expect("wait for add");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is only the JSON document");
+    assert_eq!(report["post_checkout"]["exit_code"], 0);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hook on stdout"));
+    assert_eq!(
+        fs::read(destination.join("hook-stdin")).expect("hook ran"),
+        b"",
+        "the hook must not read the caller's stdin"
+    );
+}

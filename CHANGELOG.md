@@ -25,6 +25,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- The `post-checkout` hook now runs as Git runs it, with its stdout sent to
+  stderr and no stdin. A hook that printed anything corrupted the `--json`
+  document of `riftri worktree add`, so the Node client rejected an add that
+  had succeeded. The Node client also reads a failure receipt from the last
+  line of stderr, so output written there first no longer hides it (#579).
 - Without a terminal, the npm launcher (`npx riftri`) now forwards SIGINT and
   SIGQUIT to the native binary, as native `riftri exec` does, and runs it in
   its own process group so a group-directed signal arrives once. It ignored
