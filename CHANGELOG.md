@@ -25,6 +25,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Branch and revision lookups are exact again. A ref that merely ends in
+  `refs/heads/<name>`, such as `refs/remotes/origin/refs/heads/<name>`, no
+  longer makes `-b <name>` refuse as an existing branch or an existing-branch
+  add fail. A range (`A..B`, `A...B`) or negation (`^A`) is refused as an
+  invalid revision, as Git refuses it, instead of creating a worktree at a
+  commit from the range (#586).
 - The `post-checkout` hook now runs as Git runs it, with its stdout sent to
   stderr and no stdin. A hook that printed anything corrupted the `--json`
   document of `riftri worktree add`, so the Node client rejected an add that
