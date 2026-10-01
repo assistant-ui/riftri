@@ -13,6 +13,7 @@ pub(crate) enum FilesystemRacePoint {
     JournalRetirementLocked,
     BaseReadMiss,
     BaseReuseAfterExclusiveWait,
+    AddIntentPersist,
 }
 
 type Hook = Box<dyn FnOnce(&Path)>;
