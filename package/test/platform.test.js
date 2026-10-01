@@ -4,7 +4,15 @@ const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
-const { access, mkdtemp, readFile, rm } = require("node:fs/promises");
+const { pathToFileURL } = require("node:url");
+const {
+  access,
+  cp,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} = require("node:fs/promises");
 const { test } = require("node:test");
 const { version } = require("../../package.json");
 
@@ -88,6 +96,90 @@ test("stages the public package with conventional root directories", async (t) =
   await access(path.join(destination, "bin", "riftri.js"));
   await access(path.join(destination, "lib", "platform.js"));
   await assert.rejects(access(path.join(destination, "package")));
+});
+
+// A copy of the real repository with its manifest edited: the staging script
+// transforms that manifest, so a hand-built skeleton would test the skeleton.
+async function stagingFixture(t, editManifest) {
+  const sourceRoot = path.resolve(__dirname, "..", "..");
+  const root = await mkdtemp(path.join(os.tmpdir(), "riftri-staging-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const entry of ["README.md", "LICENSE"]) {
+    await cp(path.join(sourceRoot, entry), path.join(root, entry));
+  }
+  for (const entry of ["bin", "lib"]) {
+    await cp(
+      path.join(sourceRoot, "package", entry),
+      path.join(root, "package", entry),
+      { recursive: true },
+    );
+  }
+  const manifest = JSON.parse(
+    await readFile(path.join(sourceRoot, "package.json"), "utf8"),
+  );
+  editManifest(manifest);
+  await writeFile(
+    path.join(root, "package.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`,
+  );
+  return { root, destination: path.join(root, "staged") };
+}
+
+test("staging keeps every export subpath, not only the root one", async (t) => {
+  // Rebuilding `exports` from its "." key drops the siblings, and nothing
+  // downstream notices: npm resolves a subpath only when something imports it,
+  // so the break surfaces as a consumer's failed require after publication.
+  const { root, destination } = await stagingFixture(t, (manifest) => {
+    manifest.exports["./client"] = {
+      types: "./package/lib/client.d.ts",
+      require: "./package/lib/client.js",
+    };
+  });
+  const { stageRootPackage } = await import("../scripts/stage-root-package.mjs");
+
+  await stageRootPackage(destination, root);
+
+  const staged = JSON.parse(
+    await readFile(path.join(destination, "package.json"), "utf8"),
+  );
+  assert.deepEqual(Object.keys(staged.exports).sort(), [".", "./client"]);
+  assert.deepEqual(staged.exports["./client"], {
+    types: "./lib/client.d.ts",
+    require: "./lib/client.js",
+  });
+});
+
+test("staging rewrites a string export target too", async (t) => {
+  const { root, destination } = await stagingFixture(t, (manifest) => {
+    manifest.exports["./platform"] = "./package/lib/platform.js";
+  });
+  const { stageRootPackage } = await import("../scripts/stage-root-package.mjs");
+
+  await stageRootPackage(destination, root);
+
+  const staged = JSON.parse(
+    await readFile(path.join(destination, "package.json"), "utf8"),
+  );
+  assert.equal(staged.exports["./platform"], "./lib/platform.js");
+});
+
+test("the staging script can be imported without a script argv", async () => {
+  // pathToFileURL(undefined) throws, so an unguarded main check makes the
+  // module unimportable under `node -e` and in embedders.
+  // A bare absolute path is not an importable specifier on Windows, where it
+  // parses as the scheme `d:`; the module URL has to be a file:// one.
+  const script = pathToFileURL(
+    path.resolve(__dirname, "..", "scripts", "stage-root-package.mjs"),
+  ).href;
+  const result = spawnSync(
+    process.execPath,
+    [
+      "-e",
+      `import(${JSON.stringify(script)}).then(() => {}, (error) => { console.error(error); process.exit(1); })`,
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test("launcher delegates to the locally built Rust executable", () => {

@@ -3610,40 +3610,51 @@ fn add_worktree_inner(
             backend,
         )
     };
-    // Created only now: every refusal above leaves no empty bucket behind for
-    // status to report as unexplained.
-    ensure_real_state_directory(&base_directory, "create repository base directory")?;
-    sync_parent(&base_directory)?;
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::AddIntentPersist,
+        &base_directory,
+    );
     let journal_path = store.persist(&journal)?;
     progress::emit(ProgressEvent::AddPhase {
         phase: journal.phase,
     });
 
     let mut metadata_lock = Some(metadata_lock);
-    let operation = fail_add_if_requested(journal.phase, fail_after).and_then(|()| {
-        perform_add(
-            &git,
-            metadata_lock
-                .take()
-                .expect("the metadata lock is handed over once"),
-            &store,
-            &mut journal,
-            &repository_root,
-            &destination,
-            &scratch,
-            &base_path,
-            &base_staging,
-            &temporary_index,
-            &resolved.commit,
-            &request.revision,
-            &request.mode,
-            &resolved.tree,
-            &compatibility.checkout_config,
-            &compatibility.lfs_objects,
-            &sparse_directories,
-            fail_after,
-        )
-    });
+    let operation = fail_add_if_requested(journal.phase, fail_after)
+        .and_then(|()| {
+            // Created only once intent is journaled: every refusal above
+            // leaves no empty bucket behind, and an add killed after this
+            // point has a journal whose rollback removes the bucket. Created
+            // before the journal, a kill in between left an empty bucket that
+            // status reported as unowned forever.
+            ensure_real_state_directory(&base_directory, "create repository base directory")?;
+            sync_parent(&base_directory)
+        })
+        .and_then(|()| {
+            perform_add(
+                &git,
+                metadata_lock
+                    .take()
+                    .expect("the metadata lock is handed over once"),
+                &store,
+                &mut journal,
+                &repository_root,
+                &destination,
+                &scratch,
+                &base_path,
+                &base_staging,
+                &temporary_index,
+                &resolved.commit,
+                &request.revision,
+                &request.mode,
+                &resolved.tree,
+                &compatibility.checkout_config,
+                &compatibility.lfs_objects,
+                &sparse_directories,
+                fail_after,
+            )
+        });
 
     match operation {
         Ok(reused_base) => {
@@ -4390,7 +4401,7 @@ fn prepare_base(
         )?;
     }
     materialize_git_lfs_objects(base_staging, lfs_objects)?;
-    remove_file_if_present(temporary_index)?;
+    remove_temporary_index(temporary_index)?;
     fs::rename(base_staging, base_path)
         .map_err(|source| io("activate immutable base", base_path, source))?;
     NativeCowCloner::make_tree_read_only(base_path)?;
@@ -6797,18 +6808,24 @@ fn diagnose_state_paths(
         &state_directory.join("tmp"),
         pending_base_builds
             .iter()
-            .map(|journal| journal.temporary_index.clone())
+            .flat_map(|journal| {
+                [
+                    journal.temporary_index.clone(),
+                    git_lock_path(&journal.temporary_index),
+                ]
+            })
             .chain(
                 add_journals
                     .iter()
                     .filter(|journal| journal.phase != AddWorktreePhase::RolledBack)
                     .map(pointer_staging_path),
             )
-            .chain(
-                pending_compactions
-                    .iter()
-                    .map(|journal| journal.temporary_index.clone()),
-            )
+            .chain(pending_compactions.iter().flat_map(|journal| {
+                [
+                    journal.temporary_index.clone(),
+                    git_lock_path(&journal.temporary_index),
+                ]
+            }))
             .collect(),
         &mut issues,
     )?;
@@ -8367,7 +8384,7 @@ fn retire_superseded_add_journal(
     };
     remove_tree_if_present(&journal.scratch)?;
     remove_tree_if_present(&journal.base_staging)?;
-    remove_file_if_present(&journal.temporary_index)?;
+    remove_temporary_index(&journal.temporary_index)?;
     store.update_phase(&pending, AddWorktreePhase::RolledBack)?;
     Ok(())
 }
@@ -9353,7 +9370,7 @@ fn resume_compaction(
         {
             remove_tree_if_present(&journal.replacement)?;
             remove_tree_if_present(&journal.base_staging)?;
-            remove_file_if_present(&journal.temporary_index)?;
+            remove_temporary_index(&journal.temporary_index)?;
             remove_empty_base_bucket(&journal)?;
             advance_compaction(
                 store,
@@ -11098,7 +11115,7 @@ fn rollback_decoded(
     if let Some(bucket) = journal.base_path.parent() {
         remove_empty_bucket(bucket)?;
     }
-    remove_file_if_present(&journal.temporary_index)?;
+    remove_temporary_index(&journal.temporary_index)?;
     remove_file_if_present(&pointer_staging_path(journal))?;
 
     if journal.branch_created
@@ -11878,6 +11895,22 @@ fn remove_tree_if_present(path: &Path) -> Result<(), WorktreeError> {
     }
     NativeCowCloner::make_tree_owner_writable(path)?;
     fs::remove_dir_all(path).map_err(|source| io("remove rollback directory", path, source))
+}
+
+/// Git's lockfile for `path`: the same name with `.lock` appended.
+fn git_lock_path(path: &Path) -> PathBuf {
+    let mut lock = path.as_os_str().to_os_string();
+    lock.push(".lock");
+    PathBuf::from(lock)
+}
+
+/// Remove a temporary index and the lockfile Git writes beside it. A Git
+/// child killed while writing the index leaves `<index>.lock`; both live in
+/// Riftri's own state under this operation's name, so nothing else owns them,
+/// and status would otherwise report the lock as unexplained forever.
+fn remove_temporary_index(path: &Path) -> Result<(), WorktreeError> {
+    remove_file_if_present(path)?;
+    remove_file_if_present(&git_lock_path(path))
 }
 
 fn remove_file_if_present(path: &Path) -> Result<(), WorktreeError> {
@@ -17799,6 +17832,73 @@ mod tests {
         assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
         assert!(accounting.bases.is_empty(), "{accounting:?}");
         // No empty base bucket may be left behind for status to report.
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// The repository bucket was created just before the add's intent was
+    /// journaled, so an add killed in between left an empty bucket that no
+    /// journal owned and status reported as unexplained forever.
+    #[test]
+    fn the_base_bucket_is_created_only_after_add_intent_is_journaled() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let observed = std::rc::Rc::new(std::cell::Cell::new(None));
+        let seen = std::rc::Rc::clone(&observed);
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::AddIntentPersist,
+            move |bucket| seen.set(Some(bucket.exists())),
+        );
+
+        add_with_state(&repository, &root.join("view"), &state).expect("add");
+
+        assert_eq!(
+            observed.get(),
+            Some(false),
+            "the bucket must not exist before the journal that owns it"
+        );
+    }
+
+    /// A Git child killed while writing the add's temporary index leaves
+    /// `<index>.lock` in Riftri's state. Rollback removed the index but not
+    /// the lock, and status reported the lock as unexplained forever.
+    #[test]
+    fn rollback_removes_the_git_lock_beside_the_temporary_index() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: root.join("view"),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::IntentRecorded),
+            false,
+        )
+        .expect_err("interrupt the add as a kill would");
+        let operation = fs::read_dir(state.join("operations"))
+            .expect("read journals")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.extension() == Some(std::ffi::OsStr::new("json")))
+            .and_then(|path| path.file_stem().map(std::ffi::OsStr::to_os_string))
+            .expect("the interrupted add left its journal");
+        let mut lock_name = OsString::from("index-");
+        lock_name.push(&operation);
+        lock_name.push(".lock");
+        let lock = state.join("tmp").join(lock_name);
+        fs::create_dir_all(lock.parent().unwrap()).expect("create temporary directory");
+        fs::write(&lock, b"").expect("leave Git's index lock behind");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(!lock.exists(), "rollback must remove Git's index lock");
+        let accounting = storage_accounting(&state).expect("status");
         assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
     }
 
