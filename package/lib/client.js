@@ -8,6 +8,7 @@
 // failure. Nothing here reimplements Riftri behaviour.
 
 const { spawn } = require("node:child_process");
+const path = require("node:path");
 const { resolveBinary } = require("./platform.js");
 const { signalExitCode } = require("./signals.js");
 
@@ -108,7 +109,11 @@ class Riftri {
    */
   constructor(options = {}) {
     this.repository = options.repository ?? process.cwd();
-    this.binary = options.binary ?? null;
+    // A relative path is relative to this process, as RIFTRI_BINARY is.
+    // Otherwise spawn resolves it against `repository`, the child's cwd. A
+    // bare name is still looked up on PATH.
+    const binary = options.binary ?? null;
+    this.binary = binary && /[\\/]/.test(binary) ? path.resolve(binary) : binary;
     this.stateDir = options.stateDir ?? null;
     this.worktree = {
       add: this.#worktreeAdd.bind(this),
@@ -188,7 +193,7 @@ class Riftri {
             receipt = JSON.parse(candidate);
             break;
           } catch {
-            // Usage errors come from the argument parser and carry no receipt.
+            // Plain text, as from a binary that predates usage receipts.
           }
         }
         reject(new RiftriError(exitCode, receipt, stderr));
@@ -273,7 +278,10 @@ class Riftri {
   }
 
   #worktreeList(options = {}) {
-    return this.run(["worktree", "list", ...flagsFor(options), ...this.#stateFlag()]);
+    // `--all-states` already covers the configured state directory, and Riftri
+    // rejects it alongside `--state-dir` as a usage error.
+    const state = options.allStates ? [] : this.#stateFlag();
+    return this.run(["worktree", "list", ...flagsFor(options), ...state]);
   }
 
   #worktreeRemove(destination, { force = false } = {}) {

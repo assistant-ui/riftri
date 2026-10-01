@@ -25,6 +25,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Node client: `worktree.list({ allStates: true })` no longer fails as a
+  usage error on a client built with `stateDir`; a relative `binary` is
+  resolved against the caller's directory, as `RIFTRI_BINARY` is, not against
+  `repository`; and the `FailureReceipt` types admit the `usage` category and
+  null `operation` that usage-error receipts carry (#584).
 - Branch and revision lookups are exact again. A ref that merely ends in
   `refs/heads/<name>`, such as `refs/remotes/origin/refs/heads/<name>`, no
   longer makes `-b <name>` refuse as an existing branch or an existing-branch

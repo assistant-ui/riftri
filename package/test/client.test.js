@@ -220,7 +220,7 @@ test("a busy worktree is distinguished from a refusal", { skip: onWindows }, asy
   fs.rmSync(directory, { recursive: true, force: true });
 });
 
-test("a usage error carries no receipt and is never retryable", { skip: onWindows }, async () => {
+test("plain parser text is still a usage error, with no receipt", { skip: onWindows }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-client-"));
   const binary = fakeBinary(directory, { stderr: "error: unexpected argument", code: 2 });
   const riftri = new Riftri({ repository: directory, binary });
@@ -234,6 +234,51 @@ test("a usage error carries no receipt and is never retryable", { skip: onWindow
     },
   );
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a usage receipt is parsed like any other", { skip: onWindows }, async (t) => {
+  // What the real binary emits under --json-errors since #304. The types once
+  // claimed usage errors carry no receipt and that `category` is only policy
+  // or operational, so typed callers never matched this one.
+  const directory = scratch(t);
+  const usage = {
+    schemaVersion: 1,
+    outcome: "failed",
+    operation: null,
+    code: "usage-error",
+    category: "usage",
+    message: "error: unexpected argument '--nope' found",
+    phase: null,
+    cleanup: "not-needed",
+    recovery: "not-required",
+    nextCommand: null,
+    repository: null,
+    repositoryNativeHex: null,
+    stateDirectory: null,
+    stateDirectoryNativeHex: null,
+    nativePathEncoding: "unix-bytes-hex",
+  };
+  const binary = fakeBinary(directory, { stderr: JSON.stringify(usage), code: 2 });
+  await assert.rejects(
+    () => new Riftri({ repository: directory, binary }).status(),
+    (error) => {
+      assert.equal(error.isUsageError, true);
+      assert.deepEqual(error.receipt, usage);
+      return true;
+    },
+  );
+});
+
+test("the receipt types admit every category the CLI documents", () => {
+  const cli = fs.readFileSync(path.join(root, "docs/cli.md"), "utf8");
+  const documented = cli.match(/`category` field \(([^)]*)\)/);
+  assert.ok(documented, "docs/cli.md no longer lists the receipt categories");
+  const categories = [...documented[1].matchAll(/`([a-z]+)`/g)].map((m) => m[1]);
+  assert.deepEqual([...categories].sort(), ["operational", "policy", "usage"]);
+  const types = fs.readFileSync(path.join(root, "package/lib/client.d.ts"), "utf8");
+  const union = types.match(/^\s*category: (.*);$/m)[1];
+  for (const category of categories) assert.ok(union.includes(`"${category}"`), union);
+  assert.match(types, /^\s*operation: string \| null;$/m, "usage receipts have no operation");
 });
 
 test("commands without --json are not parsed as JSON", { skip: onWindows }, async () => {
@@ -255,6 +300,31 @@ test("global flags go before the exec payload, never inside it", { skip: onWindo
     "git",
     "--version",
   ]);
+});
+
+test("listing every state never also names the configured one", { skip: onWindows }, async (t) => {
+  // Riftri rejects --all-states with --state-dir, so a client built with
+  // `stateDir` failed every `list({ allStates: true })` as a usage error.
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "state" });
+  await riftri.worktree.list({ allStates: true });
+  assert.deepEqual(stub.argv(), ["worktree", "list", "--all-states", "--json", "--json-errors"]);
+  await riftri.worktree.list();
+  assert.ok(stub.argv().includes("--state-dir=state"), stub.argv().join(" "));
+});
+
+test("a relative binary is relative to the caller, not the repository", { skip: onWindows }, async (t) => {
+  // spawn resolves a relative command against its cwd, so this failed with
+  // ENOENT whenever `repository` was not the caller's own directory.
+  const directory = scratch(t);
+  const repository = path.join(directory, "repository");
+  fs.mkdirSync(repository);
+  const stub = argvBinary(directory);
+  const binary = path.relative(process.cwd(), stub.binary);
+  assert.ok(!path.isAbsolute(binary) && binary.includes(path.sep), binary);
+  await new Riftri({ repository, binary }).run(["status"], { json: false });
+  assert.deepEqual(stub.argv(), ["status", "--json-errors"]);
 });
 
 test("a command with no payload still receives its flags last", { skip: onWindows }, async (t) => {
