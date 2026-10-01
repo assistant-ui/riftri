@@ -98,6 +98,41 @@ test("website finalization rejects a build missing its Markdown guide before cle
   assert.ok(fs.existsSync(path.join(output, "functions")));
 });
 
+test("finalization refuses a build with no immutable asset route", async (t) => {
+  // The rebuilt route table keeps exactly one route from the build output,
+  // found by searching for the literal "immutable". If the framework changed
+  // how it emits that header, the route would vanish from production with no
+  // error anywhere: finalization succeeds, and verify-website.mjs checks no
+  // asset's Cache-Control. riftri.dev serves hashed assets immutable today.
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-cache-output-"));
+  t.after(() => fs.rmSync(output, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(output, "static/404"), { recursive: true });
+  for (const name of ["index.html", "index.md", "install.sh", "install.ps1", "robots.txt", "sitemap.xml", "404/index.html"]) {
+    fs.writeFileSync(path.join(output, "static", name), name);
+  }
+  // An asset route that caches for a year but drops the immutable directive:
+  // present, plausible, and invisible to the search this script relies on.
+  fs.writeFileSync(
+    path.join(output, "config.json"),
+    JSON.stringify({
+      version: 3,
+      routes: [
+        {
+          src: "^/assets/(.*)$",
+          headers: { "Cache-Control": "public, max-age=31536000" },
+          continue: true,
+        },
+      ],
+    }),
+  );
+  const { finalizeStaticWebsite } = await import("../scripts/finalize-static-website.mjs");
+
+  await assert.rejects(
+    finalizeStaticWebsite(output, { docs: false }),
+    /no immutable asset route/,
+  );
+});
+
 test("website build always runs static output finalization", () => {
   const root = path.resolve(__dirname, "../..");
   const { scripts } = JSON.parse(
@@ -113,7 +148,20 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   for (const name of ["index.html", "index.md", "install.sh", "install.ps1", "robots.txt", "sitemap.xml", "404/index.html"]) {
     fs.writeFileSync(path.join(output, "static", name), name);
   }
-  fs.writeFileSync(path.join(output, "config.json"), JSON.stringify({ version: 3 }));
+  // A real build always emits this route; finalization now refuses without it.
+  fs.writeFileSync(
+    path.join(output, "config.json"),
+    JSON.stringify({
+      version: 3,
+      routes: [
+        {
+          src: "^/assets/(.*)$",
+          headers: { "Cache-Control": "public, max-age=31536000, immutable" },
+          continue: true,
+        },
+      ],
+    }),
+  );
   const { finalizeStaticWebsite } = await import("../scripts/finalize-static-website.mjs");
   await assert.rejects(finalizeStaticWebsite(output, { docs: true }), { code: "ENOENT" });
   const runtime = path.join(output, "functions/__nitro.func");

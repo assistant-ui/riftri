@@ -60,10 +60,6 @@ export async function finalizeStaticWebsite(
     await access(path.join(staticDirectory, name));
   }
 
-  const immutableAssetRoute = config.routes?.find(
-    (route) => route.headers?.["Cache-Control"]?.includes("immutable"),
-  );
-
   await writeFile(path.join(staticDirectory, "build-info.json"), `${JSON.stringify({ revision: currentRevision() })}\n`);
 
   if (docs) {
@@ -78,6 +74,20 @@ export async function finalizeStaticWebsite(
   } else {
     await rm(path.join(outputDirectory, "functions"), { recursive: true, force: true });
     await rm(path.join(outputDirectory, "nitro.json"), { force: true });
+  }
+
+  // The rebuilt route table keeps exactly one route from the build output, so
+  // a change in how the framework emits it would drop long-term asset caching
+  // silently: finalization would still succeed, every test here would still
+  // pass, and `verify-website.mjs` checks no asset's Cache-Control. Fail
+  // closed instead -- production serves hashed assets `immutable` today.
+  const immutableAssetRoute = config.routes?.find(
+    (route) => route.headers?.["Cache-Control"]?.includes("immutable"),
+  );
+  if (!immutableAssetRoute) {
+    throw new Error(
+      "build output has no immutable asset route; hashed assets would be served without long-term caching",
+    );
   }
 
   const staticConfig = {
