@@ -23,14 +23,24 @@ export async function stageRootPackage(
   const published = (entry) => entry.replace(/^package\//, "");
   manifest.main = published(manifest.main);
   manifest.types = published(manifest.types);
-  manifest.exports = {
-    ".": Object.fromEntries(
-      Object.entries(manifest.exports["."]).map(([condition, entry]) => [
-        condition,
-        `./${published(entry.replace(/^\.\//, ""))}`,
-      ]),
-    ),
-  };
+  // Rewrite every subpath, not just ".". Rebuilding the object from one key
+  // would publish a package missing the others, and nothing downstream looks:
+  // npm resolves a subpath only when something imports it.
+  const publishedEntry = (entry) =>
+    `./${published(entry.replace(/^\.\//, ""))}`;
+  manifest.exports = Object.fromEntries(
+    Object.entries(manifest.exports).map(([subpath, target]) => [
+      subpath,
+      typeof target === "string"
+        ? publishedEntry(target)
+        : Object.fromEntries(
+            Object.entries(target).map(([condition, entry]) => [
+              condition,
+              publishedEntry(entry),
+            ]),
+          ),
+    ]),
+  );
   manifest.files = ["bin", "lib", "README.md", "LICENSE"];
   delete manifest.scripts;
 
@@ -58,7 +68,12 @@ export async function stageRootPackage(
   return destination;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+// `process.argv[1]` is undefined under `node -e` and in embedders, where
+// pathToFileURL throws. The sibling release scripts all guard it.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href
+) {
   const destination = await stageRootPackage();
   process.stdout.write(`staged public npm launcher at ${destination}\n`);
 }
