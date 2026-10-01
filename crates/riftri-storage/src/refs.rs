@@ -561,101 +561,13 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> StorageEr
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, OpenOptions};
-    use std::time::Instant;
+    use std::fs;
 
     use tempfile::tempdir;
 
     use super::{
         clone_tree, clone_tree_owner_writable, make_tree_owner_writable, make_tree_read_only, probe,
     };
-
-    /// Compare the path-based permission update used before this optimization
-    /// with SetFileInformationByHandle on the destination handle the clone
-    /// worker already owns. Full ReFS lifecycle coverage remains the
-    /// correctness gate for the block-clone path around this isolated phase.
-    #[test]
-    #[ignore = "manual destination permission restoration benchmark"]
-    #[allow(clippy::permissions_set_readonly_false)]
-    fn reports_destination_handle_permission_latency() {
-        const FILES: usize = 6_144;
-        const ROUNDS: usize = 7;
-
-        let fixture = tempdir().expect("permission benchmark fixture");
-        if probe(fixture.path()).is_err() {
-            return;
-        }
-        let directory = fixture.path().join("files");
-        fs::create_dir(&directory).expect("permission benchmark directory");
-        let mut files = Vec::with_capacity(FILES);
-        for index in 0..FILES {
-            let path = directory.join(format!("file-{index:05}"));
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .expect("permission benchmark file");
-            files.push((path, file));
-        }
-        let mut read_only = fs::symlink_metadata(&files[0].0)
-            .expect("benchmark permissions")
-            .permissions();
-        read_only.set_readonly(true);
-        let mut writable = read_only.clone();
-        writable.set_readonly(false);
-        let reset = || {
-            for (_, file) in &files {
-                file.set_permissions(read_only.clone())
-                    .expect("reset benchmark permissions");
-            }
-        };
-        let path_permissions = || {
-            reset();
-            let started = Instant::now();
-            for (path, _) in &files {
-                fs::set_permissions(path, writable.clone()).expect("restore permissions by path");
-            }
-            started.elapsed().as_micros()
-        };
-        let handle_permissions = || {
-            reset();
-            let started = Instant::now();
-            for (_, file) in &files {
-                file.set_permissions(writable.clone())
-                    .expect("restore permissions by handle");
-            }
-            started.elapsed().as_micros()
-        };
-
-        let mut baseline = Vec::with_capacity(ROUNDS);
-        let mut candidate = Vec::with_capacity(ROUNDS);
-        for round in 0..ROUNDS {
-            if round % 2 == 0 {
-                baseline.push(path_permissions());
-                candidate.push(handle_permissions());
-            } else {
-                candidate.push(handle_permissions());
-                baseline.push(path_permissions());
-            }
-        }
-        assert!(
-            !fs::symlink_metadata(&files[FILES / 2].0)
-                .expect("benchmark result metadata")
-                .permissions()
-                .readonly()
-        );
-        let median = |samples: &[u128]| {
-            let mut sorted = samples.to_vec();
-            sorted.sort_unstable();
-            sorted[ROUNDS / 2]
-        };
-        println!(
-            "RIFTRI_REFS_PERMISSION_BENCHMARK files={FILES} baseline_median_microseconds={} candidate_median_microseconds={} baseline_samples_microseconds={baseline:?} candidate_samples_microseconds={candidate:?}",
-            median(&baseline),
-            median(&candidate),
-        );
-    }
 
     #[test]
     fn writable_clone_matches_the_two_pass_path_and_preserves_the_base() {

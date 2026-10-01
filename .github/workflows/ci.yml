@@ -515,14 +515,6 @@ jobs:
           TMPDIR: ${{ runner.temp }}/riftri-reflink
         run: cargo test --workspace --locked --features riftri-core/native-cow-integration
 
-      - name: Compare reflink destination permission restoration
-        env:
-          TMPDIR: ${{ runner.temp }}/riftri-reflink
-        run: >-
-          cargo test -p riftri-storage
-          reflink::tests::reports_destination_handle_permission_latency
-          -- --ignored --exact --nocapture
-
       - name: Run installed npm workflow on the reflink volume
         env:
           RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
@@ -746,16 +738,6 @@ jobs:
           TEMP: R:\riftri-temp
           TMP: R:\riftri-temp
         run: cargo test --workspace --locked --features riftri-core/native-cow-integration
-
-      - name: Compare ReFS destination permission restoration
-        shell: pwsh
-        env:
-          TEMP: R:\riftri-temp
-          TMP: R:\riftri-temp
-        run: >-
-          cargo test -p riftri-storage
-          refs::tests::reports_destination_handle_permission_latency
-          -- --ignored --exact --nocapture
 
       - name: Run installed npm workflow on ReFS
         shell: pwsh
