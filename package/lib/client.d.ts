@@ -9,14 +9,21 @@ export const EXIT_POLICY: 3;
 export interface FailureReceipt {
   schemaVersion: number;
   outcome: "failed";
-  operation: string;
+  /** Null for a usage error: parsing failed before a command was chosen. */
+  operation: string | null;
   code: string;
-  category: "policy" | "operational";
+  /** Mirrors the exit code: 1 operational, 2 usage, 3 policy. */
+  category: "policy" | "operational" | "usage";
   message: string;
   phase: string | null;
   cleanup: string;
   recovery: "required" | "not-required" | "retry" | "inspect" | "unknown";
   nextCommand: string | null;
+  repository: string | null;
+  repositoryNativeHex: string | null;
+  stateDirectory: string | null;
+  stateDirectoryNativeHex: string | null;
+  nativePathEncoding: string;
 }
 
 export class RiftriError extends Error {
@@ -71,6 +78,8 @@ export interface AddReport {
   base_path: string;
   /** False when this add materialized a new immutable base. */
   reused_base: boolean;
+  /** The `post-checkout` hook Git would run, or null when there is none. */
+  post_checkout: { hook: string; started: boolean; exit_code: number | null } | null;
   journal_path: string;
   native_path_encoding: string;
 }

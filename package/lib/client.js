@@ -182,7 +182,7 @@ class Riftri {
         try {
           receipt = JSON.parse(stderr);
         } catch {
-          // Usage errors come from the argument parser and carry no receipt.
+          // Plain text, as from a binary that predates usage receipts.
         }
         reject(new RiftriError(exitCode, receipt, stderr));
       });
