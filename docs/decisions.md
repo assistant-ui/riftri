@@ -176,6 +176,10 @@ path, and only then is the quarantine deleted. An interrupted delete therefore
 cannot leave a half-deleted view that is still registered, a state recovery
 could not tell apart from user changes (#447). Active reference counts are derived from terminal
 add and removal journals instead of maintained as a second mutable counter.
+That derivation reads the journals alone: an add journal that is neither rolled
+back nor removal-complete still counts its base even when Git no longer
+registers its destination, so the read-only status report cannot describe a base
+as unreferenced while the collector protects it (#600).
 Zero-reference bases remain cached until the explicit garbage collector is
 applied; collection is journaled and independently validates that no active or
 incomplete operation references the base.
