@@ -22,11 +22,15 @@ For a real-project, ten-agent run using the public direct-download CLI, see
 It records both allocation savings and slower creation, along with the
 repository compatibility adjustment and workload limitations.
 
-For the current cached-creation baseline on a real repository, see
+For a historical cached-creation baseline on a real repository, see
 [the assistant-ui cached creation baseline](benchmarks/assistant-ui-cached-creation-2026-09-25.md).
 It records serial and ten-way concurrent latencies, reports the two physical
 allocation measurements separately, and retains an outlier rather than dropping
 it. It is a baseline for #211, not a comparison between versions.
+
+The [October 1 diagnostic](benchmarks/assistant-ui-diagnostic-2026-10-01.md)
+records serial process counts and next profiling targets. Heavy host pressure
+prevented a complete comparison, so it makes no latency claim.
 
 For the narrower checkout-configuration optimization, see
 [the batching comparison](benchmarks/checkout-config-batching-2026-09-13.md).
@@ -145,4 +149,6 @@ methodology the `docs/benchmarks/` records already use.
 
 The Git invocation counts the issue also asks about are a hard contract
 elsewhere: `crates/riftri-cli/tests/git_invocation_budget.rs` caps a cold add at
-24 invocations and a cached add at 18, and fails when either grows.
+19 invocations and a detached cached add at 14; a cached existing-branch add
+is capped at 17. These budgets cover the test's attribute-free fixture, rather
+than every checkout profile, and the test fails when a budget grows.

@@ -20,8 +20,9 @@ these guarantees.
 | OverlayFS | A shared base with a private writable layer |
 | ReFS | Aligned file extents; small tails may be copied |
 
-Mounted OverlayFS moves and compaction, and sparse-worktree compaction, are
-not supported.
+Mounted OverlayFS moves and compaction are not supported. Pristine native-COW
+sparse worktrees can compact at their original cone selection; compaction after
+changing that selection remains unsupported.
 
 ## Not promised
 

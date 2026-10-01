@@ -19,10 +19,17 @@ function count(name, fallback, maximum) {
 const singleRounds = count('RIFTRI_BENCH_SINGLE_ROUNDS', 8, 30);
 const batchRounds = count('RIFTRI_BENCH_BATCH_ROUNDS', 2, 30);
 const workers = count('RIFTRI_BENCH_WORKERS', 9, 16);
+// Large exact-tree fixtures can legitimately spend more than a minute in Git
+// or final clean verification on a busy development host. Keep a finite guard
+// against a wedged subprocess without censoring the slow samples this manual
+// harness exists to retain.
+const commandTimeoutMs = 5 * 60 * 1000;
 const binaries = { before: path.resolve(before), after: path.resolve(after) };
-const output = path.resolve(outputArgument);
-assert.ok(!fs.existsSync(output), 'Output directory must not already exist');
-fs.mkdirSync(output);
+const requestedOutput = path.resolve(outputArgument);
+assert.ok(!fs.existsSync(requestedOutput), 'Output directory must not already exist');
+fs.mkdirSync(requestedOutput);
+// Journals store canonical paths; /tmp is an alias for /private/tmp on macOS.
+const output = fs.realpathSync(requestedOutput);
 const repository = path.join(output, 'repository');
 fs.mkdirSync(repository);
 const emptyConfig = path.join(output, 'empty-config');
@@ -30,7 +37,7 @@ fs.writeFileSync(emptyConfig, '');
 const env = { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_SYSTEM: emptyConfig, GIT_CONFIG_NOSYSTEM: '1' };
 for (const key of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_TRACE2_EVENT', 'RIFTRI_BYPASS', 'RIFTRI_SHIM_ACTIVE', 'RIFTRI_REAL_GIT']) delete env[key];
 function exec(command, args, cwd = repository, input) {
-  const result = spawnSync(command, args, { cwd, env, input, maxBuffer: 100e6, timeout: 60000 });
+  const result = spawnSync(command, args, { cwd, env, input, maxBuffer: 100e6, timeout: commandTimeoutMs });
   assert.equal(result.status, 0, `${command} ${args.join(' ')}\n${result.stderr}`);
   return result.stdout;
 }
@@ -70,7 +77,7 @@ async function create(version, mode, label, warm = true) {
     ? ['worktree', 'add', '--detach', '--repository', repository, destination, 'HEAD']
     : ['exec', '--', 'git', 'worktree', 'add', '--detach', destination, 'HEAD'];
   const started = process.hrtime.bigint();
-  const child = spawn(binaries[version], args, { cwd: repository, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: 60000 });
+  const child = spawn(binaries[version], args, { cwd: repository, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: commandTimeoutMs });
   let stdout = '', stderr = '';
   let partial = '';
   const phases = [];

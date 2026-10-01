@@ -121,5 +121,6 @@ read as a median over many samples rather than a per-run figure.
 - Host APFS was used rather than a dedicated sparse image, matching
   `shared-base-readers-2026-09-13.md`.
 - Git invocation counts are not measured here; they are a hard contract in
-  `crates/riftri-cli/tests/git_invocation_budget.rs` (24 cold, 18 cached).
+  `crates/riftri-cli/tests/git_invocation_budget.rs` (24 cold, 18 cached at
+  the time of this historical run; see `docs/benchmarks.md` for current budgets).
 - Machine-readable results: `assistant-ui-cached-creation-2026-09-25.json`.

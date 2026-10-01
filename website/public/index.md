@@ -383,6 +383,7 @@ maps every document in one place.
 
 ### Measurements and optimization work
 
+- [Assistant-ui diagnostic, October 1](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-diagnostic-2026-10-01.md): serial process counts and follow-up priorities; no latency claim.
 - [Benchmark guide](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks.md): running and interpreting native-COW benchmarks.
 - [APFS allocation evidence](https://github.com/assistant-ui/riftri/blob/main/docs/allocation-evidence.md): physical-sharing measurements.
 - [Assistant-ui ten-agent experiment](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-ten-agents-2026-09-12.md): real-project allocation and timing.

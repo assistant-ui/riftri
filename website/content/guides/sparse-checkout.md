@@ -15,9 +15,12 @@ worktree with its own branch and index.
 ## Current limits
 
 - Literal directory names only; no file paths, wildcards, or negations.
-- Request sparse views through `riftri worktree add`, not intercepted Git commands.
-- Existing repository-level sparse configuration and Git LFS paths are unsupported.
-- Sparse worktrees cannot be compacted yet.
+- Explicit selections use `riftri worktree add --sparse-dir`.
+- Adds issued inside a cone-mode sparse worktree inherit its selection, including
+  intercepted Git adds. Explicit sparse options through interception remain unsupported.
+- Sparse selections combined with Git LFS paths are unsupported.
+- Pristine native-COW sparse views can compact at their original selection;
+  compaction after a selection change remains unsupported.
 
 You can change the selection later with Git's sparse-checkout commands, but
 newly included files are ordinary checkouts, not new Riftri clones; for a
