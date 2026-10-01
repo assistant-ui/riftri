@@ -1484,11 +1484,10 @@ pub fn storage_accounting(
         let Ok(registered) = git.list_worktrees(&journal.repository) else {
             continue;
         };
-        inventories.insert(journal.repository.clone(), registered.clone());
-        for worktree in registered {
+        for worktree in &registered {
             if worktree.head_unresolvable {
                 unresolvable_worktree_issues.push(StateDiagnosticIssue {
-                    path: worktree.path,
+                    path: worktree.path.clone(),
                     base_count_impact: BaseCountImpact::MayHideReference,
                     reason: "Git cannot resolve this worktree's HEAD; Riftri left it \
                              alone. `git worktree repair` or removing the worktree \
@@ -1497,6 +1496,10 @@ pub fn storage_accounting(
                 });
             }
         }
+        inventories.insert(
+            journal.repository.clone(),
+            WorktreeInventory::new(registered),
+        );
     }
     let mut add_journals = Vec::with_capacity(loaded_add_journals.len());
     let mut registered_worktrees = BTreeMap::new();
@@ -1788,9 +1791,72 @@ enum StatusAddJournal {
     Unregistered(String),
 }
 
+struct WorktreeInventory {
+    entries: Vec<riftri_git::WorktreeInfo>,
+    by_path: HashMap<PathBuf, usize>,
+    by_alias: HashMap<Vec<u8>, usize>,
+}
+
+impl WorktreeInventory {
+    fn new(entries: Vec<riftri_git::WorktreeInfo>) -> Self {
+        let mut by_path = HashMap::with_capacity(entries.len());
+        let mut by_alias = HashMap::new();
+        for (index, entry) in entries.iter().enumerate() {
+            // Preserve the previous linear search's first-match behavior.
+            by_path.entry(entry.path.clone()).or_insert(index);
+            if let Some(key) = inventory_path_key(&entry.path) {
+                by_alias.entry(key).or_insert(index);
+            }
+        }
+        Self {
+            entries,
+            by_path,
+            by_alias,
+        }
+    }
+
+    fn find(&self, path: &Path) -> Option<&riftri_git::WorktreeInfo> {
+        let alias = inventory_path_key(path).and_then(|key| self.by_alias.get(&key));
+        // Windows paths_match uses only its normalized wide representation.
+        let exact = if cfg!(target_os = "windows") {
+            None
+        } else {
+            self.by_path.get(path)
+        };
+        let index = exact.into_iter().chain(alias).min();
+        index.map(|index| &self.entries[*index])
+    }
+}
+
+// This key is deliberately identical to paths_match, including platform
+// aliases and lossless non-UTF-8 paths. It is scoped to one status snapshot.
+fn inventory_path_key(path: &Path) -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    {
+        use unicode_normalization::UnicodeNormalization;
+        if let Some(text) = path.to_str() {
+            return Some(text.nfc().collect::<String>().into_bytes());
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Some(
+            windows_path_key(path)
+                .into_iter()
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+        )
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 fn validate_status_add_journal(
     git: &Git,
-    inventories: &HashMap<PathBuf, Vec<riftri_git::WorktreeInfo>>,
+    inventories: &HashMap<PathBuf, WorktreeInventory>,
     state_directory: &Path,
     journal: &DecodedJournal,
     removal_complete: bool,
@@ -1812,16 +1878,12 @@ fn validate_status_add_journal(
     let inventory = match inventories.get(&journal.repository) {
         Some(inventory) => inventory,
         None => {
-            listed = git.list_worktrees(&journal.repository)?;
+            listed = WorktreeInventory::new(git.list_worktrees(&journal.repository)?);
             &listed
         }
     };
-    let Some(registered) = inventory
-        .iter()
-        .find(|worktree| paths_match(&worktree.path, &journal.destination))
-        .cloned()
-    else {
-        return unregistered_destination_advice(inventory, claimed, journal)
+    let Some(registered) = inventory.find(&journal.destination).cloned() else {
+        return unregistered_destination_advice(&inventory.entries, claimed, journal)
             .map(StatusAddJournal::Unregistered);
     };
     if registered.head_unresolvable {
@@ -5636,30 +5698,35 @@ fn inspect_git_lfs_objects(
         .inspect_repository(repository)
         .map_err(|error| format!("could not locate the Git LFS object store: {error}"))?;
     let mut objects = Vec::with_capacity(paths.len());
-    for path in paths {
-        let entry = entries
-            .iter()
-            .find(|entry| entry.path == *path)
-            .ok_or_else(|| {
+    let entries_by_path = entries
+        .iter()
+        .map(|entry| (entry.path.as_path(), entry))
+        .collect::<HashMap<_, _>>();
+    let selected = paths
+        .iter()
+        .map(|path| {
+            entries_by_path.get(path.as_path()).copied().ok_or_else(|| {
                 format!(
                     "Git LFS path {} is absent from the exact tree",
                     path.display()
                 )
-            })?;
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ids = selected
+        .iter()
+        .map(|entry| entry.object_id.clone())
+        .collect::<Vec<_>>();
+    let sizes = git
+        .blob_sizes(repository, &ids)
+        .map_err(|error| format!("could not inspect Git LFS pointers: {error}"))?;
+    for ((path, entry), blob_size) in paths.iter().zip(selected).zip(sizes) {
         if entry.object_kind != b"blob" || !matches!(entry.mode, 0o100644 | 0o100755) {
             return Err(format!(
                 "Git LFS path {} is not a regular file in the exact tree",
                 path.display()
             ));
         }
-        let blob_size = git
-            .blob_size(repository, &entry.object_id)
-            .map_err(|error| {
-                format!(
-                    "could not inspect Git LFS pointer {}: {error}",
-                    path.display()
-                )
-            })?;
         if blob_size > MAX_POINTER_BYTES {
             return Err(format!(
                 "Git LFS pointer {} is {blob_size} bytes; canonical pointers must be at most {MAX_POINTER_BYTES} bytes",
@@ -12077,6 +12144,102 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use crate::BaseCountImpact;
+    #[test]
+    fn inventory_keys_preserve_path_matching() {
+        let mut paths = vec![
+            std::path::PathBuf::from("/work/plain"),
+            std::path::PathBuf::from("/work/caf\u{00e9}"),
+            std::path::PathBuf::from("/work/cafe\u{0301}"),
+            std::path::PathBuf::from("/work/./caf\u{00e9}"),
+            std::path::PathBuf::from("/WORK/PLAIN"),
+            std::path::PathBuf::from(r"C:\work\plain"),
+            std::path::PathBuf::from(r"\\?\C:\work\plain"),
+        ];
+        #[cfg(unix)]
+        paths.push(std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            b"/work/\xff".to_vec(),
+        )));
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            paths.push(PathBuf::from(OsString::from_wide(&[0xd800])));
+        }
+        for left in &paths {
+            for right in &paths {
+                let aliases = matches!((super::inventory_path_key(left), super::inventory_path_key(right)), (Some(left), Some(right)) if left == right);
+                assert_eq!(
+                    (!cfg!(target_os = "windows") && left == right) || aliases,
+                    super::paths_match(left, right),
+                    "{left:?} {right:?}"
+                );
+            }
+        }
+        let entries = paths
+            .iter()
+            .chain(paths.iter())
+            .map(|path| inventory_entry(path.clone()))
+            .collect::<Vec<_>>();
+        let inventory = super::WorktreeInventory::new(entries.clone());
+        for path in &paths {
+            let expected = entries
+                .iter()
+                .find(|entry| super::paths_match(&entry.path, path));
+            assert_eq!(inventory.find(path), expected);
+        }
+        assert!(inventory.find(Path::new("/not-registered")).is_none());
+    }
+
+    fn inventory_entry(path: PathBuf) -> riftri_git::WorktreeInfo {
+        riftri_git::WorktreeInfo {
+            path,
+            head: None,
+            branch: None,
+            detached: true,
+            bare: false,
+            head_unresolvable: false,
+            locked_reason: None,
+            prunable_reason: None,
+        }
+    }
+
+    #[test]
+    #[ignore = "manual paired inventory lookup benchmark; includes index construction"]
+    fn reports_inventory_lookup_latency() {
+        let entries = (0..1000)
+            .map(|index| inventory_entry(PathBuf::from(format!("/work/view-{index:04}"))))
+            .collect::<Vec<_>>();
+        for round in 0..4 {
+            for indexed in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let started = std::time::Instant::now();
+                if indexed {
+                    let inventory = super::WorktreeInventory::new(entries.clone());
+                    for entry in &entries {
+                        assert_eq!(
+                            std::hint::black_box(inventory.find(&entry.path)),
+                            Some(entry)
+                        );
+                    }
+                } else {
+                    for entry in &entries {
+                        assert_eq!(
+                            std::hint::black_box(entries.iter().find(|candidate| {
+                                super::paths_match(&candidate.path, &entry.path)
+                            })),
+                            Some(entry)
+                        );
+                    }
+                }
+                println!(
+                    "inventory round={round} indexed={indexed} elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+            }
+        }
+    }
     use std::collections::HashSet;
     use std::ffi::{OsStr, OsString};
     use std::fs;

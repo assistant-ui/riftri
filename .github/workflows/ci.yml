@@ -75,6 +75,12 @@ jobs:
           hdiutil attach "$RUNNER_TEMP/riftri-benchmark.sparsebundle" \
             -mountpoint "$RUNNER_TEMP/riftri-apfs" -nobrowse
 
+      - name: Verify release-mode many-file CLI and LFS workflows
+        if: matrix.os == 'macos-15'
+        run: >-
+          cargo test --release --locked -p riftri-cli
+          --test git_invocation_budget --test checkout_compatibility
+
       - name: Record native COW benchmark
         if: matrix.os == 'macos-15'
         env:

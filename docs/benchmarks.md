@@ -1,5 +1,54 @@
 # Native COW benchmark
 
+## Performance regression checks
+
+On macOS, the release-mode CLI checks exercise 1,025-file cold, cached, and
+existing-branch adds, verify every file and private-write isolation, and remove
+the views through Riftri. They also cover 16 local LFS pointers through creation
+and compaction. CI runs these without requiring any new user configuration:
+
+```sh
+cargo test --release --locked -p riftri-cli \
+  --test git_invocation_budget --test checkout_compatibility
+```
+
+The many-file fixture retains the 19/14/17 Git-process budgets. LFS pointer
+size inspection is one batch regardless of pointer count; pointer bodies remain
+individually read only after their sizes pass the existing bound. Status indexes
+one inventory snapshot without caching it across commands or skipping checks.
+
+Two optional paired probes isolate size-query overhead and worktree lookup
+costs (including index construction):
+
+```sh
+cargo test --release -p riftri-git --lib reports_blob_size_batch_latency -- --ignored --nocapture
+cargo test --release -p riftri-core --lib reports_inventory_lookup_latency -- --ignored --nocapture
+```
+
+These probes alternate old/new operation order and check result parity. Their
+timings are not end-to-end add/status speedups; use the full CLI workload below
+for those claims. The lookup probe runs on macOS, or with the
+`native-cow-integration` feature on supported Linux/Windows test volumes.
+
+Local diagnostic on October 1, 2026 (Apple M1, macOS, release profile): the four
+paired samples below passed result parity. The host was busy with other builds
+and tests; these are component observations, not a quiet-machine baseline or a
+whole-command speedup claim. All samples are retained, in microseconds:
+
+```text
+64 blob sizes, individual: 2722253, 1591882, 3615255, 3368587
+64 blob sizes, batched:      26695,   38438,   41424,   64565
+1000 lookups, linear:      223819, 257709, 303160, 243345
+1000 lookups, indexed:       1109,    889,    875,    768
+```
+
+The deterministic improvement is fewer subprocesses (64 size requests become
+one) and indexed rather than repeated linear lookup. Pointer parsing, local
+object validation, base integrity, and final Git cleanliness checks remain in
+place. No command syntax, opt-in requirement, or checkout default changes.
+
+## Real-project comparisons
+
 For a sparse/full comparison on an exported source tree, run:
 
 ```sh

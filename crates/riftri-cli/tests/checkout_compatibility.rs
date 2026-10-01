@@ -297,10 +297,15 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
     )
     .expect("write canonical LFS attributes");
     fs::write(fixture.repository.join("payload.bin"), &pointer).expect("write LFS pointer");
-    fixture.commit(
-        &[".gitattributes", "payload.bin"],
-        "canonical Git LFS pointer",
-    );
+    let extra_pointers = (0..15)
+        .map(|index| format!("payload-{index}.bin"))
+        .collect::<Vec<_>>();
+    for name in &extra_pointers {
+        fs::write(fixture.repository.join(name), &pointer).expect("write repeated LFS pointer");
+    }
+    let mut tracked = vec![".gitattributes", "payload.bin"];
+    tracked.extend(extra_pointers.iter().map(String::as_str));
+    fixture.commit(&tracked, "canonical Git LFS pointer");
 
     let object = fixture
         .repository
@@ -351,6 +356,11 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
         .expect("repository parent")
         .join("lfs-state");
     let mut add = Command::new(env!("CARGO_BIN_EXE_riftri"));
+    let trace = fixture
+        .repository
+        .parent()
+        .unwrap()
+        .join("lfs-add-trace.jsonl");
     add.args([
         "worktree",
         "add",
@@ -361,6 +371,7 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
         state.to_str().expect("UTF-8 state"),
     ])
     .current_dir(&fixture.repository)
+    .env("GIT_TRACE2_EVENT", &trace)
     .env("PATH", &child_path)
     .env("GIT_CONFIG_GLOBAL", "/dev/null")
     .env("GIT_CONFIG_NOSYSTEM", "1");
@@ -413,6 +424,24 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
         "Riftri LFS add failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let starts = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| event["event"] == "start")
+        .collect::<Vec<_>>();
+    let size_batches = starts
+        .iter()
+        .filter(|event| {
+            event["argv"]
+                .as_array()
+                .is_some_and(|args| args.iter().any(|arg| arg == "--batch-check"))
+        })
+        .count();
+    assert_eq!(
+        size_batches, 1,
+        "all 16 LFS pointers must share one size query"
+    );
     assert_eq!(
         fs::read(destination.join("payload.bin")).expect("read expanded payload"),
         contents
@@ -451,6 +480,12 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
         fs::read(destination.join("payload.bin")).expect("read compacted expanded payload"),
         contents
     );
+    for name in &extra_pointers {
+        assert_eq!(
+            fs::read(destination.join(name)).expect("read compacted LFS pointer"),
+            contents
+        );
+    }
 
     fs::write(destination.join("payload.bin"), b"private edit\n").expect("edit private view");
     assert_eq!(
