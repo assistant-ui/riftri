@@ -25,6 +25,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- An add killed while it starts or builds a base no longer leaves a permanent
+  `status` diagnostic. The repository base bucket is created only after the
+  add's intent is journaled, so a kill between the two no longer strands an
+  empty bucket with no owner. Rollback also removes the lock Git leaves beside
+  the add's temporary index (#591).
 - Adding a branch that another worktree already has checked out is refused
   before anything is written, as an `invalid-request` policy failure naming
   that worktree. It used to reach Git after the add was journaled and fail as
