@@ -273,6 +273,18 @@ test("global flags go before the exec payload, never inside it", { skip: onWindo
   ]);
 });
 
+test("listing every state never also names the configured one", { skip: onWindows }, async (t) => {
+  // Riftri rejects --all-states with --state-dir, so a client built with
+  // `stateDir` failed every `list({ allStates: true })` as a usage error.
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "state" });
+  await riftri.worktree.list({ allStates: true });
+  assert.deepEqual(stub.argv(), ["worktree", "list", "--all-states", "--json", "--json-errors"]);
+  await riftri.worktree.list();
+  assert.ok(stub.argv().includes("state"), stub.argv().join(" "));
+});
+
 test("a command with no payload still receives its flags last", { skip: onWindows }, async (t) => {
   assert.deepEqual(await argvFor(t, ["status"], { json: true }), [
     "status",

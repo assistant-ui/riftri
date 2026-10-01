@@ -266,7 +266,10 @@ class Riftri {
   }
 
   #worktreeList(options = {}) {
-    return this.run(["worktree", "list", ...flagsFor(options), ...this.#stateFlag()]);
+    // `--all-states` already covers the configured state directory, and Riftri
+    // rejects it alongside `--state-dir` as a usage error.
+    const state = options.allStates ? [] : this.#stateFlag();
+    return this.run(["worktree", "list", ...flagsFor(options), ...state]);
   }
 
   #worktreeRemove(destination, { force = false } = {}) {
