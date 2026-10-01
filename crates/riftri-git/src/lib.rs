@@ -469,6 +469,15 @@ impl Git {
         path: &Path,
         revision: &OsStr,
     ) -> Result<ResolvedRevision, GitError> {
+        // `git show` reads its argument as a revision walk, so it would list
+        // the commits of a range (`A..B`, `A...B`) or a negation (`^A`)
+        // rather than refuse them as `rev-parse --verify` and Git's own
+        // `worktree add` do. Only those spellings take the strict two-process
+        // path; the appended `^{commit}` already defeats `^@`, `^!` and `^-`.
+        if is_revision_walk(revision) {
+            let commit = self.resolve_required_object(path, revision, "^{commit}")?;
+            return self.resolve_commit_tree(path, commit);
+        }
         let arguments = resolved_revision_arguments(revision);
         let output = self.run_os(Some(path), &arguments)?;
         parse_resolved_revision_output(&output.stdout)
@@ -510,6 +519,11 @@ impl Git {
         path: &Path,
         revision: &OsStr,
     ) -> Result<Option<ResolvedRevision>, GitError> {
+        // A leading `^` is a negation, never a commit; even `rev-parse
+        // --verify` accepts it and prints `^<oid>` back.
+        if revision.as_encoded_bytes().first() == Some(&b'^') {
+            return Ok(None);
+        }
         match self.resolve_revision(path, revision) {
             Ok(resolved) => Ok(Some(resolved)),
             Err(error @ GitError::CommandFailed { .. }) => {
@@ -1918,18 +1932,29 @@ impl Git {
     ) -> Result<Option<ObjectId>, GitError> {
         let mut reference = OsString::from("refs/heads/");
         reference.push(branch);
-        // A full refname pattern matches only that complete ref. Omitting
-        // `--verify` is intentional: show-ref then returns 1 with no output
-        // for a missing ref, while still printing the object ID for a match,
-        // so existence and target resolution share one process.
-        let arguments = [
-            OsString::from("show-ref"),
-            OsString::from("--hash"),
-            reference,
-        ];
+        // Without `--verify`, show-ref returns 1 with no output for a missing
+        // ref and prints the object ID for a match, so existence and target
+        // resolution share one process. Its pattern is a suffix match, though:
+        // `refs/heads/topic` also matches `refs/remotes/origin/refs/heads/topic`
+        // and `refs/heads/refs/heads/topic`. So only the line naming exactly
+        // this ref counts. A refname cannot contain a space, so each
+        // `<oid> <refname>` line splits unambiguously.
+        let arguments = [OsString::from("show-ref"), reference.clone()];
         let output = self.output_os(Some(repository), &arguments)?;
         match output.status.code() {
-            Some(0) => parse_object_output(&output.stdout).map(Some),
+            Some(0) => {
+                let reference = reference.as_encoded_bytes();
+                output
+                    .stdout
+                    .split(|byte| *byte == b'\n')
+                    .filter_map(|line| {
+                        let space = line.iter().position(|byte| *byte == b' ')?;
+                        Some((&line[..space], &line[space + 1..]))
+                    })
+                    .find(|(_, name)| *name == reference)
+                    .map(|(object, _)| parse_object_bytes(object))
+                    .transpose()
+            }
             Some(1) => Ok(None),
             _ => Err(command_failed(&arguments, &output)),
         }
@@ -2402,6 +2427,14 @@ pub fn parse_worktree_porcelain(input: &[u8]) -> Result<Vec<WorktreeInfo>, GitEr
 
 fn parse_object_output(bytes: &[u8]) -> Result<ObjectId, GitError> {
     parse_object_bytes(trim_line_endings(bytes))
+}
+
+/// Whether `git show` would parse `revision` as a range or a negation. No
+/// refname contains `..` or starts with `^`, so a name that does is either one
+/// of those or something `rev-parse --verify` must judge.
+fn is_revision_walk(revision: &OsStr) -> bool {
+    let bytes = revision.as_encoded_bytes();
+    bytes.first() == Some(&b'^') || bytes.windows(2).any(|pair| pair == b"..")
 }
 
 fn resolved_revision_arguments(revision: &OsStr) -> [OsString; 8] {
@@ -3642,6 +3675,80 @@ mod tests {
             git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
                 .expect("check removed branch"),
             None
+        );
+    }
+
+    #[test]
+    fn requested_ranges_and_negations_name_no_commit() {
+        // `git show` walks these, so `HEAD~1..HEAD` once resolved to HEAD
+        // where Git's own `worktree add` refuses it as an invalid reference.
+        let fixture = RepositoryFixture::committed();
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "second"],
+        );
+        let git_runner = Git::default();
+        for revision in ["HEAD~1..HEAD", "HEAD~1...HEAD", "HEAD...HEAD~1", "^HEAD~1"] {
+            assert_eq!(
+                git_runner
+                    .resolve_requested_revision(fixture.path(), OsStr::new(revision))
+                    .expect("classify a walk expression"),
+                None,
+                "{revision} must not resolve to a single commit"
+            );
+        }
+
+        let attempts_before = git_runner.process_attempts();
+        let head = git_runner
+            .resolve_requested_revision(fixture.path(), OsStr::new("HEAD~1"))
+            .expect("resolve an ordinary revision");
+        assert!(head.is_some());
+        assert_eq!(
+            git_runner.process_attempts() - attempts_before,
+            1,
+            "an ordinary revision must still resolve in one process"
+        );
+    }
+
+    #[test]
+    fn local_branch_lookup_ignores_refs_that_only_end_with_the_branch_ref() {
+        // show-ref patterns match ref-name suffixes, so these matched
+        // `refs/heads/topic`: an absent branch read as present, and a present
+        // one printed two object IDs and failed to parse.
+        let fixture = RepositoryFixture::committed();
+        let head = Git::default()
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve HEAD")
+            .commit;
+        git(
+            fixture.path(),
+            &["update-ref", "refs/remotes/origin/refs/heads/topic", "HEAD"],
+        );
+        git(
+            fixture.path(),
+            &["update-ref", "refs/heads/refs/heads/topic", "HEAD"],
+        );
+        let git_runner = Git::default();
+
+        assert_eq!(
+            git_runner
+                .local_branch_target(fixture.path(), OsStr::new("topic"))
+                .expect("query a branch only other refs end with"),
+            None
+        );
+
+        git(fixture.path(), &["branch", "topic", "HEAD"]);
+        let attempts_before = git_runner.process_attempts();
+        assert_eq!(
+            git_runner
+                .local_branch_target(fixture.path(), OsStr::new("topic"))
+                .expect("resolve a branch that other refs end with"),
+            Some(head)
+        );
+        assert_eq!(
+            git_runner.process_attempts() - attempts_before,
+            1,
+            "the exact match must still need only one show-ref"
         );
     }
 

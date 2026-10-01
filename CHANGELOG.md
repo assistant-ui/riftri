@@ -25,6 +25,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Branch and revision lookups are exact again. A ref that merely ends in
+  `refs/heads/<name>`, such as `refs/remotes/origin/refs/heads/<name>`, no
+  longer makes `-b <name>` refuse as an existing branch or an existing-branch
+  add fail. A range (`A..B`, `A...B`) or negation (`^A`) is refused as an
+  invalid revision, as Git refuses it, instead of creating a worktree at a
+  commit from the range (#586).
 - The Node client passes paths after `--` and option values as `--name=value`,
   so a relative path such as `-scratch`, or a value starting with `-`, is no
   longer parsed as flags and rejected as a usage error (#581).
