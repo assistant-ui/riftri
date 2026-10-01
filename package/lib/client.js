@@ -183,11 +183,18 @@ class Riftri {
           }
           return;
         }
+        // The receipt is one JSON line at the end of stderr. Anything else a
+        // child wrote there first (a hook's output, a Git warning) must not
+        // cost the caller the receipt's code and category.
         let receipt = null;
-        try {
-          receipt = JSON.parse(stderr);
-        } catch {
-          // Plain text, as from a binary that predates usage receipts.
+        const lines = stderr.trimEnd().split("\n");
+        for (const candidate of [lines.at(-1), stderr]) {
+          try {
+            receipt = JSON.parse(candidate);
+            break;
+          } catch {
+            // Plain text, as from a binary that predates usage receipts.
+          }
         }
         reject(new RiftriError(exitCode, receipt, stderr));
       });
