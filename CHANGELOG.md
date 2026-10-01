@@ -25,6 +25,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `--detach :/<text>` (Git's commit-message search) now resolves as it does in
+  Git instead of failing as `git-failed`, and `<rev>:<path>` naming a file is
+  refused as an invalid revision rather than reported as a Git failure. The
+  appended `^{commit}` had become part of the search text or the path (#586).
 - An add killed while it starts or builds a base no longer leaves a permanent
   `status` diagnostic. The repository base bucket is created only after the
   add's intent is journaled, so a kill between the two no longer strands an
