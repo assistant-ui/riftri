@@ -25,6 +25,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A file written into the destination while `riftri worktree add` is still
+  running no longer leaves the add pending with no way forward. Rollback still
+  keeps the file, but the error from the add and from `riftri repair` now names
+  the kept destination. It says to copy anything needed out of it, delete it,
+  and run `riftri repair`, which then finishes the rollback (#599).
 - A write into a worktree during `riftri worktree compact` no longer wedges it.
   If the write lands before the swap, the compaction is cancelled and only its
   replacement is removed. If it reaches the old view after the swap, that view

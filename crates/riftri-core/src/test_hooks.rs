@@ -14,6 +14,7 @@ pub(crate) enum FilesystemRacePoint {
     BaseReadMiss,
     BaseReuseAfterExclusiveWait,
     AddIntentPersist,
+    AddCleanCheck,
 }
 
 type Hook = Box<dyn FnOnce(&Path)>;

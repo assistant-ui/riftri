@@ -621,6 +621,11 @@ Ignored files and unexpected empty directories count as private changes and
 are preserved. Native rollback repeats this check at the final removal boundary;
 OverlayFS checks the merged view before unmounting and revalidates its private
 layer afterward. Otherwise it retains the view and journal for manual attention.
+That retention is reported as recovery the caller completes, not a bare
+refusal: the message names the kept destination and says to copy
+anything needed out of it, delete it, and run `riftri repair`, which then
+finishes the rollback. A file written into the destination before the add
+returns is the usual cause.
 This stronger automatic-rollback rule does not change explicit removal's
 ordinary Git semantics.
 
