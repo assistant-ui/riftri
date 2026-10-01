@@ -144,10 +144,13 @@ request, always key different bases. Git's own `sparse-checkout set --cone`
 runs inside the isolated materialization directory to compute the patterns and
 skip-worktree bits, `checkout-index` writes only the active entries, and the
 new linked worktree receives real worktree-scoped sparse configuration before
-its clean state is verified. Anything outside that subset — patterns,
-nonexistent directories, repository-configured sparse checkout, sparse
-requests through Git interception, sparse plus Git LFS, or compaction of a
-sparse view — fails closed before durable state exists
+its clean state is verified. Adds inside an existing cone-mode sparse worktree
+inherit its selection, including intercepted Git adds; an explicit directory
+list overrides inheritance. Pristine native-COW sparse views compact at their
+creation profile. Anything outside that subset — non-cone patterns,
+nonexistent directories, explicit sparse options through Git interception,
+sparse plus Git LFS, or compaction after changing the selection — fails closed
+before durable state exists
 (see [sparse-checkout.md](sparse-checkout.md)).
 
 Git materializes the exact pointer tree inside Riftri's isolated administrative
@@ -505,9 +508,11 @@ cloned view restores owner write permission before Git index synchronization.
 On APFS, permission restoration is part of the per-entry clone traversal rather
 than a second directory walk. It reads each cloned file's actual mode before
 adding owner write permission, leaves symlink targets alone, and uses the same
-directory mode policy and failure cleanup. Linux and ReFS retain their existing
-two-pass implementation. Immutable-base integrity verification, journal
-transitions, Git index initialization, and final clean-state checks are unchanged.
+directory mode policy and failure cleanup. Linux and ReFS also restore file
+permissions within clone workers using their already-open destination handles,
+avoiding a separate permission traversal. Immutable-base integrity verification,
+journal transitions, Git index initialization, and final clean-state checks are
+unchanged.
 
 On Linux, Riftri accepts Btrfs and reflink-enabled XFS only after an active
 `FICLONE` check succeeds on two unnamed files in the destination volume. The

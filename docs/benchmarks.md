@@ -145,4 +145,6 @@ methodology the `docs/benchmarks/` records already use.
 
 The Git invocation counts the issue also asks about are a hard contract
 elsewhere: `crates/riftri-cli/tests/git_invocation_budget.rs` caps a cold add at
-24 invocations and a cached add at 18, and fails when either grows.
+19 invocations and a detached cached add at 14; a cached existing-branch add
+is capped at 17. These budgets cover the test's attribute-free fixture, rather
+than every checkout profile, and the test fails when a budget grows.

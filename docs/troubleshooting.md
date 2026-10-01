@@ -68,14 +68,14 @@ managers that set `core.hooksPath`, such as husky, work normally.
 
 ### Creation fails on a repository with sparse checkout, submodules, or custom filters
 
-A repository that already carries its own sparse-checkout profile, submodules,
-or custom filters fails closed with an explanation rather than producing an
-inexact worktree.
+Submodules and custom filters fail closed with an explanation rather than
+producing an inexact worktree.
 
-Sparse worktrees themselves are supported, but only when requested explicitly:
-pass `--sparse-dir <DIR>` to `riftri worktree add` for cone-mode selection.
-Inheriting the repository's sparse configuration, non-cone patterns, sparse
-plus Git LFS, and compacting a sparse worktree all still refuse. See
+For a cone-mode sparse selection, pass `--sparse-dir <DIR>` to `riftri worktree
+add`, or issue the add inside an existing cone-mode sparse worktree to inherit
+its selection. Pristine native-COW sparse views can compact at their creation
+profile. Non-cone patterns, sparse plus Git LFS, and compaction after changing
+the selection still refuse. See
 [sparse checkout](sparse-checkout.md). Submodules and broader sparse support
 are tracked in the [roadmap](../ROADMAP.md).
 
