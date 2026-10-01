@@ -474,6 +474,12 @@ impl Git {
         // rather than refuse them as `rev-parse --verify` and Git's own
         // `worktree add` do. Only those spellings take the strict two-process
         // path; the appended `^{commit}` already defeats `^@`, `^!` and `^-`.
+        if must_resolve_before_peeling(revision) {
+            let object = self.resolve_required_object(path, revision, "")?;
+            let arguments = resolved_revision_arguments(OsStr::new(object.as_str()));
+            let output = self.run_os(Some(path), &arguments)?;
+            return parse_resolved_revision_output(&output.stdout);
+        }
         if is_revision_walk(revision) {
             let commit = self.resolve_required_object(path, revision, "^{commit}")?;
             return self.resolve_commit_tree(path, commit);
@@ -551,7 +557,14 @@ impl Git {
     /// probe cannot establish (a corrupt object store, say) answers `false`,
     /// keeping the caller's original error.
     fn names_a_non_commit(&self, path: &Path, revision: &OsStr) -> Result<bool, GitError> {
-        let mut peeled = revision.to_os_string();
+        let mut peeled = if must_resolve_before_peeling(revision) {
+            match self.resolve_optional_object_os(path, revision)? {
+                Some(object) => OsString::from(object.as_str()),
+                None => return Ok(false),
+            }
+        } else {
+            revision.to_os_string()
+        };
         peeled.push("^{}");
         let object = self.output_os(
             Some(path),
@@ -2010,6 +2023,28 @@ impl Git {
         Ok(())
     }
 
+    /// `rev-parse --verify --quiet` without peeling: the object `revision`
+    /// names, or `None` when it names nothing.
+    fn resolve_optional_object_os(
+        &self,
+        path: &Path,
+        revision: &OsStr,
+    ) -> Result<Option<ObjectId>, GitError> {
+        let arguments = [
+            OsString::from("rev-parse"),
+            OsString::from("--verify"),
+            OsString::from("--quiet"),
+            OsString::from("--end-of-options"),
+            revision.to_os_string(),
+        ];
+        let output = self.output_os(Some(path), &arguments)?;
+        match output.status.code() {
+            Some(0) => parse_object_output(&output.stdout).map(Some),
+            Some(1) => Ok(None),
+            _ => Err(command_failed(&arguments, &output)),
+        }
+    }
+
     fn resolve_optional_object(
         &self,
         path: &Path,
@@ -2427,6 +2462,13 @@ pub fn parse_worktree_porcelain(input: &[u8]) -> Result<Vec<WorktreeInfo>, GitEr
 
 fn parse_object_output(bytes: &[u8]) -> Result<ObjectId, GitError> {
     parse_object_bytes(trim_line_endings(bytes))
+}
+
+/// Whether a peel suffix cannot be appended to `revision`: in `:/<text>` it
+/// would join the search text, and in `<rev>:<path>` the path. Those spellings
+/// are resolved to an object first and peeled after. No refname contains `:`.
+fn must_resolve_before_peeling(revision: &OsStr) -> bool {
+    revision.as_encoded_bytes().contains(&b':')
 }
 
 /// Whether `git show` would parse `revision` as a range or a negation. No
@@ -3674,6 +3716,42 @@ mod tests {
         assert_eq!(
             git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
                 .expect("check removed branch"),
+            None
+        );
+    }
+
+    #[test]
+    fn colon_revisions_are_peeled_after_they_resolve() {
+        // Appending `^{commit}` turned `:/second` into a search for the text
+        // `second^{commit}` and `HEAD:tracked.txt` into a path ending in it,
+        // so Git's own message search failed and a blob was reported as a
+        // Git failure rather than as a revision that names no commit.
+        let fixture = RepositoryFixture::committed();
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "second"],
+        );
+        let git_runner = Git::default();
+        let head = git_runner
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve HEAD");
+
+        assert_eq!(
+            git_runner
+                .resolve_requested_revision(fixture.path(), OsStr::new(":/second"))
+                .expect("search commit messages"),
+            Some(head)
+        );
+        assert_eq!(
+            git_runner
+                .resolve_requested_revision(fixture.path(), OsStr::new("HEAD:tracked.txt"))
+                .expect("classify a blob"),
+            None
+        );
+        assert_eq!(
+            git_runner
+                .resolve_requested_revision(fixture.path(), OsStr::new(":/no such message"))
+                .expect("classify a failed search"),
             None
         );
     }
