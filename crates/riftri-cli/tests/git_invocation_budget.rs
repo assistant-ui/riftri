@@ -17,11 +17,11 @@ mod support;
 use support::writable_tempdir as tempdir;
 
 /// Git invocations for an add that must build the immutable base first.
-const COLD_ADD_BUDGET: usize = 20;
+const COLD_ADD_BUDGET: usize = 19;
 /// Git invocations for an add that reuses a verified immutable base.
-const CACHED_ADD_BUDGET: usize = 15;
+const CACHED_ADD_BUDGET: usize = 14;
 /// Git invocations for a cached add that checks out an existing local branch.
-const CACHED_EXISTING_BRANCH_ADD_BUDGET: usize = 18;
+const CACHED_EXISTING_BRANCH_ADD_BUDGET: usize = 17;
 
 fn git(path: &Path, arguments: &[&str]) -> Output {
     let output = Command::new("git")
