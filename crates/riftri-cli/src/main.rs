@@ -2549,17 +2549,7 @@ fn print_storage_accounting(
     );
     outputln!("Retained bases: {}", report.bases.len());
     for base in &report.bases {
-        // Reference counts are derived only from journals that parsed. When
-        // some did not, a zero is "none that could be counted", not "none" —
-        // and a base a live worktree still uses must never be described as an
-        // unreferenced cache.
-        let state = if base.reference_count > 0 {
-            "in use"
-        } else if counts_are_complete {
-            "retained cache; no active views"
-        } else {
-            "reference count unknown; unreadable journals may still claim it"
-        };
+        let state = retained_base_state(base.reference_count, counts_are_complete);
         outputln!(
             "- {}: refs={}, logical={}, filesystem-accounted allocated={}, state={}",
             base.path.display(),
@@ -3007,8 +2997,61 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
     }
 }
 
+/// How `status` describes one retained base.
+///
+/// Reference counts cover the journals this inventory could account for. Any
+/// state diagnostic means a claim may have gone uncounted, so a zero is "none
+/// that could be counted", not "none" — and a base a live worktree still uses
+/// must never be described as an unreferenced cache.
+///
+/// `counts_are_complete` is false for *any* state diagnostic, not only a
+/// journal that failed to parse, so the uncertain case must not name a cause.
+/// It once claimed "unreadable journals may still claim it" while every
+/// journal parsed and the diagnostic was an unregistered worktree path, which
+/// sent the reader looking for corruption that did not exist. The diagnostics
+/// are already listed above, and `gc` resolves the count under the collection
+/// lock this read-only report deliberately does not take.
+fn retained_base_state(reference_count: usize, counts_are_complete: bool) -> &'static str {
+    if reference_count > 0 {
+        "in use"
+    } else if counts_are_complete {
+        "retained cache; no active views"
+    } else {
+        "reference count unconfirmed while a state diagnostic above is unresolved; \
+         `riftri gc` reports what it can still collect"
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_unconfirmed_base_count_does_not_blame_unreadable_journals() {
+        // `counts_are_complete` is false for any state diagnostic. Naming a
+        // cause here sent a reader hunting for corrupt journals when all 134
+        // parsed and the real diagnostic was an unregistered worktree path.
+        let state = super::retained_base_state(0, false);
+        assert!(
+            !state.contains("unreadable"),
+            "must not assert a cause the flag does not carry: {state}"
+        );
+        assert!(
+            state.contains("riftri gc"),
+            "an unconfirmed count must point at the command that resolves it: {state}"
+        );
+    }
+
+    #[test]
+    fn a_confirmed_base_count_still_distinguishes_use_from_cache() {
+        assert_eq!(super::retained_base_state(2, true), "in use");
+        assert_eq!(
+            super::retained_base_state(0, true),
+            "retained cache; no active views"
+        );
+        // A base a live worktree uses must never read as an unreferenced
+        // cache, even while diagnostics make the total uncertain.
+        assert_eq!(super::retained_base_state(1, false), "in use");
+    }
     use std::ffi::OsStr;
     use std::path::Path;
 
