@@ -9,7 +9,6 @@ use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
 struct FileClone {
     source: PathBuf,
     destination: PathBuf,
-    mode: u32,
 }
 
 pub(crate) fn probe(directory: &Path) -> std::io::Result<()> {
@@ -82,7 +81,7 @@ fn clone_tree_with_permissions(
             owner_writable,
         )?;
         try_for_each_bounded(files, file_clone_parallelism(), |file| {
-            clone_file(&file.source, &file.destination, file.mode)
+            clone_file(&file.source, &file.destination, owner_writable)
         })?;
         for (path, mode) in directories.into_iter().rev() {
             fs::set_permissions(&path, fs::Permissions::from_mode(mode))
@@ -123,11 +122,22 @@ fn prepare_clone_directory(
             entry.map_err(|source_error| io("read clone source entry", source, source_error))?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path)
-            .map_err(|source_error| io("inspect clone source entry", &source_path, source_error))?;
-        let file_type = metadata.file_type();
+        // Linux directory entries normally carry their type. Regular-file
+        // metadata is read from the already-open source handle in the bounded
+        // clone worker, so only directories need a serial path metadata read
+        // here for their final mode.
+        let file_type = entry.file_type().map_err(|source_error| {
+            io(
+                "inspect clone source entry type",
+                &source_path,
+                source_error,
+            )
+        })?;
 
         if file_type.is_dir() {
+            let metadata = fs::symlink_metadata(&source_path).map_err(|source_error| {
+                io("inspect clone source directory", &source_path, source_error)
+            })?;
             prepare_clone_directory(
                 &source_path,
                 &destination_path,
@@ -137,15 +147,9 @@ fn prepare_clone_directory(
                 owner_writable,
             )?;
         } else if file_type.is_file() {
-            let mode = if owner_writable {
-                metadata.permissions().mode() | crate::umask_writable_bits()
-            } else {
-                metadata.permissions().mode()
-            };
             files.push(FileClone {
                 source: source_path,
                 destination: destination_path,
-                mode,
             });
         } else if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
@@ -161,12 +165,31 @@ fn prepare_clone_directory(
     Ok(())
 }
 
-fn clone_file(source: &Path, destination: &Path, mode: u32) -> Result<(), StorageError> {
-    let source_file = File::open(source).map_err(|source_error| StorageError::Clone {
-        source_path: source.to_path_buf(),
-        destination: destination.to_path_buf(),
-        source: source_error,
-    })?;
+fn clone_file(source: &Path, destination: &Path, owner_writable: bool) -> Result<(), StorageError> {
+    let source_file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(source)
+        .map_err(|source_error| StorageError::Clone {
+            source_path: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            source: source_error,
+        })?;
+    let metadata = source_file
+        .metadata()
+        .map_err(|source_error| StorageError::Clone {
+            source_path: source.to_path_buf(),
+            destination: destination.to_path_buf(),
+            source: source_error,
+        })?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(StorageError::UnsupportedEntry(source.to_path_buf()));
+    }
+    let mode = if owner_writable {
+        metadata.permissions().mode() | crate::umask_writable_bits()
+    } else {
+        metadata.permissions().mode()
+    };
     let destination_file = OpenOptions::new()
         .write(true)
         .create_new(true)
