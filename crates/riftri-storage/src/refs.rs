@@ -561,93 +561,12 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> StorageEr
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::Path;
-    use std::time::Instant;
 
     use tempfile::tempdir;
 
     use super::{
         clone_tree, clone_tree_owner_writable, make_tree_owner_writable, make_tree_read_only, probe,
     };
-
-    fn entries_with_path_metadata(path: &Path) -> usize {
-        fs::read_dir(path)
-            .expect("read benchmark directory")
-            .map(|entry| {
-                let entry = entry.expect("benchmark entry");
-                let metadata = fs::symlink_metadata(entry.path()).expect("benchmark metadata");
-                if metadata.is_dir() {
-                    1 + entries_with_path_metadata(&entry.path())
-                } else {
-                    usize::from(metadata.is_file() || metadata.file_type().is_symlink())
-                }
-            })
-            .sum()
-    }
-
-    fn entries_with_directory_types(path: &Path) -> usize {
-        fs::read_dir(path)
-            .expect("read benchmark directory")
-            .map(|entry| {
-                let entry = entry.expect("benchmark entry");
-                let file_type = entry.file_type().expect("benchmark entry type");
-                if file_type.is_dir() {
-                    let metadata =
-                        fs::symlink_metadata(entry.path()).expect("benchmark directory metadata");
-                    std::hint::black_box(metadata.permissions());
-                    1 + entries_with_directory_types(&entry.path())
-                } else {
-                    usize::from(file_type.is_file() || file_type.is_symlink())
-                }
-            })
-            .sum()
-    }
-
-    /// Repeatable comparison for the serial ReFS clone-discovery path. Kept
-    /// threshold-free because runner and filesystem load move absolute
-    /// timings; before/after work should retain every alternating sample.
-    #[test]
-    #[ignore = "manual ReFS many-file entry-discovery benchmark"]
-    fn reports_many_file_entry_discovery_latency() {
-        const DIRECTORIES: usize = 96;
-        const FILES_PER_DIRECTORY: usize = 64;
-        const ROUNDS: usize = 7;
-
-        let fixture = tempdir().expect("entry-discovery fixture");
-        for directory in 0..DIRECTORIES {
-            let directory = fixture.path().join(format!("directory-{directory:03}"));
-            fs::create_dir(&directory).expect("benchmark directory");
-            for file in 0..FILES_PER_DIRECTORY {
-                fs::write(directory.join(format!("file-{file:03}")), b"").expect("benchmark file");
-            }
-        }
-
-        let expected = DIRECTORIES * (FILES_PER_DIRECTORY + 1);
-        assert_eq!(entries_with_path_metadata(fixture.path()), expected);
-        assert_eq!(entries_with_directory_types(fixture.path()), expected);
-        let mut path_metadata = Vec::with_capacity(ROUNDS);
-        let mut directory_types = Vec::with_capacity(ROUNDS);
-        for _ in 0..ROUNDS {
-            let started = Instant::now();
-            assert_eq!(entries_with_path_metadata(fixture.path()), expected);
-            path_metadata.push(started.elapsed().as_micros());
-
-            let started = Instant::now();
-            assert_eq!(entries_with_directory_types(fixture.path()), expected);
-            directory_types.push(started.elapsed().as_micros());
-        }
-        let median = |samples: &[u128]| {
-            let mut sorted = samples.to_vec();
-            sorted.sort_unstable();
-            sorted[ROUNDS / 2]
-        };
-        println!(
-            "RIFTRI_REFS_ENTRY_DISCOVERY_BENCHMARK files={} path_metadata_median_microseconds={} directory_types_median_microseconds={} path_metadata_samples_microseconds={path_metadata:?} directory_types_samples_microseconds={directory_types:?}",
-            DIRECTORIES * FILES_PER_DIRECTORY,
-            median(&path_metadata),
-            median(&directory_types),
-        );
-    }
 
     #[test]
     fn writable_clone_matches_the_two_pass_path_and_preserves_the_base() {

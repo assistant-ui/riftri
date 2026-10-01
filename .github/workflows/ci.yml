@@ -739,16 +739,6 @@ jobs:
           TMP: R:\riftri-temp
         run: cargo test --workspace --locked --features riftri-core/native-cow-integration
 
-      - name: Compare ReFS entry discovery
-        shell: pwsh
-        env:
-          TEMP: R:\riftri-temp
-          TMP: R:\riftri-temp
-        run: >-
-          cargo test -p riftri-storage
-          refs::tests::reports_many_file_entry_discovery_latency
-          -- --ignored --exact --nocapture
-
       - name: Run installed npm workflow on ReFS
         shell: pwsh
         env:
