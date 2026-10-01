@@ -54,6 +54,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Measurements
 
+- [Assistant-ui diagnostic, October 1](benchmarks/assistant-ui-diagnostic-2026-10-01.md)
+  — serial process counts and follow-up priorities; no latency claim.
 - [benchmarks.md](benchmarks.md) — running and interpreting the native-COW
   benchmarks.
 - [allocation-evidence.md](allocation-evidence.md) — APFS physical-sharing
