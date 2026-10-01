@@ -135,7 +135,6 @@ fn hash_native(value: &OsStr, digest: &mut Sha256) {
 mod windows_tests {
     use std::ffi::{OsStr, OsString};
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use std::time::Instant;
 
     use sha2::{Digest, Sha256};
 
@@ -149,15 +148,13 @@ mod windows_tests {
         }
     }
 
-    fn digest_names(names: &[OsString], allocating: bool, passes: usize) -> Vec<u8> {
+    fn digest_names(names: &[OsString], allocating: bool) -> Vec<u8> {
         let mut digest = Sha256::new();
-        for _ in 0..passes {
-            for name in names {
-                if allocating {
-                    hash_native_allocating(name, &mut digest);
-                } else {
-                    hash_native(name, &mut digest);
-                }
+        for name in names {
+            if allocating {
+                hash_native_allocating(name, &mut digest);
+            } else {
+                hash_native(name, &mut digest);
             }
         }
         digest.finalize().to_vec()
@@ -170,63 +167,7 @@ mod windows_tests {
             OsString::from("emoji-🦀"),
             OsString::from_wide(&[b'x' as u16, 0xd800, b'y' as u16]),
         ];
-        assert_eq!(
-            digest_names(&values, false, 1),
-            digest_names(&values, true, 1)
-        );
-    }
-
-    /// Isolate the per-entry allocation removed from Windows integrity walks.
-    /// The old and new paths hash the same representative names repeatedly,
-    /// retain every alternating sample, and assert the exact digest matches.
-    #[test]
-    #[ignore = "manual Windows native-name integrity benchmark"]
-    fn reports_streamed_native_name_latency() {
-        const NAMES: usize = 6_144;
-        const PASSES: usize = 32;
-        const ROUNDS: usize = 7;
-
-        let names = (0..NAMES)
-            .map(|index| {
-                let mut units = format!("directory-{index:05}-component-🦀")
-                    .encode_utf16()
-                    .collect::<Vec<_>>();
-                if index % 997 == 0 {
-                    units.push(0xd800);
-                }
-                OsString::from_wide(&units)
-            })
-            .collect::<Vec<_>>();
-        let expected = digest_names(&names, true, PASSES);
-        let measure = |allocating| {
-            let started = Instant::now();
-            let actual = digest_names(&names, allocating, PASSES);
-            let elapsed = started.elapsed().as_micros();
-            assert_eq!(actual, expected);
-            elapsed
-        };
-
-        let mut baseline = Vec::with_capacity(ROUNDS);
-        let mut candidate = Vec::with_capacity(ROUNDS);
-        for round in 0..ROUNDS {
-            if round % 2 == 0 {
-                baseline.push(measure(true));
-                candidate.push(measure(false));
-            } else {
-                candidate.push(measure(false));
-                baseline.push(measure(true));
-            }
-        }
-        let median = |samples: &[u128]| {
-            let mut sorted = samples.to_vec();
-            sorted.sort_unstable();
-            sorted[ROUNDS / 2]
-        };
-        println!(
-            "RIFTRI_WINDOWS_NATIVE_NAME_BENCHMARK names={NAMES} passes={PASSES} baseline_median_microseconds={} candidate_median_microseconds={} baseline_samples_microseconds={baseline:?} candidate_samples_microseconds={candidate:?}",
-            median(&baseline),
-            median(&candidate),
-        );
+        assert_eq!(digest_names(&values, false), digest_names(&values, true));
     }
 }
 
