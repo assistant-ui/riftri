@@ -925,7 +925,8 @@ fn repository_fixture(path: &std::path::Path, with_commit: bool) {
 }
 
 /// Requests that cannot succeed as written — a branch name that is already
-/// taken, a revision that names nothing, a repository with no commits — are
+/// taken, a revision that names nothing, a repository with no commits, a
+/// branch another worktree has checked out — are
 /// caller mistakes, and retrying cannot help. They used to surface as Git
 /// command failures: `git-failed`, operational, unknown cleanup (#425). An
 /// agent re-running a task with the same branch name, or misspelling a ref,
@@ -940,10 +941,22 @@ fn requests_git_would_reject_are_refused_as_policy_before_anything_is_written() 
     let repository = fixture.path().join("repository");
     repository_fixture(&repository, true);
     git_in(&repository, &["branch", "taken"]);
+    git_in(&repository, &["branch", "busy"]);
+    let holder = fixture.path().join("holder");
+    git_in(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            holder.to_str().expect("UTF-8 fixture path"),
+            "busy",
+        ],
+    );
     let unborn = fixture.path().join("unborn");
     repository_fixture(&unborn, false);
 
-    let cases: [(&str, &std::path::Path, &[&str], &str); 3] = [
+    let cases: [(&str, &std::path::Path, &[&str], &str); 4] = [
         (
             "branch-exists",
             &repository,
@@ -957,6 +970,12 @@ fn requests_git_would_reject_are_refused_as_policy_before_anything_is_written() 
             "does not name a commit",
         ),
         ("no-commits", &unborn, &["-b", "fresh"], "no commits yet"),
+        (
+            "branch-checked-out",
+            &repository,
+            &["busy"],
+            "already checked out",
+        ),
     ];
     for (name, repo, extra, expected_message) in cases {
         let destination = fixture.path().join(format!("view-{name}"));
