@@ -3236,12 +3236,22 @@ fn compact_worktree_inner(
         CompactWorktreePhase::ReplacementReady,
         fail_after,
     )?;
+    let operation_id = journal.operation_id.clone();
     resume_compaction(
         &git,
         &store,
         journal.decode(journal_path.clone())?,
         fail_after,
     )?;
+    let cancelled = store.load_all()?.into_iter().any(|candidate| {
+        candidate.operation_id == operation_id && candidate.phase == CompactWorktreePhase::Cancelled
+    });
+    if cancelled {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "worktree {} changed while it was being compacted; compaction was cancelled and nothing changed",
+            destination.display()
+        )));
+    }
 
     Ok(CompactWorktreeResult {
         destination,
@@ -9368,16 +9378,7 @@ fn resume_compaction(
             && destination_exists
             && !quarantine_exists
         {
-            remove_tree_if_present(&journal.replacement)?;
-            remove_tree_if_present(&journal.base_staging)?;
-            remove_temporary_index(&journal.temporary_index)?;
-            remove_empty_base_bucket(&journal)?;
-            advance_compaction(
-                store,
-                &mut record,
-                CompactWorktreePhase::Cancelled,
-                fail_after,
-            )?;
+            cancel_unactivated_compaction(store, &mut record, &journal, fail_after)?;
             return Ok(());
         } else if !destination_exists && quarantine_exists && replacement_exists {
             verify_snapshot(&journal.quarantine, &journal.expected_snapshot)?;
@@ -9405,13 +9406,25 @@ fn resume_compaction(
             let _metadata_lock =
                 acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
             let commit = ObjectId::parse(journal.expected_commit.clone())?;
-            verify_compaction_source(
+            match verify_compaction_source(
                 git,
                 &journal.repository,
                 &journal.destination,
                 &commit,
                 Some(&journal.expected_snapshot),
-            )?;
+            ) {
+                Ok(()) => {}
+                // The worktree changed after its replacement was built: a
+                // write, a new file, a checkout. Nothing has touched the
+                // worktree yet, so cancel and remove only the replacement.
+                // Left pending, repair re-ran this check forever while remove
+                // and compact refused until it passed.
+                Err(WorktreeError::InvalidRequest(_)) => {
+                    cancel_unactivated_compaction(store, &mut record, &journal, fail_after)?;
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
             verify_snapshot(&journal.replacement, &journal.expected_snapshot)?;
             fs::rename(&journal.destination, &journal.quarantine).map_err(|source| {
                 io(
@@ -9531,7 +9544,23 @@ fn resume_compaction(
                     journal.quarantine.display()
                 )));
             }
-            verify_snapshot(&journal.quarantine, &journal.expected_snapshot)?;
+            // A write that reached the old view after it was verified is the
+            // caller's data: keep the view and say how to finish. This is not
+            // a refusal — the compacted replacement is already in place — so
+            // it is reported as recovery the caller completes, then `repair`.
+            if directory_snapshot(&journal.quarantine)? != journal.expected_snapshot {
+                return Err(recovery_pending_error(
+                    format!(
+                        "{} was compacted, but files written during the compaction reached \
+                         its old view, which was kept at {}; copy anything you need from \
+                         there into {} and delete it",
+                        journal.destination.display(),
+                        journal.quarantine.display(),
+                        journal.destination.display()
+                    ),
+                    &state_directory,
+                ));
+            }
             fs::rename(&journal.quarantine, &dropped).map_err(|source| {
                 io("hand the compacted-away view to cleanup", &dropped, source)
             })?;
@@ -9670,6 +9699,22 @@ fn validate_compaction_paths(
         )));
     }
     Ok(())
+}
+
+/// Cancel a compaction whose replacement was never activated: the worktree
+/// was not touched, so only the compaction's own artifacts are removed.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn cancel_unactivated_compaction(
+    store: &CompactJournalStore,
+    record: &mut CompactJournalRecord,
+    journal: &DecodedCompactJournal,
+    fail_after: Option<CompactWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    remove_tree_if_present(&journal.replacement)?;
+    remove_tree_if_present(&journal.base_staging)?;
+    remove_temporary_index(&journal.temporary_index)?;
+    remove_empty_base_bucket(journal)?;
+    advance_compaction(store, record, CompactWorktreePhase::Cancelled, fail_after)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -12449,14 +12494,11 @@ mod tests {
         }
     }
 
-    /// A compaction stopped at `add-journal-updated`: the replacement is
-    /// active and only the verified quarantine of the old view remains.
-    fn compaction_awaiting_quarantine_cleanup() -> (
-        crate::test_support::WritableTempDir,
-        PathBuf,
-        PathBuf,
-        PathBuf,
-    ) {
+    /// A compaction of a fresh managed worktree, stopped after `phase` as a
+    /// kill would leave it.
+    fn stopped_compaction(
+        phase: CompactWorktreePhase,
+    ) -> (crate::test_support::WritableTempDir, PathBuf, PathBuf) {
         let fixture = tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
         let destination = fixture.path().join("worktree");
@@ -12498,9 +12540,22 @@ mod tests {
                 destination: destination.clone(),
                 state_dir: Some(state.clone()),
             },
-            Some(CompactWorktreePhase::AddJournalUpdated),
+            Some(phase),
         )
-        .expect_err("stop before the quarantine is cleaned up");
+        .expect_err("stop the compaction after the requested phase");
+        (fixture, destination, state)
+    }
+
+    /// A compaction stopped at `add-journal-updated`: the replacement is
+    /// active and only the verified quarantine of the old view remains.
+    fn compaction_awaiting_quarantine_cleanup() -> (
+        crate::test_support::WritableTempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let (fixture, destination, state) =
+            stopped_compaction(CompactWorktreePhase::AddJournalUpdated);
         let compactions = crate::journal::CompactJournalStore::open(&state)
             .load_all()
             .expect("load compaction");
@@ -12534,6 +12589,73 @@ mod tests {
         let accounting = storage_accounting(&state).expect("account after repair");
         assert_eq!(accounting.pending_compactions, 0);
         assert_eq!(accounting.completed_compactions, 1);
+    }
+
+    /// A write that reached the old view after it was verified is kept, but
+    /// the error named only the kept path. Repair failed the same way forever
+    /// and remove refused until it passed, with nothing saying what to do.
+    #[test]
+    fn a_late_write_to_the_old_view_is_kept_with_steps_to_finish() {
+        let (_fixture, destination, state, quarantine) = compaction_awaiting_quarantine_cleanup();
+        fs::write(quarantine.join("late.txt"), "late\n").expect("write after verification");
+
+        let store = crate::journal::CompactJournalStore::open(
+            &fs::canonicalize(&state).expect("resolve state directory"),
+        );
+        let journal = store.load_all().expect("load compaction").remove(0);
+        let error = super::resume_compaction(&Git::default(), &store, journal, None)
+            .expect_err("the changed old view must be kept");
+        let message = error.to_string();
+        assert!(
+            matches!(error, super::WorktreeError::RecoveryPending { .. }),
+            "the compacted view is already active, so this is not a refusal: {message}"
+        );
+        assert!(
+            message.contains(&quarantine.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("copy anything you need"), "{message}");
+        assert!(message.contains("riftri repair"), "{message}");
+        assert_eq!(fs::read(quarantine.join("late.txt")).unwrap(), b"late\n");
+
+        // Following the steps finishes the compaction.
+        fs::copy(quarantine.join("late.txt"), destination.join("late.txt")).expect("copy back");
+        fs::remove_dir_all(&quarantine).expect("delete the kept old view");
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
+        assert_eq!(accounting.completed_compactions, 1, "{accounting:?}");
+        assert_eq!(fs::read(destination.join("late.txt")).unwrap(), b"late\n");
+    }
+
+    /// The worktree changed after its replacement was built but before the
+    /// swap. Nothing had touched it, yet the compaction stayed pending forever:
+    /// repair re-ran the clean check, and remove and compact refused.
+    #[test]
+    fn repair_cancels_a_compaction_whose_worktree_changed_before_the_swap() {
+        let (_fixture, destination, state) =
+            stopped_compaction(CompactWorktreePhase::ReplacementReady);
+        let replacement = crate::journal::CompactJournalStore::open(&state)
+            .load_all()
+            .expect("load compaction")
+            .remove(0)
+            .replacement;
+        assert!(
+            replacement.is_dir(),
+            "the replacement waits beside the view"
+        );
+        fs::write(destination.join("late.txt"), "late\n").expect("write before the swap");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert!(!replacement.exists(), "only the replacement is removed");
+        assert_eq!(fs::read(destination.join("late.txt")).unwrap(), b"late\n");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
+        assert_eq!(accounting.cancelled_compactions, 1, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
     }
 
     #[test]
@@ -12714,8 +12836,17 @@ mod tests {
             for _ in 0..2 {
                 let report = recover_incomplete_operations(&state).unwrap();
                 assert_eq!(report.recovered_compactions, 0, "{phase:?}: {report:?}");
-                assert_eq!(report.errors.len(), 1, "{report:?}");
-                assert!(report.errors[0].contains("ACL"), "{report:?}");
+                if phase == CompactWorktreePhase::ReplacementReady {
+                    // Before the swap the worktree is untouched, so a change
+                    // to it cancels the compaction and leaves it as it is.
+                    assert!(report.errors.is_empty(), "{report:?}");
+                    assert!(!journal.replacement.exists());
+                    let accounting = storage_accounting(&state).unwrap();
+                    assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
+                } else {
+                    assert_eq!(report.errors.len(), 1, "{report:?}");
+                    assert!(report.errors[0].contains("ACL"), "{report:?}");
+                }
                 assert!(riftri_storage::has_macos_acl(&protected).unwrap());
                 assert_eq!(fs::read(&protected).unwrap(), b"original\n");
                 assert_eq!(fs::read(destination.join("file")).unwrap(), b"original\n");
