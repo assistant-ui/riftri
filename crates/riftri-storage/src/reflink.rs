@@ -210,7 +210,8 @@ fn clone_file(source: &Path, destination: &Path, owner_writable: bool) -> Result
             source: std::io::Error::from_raw_os_error(error.raw_os_error()),
         });
     }
-    fs::set_permissions(destination, fs::Permissions::from_mode(mode))
+    destination_file
+        .set_permissions(fs::Permissions::from_mode(mode))
         .map_err(|source_error| io("restore cloned file mode", destination, source_error))?;
     Ok(())
 }

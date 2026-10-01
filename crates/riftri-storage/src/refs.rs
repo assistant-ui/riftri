@@ -331,7 +331,8 @@ fn clone_file(
     } else {
         permissions
     };
-    fs::set_permissions(destination, permissions)
+    destination_file
+        .set_permissions(permissions)
         .map_err(|source_error| io("restore cloned file permissions", destination, source_error))?;
     Ok(())
 }
