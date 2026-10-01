@@ -4950,9 +4950,13 @@ fn analyze_resolved_repository_compatibility(
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
     let mut has_submodules = false;
+    let mut has_in_tree_attribute_file = false;
     for entry in &entries {
         if entry.path == Path::new(".gitmodules") || entry.object_kind == b"commit" {
             has_submodules = true;
+        }
+        if entry.path.file_name() == Some(OsStr::new(".gitattributes")) {
+            has_in_tree_attribute_file = true;
         }
     }
     if has_submodules {
@@ -5020,7 +5024,16 @@ fn analyze_resolved_repository_compatibility(
         // isolated and effective environments still apply per `check-attr`
         // query, which never writes the shared index.
         let tree_index = git.tree_attribute_index(repository, &resolved.tree)?;
-        let mut in_tree = git.in_tree_attributes_for_index(repository, &tree_index, &paths)?;
+        // With no `.gitattributes` entry anywhere in the exact tree, the
+        // isolated in-tree result is necessarily empty. Keep the effective
+        // query below: global and system attributes must still be detected
+        // and refused rather than becoming part of a supposedly immutable
+        // checkout profile.
+        let mut in_tree = if has_in_tree_attribute_file {
+            git.in_tree_attributes_for_index(repository, &tree_index, &paths)?
+        } else {
+            Vec::new()
+        };
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
             Err(explanation) => {
@@ -11794,7 +11807,7 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use std::collections::HashSet;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
@@ -11803,7 +11816,6 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    #[cfg(unix)]
     use super::Git;
     use super::{
         AddWorktreeRequest, BackendKind, BaseStorageAccounting, CompactWorktreeRequest,
@@ -13461,6 +13473,62 @@ mod tests {
         fs::remove_file(&attributes).expect("remove fixture FIFO");
         fs::write(&attributes, "").expect("empty regular attributes");
         assert!(inspect().compatible);
+    }
+
+    #[test]
+    fn attribute_fast_path_still_rejects_external_attributes() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let attributes = fixture.path().join("global-attributes");
+        fs::create_dir(&repository).expect("repository");
+        git(&repository, &["init", "--quiet"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        assert!(
+            !repository.join(".gitattributes").exists(),
+            "fixture must exercise the no-in-tree-attributes fast path"
+        );
+        fs::write(&attributes, "*.txt filter=external\n").expect("external attributes");
+        git(
+            &repository,
+            &[
+                "config",
+                "core.attributesFile",
+                attributes.to_str().expect("UTF-8 fixture path"),
+            ],
+        );
+
+        let git = Git::default();
+        let common_git_dir = git
+            .inspect_repository(&repository)
+            .expect("inspect repository")
+            .identity
+            .common_git_dir;
+        let report = super::inspect_repository_compatibility(
+            &git,
+            &repository,
+            &common_git_dir,
+            OsStr::new("HEAD"),
+        )
+        .expect("compatibility report");
+
+        assert!(!report.compatible);
+        assert!(report.blockers.iter().any(|blocker| {
+            blocker.kind == super::RepositoryCompatibilityBlockerKind::EffectiveAttributes
+        }));
     }
 
     #[cfg(unix)]
