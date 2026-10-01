@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
 const {
   access,
   cp,
@@ -165,10 +166,17 @@ test("staging rewrites a string export target too", async (t) => {
 test("the staging script can be imported without a script argv", async () => {
   // pathToFileURL(undefined) throws, so an unguarded main check makes the
   // module unimportable under `node -e` and in embedders.
-  const script = path.resolve(__dirname, "..", "scripts", "stage-root-package.mjs");
+  // A bare absolute path is not an importable specifier on Windows, where it
+  // parses as the scheme `d:`; the module URL has to be a file:// one.
+  const script = pathToFileURL(
+    path.resolve(__dirname, "..", "scripts", "stage-root-package.mjs"),
+  ).href;
   const result = spawnSync(
     process.execPath,
-    ["-e", `import(${JSON.stringify(script)}).then(() => {}, (error) => { console.error(error); process.exit(1); })`],
+    [
+      "-e",
+      `import(${JSON.stringify(script)}).then(() => {}, (error) => { console.error(error); process.exit(1); })`,
+    ],
     { encoding: "utf8" },
   );
   assert.equal(result.status, 0, result.stderr);
