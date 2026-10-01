@@ -25,6 +25,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Adding a branch that another worktree already has checked out is refused
+  before anything is written, as an `invalid-request` policy failure naming
+  that worktree. It used to reach Git after the add was journaled and fail as
+  an operational `git-failed` with unknown cleanup (#588).
 - Branch and revision lookups are exact again. A ref that merely ends in
   `refs/heads/<name>`, such as `refs/remotes/origin/refs/heads/<name>`, no
   longer makes `-b <name>` refuse as an existing branch or an existing-branch
