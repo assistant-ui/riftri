@@ -218,20 +218,24 @@ fn riftri(path: &Path, arguments: &[&str]) -> Output {
 }
 
 #[cfg(unix)]
-#[test]
-fn worktree_add_expands_tilde_in_core_hooks_path_like_git() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let fixture = RepositoryFixture::new();
-    let supported = riftri_storage::probe_backends(fixture._directory.path())
+fn native_cow_supported(fixture: &RepositoryFixture) -> bool {
+    riftri_storage::probe_backends(fixture._directory.path())
         .iter()
         .any(|backend| {
             matches!(
                 backend.kind,
                 riftri_storage::BackendKind::ApfsClone | riftri_storage::BackendKind::Reflink
             ) && backend.status == riftri_storage::CapabilityStatus::Supported
-        });
-    if !supported {
+        })
+}
+
+#[cfg(unix)]
+#[test]
+fn worktree_add_expands_tilde_in_core_hooks_path_like_git() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = RepositoryFixture::new();
+    if !native_cow_supported(&fixture) {
         return;
     }
 
@@ -724,6 +728,9 @@ fn post_checkout_hook_output_stays_off_json_stdout_like_git() {
     use std::process::Stdio;
 
     let fixture = RepositoryFixture::new();
+    if !native_cow_supported(&fixture) {
+        return;
+    }
     let hook = fixture.repository.join(".git/hooks/post-checkout");
     fs::write(
         &hook,
