@@ -739,6 +739,13 @@ jobs:
           TMP: R:\riftri-temp
         run: cargo test --workspace --locked --features riftri-core/native-cow-integration
 
+      - name: Compare Windows integrity name hashing
+        shell: pwsh
+        run: >-
+          cargo test -p riftri-core
+          base_integrity::windows_tests::reports_streamed_native_name_latency
+          -- --ignored --exact --nocapture
+
       - name: Run installed npm workflow on ReFS
         shell: pwsh
         env:
