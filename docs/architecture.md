@@ -422,9 +422,14 @@ name. A kill mid-delete therefore leaves a partial tree that recovery finishes
 deleting, instead of a quarantine that can never match its snapshot again.
 
 Recovery cancels intent-only work and restores a quarantined original when the
-replacement was not activated. Once activation occurred it moves forward,
-updates the add journal idempotently, and removes only the exact journaled
-quarantine. Pending compactions protect both old and new bases from garbage
+replacement was not activated. A worktree that changes after its replacement
+was built, but before the swap, has not been touched, so the compaction is
+cancelled and only the replacement is removed. Once activation occurred it
+moves forward, updates the add journal idempotently, and removes only the exact
+journaled quarantine. A write that reached the old view after its last check is
+kept there: the compaction stays pending as recovery the caller completes, and
+the message names the kept view and says to copy what is needed into the
+worktree, delete it, and run `riftri repair`. Pending compactions protect both old and new bases from garbage
 collection. OverlayFS compaction remains separate future work because resetting
 a mounted private upper requires mount-identity-aware handling rather than a
 native directory clone and rename.

@@ -25,6 +25,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A write into a worktree during `riftri worktree compact` no longer wedges it.
+  If the write lands before the swap, the compaction is cancelled and only its
+  replacement is removed. If it reaches the old view after the swap, that view
+  is still kept, but the failure is reported as recovery to finish
+  (`recovery-pending`, exit 1) rather than a policy refusal. The message names
+  the kept view and says to copy what is needed back, delete it, and run
+  `riftri repair` (#595).
 - `--detach :/<text>` (Git's commit-message search) now resolves as it does in
   Git instead of failing as `git-failed`, and `<rev>:<path>` naming a file is
   refused as an invalid revision rather than reported as a Git failure. The
