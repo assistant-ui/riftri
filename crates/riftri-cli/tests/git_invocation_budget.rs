@@ -17,9 +17,11 @@ mod support;
 use support::writable_tempdir as tempdir;
 
 /// Git invocations for an add that must build the immutable base first.
-const COLD_ADD_BUDGET: usize = 22;
+const COLD_ADD_BUDGET: usize = 19;
 /// Git invocations for an add that reuses a verified immutable base.
-const CACHED_ADD_BUDGET: usize = 16;
+const CACHED_ADD_BUDGET: usize = 14;
+/// Git invocations for a cached add that checks out an existing local branch.
+const CACHED_EXISTING_BRANCH_ADD_BUDGET: usize = 17;
 
 fn git(path: &Path, arguments: &[&str]) -> Output {
     let output = Command::new("git")
@@ -63,6 +65,7 @@ fn add_worktree_with_counted_git(
     repository: &Path,
     destination: &Path,
     state: &Path,
+    add_arguments: &[&str],
     shim_directory: &Path,
     real_git: &Path,
     log: &Path,
@@ -72,9 +75,10 @@ fn add_worktree_with_counted_git(
     shim_path.push(":");
     shim_path.push(&original_path);
     let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
-        .args(["worktree", "add", "--detach"])
+        .args(["worktree", "add"])
         .arg(destination)
-        .args(["HEAD", "--state-dir"])
+        .args(add_arguments)
+        .arg("--state-dir")
         .arg(state)
         .current_dir(repository)
         .env("PATH", shim_path)
@@ -122,6 +126,7 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         &repository,
         &fixture.path().join("cold-view"),
         &state,
+        &["--detach", "HEAD"],
         &shim_directory,
         &real_git,
         &cold_log,
@@ -138,6 +143,7 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         &repository,
         &fixture.path().join("cached-view"),
         &state,
+        &["--detach", "HEAD"],
         &shim_directory,
         &real_git,
         &cached_log,
@@ -157,6 +163,25 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         )
         .stdout
         .is_empty()
+    );
+
+    git(&repository, &["branch", "existing", "HEAD"]);
+    let existing_log = fixture.path().join("existing-branch-invocations");
+    let existing = add_worktree_with_counted_git(
+        &repository,
+        &fixture.path().join("existing-view"),
+        &state,
+        &["existing"],
+        &shim_directory,
+        &real_git,
+        &existing_log,
+    );
+    assert!(
+        existing.len() <= CACHED_EXISTING_BRANCH_ADD_BUDGET,
+        "cached existing-branch add spawned {} Git processes, budget is \
+         {CACHED_EXISTING_BRANCH_ADD_BUDGET}:\n{}",
+        existing.len(),
+        existing.join("\n")
     );
 }
 

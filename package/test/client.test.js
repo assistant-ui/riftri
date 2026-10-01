@@ -401,3 +401,31 @@ test("isOptimizable trusts readiness, not just the volume", { skip: onWindows },
     "a report lacking destination_readiness keeps the old answer",
   );
 });
+
+test("paths and values that start with a dash are never parsed as flags", { skip: onWindows }, async (t) => {
+  // A relative destination such as `-scratch`, or a branch value, went onto
+  // the command line where Riftri's parser read it as flags, so the call
+  // failed as a usage error.
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "-state" });
+
+  await riftri.worktree.add("-scratch", { branch: "-topic", revision: "HEAD" });
+  assert.deepEqual(stub.argv(), [
+    "worktree",
+    "add",
+    "--branch=-topic",
+    "--state-dir=-state",
+    "--json",
+    "--json-errors",
+    "--",
+    "-scratch",
+    "HEAD",
+  ]);
+  await riftri.worktree.remove("-scratch", { force: true });
+  assert.deepEqual(stub.argv().slice(-2), ["--", "-scratch"]);
+  await riftri.worktree.move("-from", "-to");
+  assert.deepEqual(stub.argv().slice(-3), ["--", "-from", "-to"]);
+  await riftri.worktree.compact("-view");
+  assert.deepEqual(stub.argv().slice(-2), ["--", "-view"]);
+});

@@ -1512,6 +1512,7 @@ pub fn storage_accounting(
     }
     let mut references = BTreeMap::<PathBuf, usize>::new();
     let mut views = Vec::new();
+    let mut view_usage_requests = Vec::new();
     for journal in add_journals.iter().filter(|journal| {
         journal.phase == AddWorktreePhase::Active && !completed.contains(&journal.operation_id)
     }) {
@@ -1531,16 +1532,21 @@ pub fn storage_accounting(
                     journal.destination.display()
                 ))
             })?;
-            let (logical_bytes, allocated_bytes) = tree_usage(&journal.destination)?;
             #[cfg(target_os = "linux")]
-            let allocated_bytes = if journal.backend == BackendKind::OverlayFs
+            let allocated_path = if journal.backend == BackendKind::OverlayFs
                 && let Some(overlayfs) = journal.overlayfs.as_ref()
                 && overlayfs.layout_root.exists()
             {
-                tree_usage(&overlayfs.layout_root)?.1
+                Some(overlayfs.layout_root.clone())
             } else {
-                allocated_bytes
+                None
             };
+            #[cfg(not(target_os = "linux"))]
+            let allocated_path = None;
+            view_usage_requests.push(TreeUsageRequest {
+                path: journal.destination.clone(),
+                allocated_path,
+            });
             views.push(ViewStorageAccounting {
                 repository: journal.repository.clone(),
                 destination: journal.destination.clone(),
@@ -1551,23 +1557,43 @@ pub fn storage_accounting(
                 detached: worktree.detached,
                 locked_reason: worktree.locked_reason.clone(),
                 prunable_reason: worktree.prunable_reason.clone(),
-                logical_bytes,
-                allocated_bytes,
+                logical_bytes: 0,
+                allocated_bytes: 0,
             });
         }
+    }
+    for (view, (logical_bytes, allocated_bytes)) in
+        views.iter_mut().zip(tree_usages(&view_usage_requests)?)
+    {
+        view.logical_bytes = logical_bytes;
+        view.allocated_bytes = allocated_bytes;
     }
     views.sort_unstable_by(|left, right| left.destination.cmp(&right.destination));
 
     for base_path in retained_base_paths(&state_directory, UnsafeBaseInventory::Ignore)? {
         references.entry(base_path).or_default();
     }
+    let references = references.into_iter().collect::<Vec<_>>();
+    let mut base_usage_requests = Vec::new();
+    let base_usage_indices = references
+        .iter()
+        .map(|(path, _)| {
+            path.is_dir().then(|| {
+                let index = base_usage_requests.len();
+                base_usage_requests.push(TreeUsageRequest {
+                    path: path.clone(),
+                    allocated_path: None,
+                });
+                index
+            })
+        })
+        .collect::<Vec<_>>();
+    let base_usages = tree_usages(&base_usage_requests)?;
     let mut bases = Vec::with_capacity(references.len());
-    for (path, reference_count) in references {
-        let (logical_bytes, allocated_bytes) = if path.is_dir() {
-            tree_usage(&path)?
-        } else {
-            (0, 0)
-        };
+    for ((path, reference_count), usage_index) in references.into_iter().zip(base_usage_indices) {
+        let (logical_bytes, allocated_bytes) = usage_index
+            .map(|index| base_usages[index])
+            .unwrap_or((0, 0));
         let damaged = is_regular_file_if_present(&damaged_base_marker(&path))?;
         bases.push(BaseStorageAccounting {
             path,
@@ -3297,7 +3323,7 @@ fn add_worktree_inner(
     rollback_on_error: bool,
 ) -> Result<AddWorktreeResult, WorktreeError> {
     let git = Git::default();
-    let repository = git.inspect_repository(&request.repository)?;
+    let repository = git.inspect_repository_with_head_tree(&request.repository)?;
     let repository_root = git_command_root(&repository)
         .map(Path::to_path_buf)
         .ok_or_else(|| {
@@ -3310,12 +3336,6 @@ fn add_worktree_inner(
     // bare name would pick the tag and then refuse because "the branch moved".
     let requested = match &request.mode {
         WorktreeMode::ExistingBranch(branch) => {
-            if git.local_branch_target(&repository_root, branch)?.is_none() {
-                return Err(WorktreeError::InvalidRequest(format!(
-                    "existing local branch does not exist: {}",
-                    branch.to_string_lossy()
-                )));
-            }
             let mut qualified = OsString::from("refs/heads/");
             qualified.push(branch);
             qualified
@@ -3323,10 +3343,22 @@ fn add_worktree_inner(
         WorktreeMode::NewBranch(_) | WorktreeMode::Detached => request.revision.clone(),
     };
     let resolved = if requested == OsStr::new("HEAD") {
-        match repository.head_commit.clone() {
-            Some(commit) => git.resolve_commit_tree(&repository_root, commit)?,
-            None => resolve_requested_revision(&git, &repository_root, &requested)?,
+        match (repository.head_commit.clone(), repository.head_tree.clone()) {
+            (Some(commit), Some(tree)) => ResolvedRevision { commit, tree },
+            _ => resolve_requested_revision(&git, &repository_root, &requested)?,
         }
+    } else if let WorktreeMode::ExistingBranch(branch) = &request.mode {
+        // Resolving the fully qualified branch already answers whether it
+        // exists. Keep the later target lookup as a race-safety recheck, but
+        // do not spawn an earlier existence-only process whose answer would
+        // immediately be discarded.
+        git.resolve_requested_revision(&repository_root, &requested)?
+            .ok_or_else(|| {
+                WorktreeError::InvalidRequest(format!(
+                    "existing local branch does not exist: {}",
+                    branch.to_string_lossy()
+                ))
+            })?
     } else {
         resolve_requested_revision(&git, &repository_root, &requested)?
     };
@@ -4261,15 +4293,47 @@ fn prepare_base(
         progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
     }
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::BaseReadMiss,
+        base_path,
+    );
     // Never upgrade a held shared lock: concurrent cold callers could deadlock.
     // Another builder or collector may run in the gap, so revalidate all state
     // after acquiring the same stable lock file exclusively.
     drop(read_lock);
-    let _write_lock = acquire_coordination_lock(
+    let mut write_lock = acquire_coordination_lock(
         &lock_path,
         "open immutable-base lock",
         "lock immutable base",
     )?;
+    if completed_base_paths_present(base_path, &complete_path)? {
+        // A builder may have completed the base while this caller waited for
+        // exclusive ownership. Do not hash that base while retaining the
+        // writer lock: release it and repeat the full integrity check under a
+        // shared lock so every waiter can verify concurrently. A collection,
+        // legacy marker, or incomplete replacement can still intervene in the
+        // gap, so a shared miss falls back to a fresh exclusive acquisition
+        // and the existing mandatory revalidation below.
+        drop(write_lock);
+        let read_lock = acquire_base_read_lock(&lock_path)?;
+        #[cfg(test)]
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::BaseReuseAfterExclusiveWait,
+            base_path,
+        );
+        if verify_existing_base(base_path, &complete_path)? {
+            progress::emit(ProgressEvent::BaseReused);
+            return Ok(true);
+        }
+        drop(read_lock);
+        write_lock = acquire_coordination_lock(
+            &lock_path,
+            "open immutable-base lock",
+            "lock immutable base",
+        )?;
+    }
+    let _write_lock = write_lock;
     if verify_existing_base(base_path, &complete_path)? {
         progress::emit(ProgressEvent::BaseReused);
         return Ok(true);
@@ -4328,6 +4392,28 @@ fn prepare_base(
         .map_err(|source| io("sync immutable-base marker", &complete_path, source))?;
     sync_parent(base_path)?;
     Ok(false)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn completed_base_paths_present(
+    base_path: &Path,
+    complete_path: &Path,
+) -> Result<bool, WorktreeError> {
+    let base_exists = base_path
+        .try_exists()
+        .map_err(|source| io("inspect immutable base", base_path, source))?;
+    let complete_exists = match fs::symlink_metadata(complete_path) {
+        Ok(_) => true,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => false,
+        Err(source) => {
+            return Err(io(
+                "inspect immutable-base completion marker",
+                complete_path,
+                source,
+            ));
+        }
+    };
+    Ok(base_exists && complete_exists)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -4924,9 +5010,13 @@ fn analyze_resolved_repository_compatibility(
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
     let mut has_submodules = false;
+    let mut has_in_tree_attribute_file = false;
     for entry in &entries {
         if entry.path == Path::new(".gitmodules") || entry.object_kind == b"commit" {
             has_submodules = true;
+        }
+        if entry.path.file_name() == Some(OsStr::new(".gitattributes")) {
+            has_in_tree_attribute_file = true;
         }
     }
     if has_submodules {
@@ -4994,7 +5084,16 @@ fn analyze_resolved_repository_compatibility(
         // isolated and effective environments still apply per `check-attr`
         // query, which never writes the shared index.
         let tree_index = git.tree_attribute_index(repository, &resolved.tree)?;
-        let mut in_tree = git.in_tree_attributes_for_index(repository, &tree_index, &paths)?;
+        // With no `.gitattributes` entry anywhere in the exact tree, the
+        // isolated in-tree result is necessarily empty. Keep the effective
+        // query below: global and system attributes must still be detected
+        // and refused rather than becoming part of a supposedly immutable
+        // checkout profile.
+        let mut in_tree = if has_in_tree_attribute_file {
+            git.in_tree_attributes_for_index(repository, &tree_index, &paths)?
+        } else {
+            Vec::new()
+        };
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
             Err(explanation) => {
@@ -7558,6 +7657,65 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
             allocated_bytes = allocated_bytes.saturating_add(entry_allocated);
         }
     }
+    Ok((logical_bytes, allocated_bytes))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct TreeUsageRequest {
+    path: PathBuf,
+    /// OverlayFS views account logical bytes from the merged view but physical
+    /// bytes from their private upper/work layout. Native COW views use the
+    /// primary path for both values.
+    allocated_path: Option<PathBuf>,
+}
+
+/// Measure independent trees concurrently while retaining request order.
+///
+/// `status` and `worktree list` are read-only snapshots, and each active view
+/// owns a disjoint directory tree. A bounded worker set overlaps their metadata
+/// reads without changing what any individual traversal counts. Results are
+/// stored by request index so an error is still reported in journal order.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn tree_usages(requests: &[TreeUsageRequest]) -> Result<Vec<(u64, u64)>, WorktreeError> {
+    const MAX_WORKERS: usize = 4;
+
+    if requests.len() <= 1 {
+        return requests.iter().map(measure_tree_usage).collect();
+    }
+
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MAX_WORKERS)
+        .min(requests.len());
+    let chunk_size = requests.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let workers = requests
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(measure_tree_usage)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut usages = Vec::with_capacity(requests.len());
+        for worker in workers {
+            usages.extend(worker.join().expect("tree-usage worker panicked")?);
+        }
+        Ok(usages)
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn measure_tree_usage(request: &TreeUsageRequest) -> Result<(u64, u64), WorktreeError> {
+    let (logical_bytes, allocated_bytes) = tree_usage(&request.path)?;
+    let allocated_bytes = match &request.allocated_path {
+        Some(path) => tree_usage(path)?.1,
+        None => allocated_bytes,
+    };
     Ok((logical_bytes, allocated_bytes))
 }
 
@@ -11768,7 +11926,7 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use std::collections::HashSet;
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::ffi::OsStringExt;
@@ -11777,16 +11935,16 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
 
-    #[cfg(unix)]
     use super::Git;
     use super::{
         AddWorktreeRequest, BackendKind, BaseStorageAccounting, CompactWorktreeRequest,
         MoveWorktreeRequest, ObjectId, PruneWorktreesRequest, RemoveWorktreeRequest,
-        ViewStorageAccounting, WorktreeMode, add_worktree_inner, classify_in_tree_attributes,
-        compact_worktree_inner, cow_aware_allocated_total, force_remove_worktree_inner,
-        garbage_collect_inner, has_ascii_case_alias, move_worktree_inner, next_operation_id,
-        prune_worktrees_inner, recover_incomplete_operations, remove_empty_directory_if_present,
-        remove_worktree_inner, storage_accounting,
+        TreeUsageRequest, ViewStorageAccounting, WorktreeMode, add_worktree_inner,
+        classify_in_tree_attributes, compact_worktree_inner, cow_aware_allocated_total,
+        force_remove_worktree_inner, garbage_collect_inner, has_ascii_case_alias,
+        move_worktree_inner, next_operation_id, prune_worktrees_inner,
+        recover_incomplete_operations, remove_empty_directory_if_present, remove_worktree_inner,
+        storage_accounting, tree_usage, tree_usages,
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
@@ -11879,6 +12037,39 @@ mod tests {
             base_allocated + 777_000,
             "a view whose base is missing must count its full allocation"
         );
+    }
+
+    #[test]
+    fn parallel_tree_usage_preserves_order_and_separate_allocation_paths() {
+        let fixture = tempdir().expect("tree-usage fixture");
+        let private = fixture.path().join("private");
+        fs::create_dir(&private).expect("private allocation tree");
+        fs::write(private.join("upper"), vec![b'c'; 12_289]).expect("private file");
+
+        let private_usage = tree_usage(&private).expect("measure private tree");
+        let mut expected = Vec::new();
+        let mut requests = Vec::new();
+        for index in 0..7 {
+            let path = fixture.path().join(format!("tree-{index}"));
+            fs::create_dir(&path).expect("usage tree");
+            fs::write(
+                path.join("file"),
+                vec![b'a' + index as u8; 4_097 + index * 1_024],
+            )
+            .expect("usage file");
+            let mut usage = tree_usage(&path).expect("measure expected tree usage");
+            let allocated_path = (index == 3).then(|| private.clone());
+            if allocated_path.is_some() {
+                usage.1 = private_usage.1;
+            }
+            expected.push(usage);
+            requests.push(TreeUsageRequest {
+                path,
+                allocated_path,
+            });
+        }
+
+        assert_eq!(tree_usages(&requests).expect("measure trees"), expected);
     }
 
     #[test]
@@ -13435,6 +13626,62 @@ mod tests {
         fs::remove_file(&attributes).expect("remove fixture FIFO");
         fs::write(&attributes, "").expect("empty regular attributes");
         assert!(inspect().compatible);
+    }
+
+    #[test]
+    fn attribute_fast_path_still_rejects_external_attributes() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let attributes = fixture.path().join("global-attributes");
+        fs::create_dir(&repository).expect("repository");
+        git(&repository, &["init", "--quiet"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        assert!(
+            !repository.join(".gitattributes").exists(),
+            "fixture must exercise the no-in-tree-attributes fast path"
+        );
+        fs::write(&attributes, "*.txt filter=external\n").expect("external attributes");
+        git(
+            &repository,
+            &[
+                "config",
+                "core.attributesFile",
+                attributes.to_str().expect("UTF-8 fixture path"),
+            ],
+        );
+
+        let git = Git::default();
+        let common_git_dir = git
+            .inspect_repository(&repository)
+            .expect("inspect repository")
+            .identity
+            .common_git_dir;
+        let report = super::inspect_repository_compatibility(
+            &git,
+            &repository,
+            &common_git_dir,
+            OsStr::new("HEAD"),
+        )
+        .expect("compatibility report");
+
+        assert!(!report.compatible);
+        assert!(report.blockers.iter().any(|blocker| {
+            blocker.kind == super::RepositoryCompatibilityBlockerKind::EffectiveAttributes
+        }));
     }
 
     #[cfg(unix)]

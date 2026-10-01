@@ -7,7 +7,7 @@ use thiserror::Error;
 
 #[cfg(any(test, target_os = "windows"))]
 mod exact_copy;
-#[cfg(any(test, target_os = "linux", target_os = "windows"))]
+#[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod parallel;
 
 /// Errors from concrete native storage operations.
@@ -172,7 +172,16 @@ pub fn has_macos_acl(path: &Path) -> Result<bool, StorageError> {
 pub struct ReflinkCloner;
 
 impl ReflinkCloner {
-    /// Clone an immutable base and restore owner permissions.
+    /// Clone an immutable base and restore owner permissions in one traversal.
+    #[cfg(target_os = "linux")]
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        reflink::clone_tree_owner_writable(source, destination)
+    }
+
+    #[cfg(not(target_os = "linux"))]
     pub fn clone_tree_owner_writable(
         source: &Path,
         destination: &Path,
@@ -1023,7 +1032,16 @@ mod overlayfs_helper;
 pub struct RefsBlockCloner;
 
 impl RefsBlockCloner {
-    /// Clone an immutable base and restore owner permissions.
+    /// Clone an immutable base and restore owner permissions in one traversal.
+    #[cfg(target_os = "windows")]
+    pub fn clone_tree_owner_writable(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), StorageError> {
+        refs::clone_tree_owner_writable(source, destination)
+    }
+
+    #[cfg(not(target_os = "windows"))]
     pub fn clone_tree_owner_writable(
         source: &Path,
         destination: &Path,

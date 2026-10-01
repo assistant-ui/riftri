@@ -27,8 +27,8 @@ const repository = path.join(output, 'repository');
 fs.mkdirSync(repository);
 const emptyConfig = path.join(output, 'empty-config');
 fs.writeFileSync(emptyConfig, '');
-const env = { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_SYSTEM: emptyConfig, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_COUNT: '0' };
-for (const key of ['GIT_CONFIG_PARAMETERS', 'GIT_CONFIG', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_TRACE2_EVENT', 'RIFTRI_BYPASS', 'RIFTRI_SHIM_ACTIVE', 'RIFTRI_REAL_GIT']) delete env[key];
+const env = { ...process.env, GIT_CONFIG_GLOBAL: emptyConfig, GIT_CONFIG_SYSTEM: emptyConfig, GIT_CONFIG_NOSYSTEM: '1' };
+for (const key of ['GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS', 'GIT_CONFIG', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_TRACE2_EVENT', 'RIFTRI_BYPASS', 'RIFTRI_SHIM_ACTIVE', 'RIFTRI_REAL_GIT']) delete env[key];
 function exec(command, args, cwd = repository, input) {
   const result = spawnSync(command, args, { cwd, env, input, maxBuffer: 100e6, timeout: 60000 });
   assert.equal(result.status, 0, `${command} ${args.join(' ')}\n${result.stderr}`);

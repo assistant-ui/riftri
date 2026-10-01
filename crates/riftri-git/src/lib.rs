@@ -313,6 +313,27 @@ impl Git {
 
     /// Inspect a normal, linked, unborn, detached, or bare repository.
     pub fn inspect_repository(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
+        self.inspect_repository_inner(path, false)
+    }
+
+    /// Inspect a repository and resolve HEAD's commit and tree together.
+    ///
+    /// Lifecycle callers that need both values use one structured `git show`
+    /// instead of resolving the commit and then starting Git again for its
+    /// tree. Callers that need only the commit keep the narrower
+    /// [`Self::inspect_repository`] path.
+    pub fn inspect_repository_with_head_tree(
+        &self,
+        path: &Path,
+    ) -> Result<RepositoryInfo, GitError> {
+        self.inspect_repository_inner(path, true)
+    }
+
+    fn inspect_repository_inner(
+        &self,
+        path: &Path,
+        include_head_tree: bool,
+    ) -> Result<RepositoryInfo, GitError> {
         // One invocation answers both identity questions; each Git subprocess
         // costs more in spawn and startup than in work. The bare flag is a
         // fixed `true`/`false` first line, so everything after it stays
@@ -393,11 +414,16 @@ impl Git {
         // Resolving HEAD's commit does double duty: it is the value `riftri
         // doctor` reports and the probe that surfaces a corrupt object store
         // as an inspection failure (relied on to fail lifecycle commands
-        // closed on an unhealthy repository). HEAD's tree, in contrast, is read
-        // only by doctor's JSON, so it is left for `inspect_repository_for_report`
-        // rather than resolved on every lifecycle operation's hot path.
-        let head_commit = self.resolve_optional_object(path, "HEAD^{commit}")?;
-        let head_tree = None;
+        // closed on an unhealthy repository). Most callers do not need its
+        // tree, while add can request both from one Git process.
+        let (head_commit, head_tree) = if include_head_tree {
+            match self.resolve_optional_head_revision(path)? {
+                Some(resolved) => (Some(resolved.commit), Some(resolved.tree)),
+                None => (None, None),
+            }
+        } else {
+            (self.resolve_optional_object(path, "HEAD^{commit}")?, None)
+        };
         Ok(RepositoryInfo {
             root,
             identity: RepositoryIdentity { common_git_dir },
@@ -419,16 +445,20 @@ impl Git {
     /// pay for and discard.
     /// Inspect a repository and additionally resolve the report-only fields
     /// that `inspect_repository` skips — working-tree cleanliness and HEAD's
-    /// tree — each of which costs a `git` subprocess and is read only by
-    /// `riftri doctor`.
+    /// tree. Commit and tree resolution share one Git subprocess; cleanliness
+    /// remains a separate full traversal used only by `riftri doctor`.
     pub fn inspect_repository_for_report(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
-        let mut info = self.inspect_repository(path)?;
+        let mut info = self.inspect_repository_with_head_tree(path)?;
         if !info.is_bare {
             // `worktree_is_clean` passes `--untracked-files=all`, which
             // overrides a `status.showUntrackedFiles=no` that would otherwise
             // hide untracked content.
             info.clean = Some(self.worktree_is_clean(path)?);
-            info.head_tree = self.resolve_optional_object(path, "HEAD^{tree}")?;
+        } else {
+            // Preserve the report contract: cleanliness and tree are
+            // worktree-only diagnostics even though the combined resolution
+            // made the bare repository's tree available at no extra cost.
+            info.head_tree = None;
         }
         Ok(info)
     }
@@ -439,8 +469,9 @@ impl Git {
         path: &Path,
         revision: &OsStr,
     ) -> Result<ResolvedRevision, GitError> {
-        let commit = self.resolve_required_object(path, revision, "^{commit}")?;
-        self.resolve_commit_tree(path, commit)
+        let arguments = resolved_revision_arguments(revision);
+        let output = self.run_os(Some(path), &arguments)?;
+        parse_resolved_revision_output(&output.stdout)
     }
 
     /// Resolve the tree for a commit ID the caller already obtained from Git.
@@ -1038,17 +1069,21 @@ impl Git {
 
     /// Remove a repository-local configuration key. Missing keys are accepted.
     pub fn unset_local_config(&self, path: &Path, key: &str) -> Result<(), GitError> {
-        if self.local_config_value(path, key)?.is_none() {
-            return Ok(());
-        }
         let arguments = [
             OsString::from("config"),
             OsString::from("--local"),
             OsString::from("--unset-all"),
             OsString::from(key),
         ];
-        self.run_os(Some(path), &arguments)?;
-        Ok(())
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() || output.status.code() == Some(5) {
+            // `git config --unset-all` exits 5 when the key has no matching
+            // value. Accept that documented missing-key disposition directly
+            // instead of probing the key in a separate process first.
+            Ok(())
+        } else {
+            Err(command_failed(&arguments, &output))
+        }
     }
 
     /// Resolve the repository-specific attributes file through Git so linked
@@ -1299,21 +1334,17 @@ impl Git {
         configuration: &[(String, Vec<u8>)],
         sparse_directories: &[String],
     ) -> Result<(), GitError> {
-        let objects = self.run_path(
+        let output = self.run(
             Some(repository),
             &[
                 "rev-parse",
                 "--path-format=absolute",
                 "--git-path",
                 "objects",
+                "--show-object-format",
             ],
-            "object directory",
         )?;
-        let format = self.run_text(
-            Some(repository),
-            &["rev-parse", "--show-object-format"],
-            "object format",
-        )?;
+        let (objects, format) = parse_checkout_storage(&output.stdout)?;
         let isolated = tempfile::Builder::new()
             .prefix("riftri-checkout-")
             .tempdir()
@@ -1707,7 +1738,10 @@ impl Git {
         self.run(Some(worktree), &arguments)?;
         self.run(Some(worktree), &["reset", "--mixed", "--quiet", "HEAD"])?;
         self.run(Some(worktree), &["sparse-checkout", "reapply"])?;
-        self.run(Some(worktree), &["update-index", "--refresh"])?;
+        // As with a full worktree, the caller's mandatory clean `git status`
+        // performs the stat-and-content refresh and fails closed on any
+        // divergence. The sparse commands above still establish the exact
+        // cone configuration and skip-worktree bits.
         Ok(())
     }
 
@@ -1884,28 +1918,21 @@ impl Git {
     ) -> Result<Option<ObjectId>, GitError> {
         let mut reference = OsString::from("refs/heads/");
         reference.push(branch);
-        let exists_arguments = [
-            OsString::from("show-ref"),
-            OsString::from("--verify"),
-            OsString::from("--quiet"),
-            reference.clone(),
-        ];
-        let exists = self.output_os(Some(repository), &exists_arguments)?;
-        if exists.status.code() == Some(1) {
-            return Ok(None);
-        }
-        if !exists.status.success() {
-            return Err(command_failed(&exists_arguments, &exists));
-        }
-
+        // A full refname pattern matches only that complete ref. Omitting
+        // `--verify` is intentional: show-ref then returns 1 with no output
+        // for a missing ref, while still printing the object ID for a match,
+        // so existence and target resolution share one process.
         let arguments = [
             OsString::from("show-ref"),
-            OsString::from("--verify"),
             OsString::from("--hash"),
             reference,
         ];
-        let output = self.run_os(Some(repository), &arguments)?;
-        parse_object_output(&output.stdout).map(Some)
+        let output = self.output_os(Some(repository), &arguments)?;
+        match output.status.code() {
+            Some(0) => parse_object_output(&output.stdout).map(Some),
+            Some(1) => Ok(None),
+            _ => Err(command_failed(&arguments, &output)),
+        }
     }
 
     /// Remove the lock on a registered worktree, whether or not its directory
@@ -2002,6 +2029,29 @@ impl Git {
             return Ok(None);
         }
         Err(command_failed(&base_arguments.map(OsString::from), &probe))
+    }
+
+    /// Resolve HEAD's commit and tree in one process, preserving the same
+    /// unborn-versus-corrupt distinction as `resolve_optional_object`.
+    fn resolve_optional_head_revision(
+        &self,
+        path: &Path,
+    ) -> Result<Option<ResolvedRevision>, GitError> {
+        let arguments = resolved_revision_arguments(OsStr::new("HEAD"));
+        let output = self.output_os(Some(path), &arguments)?;
+        if output.status.success() {
+            return parse_resolved_revision_output(&output.stdout).map(Some);
+        }
+
+        // `git show` has no quiet missing-revision disposition. Reuse the
+        // established optional-object probe only on this failure path: it
+        // returns None for an unborn HEAD, reports an unreadable commit as
+        // corruption, and lets every other failure retain the original show
+        // diagnostic.
+        match self.resolve_optional_object(path, "HEAD^{commit}")? {
+            None => Ok(None),
+            Some(_) => Err(command_failed(&arguments, &output)),
+        }
     }
 
     fn resolve_required_object(
@@ -2354,6 +2404,37 @@ fn parse_object_output(bytes: &[u8]) -> Result<ObjectId, GitError> {
     parse_object_bytes(trim_line_endings(bytes))
 }
 
+fn resolved_revision_arguments(revision: &OsStr) -> [OsString; 8] {
+    let mut expression = revision.to_os_string();
+    expression.push("^{commit}");
+    [
+        OsString::from("show"),
+        OsString::from("--no-patch"),
+        OsString::from("--no-notes"),
+        OsString::from("--no-show-signature"),
+        OsString::from("--format=format:%H%x00%T%x00"),
+        OsString::from("--end-of-options"),
+        expression,
+        OsString::from("--"),
+    ]
+}
+
+fn parse_resolved_revision_output(bytes: &[u8]) -> Result<ResolvedRevision, GitError> {
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let commit = fields.next().unwrap_or_default();
+    let tree = fields.next().unwrap_or_default();
+    if fields.next() != Some(&[][..]) || fields.next().is_some() {
+        return Err(GitError::InvalidOutput {
+            context: "resolved revision",
+            detail: "expected exactly two NUL-delimited object IDs".to_owned(),
+        });
+    }
+    Ok(ResolvedRevision {
+        commit: parse_object_bytes(commit)?,
+        tree: parse_object_bytes(tree)?,
+    })
+}
+
 fn parse_object_bytes(bytes: &[u8]) -> Result<ObjectId, GitError> {
     let value = std::str::from_utf8(bytes).map_err(|error| GitError::InvalidOutput {
         context: "object ID",
@@ -2424,6 +2505,39 @@ fn utf8_line(bytes: &[u8], context: &'static str) -> Result<String, GitError> {
             detail: error.to_string(),
         })?;
     Ok(value.to_owned())
+}
+
+/// Parse the object directory followed by the object format from one
+/// `rev-parse` invocation. Splitting at the final newline preserves every byte
+/// in a native path that itself contains newlines; the format is Git-owned
+/// ASCII and always occupies the final line.
+fn parse_checkout_storage(output: &[u8]) -> Result<(PathBuf, String), GitError> {
+    let output = output.strip_suffix(b"\n").unwrap_or(output);
+    let separator = output
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .ok_or_else(|| GitError::InvalidOutput {
+            context: "checkout object storage",
+            detail: "expected an object directory and object format".to_owned(),
+        })?;
+    let object_directory = &output[..separator];
+    if object_directory.is_empty() {
+        return Err(GitError::InvalidOutput {
+            context: "object directory",
+            detail: "path was empty".to_owned(),
+        });
+    }
+    let format = utf8_line(&output[separator + 1..], "object format")?;
+    if format.is_empty() {
+        return Err(GitError::InvalidOutput {
+            context: "object format",
+            detail: "value was empty".to_owned(),
+        });
+    }
+    Ok((
+        PathBuf::from(os_string_from_git(object_directory, "object directory")?),
+        format,
+    ))
 }
 
 fn trim_line_endings(mut bytes: &[u8]) -> &[u8] {
@@ -2680,6 +2794,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn checkout_storage_parser_preserves_newlines_in_the_object_path() {
+        let (objects, format) =
+            super::parse_checkout_storage(b"/tmp/repository\nname/.git/objects\nsha256\n")
+                .expect("parse checkout storage");
+        assert_eq!(objects, Path::new("/tmp/repository\nname/.git/objects"));
+        assert_eq!(format, "sha256");
+        assert!(super::parse_checkout_storage(b"objects-only\n").is_err());
+        assert!(super::parse_checkout_storage(b"\nsha1\n").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkout_storage_parser_preserves_non_utf8_object_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (objects, format) =
+            super::parse_checkout_storage(b"/tmp/objects-\xff\nsha1\n").unwrap();
+        assert_eq!(
+            objects,
+            PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/objects-\xff".to_vec()))
+        );
+        assert_eq!(format, "sha1");
+    }
+
     /// `git worktree list` dies when a concurrent removal deletes a
     /// worktree's administrative file mid-listing. The inventory is retried,
     /// so one such race no longer fails the caller.
@@ -2714,8 +2853,8 @@ mod tests {
         .expect("write stand-in");
         fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("chmod");
 
-        let listed = super::Git::new(&stand_in)
-            .list_worktrees(&repository)
+        let git = super::Git::new(&stand_in);
+        let listed = retry_while_wrapper_is_busy(|| git.list_worktrees(&repository))
             .expect("the retried listing succeeds");
 
         assert!(marker.exists(), "the first listing did fail");
@@ -3164,9 +3303,15 @@ mod tests {
         let fixture = RepositoryFixture::committed();
         let git = Git::default();
 
+        let attempts_before = git.process_attempts();
         let resolved = git
             .resolve_revision(fixture.path(), OsStr::new("HEAD"))
             .expect("resolve HEAD");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "one structured Git call must resolve both object IDs"
+        );
         // `inspect_repository` resolves HEAD's commit; the tree comes from the
         // report method.
         let repository = git
@@ -3174,12 +3319,49 @@ mod tests {
             .expect("inspect repository");
         assert_eq!(repository.head_commit, Some(resolved.commit.clone()));
         assert!(repository.head_tree.is_none());
+        let repository_with_tree = git
+            .inspect_repository_with_head_tree(fixture.path())
+            .expect("inspect repository with HEAD tree");
+        assert_eq!(
+            repository_with_tree.head_commit,
+            Some(resolved.commit.clone())
+        );
+        assert_eq!(repository_with_tree.head_tree, Some(resolved.tree.clone()));
         let reported = git
             .inspect_repository_for_report(fixture.path())
             .expect("inspect for report");
         assert_eq!(reported.head_commit, Some(resolved.commit));
         assert_eq!(reported.head_tree, Some(resolved.tree));
         assert_eq!(reported.clean, Some(true));
+    }
+
+    #[test]
+    fn resolved_revision_parser_requires_exact_nul_delimited_ids() {
+        let oid = b"0123456789012345678901234567890123456789";
+        let mut valid = Vec::new();
+        valid.extend_from_slice(oid);
+        valid.push(0);
+        valid.extend_from_slice(oid);
+        valid.push(0);
+        let resolved = super::parse_resolved_revision_output(&valid).expect("parse exact record");
+        assert_eq!(
+            resolved.commit.as_str(),
+            "0123456789012345678901234567890123456789"
+        );
+        assert_eq!(
+            resolved.tree.as_str(),
+            "0123456789012345678901234567890123456789"
+        );
+
+        valid.extend_from_slice(b"unexpected");
+        assert!(
+            super::parse_resolved_revision_output(&valid).is_err(),
+            "trailing output must fail closed"
+        );
+        assert!(
+            super::parse_resolved_revision_output(oid).is_err(),
+            "missing delimiters must fail closed"
+        );
     }
 
     /// Spawning a freshly written script can fail with ETXTBSY when a
@@ -3217,7 +3399,7 @@ mod tests {
         fs::write(fixture.path().join("tracked.txt"), "new tree\n").expect("change tree");
         git(fixture.path(), &["commit", "-am", "second", "--quiet"]);
         let wrapper = fixture.path().join("moving-git");
-        fs::write(&wrapper, "#!/bin/sh\nif [ \"$4\" = 'moving^{commit}' ]; then\n  git \"$@\" || exit\n  git update-ref refs/heads/moving HEAD\nelse\n  exec git \"$@\"\nfi\n")
+        fs::write(&wrapper, "#!/bin/sh\nif [ \"$1\" = show ]; then\n  git \"$@\" || exit\n  git update-ref refs/heads/moving HEAD\nelse\n  exec git \"$@\"\nfi\n")
             .expect("write Git wrapper");
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
 
@@ -3407,10 +3589,16 @@ mod tests {
 
         assert!(linked.join(".git").is_file());
         assert!(!linked.join("tracked.txt").exists());
+        let attempts_before = git.process_attempts();
         assert_eq!(
             git.local_branch_target(fixture.path(), OsStr::new("feature/suppressed"))
                 .expect("read branch"),
             Some(revision.commit.clone())
+        );
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "one show-ref call must both detect and resolve an exact local branch"
         );
 
         fs::write(linked.join("tracked.txt"), "tracked\n").expect("materialize linked file");
@@ -3455,6 +3643,78 @@ mod tests {
                 .expect("check removed branch"),
             None
         );
+    }
+
+    #[test]
+    fn local_branch_lookup_does_not_match_a_nested_ref_prefix() {
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["branch", "topic/child", "HEAD"]);
+        let git = Git::default();
+
+        let attempts_before = git.process_attempts();
+        assert_eq!(
+            git.local_branch_target(fixture.path(), OsStr::new("topic"))
+                .expect("query absent branch prefix"),
+            None
+        );
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "an absent exact branch must remain one lookup"
+        );
+    }
+
+    #[test]
+    fn sparse_index_synchronization_leaves_refresh_to_the_paired_clean_check() {
+        let fixture = RepositoryFixture::committed();
+        fs::create_dir(fixture.path().join("selected")).expect("create selected directory");
+        fs::create_dir(fixture.path().join("omitted")).expect("create omitted directory");
+        fs::write(fixture.path().join("selected/file.txt"), "selected\n")
+            .expect("write selected file");
+        fs::write(fixture.path().join("omitted/file.txt"), "omitted\n")
+            .expect("write omitted file");
+        git(fixture.path(), &["add", "--", "selected", "omitted"]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "sparse fixture"],
+        );
+
+        let linked_parent = tempdir().expect("linked parent");
+        let linked = linked_parent.path().join("sparse");
+        let git = Git::default();
+        git.add_worktree_no_checkout(
+            fixture.path(),
+            &linked,
+            OsStr::new("HEAD"),
+            WorktreeHead::NewBranch(OsStr::new("feature/sparse-suppressed")),
+        )
+        .expect("add no-checkout worktree");
+        fs::create_dir(linked.join("selected")).expect("materialize selected directory");
+        fs::write(linked.join("tracked.txt"), "tracked\n").expect("materialize root file");
+        fs::write(linked.join("selected/file.txt"), "selected\n")
+            .expect("materialize selected file");
+
+        let attempts_before = git.process_attempts();
+        git.synchronize_sparse_worktree_index(&linked, &["selected".to_owned()])
+            .expect("synchronize sparse index");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            3,
+            "sparse index synchronization needs set, reset, and reapply; the paired clean check performs the refresh"
+        );
+        assert!(git.worktree_is_clean(&linked).expect("check clean"));
+        let tags = git
+            .run_text(Some(&linked), &["ls-files", "-t"], "sparse index tags")
+            .expect("read sparse index tags");
+        assert!(tags.contains("H selected/file.txt"), "{tags}");
+        assert!(tags.contains("S omitted/file.txt"), "{tags}");
+
+        fs::write(linked.join("selected/file.txt"), "changed\n").expect("modify selected file");
+        assert!(!git.worktree_is_clean(&linked).expect("check dirty"));
+        git.remove_worktree_force(fixture.path(), &linked)
+            .expect("remove linked worktree");
+        git.delete_branch_force(fixture.path(), OsStr::new("feature/sparse-suppressed"))
+            .expect("delete rollback branch");
     }
 
     #[test]
@@ -3976,12 +4236,26 @@ mod tests {
             Some(true)
         );
 
+        let attempts_before = git.process_attempts();
         git.unset_local_config(fixture.path(), "riftri.enabled")
             .expect("disable repository");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "removing a present key should not require a separate existence query"
+        );
         assert_eq!(
             git.local_config_value(fixture.path(), "riftri.enabled")
                 .expect("read removed local configuration"),
             None
+        );
+        let attempts_before = git.process_attempts();
+        git.unset_local_config(fixture.path(), "riftri.enabled")
+            .expect("missing local configuration is already removed");
+        assert_eq!(
+            git.process_attempts() - attempts_before,
+            1,
+            "a missing key should use the same direct removal attempt"
         );
 
         let first = fixture.path().join("state one");

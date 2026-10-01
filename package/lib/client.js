@@ -90,9 +90,11 @@ function flagsFor(options) {
   for (const [key, value] of Object.entries(options)) {
     if (value === undefined || value === null || value === false) continue;
     const flag = `--${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`;
+    // `--flag=value`, so a value that starts with `-` (a branch, a path) is
+    // never parsed as another flag.
     if (value === true) flags.push(flag);
-    else if (Array.isArray(value)) for (const item of value) flags.push(flag, String(item));
-    else flags.push(flag, String(value));
+    else if (Array.isArray(value)) for (const item of value) flags.push(`${flag}=${item}`);
+    else flags.push(`${flag}=${value}`);
   }
   return flags;
 }
@@ -195,7 +197,7 @@ class Riftri {
   }
 
   #stateFlag() {
-    return this.stateDir ? ["--state-dir", this.stateDir] : [];
+    return this.stateDir ? [`--state-dir=${this.stateDir}`] : [];
   }
 
   /** Inspect Git and storage without creating anything. */
@@ -205,7 +207,7 @@ class Riftri {
 
   /** Probe storage backends for a destination volume. */
   backends(pathOrOptions = {}) {
-    const target = typeof pathOrOptions === "string" ? [pathOrOptions] : [];
+    const target = typeof pathOrOptions === "string" ? ["--", pathOrOptions] : [];
     return this.run(["backends", ...target]);
   }
 
@@ -261,11 +263,13 @@ class Riftri {
     return this.run(args);
   }
 
+  // Paths and revisions follow `--`: a relative path such as `-scratch` was
+  // otherwise parsed as flags and the call failed as a usage error.
   #worktreeAdd(destination, options = {}) {
     const { revision, ...rest } = options;
-    const args = ["worktree", "add", destination];
-    if (revision) args.push(revision);
-    return this.run([...args, ...flagsFor(rest), ...this.#stateFlag()]);
+    const positionals = ["--", destination];
+    if (revision) positionals.push(revision);
+    return this.run(["worktree", "add", ...flagsFor(rest), ...this.#stateFlag(), ...positionals]);
   }
 
   #worktreeList(options = {}) {
@@ -273,17 +277,17 @@ class Riftri {
   }
 
   #worktreeRemove(destination, { force = false } = {}) {
-    const args = ["worktree", "remove", destination];
+    const args = ["worktree", "remove"];
     if (force) args.push("--force", "--yes");
-    return this.run([...args, ...this.#stateFlag()]);
+    return this.run([...args, ...this.#stateFlag(), "--", destination]);
   }
 
   #worktreeMove(source, destination) {
-    return this.run(["worktree", "move", source, destination, ...this.#stateFlag()]);
+    return this.run(["worktree", "move", ...this.#stateFlag(), "--", source, destination]);
   }
 
   #worktreeCompact(destination) {
-    return this.run(["worktree", "compact", destination, ...this.#stateFlag()]);
+    return this.run(["worktree", "compact", ...this.#stateFlag(), "--", destination]);
   }
 
   #worktreePrune() {

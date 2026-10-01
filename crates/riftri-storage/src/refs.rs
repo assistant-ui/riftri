@@ -87,6 +87,21 @@ fn open_delete_on_close(path: &Path) -> std::io::Result<File> {
 }
 
 pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
+    clone_tree_with_permissions(source, destination, false)
+}
+
+pub(crate) fn clone_tree_owner_writable(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), StorageError> {
+    clone_tree_with_permissions(source, destination, true)
+}
+
+fn clone_tree_with_permissions(
+    source: &Path,
+    destination: &Path,
+    owner_writable: bool,
+) -> Result<(), StorageError> {
     let metadata = fs::symlink_metadata(source)
         .map_err(|source_error| io("inspect clone source", source, source_error))?;
     if !metadata.is_dir() {
@@ -110,9 +125,15 @@ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), Storag
             metadata.permissions(),
             &mut files,
             &mut directories,
+            owner_writable,
         )?;
         try_for_each_bounded(files, file_clone_parallelism(), |file| {
-            clone_file(&file.source, &file.destination, cluster_size)
+            clone_file(
+                &file.source,
+                &file.destination,
+                cluster_size,
+                owner_writable,
+            )
         })?;
         for directory in directories.into_iter().rev() {
             fs::set_permissions(&directory.destination, directory.permissions).map_err(
@@ -140,9 +161,15 @@ fn prepare_clone_directory(
     permissions: fs::Permissions,
     files: &mut Vec<FileClone>,
     directories: &mut Vec<DirectoryClone>,
+    owner_writable: bool,
 ) -> Result<(), StorageError> {
     fs::create_dir(destination)
         .map_err(|source_error| io("create clone directory", destination, source_error))?;
+    let permissions = if owner_writable {
+        owner_writable_permissions(permissions)
+    } else {
+        permissions
+    };
     directories.push(DirectoryClone {
         destination: destination.to_path_buf(),
         permissions,
@@ -155,17 +182,30 @@ fn prepare_clone_directory(
             entry.map_err(|source_error| io("read clone source entry", source, source_error))?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path)
-            .map_err(|source_error| io("inspect clone source entry", &source_path, source_error))?;
-        let file_type = metadata.file_type();
+        // Directory enumeration already carries each entry's type on Windows.
+        // Regular-file metadata comes from the opened source handle in
+        // `clone_file`, and `clone_symlink` reads the link's own reparse
+        // attributes, so only directories need a separate path metadata read
+        // here for the permissions restored after recursion.
+        let file_type = entry.file_type().map_err(|source_error| {
+            io(
+                "inspect clone source entry type",
+                &source_path,
+                source_error,
+            )
+        })?;
 
         if file_type.is_dir() {
+            let metadata = fs::symlink_metadata(&source_path).map_err(|source_error| {
+                io("inspect clone source directory", &source_path, source_error)
+            })?;
             prepare_clone_directory(
                 &source_path,
                 &destination_path,
                 metadata.permissions(),
                 files,
                 directories,
+                owner_writable,
             )?;
         } else if file_type.is_file() {
             files.push(FileClone {
@@ -182,7 +222,12 @@ fn prepare_clone_directory(
     Ok(())
 }
 
-fn clone_file(source: &Path, destination: &Path, cluster_size: u64) -> Result<(), StorageError> {
+fn clone_file(
+    source: &Path,
+    destination: &Path,
+    cluster_size: u64,
+    owner_writable: bool,
+) -> Result<(), StorageError> {
     let mut source_file = File::open(source).map_err(|source_error| StorageError::Clone {
         source_path: source.to_path_buf(),
         destination: destination.to_path_buf(),
@@ -280,9 +325,24 @@ fn clone_file(source: &Path, destination: &Path, cluster_size: u64) -> Result<()
             destination: destination.to_path_buf(),
             source: source_error,
         })?;
-    fs::set_permissions(destination, metadata.permissions())
+    let permissions = metadata.permissions();
+    let permissions = if owner_writable {
+        owner_writable_permissions(permissions)
+    } else {
+        permissions
+    };
+    destination_file
+        .set_permissions(permissions)
         .map_err(|source_error| io("restore cloned file permissions", destination, source_error))?;
     Ok(())
+}
+
+// This module is Windows-only, where clearing `readonly` resets the specific
+// FILE_ATTRIBUTE_READONLY bit rather than broadening Unix mode bits.
+#[allow(clippy::permissions_set_readonly_false)]
+fn owner_writable_permissions(mut permissions: fs::Permissions) -> fs::Permissions {
+    permissions.set_readonly(false);
+    permissions
 }
 
 fn prepare_destination_attributes(
@@ -496,5 +556,64 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> StorageEr
         operation,
         path: path.to_path_buf(),
         source,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{
+        clone_tree, clone_tree_owner_writable, make_tree_owner_writable, make_tree_read_only, probe,
+    };
+
+    #[test]
+    fn writable_clone_matches_the_two_pass_path_and_preserves_the_base() {
+        let fixture = tempdir().expect("writable clone fixture");
+        if probe(fixture.path()).is_err() {
+            return;
+        }
+        let source = fixture.path().join("source");
+        let old = fixture.path().join("old");
+        let fused = fixture.path().join("fused");
+        fs::create_dir(&source).expect("source");
+        fs::create_dir(source.join("nested")).expect("nested source");
+        fs::write(source.join("nested/file"), b"base contents\n").expect("regular file");
+        make_tree_read_only(&source).expect("immutable source");
+
+        clone_tree(&source, &old).expect("old clone");
+        make_tree_owner_writable(&old).expect("old permission pass");
+        clone_tree_owner_writable(&source, &fused).expect("fused clone");
+
+        for relative in ["", "nested", "nested/file"] {
+            let old_read_only = fs::symlink_metadata(old.join(relative))
+                .expect("old metadata")
+                .permissions()
+                .readonly();
+            let fused_read_only = fs::symlink_metadata(fused.join(relative))
+                .expect("fused metadata")
+                .permissions()
+                .readonly();
+            assert_eq!(
+                fused_read_only, old_read_only,
+                "read-only state differs for {relative:?}"
+            );
+        }
+        fs::write(fused.join("nested/file"), b"private change\n").expect("private write");
+        assert_eq!(
+            fs::read(source.join("nested/file")).expect("source contents"),
+            b"base contents\n"
+        );
+        assert!(
+            fs::symlink_metadata(source.join("nested/file"))
+                .expect("source metadata")
+                .permissions()
+                .readonly(),
+            "fused clone changed immutable source permissions"
+        );
+
+        make_tree_owner_writable(&source).expect("fixture cleanup");
     }
 }

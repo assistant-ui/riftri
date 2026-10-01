@@ -2,9 +2,15 @@ use std::ffi::CString;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::StorageError;
+use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
+
+struct FileClone {
+    source: PathBuf,
+    destination: PathBuf,
+}
 
 pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
     clone_tree_with_permissions(source, destination, false)
@@ -34,12 +40,25 @@ fn clone_tree_with_permissions(
         return Err(StorageError::DestinationExists(destination.to_path_buf()));
     }
 
-    let result = clone_directory(
-        source,
-        destination,
-        metadata.permissions().mode(),
-        owner_writable,
-    );
+    let result = (|| {
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        prepare_clone_directory(
+            source,
+            destination,
+            metadata.permissions().mode(),
+            owner_writable,
+            &mut files,
+            &mut directories,
+        )?;
+        try_for_each_bounded(files, file_clone_parallelism(), |file| {
+            clone_file(&file.source, &file.destination, owner_writable)
+        })?;
+        for (path, mode) in directories.into_iter().rev() {
+            set_mode(&path, mode)?;
+        }
+        Ok(())
+    })();
     if result.is_err() && destination.exists() {
         let _ = make_tree_owner_writable(destination);
         let _ = fs::remove_dir_all(destination);
@@ -47,16 +66,30 @@ fn clone_tree_with_permissions(
     result
 }
 
-fn clone_directory(
+fn prepare_clone_directory(
     source: &Path,
     destination: &Path,
     final_mode: u32,
     owner_writable: bool,
+    files: &mut Vec<FileClone>,
+    directories: &mut Vec<(PathBuf, u32)>,
 ) -> Result<(), StorageError> {
     fs::create_dir(destination)
         .map_err(|source_error| io("create clone directory", destination, source_error))?;
     fs::set_permissions(destination, fs::Permissions::from_mode(final_mode | 0o700))
         .map_err(|source_error| io("prepare clone directory mode", destination, source_error))?;
+
+    let final_mode = if owner_writable {
+        // Owner rwx (`0o700`) guarantees traversal and edits, and the
+        // umask-appropriate write bits restore the group/other access a plain
+        // `git worktree add` keeps under `umask 002` or
+        // `core.sharedRepository=group`. The base tree was made read-only
+        // before cloning, so `final_mode` arrives with every write bit cleared.
+        final_mode | 0o700 | crate::umask_writable_bits()
+    } else {
+        final_mode
+    };
+    directories.push((destination.to_path_buf(), final_mode));
 
     for entry in fs::read_dir(source)
         .map_err(|source_error| io("read clone source directory", source, source_error))?
@@ -65,29 +98,34 @@ fn clone_directory(
             entry.map_err(|source_error| io("read clone source entry", source, source_error))?;
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source_path)
-            .map_err(|source_error| io("inspect clone source entry", &source_path, source_error))?;
-        let file_type = metadata.file_type();
+        // APFS directory entries carry their type, and clonefile preserves a
+        // regular file's source metadata. Only directories need a separate
+        // metadata lookup for the mode restored after their children finish.
+        let file_type = entry.file_type().map_err(|source_error| {
+            io(
+                "inspect clone source entry type",
+                &source_path,
+                source_error,
+            )
+        })?;
 
         if file_type.is_dir() {
-            clone_directory(
+            let metadata = fs::symlink_metadata(&source_path).map_err(|source_error| {
+                io("inspect clone source directory", &source_path, source_error)
+            })?;
+            prepare_clone_directory(
                 &source_path,
                 &destination_path,
                 metadata.permissions().mode(),
                 owner_writable,
+                files,
+                directories,
             )?;
         } else if file_type.is_file() {
-            clone_file(&source_path, &destination_path)?;
-            if owner_writable {
-                // Read the clone's actual mode, just like the former second
-                // pass: clonefile/umask/inherited ACL semantics remain intact.
-                let cloned = fs::symlink_metadata(&destination_path)
-                    .map_err(|error| io("inspect cloned permissions", &destination_path, error))?;
-                set_mode(
-                    &destination_path,
-                    cloned.permissions().mode() | crate::umask_writable_bits(),
-                )?;
-            }
+            files.push(FileClone {
+                source: source_path,
+                destination: destination_path,
+            });
         } else if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
                 .map_err(|source_error| io("read source symlink", &source_path, source_error))?;
@@ -98,24 +136,22 @@ fn clone_directory(
             return Err(StorageError::UnsupportedEntry(source_path));
         }
     }
-
-    let final_mode = if owner_writable {
-        // Mirror the file branch above: owner rwx (`0o700`) guarantees
-        // traversal and edits, and the umask-appropriate write bits restore the
-        // group/other access a plain `git worktree add` keeps under `umask 002`
-        // or `core.sharedRepository=group`. The base tree was made read-only
-        // before cloning, so `final_mode` arrives with every write bit cleared.
-        final_mode | 0o700 | crate::umask_writable_bits()
-    } else {
-        final_mode
-    };
-    fs::set_permissions(destination, fs::Permissions::from_mode(final_mode))
-        .map_err(|source_error| io("restore clone directory mode", destination, source_error))?;
     Ok(())
 }
 
-fn clone_file(source: &Path, destination: &Path) -> Result<(), StorageError> {
-    clone_path(source, destination)
+fn clone_file(source: &Path, destination: &Path, owner_writable: bool) -> Result<(), StorageError> {
+    clone_path(source, destination)?;
+    if owner_writable {
+        // Read the clone's actual mode, just like the former second pass:
+        // clonefile/umask/inherited ACL semantics remain intact.
+        let cloned = fs::symlink_metadata(destination)
+            .map_err(|error| io("inspect cloned permissions", destination, error))?;
+        set_mode(
+            destination,
+            cloned.permissions().mode() | crate::umask_writable_bits(),
+        )?;
+    }
+    Ok(())
 }
 
 fn clone_path(source: &Path, destination: &Path) -> Result<(), StorageError> {
