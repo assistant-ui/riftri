@@ -25,6 +25,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- The Node client passes paths after `--` and option values as `--name=value`,
+  so a relative path such as `-scratch`, or a value starting with `-`, is no
+  longer parsed as flags and rejected as a usage error (#581).
 - Without a terminal, the npm launcher (`npx riftri`) now forwards SIGINT and
   SIGQUIT to the native binary, as native `riftri exec` does, and runs it in
   its own process group so a group-directed signal arrives once. It ignored
