@@ -123,11 +123,51 @@ fn hash_native(value: &OsStr, digest: &mut Sha256) {
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
+        let units = value.encode_wide();
+        digest.update((units.clone().count() as u64).to_le_bytes());
+        for unit in units {
+            digest.update(unit.to_le_bytes());
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use std::ffi::{OsStr, OsString};
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    use sha2::{Digest, Sha256};
+
+    use super::hash_native;
+
+    fn hash_native_allocating(value: &OsStr, digest: &mut Sha256) {
         let units = value.encode_wide().collect::<Vec<_>>();
         digest.update((units.len() as u64).to_le_bytes());
         for unit in units {
             digest.update(unit.to_le_bytes());
         }
+    }
+
+    fn digest_names(names: &[OsString], allocating: bool) -> Vec<u8> {
+        let mut digest = Sha256::new();
+        for name in names {
+            if allocating {
+                hash_native_allocating(name, &mut digest);
+            } else {
+                hash_native(name, &mut digest);
+            }
+        }
+        digest.finalize().to_vec()
+    }
+
+    #[test]
+    fn streamed_native_names_preserve_the_persisted_wide_layout() {
+        let values = [
+            OsString::from("ascii"),
+            OsString::from("emoji-🦀"),
+            OsString::from_wide(&[b'x' as u16, 0xd800, b'y' as u16]),
+        ];
+        assert_eq!(digest_names(&values, false), digest_names(&values, true));
     }
 }
 
