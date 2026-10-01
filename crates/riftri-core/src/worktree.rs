@@ -1512,6 +1512,7 @@ pub fn storage_accounting(
     }
     let mut references = BTreeMap::<PathBuf, usize>::new();
     let mut views = Vec::new();
+    let mut view_usage_requests = Vec::new();
     for journal in add_journals.iter().filter(|journal| {
         journal.phase == AddWorktreePhase::Active && !completed.contains(&journal.operation_id)
     }) {
@@ -1531,16 +1532,21 @@ pub fn storage_accounting(
                     journal.destination.display()
                 ))
             })?;
-            let (logical_bytes, allocated_bytes) = tree_usage(&journal.destination)?;
             #[cfg(target_os = "linux")]
-            let allocated_bytes = if journal.backend == BackendKind::OverlayFs
+            let allocated_path = if journal.backend == BackendKind::OverlayFs
                 && let Some(overlayfs) = journal.overlayfs.as_ref()
                 && overlayfs.layout_root.exists()
             {
-                tree_usage(&overlayfs.layout_root)?.1
+                Some(overlayfs.layout_root.clone())
             } else {
-                allocated_bytes
+                None
             };
+            #[cfg(not(target_os = "linux"))]
+            let allocated_path = None;
+            view_usage_requests.push(TreeUsageRequest {
+                path: journal.destination.clone(),
+                allocated_path,
+            });
             views.push(ViewStorageAccounting {
                 repository: journal.repository.clone(),
                 destination: journal.destination.clone(),
@@ -1551,23 +1557,43 @@ pub fn storage_accounting(
                 detached: worktree.detached,
                 locked_reason: worktree.locked_reason.clone(),
                 prunable_reason: worktree.prunable_reason.clone(),
-                logical_bytes,
-                allocated_bytes,
+                logical_bytes: 0,
+                allocated_bytes: 0,
             });
         }
+    }
+    for (view, (logical_bytes, allocated_bytes)) in
+        views.iter_mut().zip(tree_usages(&view_usage_requests)?)
+    {
+        view.logical_bytes = logical_bytes;
+        view.allocated_bytes = allocated_bytes;
     }
     views.sort_unstable_by(|left, right| left.destination.cmp(&right.destination));
 
     for base_path in retained_base_paths(&state_directory, UnsafeBaseInventory::Ignore)? {
         references.entry(base_path).or_default();
     }
+    let references = references.into_iter().collect::<Vec<_>>();
+    let mut base_usage_requests = Vec::new();
+    let base_usage_indices = references
+        .iter()
+        .map(|(path, _)| {
+            path.is_dir().then(|| {
+                let index = base_usage_requests.len();
+                base_usage_requests.push(TreeUsageRequest {
+                    path: path.clone(),
+                    allocated_path: None,
+                });
+                index
+            })
+        })
+        .collect::<Vec<_>>();
+    let base_usages = tree_usages(&base_usage_requests)?;
     let mut bases = Vec::with_capacity(references.len());
-    for (path, reference_count) in references {
-        let (logical_bytes, allocated_bytes) = if path.is_dir() {
-            tree_usage(&path)?
-        } else {
-            (0, 0)
-        };
+    for ((path, reference_count), usage_index) in references.into_iter().zip(base_usage_indices) {
+        let (logical_bytes, allocated_bytes) = usage_index
+            .map(|index| base_usages[index])
+            .unwrap_or((0, 0));
         let damaged = is_regular_file_if_present(&damaged_base_marker(&path))?;
         bases.push(BaseStorageAccounting {
             path,
@@ -7600,6 +7626,65 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
     Ok((logical_bytes, allocated_bytes))
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct TreeUsageRequest {
+    path: PathBuf,
+    /// OverlayFS views account logical bytes from the merged view but physical
+    /// bytes from their private upper/work layout. Native COW views use the
+    /// primary path for both values.
+    allocated_path: Option<PathBuf>,
+}
+
+/// Measure independent trees concurrently while retaining request order.
+///
+/// `status` and `worktree list` are read-only snapshots, and each active view
+/// owns a disjoint directory tree. A bounded worker set overlaps their metadata
+/// reads without changing what any individual traversal counts. Results are
+/// stored by request index so an error is still reported in journal order.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn tree_usages(requests: &[TreeUsageRequest]) -> Result<Vec<(u64, u64)>, WorktreeError> {
+    const MAX_WORKERS: usize = 4;
+
+    if requests.len() <= 1 {
+        return requests.iter().map(measure_tree_usage).collect();
+    }
+
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MAX_WORKERS)
+        .min(requests.len());
+    let chunk_size = requests.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let workers = requests
+            .chunks(chunk_size)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    chunk
+                        .iter()
+                        .map(measure_tree_usage)
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut usages = Vec::with_capacity(requests.len());
+        for worker in workers {
+            usages.extend(worker.join().expect("tree-usage worker panicked")?);
+        }
+        Ok(usages)
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn measure_tree_usage(request: &TreeUsageRequest) -> Result<(u64, u64), WorktreeError> {
+    let (logical_bytes, allocated_bytes) = tree_usage(&request.path)?;
+    let allocated_bytes = match &request.allocated_path {
+        Some(path) => tree_usage(path)?.1,
+        None => allocated_bytes,
+    };
+    Ok((logical_bytes, allocated_bytes))
+}
+
 #[cfg(unix)]
 fn allocated_bytes(_path: &Path, metadata: &fs::Metadata) -> Result<u64, WorktreeError> {
     use std::os::unix::fs::MetadataExt;
@@ -11820,11 +11905,12 @@ mod tests {
     use super::{
         AddWorktreeRequest, BackendKind, BaseStorageAccounting, CompactWorktreeRequest,
         MoveWorktreeRequest, ObjectId, PruneWorktreesRequest, RemoveWorktreeRequest,
-        ViewStorageAccounting, WorktreeMode, add_worktree_inner, classify_in_tree_attributes,
-        compact_worktree_inner, cow_aware_allocated_total, force_remove_worktree_inner,
-        garbage_collect_inner, has_ascii_case_alias, move_worktree_inner, next_operation_id,
-        prune_worktrees_inner, recover_incomplete_operations, remove_empty_directory_if_present,
-        remove_worktree_inner, storage_accounting,
+        TreeUsageRequest, ViewStorageAccounting, WorktreeMode, add_worktree_inner,
+        classify_in_tree_attributes, compact_worktree_inner, cow_aware_allocated_total,
+        force_remove_worktree_inner, garbage_collect_inner, has_ascii_case_alias,
+        move_worktree_inner, next_operation_id, prune_worktrees_inner,
+        recover_incomplete_operations, remove_empty_directory_if_present, remove_worktree_inner,
+        storage_accounting, tree_usage, tree_usages,
     };
     #[cfg(unix)]
     use crate::journal::{CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore};
@@ -11917,6 +12003,39 @@ mod tests {
             base_allocated + 777_000,
             "a view whose base is missing must count its full allocation"
         );
+    }
+
+    #[test]
+    fn parallel_tree_usage_preserves_order_and_separate_allocation_paths() {
+        let fixture = tempdir().expect("tree-usage fixture");
+        let private = fixture.path().join("private");
+        fs::create_dir(&private).expect("private allocation tree");
+        fs::write(private.join("upper"), vec![b'c'; 12_289]).expect("private file");
+
+        let private_usage = tree_usage(&private).expect("measure private tree");
+        let mut expected = Vec::new();
+        let mut requests = Vec::new();
+        for index in 0..7 {
+            let path = fixture.path().join(format!("tree-{index}"));
+            fs::create_dir(&path).expect("usage tree");
+            fs::write(
+                path.join("file"),
+                vec![b'a' + index as u8; 4_097 + index * 1_024],
+            )
+            .expect("usage file");
+            let mut usage = tree_usage(&path).expect("measure expected tree usage");
+            let allocated_path = (index == 3).then(|| private.clone());
+            if allocated_path.is_some() {
+                usage.1 = private_usage.1;
+            }
+            expected.push(usage);
+            requests.push(TreeUsageRequest {
+                path,
+                allocated_path,
+            });
+        }
+
+        assert_eq!(tree_usages(&requests).expect("measure trees"), expected);
     }
 
     #[test]
