@@ -25,6 +25,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Adding a branch that another worktree already has checked out is refused
+  before anything is written, as an `invalid-request` policy failure naming
+  that worktree. It used to reach Git after the add was journaled and fail as
+  an operational `git-failed` with unknown cleanup (#588).
 - Node client: `worktree.list({ allStates: true })` no longer fails as a
   usage error on a client built with `stateDir`; a relative `binary` is
   resolved against the caller's directory, as `RIFTRI_BINARY` is, not against

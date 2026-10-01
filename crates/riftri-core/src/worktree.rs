@@ -3395,9 +3395,9 @@ fn add_worktree_inner(
     // Git also refuses a destination it still registers, even once the
     // directory is gone, but only after Riftri has journaled the add, and
     // rollback then mistook that stale registration for its own (#461).
-    if let Some(registered) = git
-        .list_worktrees(&repository_root)?
-        .into_iter()
+    let registered_worktrees = git.list_worktrees(&repository_root)?;
+    if let Some(registered) = registered_worktrees
+        .iter()
         .find(|worktree| paths_match(&worktree.path, &destination))
     {
         let clear = if registered.locked_reason.is_some() {
@@ -3409,6 +3409,28 @@ fn add_worktree_inner(
             "{} is already registered as a Git worktree; if that worktree was deleted, {clear}",
             destination.display()
         )));
+    }
+    // Git refuses a branch another worktree has checked out, but only after
+    // Riftri has journaled the add, so re-running a task on the same branch
+    // ended as an operational `git-failed` with unknown cleanup (#425).
+    if let WorktreeMode::ExistingBranch(branch) = &request.mode {
+        let mut reference = b"refs/heads/".to_vec();
+        reference.extend_from_slice(branch.as_encoded_bytes());
+        if let Some(holder) = registered_worktrees
+            .iter()
+            .find(|worktree| worktree.branch.as_deref() == Some(reference.as_slice()))
+        {
+            let clear = if holder.prunable_reason.is_some() {
+                "; that worktree is gone, so run `git worktree prune` to release the branch"
+            } else {
+                ""
+            };
+            return Err(WorktreeError::InvalidRequest(format!(
+                "branch {} is already checked out at {}{clear}",
+                branch.to_string_lossy(),
+                holder.path.display()
+            )));
+        }
     }
     let checkout_config = git.config_values(&repository_root, CHECKOUT_CONFIG_KEYS)?;
     let sparse_directories = resolve_sparse_profile(
