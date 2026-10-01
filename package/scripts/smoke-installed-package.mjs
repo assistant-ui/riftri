@@ -251,6 +251,18 @@ export async function smokeInstalledPackage(options = {}) {
       delete environment[key];
     }
     const version = runInstalled(launcher, ["--version"], temporary, environment);
+    // `install.sh` has always compared the binary's own version against the
+    // release it downloaded; the npm path captured this string and compared it
+    // to nothing, so a crate whose version drifted from the workspace shipped
+    // silently through every npm job.
+    const expectedVersion = JSON.parse(
+      await readFile(path.join(repositoryRoot, "package.json"), "utf8"),
+    ).version;
+    if (version.trim() !== `riftri ${expectedVersion}`) {
+      throw new Error(
+        `installed binary reports ${JSON.stringify(version.trim())}, but the package claims ${expectedVersion}`,
+      );
+    }
     const gitVersion = runInstalled(
       launcher,
       ["exec", "--", "git", "--version"],
