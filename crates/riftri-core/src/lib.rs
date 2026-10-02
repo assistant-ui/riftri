@@ -144,16 +144,17 @@ pub use shell::{
     command_path, repair_command, shell_quoted_path, status_command, unregister_state_command,
 };
 pub use worktree::{
-    AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseStorageAccounting,
-    CompactWorktreeRequest, CompactWorktreeResult, GarbageCollectionCandidate,
-    GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult, PostCheckoutOutcome,
-    ProtectedBase, PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
-    RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue, StateDirectorySource,
-    StateWorktreeInventory, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
-    WorktreeMode, add_worktree, compact_worktree, default_state_directory, force_remove_worktree,
-    forget_missing_state_directory, garbage_collect, is_managed_worktree, move_worktree,
-    prune_worktrees, recover_incomplete_operations, recovery_pending_error, remove_worktree,
-    storage_accounting, validate_new_worktree_destination, worktree_inventory_across_states,
+    AddWorktreeRequest, AddWorktreeResult, AllStatesWorktreeInventory, BaseCountImpact,
+    BaseStorageAccounting, CompactWorktreeRequest, CompactWorktreeResult,
+    GarbageCollectionCandidate, GarbageCollectionReport, MoveWorktreeRequest, MoveWorktreeResult,
+    PostCheckoutOutcome, ProtectedBase, PruneWorktreesRequest, PruneWorktreesResult,
+    RecoveryReport, RelocatedWorktree, RemoveWorktreeRequest, RemoveWorktreeResult,
+    StateDiagnosticIssue, StateDirectorySource, StateWorktreeInventory, StorageAccountingReport,
+    ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree, compact_worktree,
+    default_state_directory, force_remove_worktree, forget_missing_state_directory,
+    garbage_collect, is_managed_worktree, move_worktree, prune_worktrees,
+    recover_incomplete_operations, recovery_pending_error, remove_worktree, storage_accounting,
+    validate_new_worktree_destination, worktree_inventory_across_states,
 };
 
 /// A diagnostic check and its optional failure explanation.

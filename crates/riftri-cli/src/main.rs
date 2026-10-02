@@ -2175,6 +2175,10 @@ fn diagnostic_issue_json(issue: &riftri_core::StateDiagnosticIssue) -> serde_jso
         "path": issue.path.display().to_string(),
         "path_native_hex": native_path_hex(&issue.path),
         "reason": issue.reason,
+        // Lets a harness tell a diagnostic that only needs attention from one
+        // that makes the base reference counts untrustworthy.
+        "may_hide_base_reference": issue.base_count_impact
+            == riftri_core::BaseCountImpact::MayHideReference,
     })
 }
 
@@ -2436,7 +2440,14 @@ fn print_storage_accounting(
     // Every count below is derived only from journals that parsed. A journal
     // that could not be read still holds a claim, so when any are unreadable
     // the counts are a lower bound rather than the truth.
-    let counts_are_complete = report.diagnostic_issues.is_empty();
+    // Only a diagnostic that can actually conceal a base reference makes the
+    // counts unconfirmed. Treating every diagnostic that way marked all four
+    // bases uncertain over one unrelated unregistered-destination note (#598),
+    // which also contradicted `gc` once that claim was counted (#600).
+    let counts_are_complete = !report
+        .diagnostic_issues
+        .iter()
+        .any(|issue| issue.base_count_impact == riftri_core::BaseCountImpact::MayHideReference);
     if json {
         let bases = report
             .bases
