@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.0] - 2026-10-02
+
 ### Added
 
 - `riftri gc --apply` retires finished journal history: the journals of
