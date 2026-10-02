@@ -1357,10 +1357,7 @@ impl Git {
             return Ok(Vec::new());
         }
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-
+        if let Some(input) = attribute_stdin(paths) {
             let mut arguments = argument_prefix.to_vec();
             arguments.extend([
                 OsString::from("check-attr"),
@@ -1369,33 +1366,38 @@ impl Git {
                 OsString::from("-z"),
                 OsString::from("--stdin"),
             ]);
-            let mut input = Vec::new();
-            for entry in paths {
-                input.extend_from_slice(entry.as_os_str().as_bytes());
-                input.push(0);
-            }
             let output = self.run_os_with_input(Some(path), &arguments, environment, input)?;
             parse_attribute_records(&output.stdout)
+        } else {
+            // Preserve the native-argument path for non-Unicode Windows input
+            // instead of replacing unpaired UTF-16 surrogates lossily. Exact
+            // tree paths decoded from Git are UTF-8 and use the fast path.
+            self.attributes_for_paths_as_arguments(path, paths, argument_prefix, environment)
         }
+    }
 
-        #[cfg(not(unix))]
-        {
-            let mut attributes = Vec::new();
-            for chunk in paths.chunks(128) {
-                let mut arguments = argument_prefix.to_vec();
-                arguments.extend([
-                    OsString::from("check-attr"),
-                    OsString::from("--cached"),
-                    OsString::from("--all"),
-                    OsString::from("-z"),
-                    OsString::from("--"),
-                ]);
-                arguments.extend(chunk.iter().map(|entry| entry.as_os_str().to_os_string()));
-                let output = self.run_os_with_env(Some(path), &arguments, environment)?;
-                attributes.extend(parse_attribute_records(&output.stdout)?);
-            }
-            Ok(attributes)
+    fn attributes_for_paths_as_arguments(
+        &self,
+        path: &Path,
+        paths: &[PathBuf],
+        argument_prefix: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        let mut attributes = Vec::new();
+        for chunk in paths.chunks(128) {
+            let mut arguments = argument_prefix.to_vec();
+            arguments.extend([
+                OsString::from("check-attr"),
+                OsString::from("--cached"),
+                OsString::from("--all"),
+                OsString::from("-z"),
+                OsString::from("--"),
+            ]);
+            arguments.extend(chunk.iter().map(|entry| entry.as_os_str().to_os_string()));
+            let output = self.run_os_with_env(Some(path), &arguments, environment)?;
+            attributes.extend(parse_attribute_records(&output.stdout)?);
         }
+        Ok(attributes)
     }
 
     /// Return whether Git resolves any attribute for the supplied tree paths.
@@ -2422,6 +2424,22 @@ impl Git {
     }
 }
 
+fn attribute_stdin(paths: &[PathBuf]) -> Option<Vec<u8>> {
+    let mut input = Vec::new();
+    for path in paths {
+        #[cfg(unix)]
+        let bytes = {
+            use std::os::unix::ffi::OsStrExt;
+            path.as_os_str().as_bytes()
+        };
+        #[cfg(not(unix))]
+        let bytes = path.to_str()?.as_bytes();
+        input.extend_from_slice(bytes);
+        input.push(0);
+    }
+    Some(input)
+}
+
 fn invalid_blob_batch(detail: impl Into<String>) -> GitError {
     GitError::InvalidOutput {
         context: "bounded blob batch",
@@ -3009,7 +3027,7 @@ fn signal_name(signal: i32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsStr;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::Path;
     use std::process::Command;
@@ -5016,7 +5034,9 @@ mod tests {
             .resolve_revision(fixture.path(), OsStr::new("HEAD"))
             .expect("resolve tree")
             .tree;
-        let paths = [Path::new("tracked.txt").to_path_buf()];
+        let paths = (0..300)
+            .map(|index| PathBuf::from(format!("日本語 path-{index}.txt")))
+            .collect::<Vec<_>>();
 
         let attempts_before = git_handle.process_attempts();
         let index = git_handle
@@ -5075,7 +5095,6 @@ mod tests {
         assert!(parse_attribute_records(b"tracked.txt\0text").is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn checks_large_attribute_path_sets_with_one_git_process() {
         let fixture = RepositoryFixture::committed();
@@ -5091,6 +5110,96 @@ mod tests {
 
         assert!(!attributes);
         assert_eq!(git.process_attempts() - attempts_before, 1);
+    }
+
+    #[test]
+    fn attribute_stdin_preserves_long_unicode_and_delimited_paths() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        let handle = Git::default();
+        // These need not exist: check-attr evaluates indexed patterns. The
+        // aggregate would exceed the Windows command-line limit if sent as argv.
+        let mut paths = (0..300)
+            .map(|i| PathBuf::from(format!("{}/日本語 space-{i}.txt", "d".repeat(240))))
+            .collect::<Vec<_>>();
+        paths.extend([
+            PathBuf::from("-leading.txt"),
+            PathBuf::from("tab\tline\n.txt"),
+        ]);
+        let before = handle.process_attempts();
+        let records = handle
+            .effective_attributes_for_paths(fixture.path(), &paths)
+            .unwrap();
+        assert_eq!(handle.process_attempts() - before, 1);
+        assert_eq!(records.len(), paths.len() * 2);
+        for (path, records) in paths.iter().zip(records.chunks_exact(2)) {
+            assert!(records.iter().all(|record| &record.path == path));
+            assert!(
+                records
+                    .iter()
+                    .any(|r| r.name == b"text" && r.value == b"set")
+            );
+            assert!(records.iter().any(|r| r.name == b"eol" && r.value == b"lf"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn attribute_stdin_keeps_unpaired_utf16_on_the_native_argument_path() {
+        use std::os::windows::ffi::OsStringExt;
+        let path = PathBuf::from(OsString::from_wide(&[0xd800]));
+        assert!(super::attribute_stdin(&[path]).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attribute_stdin_keeps_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(OsString::from_vec(b"bad-\xff.txt".to_vec()));
+        assert_eq!(super::attribute_stdin(&[path]).unwrap(), b"bad-\xff.txt\0");
+    }
+
+    #[test]
+    #[ignore = "paired attribute query benchmark; no wall-clock threshold"]
+    fn reports_attribute_stdin_latency() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        let handle = Git::default();
+        let paths = (0..10000)
+            .map(|i| PathBuf::from(format!("path-{i}.txt")))
+            .collect::<Vec<_>>();
+        let expected = handle
+            .effective_attributes_for_paths(fixture.path(), &paths)
+            .unwrap();
+        for round in 0..4 {
+            for stdin in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let attempts = handle.process_attempts();
+                let start = std::time::Instant::now();
+                let records = if stdin {
+                    handle
+                        .effective_attributes_for_paths(fixture.path(), &paths)
+                        .unwrap()
+                } else {
+                    handle
+                        .attributes_for_paths_as_arguments(fixture.path(), &paths, &[], &[])
+                        .unwrap()
+                };
+                let elapsed = start.elapsed();
+                assert_eq!(records, expected);
+                let starts = handle.process_attempts() - attempts;
+                assert_eq!(starts, if stdin { 1 } else { 79 });
+                println!(
+                    "attribute-query round={round} stdin={stdin} git_starts={starts} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
     }
 
     /// The identity probe reads a bare flag and the common Git directory from

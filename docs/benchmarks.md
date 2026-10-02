@@ -51,6 +51,23 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+Windows attribute queries now use one NUL-delimited stdin request for Unicode
+paths, as Unix already does for raw native bytes. Non-Unicode Windows input
+retains the native-argument fallback. To compare the previous 128-path argument
+chunks with stdin against the same index and validate identical records:
+
+```sh
+cargo test --release --locked -p riftri-git reports_attribute_stdin_latency \
+  -- --ignored --nocapture
+```
+
+The probe alternates four pairs over 10,000 paths and asserts 79 versus one Git
+start. Windows quality CI records its native timings. A local macOS run of the
+two query strategies measured 983–1,264 ms versus 26–56 ms; that is component
+evidence, not a Windows or complete-worktree timing claim. Real-filesystem tests
+also create two clean, isolated 300-Unicode-file views and refuse external
+attribute filters before creating state.
+
 To compare accounting worker scheduling on Unix/native COW volumes:
 
 ```sh
