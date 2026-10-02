@@ -366,6 +366,7 @@ pub struct StorageAccountingReport {
     pub active_views: usize,
     pub pending_adds: usize,
     pub completed_removals: usize,
+    pub cancelled_removals: usize,
     pub pending_removals: usize,
     pub completed_moves: usize,
     pub cancelled_moves: usize,
@@ -408,6 +409,8 @@ pub struct RecoveryReport {
     pub recovered_mounts: usize,
     pub completed_removals: usize,
     pub recovered_removals: usize,
+    /// Pending removals whose worktree changed before anything was removed.
+    pub cancelled_removals: usize,
     pub completed_moves: usize,
     pub recovered_moves: usize,
     /// Pending moves Git refused while both paths proved nothing had moved.
@@ -1705,9 +1708,13 @@ pub fn storage_accounting(
             .iter()
             .filter(|journal| journal.phase == RemoveWorktreePhase::Complete)
             .count(),
+        cancelled_removals: removal_journals
+            .iter()
+            .filter(|journal| journal.phase == RemoveWorktreePhase::Cancelled)
+            .count(),
         pending_removals: removal_journals
             .iter()
-            .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
+            .filter(|journal| !journal.phase.is_finished())
             .count(),
         completed_moves: move_journals
             .iter()
@@ -2078,9 +2085,7 @@ fn locked_retirable_lineage(
         .any(|removal| removal.phase == RemoveWorktreePhase::Complete);
     let gone_for_good = add.phase == AddWorktreePhase::RolledBack
         || (add.phase == AddWorktreePhase::Active && removal_completed);
-    let history_finished = removals
-        .iter()
-        .all(|removal| removal.phase == RemoveWorktreePhase::Complete)
+    let history_finished = removals.iter().all(|removal| removal.phase.is_finished())
         && moves.iter().all(|journal| journal.phase.is_finished())
         && compactions.iter().all(|journal| {
             matches!(
@@ -2167,8 +2172,7 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
                 .load_all()?
                 .iter()
                 .filter(|removal| {
-                    removal.source_add_operation_id == operation_id
-                        && removal.phase == RemoveWorktreePhase::Complete
+                    removal.source_add_operation_id == operation_id && removal.phase.is_finished()
                 })
                 .map(|removal| removal.journal_path.clone())
                 .collect::<Vec<_>>();
@@ -2207,7 +2211,7 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
             || (add.phase == AddWorktreePhase::Active && removal_completed);
         let history_finished = own_removals
             .iter()
-            .all(|removal| removal.phase == RemoveWorktreePhase::Complete)
+            .all(|removal| removal.phase.is_finished())
             && own_moves.iter().all(|journal| journal.phase.is_finished())
             && own_compactions.iter().all(|journal| {
                 matches!(
@@ -2959,7 +2963,7 @@ fn remove_worktree_with_mode(
         fail_after,
     )?;
 
-    remove_managed_worktree_files(
+    if let Err(error) = remove_managed_worktree_files(
         &git,
         &repository_root,
         &destination,
@@ -2968,7 +2972,14 @@ fn remove_worktree_with_mode(
         journal.overlayfs_clean_snapshot.as_deref(),
         journal.force,
         journal.force_snapshot.as_deref(),
-    )?;
+    ) {
+        // A refusal that put the view back removed nothing; cancelling makes
+        // the error's promise true instead of leaving a journal that `repair`
+        // would refuse forever, or finish once the user undid their change.
+        // Should cancelling itself fail, the journal stays for repair.
+        let _ = cancel_untouched_removal(&git, &store, &mut journal, &repository_root, &managed);
+        return Err(error);
+    }
     advance_removal(
         &store,
         &mut journal,
@@ -6599,7 +6610,7 @@ fn find_managed_add_journal(
     let completed = validated_completed_removal_ids(state_directory, &adds, &removals)?;
     let pending = removals
         .iter()
-        .filter(|journal| journal.phase != RemoveWorktreePhase::Complete)
+        .filter(|journal| !journal.phase.is_finished())
         .map(|journal| journal.source_add_operation_id.as_str())
         .collect::<HashSet<_>>();
     let pending_moves = MoveJournalStore::open(state_directory)
@@ -8876,9 +8887,13 @@ pub fn recover_incomplete_operations(
     }
 
     for journal in removal_journals {
-        if journal.phase == RemoveWorktreePhase::Complete {
-            report.completed_removals += 1;
-            continue;
+        match journal.phase {
+            RemoveWorktreePhase::Complete => {
+                report.completed_removals += 1;
+                continue;
+            }
+            RemoveWorktreePhase::Cancelled => continue,
+            _ => {}
         }
         // A running `riftri worktree remove` holds its worktree's add lock for
         // the whole transaction; resuming its journal concurrently drove one
@@ -8905,9 +8920,11 @@ pub fn recover_incomplete_operations(
             .into_iter()
             .find(|candidate| candidate.operation_id == journal.operation_id)
         {
-            Some(journal) if journal.phase != RemoveWorktreePhase::Complete => journal,
-            Some(_) => {
-                report.completed_removals += 1;
+            Some(journal) if !journal.phase.is_finished() => journal,
+            Some(journal) => {
+                if journal.phase == RemoveWorktreePhase::Complete {
+                    report.completed_removals += 1;
+                }
                 continue;
             }
             None => continue,
@@ -8916,15 +8933,17 @@ pub fn recover_incomplete_operations(
             kind: "removal",
             operation_id: journal.operation_id.clone(),
         });
-        if let Err(error) = resume_removal(&git, &removal_store, journal.clone()) {
-            report.errors.push(format!(
+        match resume_removal(&git, &removal_store, journal.clone()) {
+            Err(error) => report.errors.push(format!(
                 "removal operation {}: {error}",
                 journal.operation_id
-            ));
-        } else {
-            report.recovered_removals += 1;
-            report.completed_removals += 1;
-            report.active = report.active.saturating_sub(1);
+            )),
+            Ok(RemovalResumption::Cancelled) => report.cancelled_removals += 1,
+            Ok(RemovalResumption::Completed) => {
+                report.recovered_removals += 1;
+                report.completed_removals += 1;
+                report.active = report.active.saturating_sub(1);
+            }
         }
     }
 
@@ -9201,11 +9220,18 @@ fn validate_removal_against_add_journals(
     validate_recovery_paths(state_directory, source)
 }
 
+/// How `repair` left a pending removal.
+enum RemovalResumption {
+    Completed,
+    /// The worktree changed before anything was removed, so it stays.
+    Cancelled,
+}
+
 fn resume_removal(
     git: &Git,
     store: &RemovalJournalStore,
     journal: DecodedRemovalJournal,
-) -> Result<(), WorktreeError> {
+) -> Result<RemovalResumption, WorktreeError> {
     let state_directory = store
         .path_for(&journal.operation_id)
         .parent()
@@ -9229,6 +9255,9 @@ fn resume_removal(
             ))
         })?;
     let mut record = store.reload(&journal)?;
+    if record.phase == RemoveWorktreePhase::Cancelled {
+        return Ok(RemovalResumption::Cancelled);
+    }
 
     let metadata_lock = if record.phase <= RemoveWorktreePhase::CleanVerified {
         Some(acquire_git_worktree_metadata_lock_for_repository(
@@ -9242,7 +9271,11 @@ fn resume_removal(
     restore_staged_git_pointer(&managed)?;
 
     if record.phase == RemoveWorktreePhase::IntentRecorded {
-        verify_recoverable_removal(git, &journal, &managed)?;
+        if verify_recoverable_removal(git, &journal, &managed)?
+            && cancel_untouched_removal(git, store, &mut record, &journal.repository, &managed)?
+        {
+            return Ok(RemovalResumption::Cancelled);
+        }
         record.transition(RemoveWorktreePhase::CleanVerified)?;
         store.persist(&record)?;
     }
@@ -9292,6 +9325,10 @@ fn resume_removal(
                 )?
             };
             if !safe {
+                if cancel_untouched_removal(git, store, &mut record, &journal.repository, &managed)?
+                {
+                    return Ok(RemovalResumption::Cancelled);
+                }
                 let reason = if journal.force {
                     "changed after forced removal intent"
                 } else {
@@ -9343,7 +9380,7 @@ fn resume_removal(
         record.transition(RemoveWorktreePhase::Complete)?;
         store.persist(&record)?;
     }
-    Ok(())
+    Ok(RemovalResumption::Completed)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -10548,9 +10585,7 @@ fn verify_prune_safe(
             journal.phase,
             AddWorktreePhase::Active | AddWorktreePhase::RolledBack
         )
-    }) || removals
-        .iter()
-        .any(|journal| journal.phase != RemoveWorktreePhase::Complete)
+    }) || removals.iter().any(|journal| !journal.phase.is_finished())
         || MoveJournalStore::open(state_directory)
             .load_all()?
             .iter()
@@ -10712,11 +10747,14 @@ fn fail_prune_if_requested(
     }
 }
 
+/// Check a removal that never got past its intent. Returns whether the
+/// worktree, still registered and in place, changed since then: nothing was
+/// removed, so the caller cancels the removal instead of refusing forever.
 fn verify_recoverable_removal(
     git: &Git,
     journal: &DecodedRemovalJournal,
     managed: &DecodedJournal,
-) -> Result<(), WorktreeError> {
+) -> Result<bool, WorktreeError> {
     let (registered, destination_exists) = removal_presence(git, journal)?;
     if registered && destination_exists {
         let safe = if journal.force {
@@ -10731,17 +10769,7 @@ fn verify_recoverable_removal(
         } else {
             managed_worktree_is_clean_for_removal(git, managed, None)?
         };
-        if !safe {
-            let reason = if journal.force {
-                "changed after forced removal intent"
-            } else {
-                "has changes"
-            };
-            return Err(WorktreeError::InvalidRequest(format!(
-                "worktree {} {reason}; recovery preserved it",
-                journal.destination.display(),
-            )));
-        }
+        return Ok(!safe);
     }
     if !registered && destination_exists {
         return Err(WorktreeError::InvalidRequest(format!(
@@ -10749,7 +10777,40 @@ fn verify_recoverable_removal(
             journal.destination.display()
         )));
     }
-    Ok(())
+    Ok(false)
+}
+
+/// Cancel a removal that removed nothing: its native view is back at its
+/// path, Git still registers it, and no quarantine remains. Otherwise the
+/// pending journal refused every later `repair` and blocked other lifecycle
+/// commands on a worktree that was simply never removed. Returns whether the
+/// removal was cancelled; OverlayFS views are left for manual attention,
+/// because a failed removal may have left them unmounted.
+fn cancel_untouched_removal(
+    git: &Git,
+    store: &RemovalJournalStore,
+    record: &mut RemovalJournalRecord,
+    repository: &Path,
+    managed: &DecodedJournal,
+) -> Result<bool, WorktreeError> {
+    let destination = &managed.destination;
+    if managed.backend == BackendKind::OverlayFs
+        || !destination.is_dir()
+        || symlink_metadata_if_present(&removal_quarantine_path(
+            destination,
+            &record.operation_id,
+        )?)?
+        .is_some()
+        || !git
+            .list_worktrees(repository)?
+            .iter()
+            .any(|worktree| paths_match(&worktree.path, destination))
+    {
+        return Ok(false);
+    }
+    record.transition(RemoveWorktreePhase::Cancelled)?;
+    store.persist(record)?;
+    Ok(true)
 }
 
 fn removal_presence(
@@ -11090,6 +11151,12 @@ fn remove_native_worktree(
             .remove_worktree(repository, destination)
             .map_err(WorktreeError::from);
     }
+    let changed_after_force = || {
+        WorktreeError::InvalidRequest(format!(
+            "worktree {} changed after forced removal intent; it was preserved",
+            destination.display()
+        ))
+    };
     if force {
         #[cfg(test)]
         crate::test_hooks::fire(
@@ -11100,10 +11167,7 @@ fn remove_native_worktree(
             WorktreeError::InvalidRequest("forced removal has no content snapshot".to_owned())
         })?;
         if !managed_worktree_matches_force_snapshot(managed, expected)? {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "worktree {} changed after forced removal intent; it was preserved",
-                destination.display()
-            )));
+            return Err(changed_after_force());
         }
     }
     if symlink_metadata_if_present(quarantine)?.is_some() {
@@ -11121,18 +11185,34 @@ fn remove_native_worktree(
         crate::test_hooks::FilesystemRacePoint::RemovalQuarantined,
         quarantine,
     );
-    // A clean removal still rejects a write that raced it, as Git's own
-    // non-force removal would: the view is rechecked where it now lives.
-    let unregistered = match (force, non_force_removal_blocker(git, quarantine)) {
-        (false, Ok(Some(reason))) => Err(WorktreeError::InvalidRequest(format!(
-            "worktree {} {reason}",
-            destination.display()
-        ))),
-        (false, Err(error)) => Err(error),
-        _ => git
-            .remove_worktree(repository, destination)
-            .map_err(WorktreeError::from),
-    };
+    // A write can land between the check above and the rename, and would be
+    // deleted with the quarantine, so the view is rechecked where it now
+    // lives. A clean removal rejects any change, as Git's own non-force
+    // removal would; a forced one rejects anything beyond its snapshot.
+    let unregistered = if force {
+        let mut quarantined = managed.clone();
+        quarantined.destination = quarantine.to_path_buf();
+        match force_snapshot
+            .map(|expected| managed_worktree_matches_force_snapshot(&quarantined, expected))
+        {
+            Some(Ok(true)) => Ok(()),
+            Some(Ok(false)) | None => Err(changed_after_force()),
+            Some(Err(error)) => Err(error),
+        }
+    } else {
+        match non_force_removal_blocker(git, quarantine) {
+            Ok(None) => Ok(()),
+            Ok(Some(reason)) => Err(WorktreeError::InvalidRequest(format!(
+                "worktree {} {reason}",
+                destination.display()
+            ))),
+            Err(error) => Err(error),
+        }
+    }
+    .and_then(|()| {
+        git.remove_worktree(repository, destination)
+            .map_err(WorktreeError::from)
+    });
     if let Err(operation) = unregistered {
         return match rename_quarantined_view(quarantine, destination) {
             Ok(()) => Err(operation),
@@ -17766,6 +17846,9 @@ mod tests {
         .expect_err("a write racing a clean removal must stop it");
 
         assert!(error.to_string().contains("has changes"), "{error}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_removals, 0, "{accounting:?}");
+        assert_eq!(accounting.cancelled_removals, 1, "{accounting:?}");
         assert_eq!(
             fs::read(destination.join("late.txt")).expect("late write restored"),
             b"late write\n"
@@ -17777,6 +17860,172 @@ mod tests {
             .filter(|name| name.to_string_lossy().starts_with(".riftri-remove-"))
             .count();
         assert_eq!(leftovers, 0, "the quarantine must be renamed back");
+    }
+
+    /// Forced removal checked its snapshot only before the quarantine rename,
+    /// so a write landing between that check and the rename was deleted with
+    /// the quarantine and the removal reported success.
+    #[test]
+    fn forced_removal_restores_a_view_written_after_its_quarantine() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        // The forced removal authorizes deleting exactly this content.
+        fs::write(destination.join("draft.txt"), "draft\n").expect("write forced content");
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::RemovalQuarantined,
+            |quarantine| {
+                fs::write(quarantine.join("late.txt"), "late write\n")
+                    .expect("write into the quarantined view");
+            },
+        );
+
+        let error = force_remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect_err("a write racing a forced removal must stop it");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_removals, 0, "{accounting:?}");
+        assert_eq!(accounting.cancelled_removals, 1, "{accounting:?}");
+
+        assert!(
+            error
+                .to_string()
+                .contains("changed after forced removal intent"),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(destination.join("late.txt")).expect("late write restored"),
+            b"late write\n"
+        );
+        assert_eq!(fs::read(destination.join("draft.txt")).unwrap(), b"draft\n");
+        assert!(registered(&repository, &destination));
+        let leftovers = fs::read_dir(fixture.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with(".riftri-remove-"))
+            .count();
+        assert_eq!(leftovers, 0, "the quarantine must be renamed back");
+    }
+
+    /// A removal stopped before it removed anything, after which the worktree
+    /// changed. Repair refused it forever ("recovery preserved it"), and
+    /// would have removed the worktree once the change was undone. It now
+    /// cancels the removal, keeps the worktree, and lets a later removal and
+    /// journal retirement proceed.
+    #[test]
+    fn repair_cancels_a_removal_whose_worktree_changed_before_anything_was_removed() {
+        for (force, phase) in [
+            (false, RemoveWorktreePhase::IntentRecorded),
+            (false, RemoveWorktreePhase::CleanVerified),
+            (true, RemoveWorktreePhase::IntentRecorded),
+            (true, RemoveWorktreePhase::CleanVerified),
+        ] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            git(&repository, &["config", "core.autocrlf", "false"]);
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            let request = || RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            };
+            let stopped = if force {
+                force_remove_worktree_inner(request(), Some(phase))
+            } else {
+                remove_worktree_inner(request(), Some(phase))
+            };
+            stopped.expect_err("simulate process termination");
+            fs::write(destination.join("mine.txt"), "user data\n").expect("write after intent");
+
+            let report = recover_incomplete_operations(&state).expect("repair");
+
+            assert!(report.errors.is_empty(), "{force} {phase:?}: {report:?}");
+            assert_eq!(
+                report.cancelled_removals, 1,
+                "{force} {phase:?}: {report:?}"
+            );
+            assert_eq!(
+                fs::read(destination.join("mine.txt")).unwrap(),
+                b"user data\n"
+            );
+            assert!(registered(&repository, &destination));
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(accounting.pending_removals, 0, "{accounting:?}");
+            assert_eq!(accounting.cancelled_removals, 1, "{accounting:?}");
+            assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+
+            // Undoing the change no longer lets repair remove the worktree.
+            fs::remove_file(destination.join("mine.txt")).expect("undo the change");
+            let report = recover_incomplete_operations(&state).expect("repair again");
+            assert!(report.errors.is_empty(), "{report:?}");
+            assert!(
+                destination.join("tracked.txt").exists(),
+                "the worktree stays"
+            );
+
+            // A new removal works, and gc retires the whole lineage.
+            remove_worktree_inner(request(), None).expect("remove the worktree");
+            garbage_collect_inner(&state, true, None).expect("gc");
+            let remaining = fs::read_dir(state.join("removals"))
+                .map(|entries| entries.count())
+                .unwrap_or(0);
+            assert_eq!(remaining, 0, "{force} {phase:?}: removal journals retired");
+        }
     }
 
     #[test]
@@ -19800,13 +20049,19 @@ mod tests {
             fs::read(destination.join("late.txt")).expect("late write preserved"),
             b"preserve late write\n"
         );
+        // The refusal removed nothing, so the removal was cancelled rather
+        // than left for a repair that would refuse it forever.
         for _ in 0..2 {
             let recovery = recover_incomplete_operations(&state).expect("repair report");
             assert_eq!(recovery.recovered_removals, 0);
-            assert_eq!(recovery.errors.len(), 1, "{recovery:?}");
-            assert!(recovery.errors[0].contains("changed after forced removal intent"));
+            assert!(recovery.errors.is_empty(), "{recovery:?}");
             assert!(destination.exists());
         }
+        assert_eq!(
+            storage_accounting(&state).unwrap().cancelled_removals,
+            1,
+            "the refused removal is cancelled"
+        );
         let accounting = storage_accounting(&state).expect("retained accounting");
         assert_eq!(accounting.active_views, 1);
         assert_eq!(accounting.bases[0].reference_count, 1);
@@ -19882,10 +20137,17 @@ mod tests {
                 record.force_snapshot = Some(crate::base_integrity::hex_lower(digest.finalize()));
                 store.persist(&record).unwrap();
             }
-            for _ in 0..2 {
+            // Nothing was removed yet, so repair cancels the removal and
+            // keeps the changed worktree.
+            for attempt in 0..2 {
                 let report = recover_incomplete_operations(&state).unwrap();
                 assert_eq!(report.recovered_removals, 0, "{change}: {report:?}");
-                assert_eq!(report.errors.len(), 1, "{change}: {report:?}");
+                assert!(report.errors.is_empty(), "{change}: {report:?}");
+                assert_eq!(
+                    report.cancelled_removals,
+                    usize::from(attempt == 0),
+                    "{change}: {report:?}"
+                );
                 assert!(destination.exists());
             }
         }
@@ -19961,12 +20223,13 @@ mod tests {
                 .expect("set sticky bit after intent");
             }
 
-            for _ in 0..2 {
+            for attempt in 0..2 {
                 let recovery = recover_incomplete_operations(&state).expect("repair report");
                 assert_eq!(recovery.recovered_removals, 0, "{change}: {recovery:?}");
-                assert_eq!(recovery.errors.len(), 1, "{change}: {recovery:?}");
-                assert!(
-                    recovery.errors[0].contains("changed after forced removal intent"),
+                assert!(recovery.errors.is_empty(), "{change}: {recovery:?}");
+                assert_eq!(
+                    recovery.cancelled_removals,
+                    usize::from(attempt == 0),
                     "{change}: {recovery:?}"
                 );
                 assert!(destination.exists(), "{change}");
@@ -20287,8 +20550,8 @@ mod tests {
 
         let report = recover_incomplete_operations(&state).expect("attempt removal recovery");
         assert_eq!(report.recovered_removals, 0);
-        assert_eq!(report.errors.len(), 1);
-        assert!(report.errors[0].contains("changes"));
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.cancelled_removals, 1, "{report:?}");
         assert!(destination.is_dir());
         assert_eq!(
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved change"),

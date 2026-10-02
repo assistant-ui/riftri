@@ -1493,6 +1493,7 @@ fn remove_phase_name(phase: riftri_core::RemoveWorktreePhase) -> &'static str {
         WorktreeRemoved => "worktree-removed",
         BaseReleased => "base-released",
         Complete => "complete",
+        Cancelled => "cancelled",
     }
 }
 
@@ -1746,6 +1747,7 @@ fn print_recovery_report(
             "recovered_adds": report.recovered,
             "completed_removals": report.completed_removals,
             "recovered_removals": report.recovered_removals,
+            "cancelled_removals": report.cancelled_removals,
             "completed_moves": report.completed_moves,
             "recovered_moves": report.recovered_moves,
             "cancelled_moves": report.cancelled_moves,
@@ -1822,6 +1824,7 @@ fn print_recovery_report(
     outputln!("Recovered add operations: {}", report.recovered);
     outputln!("Completed removals: {}", report.completed_removals);
     outputln!("Recovered removals: {}", report.recovered_removals);
+    outputln!("Cancelled removals: {}", report.cancelled_removals);
     outputln!("Completed moves: {}", report.completed_moves);
     outputln!("Recovered moves: {}", report.recovered_moves);
     outputln!("Cancelled moves: {}", report.cancelled_moves);
@@ -2489,6 +2492,7 @@ fn print_storage_accounting(
                 "active_views": report.active_views,
                 "pending_adds": report.pending_adds,
                 "completed_removals": report.completed_removals,
+                "cancelled_removals": report.cancelled_removals,
                 "pending_removals": report.pending_removals,
                 "completed_moves": report.completed_moves,
                 "cancelled_moves": report.cancelled_moves,
@@ -2528,6 +2532,7 @@ fn print_storage_accounting(
         outputln!("Attention: {repair} to roll back pending adds");
     }
     outputln!("Completed removals: {}", report.completed_removals);
+    outputln!("Cancelled removals: {}", report.cancelled_removals);
     outputln!("Pending removals: {}", report.pending_removals);
     if report.pending_removals > 0 {
         outputln!("Attention: {repair} to resume pending removals");

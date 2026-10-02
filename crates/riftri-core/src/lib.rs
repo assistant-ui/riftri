@@ -354,6 +354,9 @@ pub enum RemoveWorktreePhase {
     WorktreeRemoved,
     BaseReleased,
     Complete,
+    /// The removal was refused before anything was removed: the view is back
+    /// at its path, still registered, so the worktree simply stays.
+    Cancelled,
 }
 
 /// Durable phases of a managed worktree-move transaction.
@@ -429,16 +432,22 @@ impl RemoveWorktreePhase {
     /// Return whether a removal journal may atomically advance to `next`.
     pub fn can_transition_to(self, next: Self) -> bool {
         use RemoveWorktreePhase::{
-            BaseReleased, CleanVerified, Complete, IntentRecorded, WorktreeRemoved,
+            BaseReleased, Cancelled, CleanVerified, Complete, IntentRecorded, WorktreeRemoved,
         };
 
         matches!(
             (self, next),
-            (IntentRecorded, CleanVerified)
-                | (CleanVerified, WorktreeRemoved)
+            (IntentRecorded, CleanVerified | Cancelled)
+                | (CleanVerified, WorktreeRemoved | Cancelled)
                 | (WorktreeRemoved, BaseReleased)
                 | (BaseReleased, Complete)
         )
+    }
+
+    /// Whether the removal needs no further work: it completed, or it was
+    /// cancelled before anything was removed.
+    pub fn is_finished(self) -> bool {
+        matches!(self, Self::Complete | Self::Cancelled)
     }
 }
 
@@ -1075,6 +1084,15 @@ mod tests {
             MoveWorktreePhase::AddJournalUpdated.can_transition_to(MoveWorktreePhase::Complete)
         );
         assert!(!MoveWorktreePhase::Complete.can_transition_to(MoveWorktreePhase::IntentRecorded));
+        assert!(
+            RemoveWorktreePhase::CleanVerified.can_transition_to(RemoveWorktreePhase::Cancelled)
+        );
+        assert!(
+            !RemoveWorktreePhase::WorktreeRemoved.can_transition_to(RemoveWorktreePhase::Cancelled)
+        );
+        assert!(
+            !RemoveWorktreePhase::Cancelled.can_transition_to(RemoveWorktreePhase::WorktreeRemoved)
+        );
         assert!(MoveWorktreePhase::IntentRecorded.can_transition_to(MoveWorktreePhase::Cancelled));
         assert!(!MoveWorktreePhase::WorktreeMoved.can_transition_to(MoveWorktreePhase::Cancelled));
         assert!(!MoveWorktreePhase::Cancelled.can_transition_to(MoveWorktreePhase::WorktreeMoved));
