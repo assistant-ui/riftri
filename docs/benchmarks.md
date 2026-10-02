@@ -100,6 +100,14 @@ These are complete cached-add timings, not just pointer reads. All four pairs
 favored batching, but the shared-object fixture, validating filter stub, small
 sample, and busy local host limit generalization to real LFS repositories.
 
+Reusing the already inspected common Git directory removes a further three Git
+starts per normal-repository LFS add (21 to 18 in every sample of the same
+129-pointer fixture, baseline `0054655`). Four alternating release-build pairs
+took `3072/2893`, `5084/3760`, `4170/2408`, and `4369/7440` milliseconds.
+All validation and cleanup passed, but this busy-host run does not demonstrate
+a consistent wall-clock improvement. The deterministic benefit is fewer Git
+processes; no pointer, object, or final-cleanliness check is cached or removed.
+
 For a sparse/full comparison on an exported source tree, run:
 
 ```sh

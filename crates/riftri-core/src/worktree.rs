@@ -5561,7 +5561,7 @@ fn analyze_resolved_repository_compatibility(
                     .to_owned(),
             });
         }
-        match inspect_git_lfs_objects(git, repository, &entries, &lfs_paths) {
+        match inspect_git_lfs_objects(git, repository, common_git_dir, &entries, &lfs_paths) {
             Ok(objects) => {
                 for object in &objects {
                     hash_lfs_profile_object(&mut profile, object);
@@ -5738,13 +5738,13 @@ fn parse_git_lfs_pointer(bytes: &[u8]) -> Result<GitLfsPointer, String> {
 fn inspect_git_lfs_objects(
     git: &Git,
     repository: &Path,
+    common_git_dir: &Path,
     entries: &[riftri_git::TreeEntry],
     paths: &[PathBuf],
 ) -> Result<Vec<GitLfsObject>, String> {
     const MAX_POINTER_BYTES: usize = 1024;
-    let repository_info = git
-        .inspect_repository(repository)
-        .map_err(|error| format!("could not locate the Git LFS object store: {error}"))?;
+    // The caller already inspected repository identity and HEAD. Reuse only
+    // that operation-local identity; pointer and local-object checks stay fresh.
     let mut objects = Vec::with_capacity(paths.len());
     let entries_by_path = entries
         .iter()
@@ -5782,9 +5782,7 @@ fn inspect_git_lfs_objects(
         for (path, bytes) in paths.iter().zip(blobs) {
             let pointer = parse_git_lfs_pointer(&bytes)
                 .map_err(|error| format!("invalid Git LFS pointer {}: {error}", path.display()))?;
-            let source_path = repository_info
-                .identity
-                .common_git_dir
+            let source_path = common_git_dir
                 .join("lfs/objects")
                 .join(&pointer.oid[..2])
                 .join(&pointer.oid[2..4])
