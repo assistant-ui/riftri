@@ -438,6 +438,18 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
                 .is_some_and(|args| args.iter().any(|arg| arg == "--batch"))
         })
         .count();
+    let identity_queries = starts
+        .iter()
+        .filter(|event| {
+            event["argv"]
+                .as_array()
+                .is_some_and(|args| args.iter().any(|arg| arg == "--git-common-dir"))
+        })
+        .count();
+    assert_eq!(
+        identity_queries, 1,
+        "LFS must reuse the inspected repository identity"
+    );
     assert_eq!(
         pointer_batches, 1,
         "all 16 LFS pointer bodies must share one bounded batch"
@@ -485,6 +497,67 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
             fs::read(destination.join(name)).expect("read compacted LFS pointer"),
             contents
         );
+    }
+
+    // Linked worktrees must use the common store, not their private gitdir.
+    // A bare repository uses its Git directory directly as that same identity.
+    let bare = parent.join("lfs-bare.git");
+    assert_git_success(
+        &fixture.repository,
+        &[
+            "clone",
+            "--bare",
+            "--no-hardlinks",
+            ".",
+            bare.to_str().unwrap(),
+        ],
+    );
+    for (key, value) in [
+        ("filter.lfs.clean", "git-lfs clean -- %f"),
+        ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+        ("filter.lfs.required", "true"),
+    ] {
+        assert_git_success(&bare, &["config", key, value]);
+    }
+    let bare_object = bare
+        .join("lfs/objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(&oid);
+    fs::create_dir_all(bare_object.parent().unwrap()).unwrap();
+    fs::write(&bare_object, &contents).unwrap();
+    for (name, source) in [("linked", &destination), ("bare", &bare)] {
+        let view = parent.join(format!("lfs-from-{name}"));
+        let report = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "add", "--detach"])
+            .arg(&view)
+            .args(["HEAD", "--state-dir"])
+            .arg(&state)
+            .current_dir(source)
+            .env("PATH", &child_path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            report.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        for file in std::iter::once("payload.bin").chain(extra_pointers.iter().map(String::as_str))
+        {
+            assert_eq!(fs::read(view.join(file)).unwrap(), contents);
+        }
+        let clean = Command::new("git")
+            .args(["status", "--porcelain=v1", "-z"])
+            .current_dir(&view)
+            .env("PATH", &child_path)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(clean.status.success());
+        assert!(clean.stdout.is_empty());
     }
 
     fs::write(destination.join("payload.bin"), b"private edit\n").expect("edit private view");
