@@ -13,8 +13,10 @@ cargo test --release --locked -p riftri-cli \
 ```
 
 The many-file fixture retains the 19/14/17 Git-process budgets. LFS pointer
-size inspection is one batch regardless of pointer count; pointer bodies remain
-individually read only after their sizes pass the existing bound. Status indexes
+inspection reads at most 128 pointers per Git batch. Each response header is
+validated against the requested object ID and the 1,024-byte pointer limit
+before its body is allocated or read. Malformed/oversized responses terminate
+and reap the child; pointer bodies consume at most 128 KiB per chunk. Status indexes
 one inventory snapshot without caching it across commands or skipping checks.
 
 Two optional paired probes isolate size-query overhead and worktree lookup
@@ -70,6 +72,33 @@ measured 45,191–48,072 microseconds for linear grouping and 591–776 microsec
 for indexed grouping. This does not establish an end-to-end improvement:
 100-cycle command timings were dominated by other costs/noise and did not
 demonstrate a clear benefit. Fresh under-lock deletion validation is unchanged.
+
+For a paired, complete cached-add comparison of pointer batching on Unix/native
+COW volumes:
+
+```sh
+node docs/benchmarks/lfs-pointer-batching.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory 129
+```
+
+The baseline must support the same checkout profile and the candidate must use
+bounded pointer batching. Both should be matching release builds. This fixture
+uses a deterministic clean-filter stub that validates bytes against the local
+object; it does not require/install git-lfs and is not a real git-lfs throughput
+benchmark. It alternates four pairs, verifies every expanded file and Git
+cleanliness, tests private-write isolation, compacts the anchor, removes all
+views, collects the base, and checks repair/empty status. Trace2 must show two
+candidate body batches for 129 pointers. It saves raw timings/counts and marks
+completion only after all checks pass; failures retain the fixture for diagnosis.
+
+A local APFS run against baseline `f970f05` (matching release builds, 129
+pointers sharing one 64 KiB local object) passed all checks. Git starts per
+cached add fell from 149 to 21, including two candidate pointer-body batches.
+Four alternating before/after pairs took, in milliseconds:
+`3599/2600`, `3485/1846`, `3668/2445`, and `6675/1727`.
+These are complete cached-add timings, not just pointer reads. All four pairs
+favored batching, but the shared-object fixture, validating filter stub, small
+sample, and busy local host limit generalization to real LFS repositories.
 
 For a sparse/full comparison on an exported source tree, run:
 

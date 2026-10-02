@@ -746,6 +746,100 @@ impl Git {
         parse_blob_sizes(&output.stdout, objects)
     }
 
+    /// Read small exact blobs through one Git process. Validate each header
+    /// before allocating/reading its body. Requests are sequential so neither
+    /// pipe can fill while the other end waits; no checkout filters are run.
+    pub fn read_small_blobs(
+        &self,
+        path: &Path,
+        objects: &[ObjectId],
+        max_bytes: usize,
+    ) -> Result<Vec<Vec<u8>>, GitError> {
+        use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+        if objects.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut stderr =
+            tempfile::tempfile().map_err(|source| GitError::TemporaryState { source })?;
+        let arguments = [OsString::from("cat-file"), OsString::from("--batch")];
+        let mut command = Command::new(&self.command);
+        command
+            .args(&arguments)
+            .current_dir(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            // A file avoids a full stderr pipe deadlocking a response read.
+            .stderr(
+                stderr
+                    .try_clone()
+                    .map_err(|source| GitError::TemporaryState { source })?,
+            );
+        #[cfg(test)]
+        self.process_attempts.fetch_add(1, Ordering::Relaxed);
+        let mut child = command
+            .spawn()
+            .map_err(|source| self.start_error(Some(path), source))?;
+        let result = (|| {
+            let mut input = child
+                .stdin
+                .take()
+                .ok_or_else(|| invalid_blob_batch("missing stdin"))?;
+            let mut output = BufReader::new(
+                child
+                    .stdout
+                    .take()
+                    .ok_or_else(|| invalid_blob_batch("missing stdout"))?,
+            );
+            let mut blobs = Vec::with_capacity(objects.len());
+            for object in objects {
+                writeln!(input, "{}", object.as_str()).map_err(|source| GitError::WriteInput {
+                    command: self.command.clone(),
+                    source,
+                })?;
+                blobs.push(read_batch_blob(&mut output, object, max_bytes)?);
+            }
+            drop(input);
+            let mut extra = [0];
+            if output
+                .read(&mut extra)
+                .map_err(|error| invalid_blob_batch(error.to_string()))?
+                != 0
+            {
+                return Err(invalid_blob_batch("unexpected trailing response bytes"));
+            }
+            let status = child.wait().map_err(|source| GitError::Wait {
+                command: self.command.clone(),
+                source,
+            })?;
+            if !status.success() {
+                stderr
+                    .seek(SeekFrom::Start(0))
+                    .map_err(|source| GitError::TemporaryState { source })?;
+                let mut diagnostic = Vec::new();
+                stderr
+                    .take(64 * 1024)
+                    .read_to_end(&mut diagnostic)
+                    .map_err(|source| GitError::TemporaryState { source })?;
+                return Err(command_failed(
+                    &arguments,
+                    &Output {
+                        status,
+                        stdout: Vec::new(),
+                        stderr: diagnostic,
+                    },
+                ));
+            }
+            Ok(blobs)
+        })();
+        if result.is_err() {
+            // An oversized/malformed response must not leave cat-file alive,
+            // blocked writing a body that the caller deliberately won't read.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        result
+    }
+
     /// Return the installed Git LFS version line, or `None` when the standard
     /// `git lfs version` command is unavailable or unhealthy.
     pub fn lfs_version(&self, path: &Path) -> Result<Option<Vec<u8>>, GitError> {
@@ -2328,6 +2422,45 @@ impl Git {
     }
 }
 
+fn invalid_blob_batch(detail: impl Into<String>) -> GitError {
+    GitError::InvalidOutput {
+        context: "bounded blob batch",
+        detail: detail.into(),
+    }
+}
+
+fn read_batch_blob(
+    reader: &mut impl std::io::BufRead,
+    object: &ObjectId,
+    max_bytes: usize,
+) -> Result<Vec<u8>, GitError> {
+    use std::io::{BufRead, Read};
+    let mut header = Vec::new();
+    reader
+        .take(128)
+        .read_until(b'\n', &mut header)
+        .map_err(|error| invalid_blob_batch(error.to_string()))?;
+    let size = parse_blob_sizes(&header, std::slice::from_ref(object))?[0];
+    if size > max_bytes as u64 {
+        return Err(invalid_blob_batch(format!(
+            "blob {} is {size} bytes; limit is {max_bytes}",
+            object.as_str()
+        )));
+    }
+    let mut bytes = vec![0; size as usize];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|error| invalid_blob_batch(error.to_string()))?;
+    let mut delimiter = [0];
+    reader
+        .read_exact(&mut delimiter)
+        .map_err(|error| invalid_blob_batch(error.to_string()))?;
+    if delimiter != [b'\n'] {
+        return Err(invalid_blob_batch("missing blob body delimiter"));
+    }
+    Ok(bytes)
+}
+
 fn parse_blob_sizes(bytes: &[u8], objects: &[ObjectId]) -> Result<Vec<u64>, GitError> {
     let invalid = || GitError::InvalidOutput {
         context: "blob size batch",
@@ -2890,6 +3023,129 @@ mod tests {
 
     struct RepositoryFixture {
         directory: TempDir,
+    }
+
+    #[test]
+    fn bounded_blob_batch_checks_limits_and_preserves_order() {
+        let fixture = RepositoryFixture::committed();
+        let handle = Git::default();
+        let revision = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let object = handle.list_tree(fixture.path(), &revision.tree).unwrap()[0]
+            .object_id
+            .clone();
+        let before = handle
+            .process_attempts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            handle
+                .read_small_blobs(fixture.path(), &[object.clone(), object.clone()], 8)
+                .unwrap(),
+            vec![b"tracked\n".to_vec(); 2]
+        );
+        assert_eq!(
+            handle
+                .process_attempts
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - before,
+            1
+        );
+        assert!(
+            handle
+                .read_small_blobs(fixture.path(), &[object], 7)
+                .is_err()
+        );
+        assert!(
+            handle
+                .read_small_blobs(fixture.path(), &[revision.tree], 1024)
+                .is_err()
+        );
+        let missing = super::ObjectId::parse("0".repeat(40)).unwrap();
+        assert!(
+            handle
+                .read_small_blobs(fixture.path(), &[missing], 1024)
+                .is_err()
+        );
+        let before = handle
+            .process_attempts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            handle
+                .read_small_blobs(fixture.path(), &[], 1024)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            handle
+                .process_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            before
+        );
+    }
+
+    #[test]
+    fn bounded_blob_decoder_refuses_bad_headers_bodies_and_delimiters() {
+        let id = super::ObjectId::parse("a".repeat(40)).unwrap();
+        let decode =
+            |bytes: Vec<u8>| super::read_batch_blob(&mut std::io::Cursor::new(bytes), &id, 8);
+        for data in [
+            Vec::new(),
+            vec![b'x'; 1000],
+            format!("{} missing\n", id.as_str()).into_bytes(),
+            format!("{} tree 1\nx\n", id.as_str()).into_bytes(),
+            format!("{} blob 3\nab", id.as_str()).into_bytes(),
+            format!("{} blob 3\nabc!", id.as_str()).into_bytes(),
+            format!("{} blob 1\nx\n", "b".repeat(40)).into_bytes(),
+        ] {
+            assert!(decode(data).is_err());
+        }
+        let header = format!("{} blob 1000000000\n", id.as_str());
+        let mut oversized = std::io::Cursor::new(format!("{header}body-must-not-be-read"));
+        assert!(super::read_batch_blob(&mut oversized, &id, 8).is_err());
+        assert_eq!(oversized.position(), header.len() as u64);
+        let mut binary = format!("{} blob 3\n", id.as_str()).into_bytes();
+        binary.extend_from_slice(b"a\0\n\n");
+        assert_eq!(decode(binary).unwrap(), b"a\0\n");
+        assert_eq!(
+            decode(format!("{} blob 0\n\n", id.as_str()).into_bytes()).unwrap(),
+            b""
+        );
+        let sha256 = super::ObjectId::parse("b".repeat(64)).unwrap();
+        let mut body = std::io::Cursor::new(format!("{} blob 1\nx\n", sha256.as_str()));
+        assert_eq!(super::read_batch_blob(&mut body, &sha256, 1).unwrap(), b"x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_blob_batch_kills_and_reaps_the_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let script = fixture.path().join("git-oversized");
+        let pid_file = fixture.path().join("pid");
+        let id = super::ObjectId::parse("a".repeat(40)).unwrap();
+        fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"{}\"\nread request\nprintf '{} blob 1000000000\\n'\nexec sleep 30\n", pid_file.display(), id.as_str())).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let handle = Git::new(&script);
+        let started = std::time::Instant::now();
+        assert!(
+            handle
+                .read_small_blobs(fixture.path(), &[id], 1024)
+                .is_err()
+        );
+        assert!(
+            started.elapsed().as_secs() < 10,
+            "failed to terminate the oversized response producer"
+        );
+        let pid = fs::read_to_string(pid_file).unwrap();
+        assert!(
+            !Command::new("kill")
+                .args(["-0", pid.trim()])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
     }
 
     #[test]
