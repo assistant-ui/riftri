@@ -106,6 +106,25 @@ RIFTRI_BENCH_WORKERS=10 node docs/benchmarks/checkout-config-batching.mjs \
 ```
 
 Use matching build profiles and a quiet volume with ample free space. The
+harness also runs ordinary Git as a control, alternating its position between
+rounds. It defaults to ten workers and writes nearest-rank p50/p95 summaries
+for serial adds, concurrent views, and batch wall times, retaining every sample.
+Cold samples and the warm-up anchor are excluded from cached summaries. Small
+sample counts are exposed; a p95 from one or two samples is not a stable tail
+estimate. Summaries are written only after content/mode/symlink checks, private
+write isolation, removal, and final empty-state checks all succeed. Timings
+include process startup and Trace2 instrumentation; volume deltas include
+concurrent host activity and are not per-file physical allocation.
+
+The same-binary smoke test proves the harness works, not a speedup. macOS CI
+runs it against release builds on a 1,026-file fixture with ten concurrent
+views. Run it locally with:
+
+```sh
+RIFTRI_BENCH_TEST_BINARY="$PWD/target/release/riftri" node --test docs/benchmarks/*.test.mjs
+```
+
+The
 harness records cold samples, alternating cached serial samples, and ten-way
 cached batches through both explicit and process-scoped interfaces. It records
 Git Trace2 process counts, observed CLI phase timestamps, and batch volume

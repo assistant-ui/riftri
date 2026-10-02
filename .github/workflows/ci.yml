@@ -81,6 +81,13 @@ jobs:
           cargo test --release --locked -p riftri-cli
           --test git_invocation_budget --test checkout_compatibility
 
+      - name: Verify end-to-end performance comparison harness
+        if: matrix.os == 'macos-15'
+        env:
+          RIFTRI_BENCH_TEST_BINARY: ${{ github.workspace }}/target/release/riftri
+          TMPDIR: ${{ runner.temp }}/riftri-apfs
+        run: node --test docs/benchmarks/*.test.mjs
+
       - name: Record native COW benchmark
         if: matrix.os == 'macos-15'
         env:

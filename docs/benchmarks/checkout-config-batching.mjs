@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { distribution } from './latency-summary.mjs';
 
 const [before, after, source, revision, outputArgument] = process.argv.slice(2);
 assert.ok(before && after && source && revision && outputArgument, 'Expected BEFORE AFTER SOURCE COMMIT NEW_OUTPUT_DIR');
@@ -18,7 +19,7 @@ function count(name, fallback, maximum) {
 }
 const singleRounds = count('RIFTRI_BENCH_SINGLE_ROUNDS', 8, 30);
 const batchRounds = count('RIFTRI_BENCH_BATCH_ROUNDS', 2, 30);
-const workers = count('RIFTRI_BENCH_WORKERS', 9, 16);
+const workers = count('RIFTRI_BENCH_WORKERS', 10, 16);
 // Large exact-tree fixtures can legitimately spend more than a minute in Git
 // or final clean verification on a busy development host. Keep a finite guard
 // against a wedged subprocess without censoring the slow samples this manual
@@ -73,11 +74,11 @@ async function create(version, mode, label, warm = true) {
   const destination = path.join(output, label);
   assert.ok(!fs.existsSync(destination));
   const trace = path.join(output, `${label}.trace2.jsonl`);
-  const args = mode === 'explicit'
+  const args = version === 'git' ? ['worktree', 'add', '--detach', destination, 'HEAD'] : mode === 'explicit'
     ? ['worktree', 'add', '--detach', '--repository', repository, destination, 'HEAD']
     : ['exec', '--', 'git', 'worktree', 'add', '--detach', destination, 'HEAD'];
   const started = process.hrtime.bigint();
-  const child = spawn(binaries[version], args, { cwd: repository, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: commandTimeoutMs });
+  const child = spawn(version === 'git' ? 'git' : binaries[version], args, { cwd: repository, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: commandTimeoutMs });
   let stdout = '', stderr = '';
   let partial = '';
   const phases = [];
@@ -95,6 +96,12 @@ async function create(version, mode, label, warm = true) {
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
   fs.writeFileSync(path.join(output, `${label}.log`), stdout + stderr);
   assert.equal(code, 0, stderr);
+  const starts = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === 'start');
+  if (version === 'git') {
+    const record = { version, mode, label, seconds, destination, gitStarts: starts.length };
+    result.cases.push(record); save();
+    return record;
+  }
   if (warm) assert.match(stdout + stderr, mode === 'explicit' ? /^Base: reused$/m : /\(reused base\)/);
   else assert.match(stdout + stderr, /^Base: created$/m);
   // The shim deliberately emits only a short stderr message. Read its durable
@@ -110,14 +117,14 @@ async function create(version, mode, label, warm = true) {
   const matches = journals.filter(journal => decodePath(journal.destination) === destination);
   assert.equal(matches.length, 1);
   const base = decodePath(matches[0].base_path);
-  const starts = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === 'start');
   const record = { version, mode, label, seconds, destination, base, backend: matches[0].backend, phases, gitStarts: starts.length, configGets: starts.filter(event => event.argv.includes('config') && event.argv.includes('--get')).length, configBatches: starts.filter(event => event.argv.includes('--get-regexp')).length };
   result.cases.push(record); save();
   return record;
 }
 function remove(record) {
   verify(record.destination);
-  exec(binaries[record.version], ['worktree', 'remove', '--repository', repository, record.destination]);
+  if (record.version === 'git') exec('git', ['worktree', 'remove', record.destination]);
+  else exec(binaries[record.version], ['worktree', 'remove', '--repository', repository, record.destination]);
   assert.ok(!fs.existsSync(record.destination));
   record.verifiedAndRemoved = true; save();
 }
@@ -132,18 +139,18 @@ for (const version of ['before', 'after']) {
 const anchor = await create('before', 'explicit', 'anchor', false);
 verify(anchor.destination);
 for (let round = 0; round < singleRounds; round++) {
-  for (const mode of ['explicit', 'shim']) {
-    for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
+  for (const mode of round % 2 ? ['git', 'shim', 'explicit'] : ['explicit', 'shim', 'git']) {
+    for (const version of mode === 'git' ? ['git'] : round % 2 ? ['after', 'before'] : ['before', 'after']) {
       const record = await create(version, mode, `single-${round}-${mode}-${version}`);
-      assert.equal(record.base, anchor.base, 'checkout profile must remain compatible');
+      if (version !== 'git') assert.equal(record.base, anchor.base, 'checkout profile must remain compatible');
       remove(record);
       console.log(`${record.label}: ${record.seconds.toFixed(3)}s, ${record.gitStarts} Git starts`);
     }
   }
 }
 for (let round = 0; round < batchRounds; round++) {
-  for (const mode of ['explicit', 'shim']) {
-  for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
+  for (const mode of round % 2 ? ['git', 'shim', 'explicit'] : ['explicit', 'shim', 'git']) {
+  for (const version of mode === 'git' ? ['git'] : round % 2 ? ['after', 'before'] : ['before', 'after']) {
     exec('sync', [], output);
     const freeBefore = fs.statfsSync(output);
     const started = process.hrtime.bigint();
@@ -153,7 +160,7 @@ for (let round = 0; round < batchRounds; round++) {
     const freeAfter = fs.statfsSync(output);
     const volumeDeltaBytes = (freeBefore.bfree * freeBefore.bsize) - (freeAfter.bfree * freeAfter.bsize);
     result.batches.push({ round, version, mode, workers, seconds, volumeDeltaBytes }); save();
-    for (const record of records) assert.equal(record.base, anchor.base);
+    if (version !== 'git') for (const record of records) assert.equal(record.base, anchor.base);
     // Private-write test is outside the timed region. Verify all peers and base.
     const file = manifest.find(entry => !entry.symlink && entry.size > 0).name;
     const target = path.join(records[0].destination, file);
@@ -176,5 +183,14 @@ fs.writeFileSync(path.join(output, 'final-status.log'), status);
 verify(repository);
 result.completedAt = new Date().toISOString();
 result.allViewsVerifiedAndRemoved = result.cases.every(record => record.verifiedAndRemoved);
+assert.ok(result.allViewsVerifiedAndRemoved);
+result.summaries = [];
+for (const [version, mode] of [['before', 'explicit'], ['after', 'explicit'], ['before', 'shim'], ['after', 'shim'], ['git', 'git']]) {
+  result.summaries.push({ version, mode,
+    serialSeconds: distribution(result.cases.filter(record => record.version === version && record.mode === mode && record.label.startsWith('single-')).map(record => record.seconds)),
+    concurrentViewSeconds: distribution(result.cases.filter(record => record.version === version && record.mode === mode && record.label.startsWith('parallel-')).map(record => record.seconds)),
+    concurrentBatchSeconds: distribution(result.batches.filter(record => record.version === version && record.mode === mode).map(record => record.seconds)),
+  });
+}
 save();
 console.log(`Complete: ${path.join(output, 'results.json')}`);
