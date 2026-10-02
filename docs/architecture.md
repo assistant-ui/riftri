@@ -399,6 +399,8 @@ intent-recorded
   -> replacement-activated
   -> add-journal-updated
   -> complete
+intent-recorded | replacement-ready -> cancelled
+add-journal-updated -> restoring-original -> cancelled
 ```
 
 Before recording intent, Riftri requires an active managed Git registration,
@@ -432,7 +434,29 @@ moves forward, updates the add journal idempotently, and removes only the exact
 journaled quarantine. A write that reached the old view after its last check is
 kept there: the compaction stays pending as recovery the caller completes, and
 the message names the kept view and says to copy what is needed into the
-worktree, delete it, and run `riftri repair`. Pending compactions protect both old and new bases from garbage
+worktree, delete it, and run `riftri repair`.
+
+A Git command that runs in the worktree just after the swap (a commit, a
+switch) acts on the old view, its working directory, while HEAD and the index
+move with it. The replacement then holds the pre-command files. When the old
+view changed, HEAD left the compacted commit or the index holds changes, and
+the replacement still matches its snapshot, Riftri records
+`restoring-original` and undoes the compaction:
+- it moves the replacement back to its staging name and renames Git's view
+  into place;
+- it points the add journal at its original base and commit, which the
+  journal records at intent;
+- it deletes the replacement and cancels.
+
+Each step is decided from the paths, so recovery finishes a kill at any
+point. When both views changed, neither replaces the other and both are
+kept. Journals written before the original commit was recorded keep the
+guidance above. A lock held by such a command does not fail the post-swap
+index refresh, which only updates Git's stat cache. A path that vanishes
+while compaction walks the worktree is reported as a change, not an I/O
+failure.
+
+Pending compactions protect both old and new bases from garbage
 collection. OverlayFS compaction remains separate future work because resetting
 a mounted private upper requires mount-identity-aware handling rather than a
 native directory clone and rename.
