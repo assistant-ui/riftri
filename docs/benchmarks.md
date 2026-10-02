@@ -67,6 +67,24 @@ deliberately skewed fixture tests queue balancing; it is not representative of
 every repository. Keep the worker cap, traversal checks, and first-error order
 unchanged when comparing scheduling strategies.
 
+For real Git LFS coverage at the bounded-batch edges, put `git-lfs` on `PATH`
+and use matching release builds:
+
+```sh
+node docs/benchmarks/real-lfs.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory 127,128,129 3
+```
+
+The fixture uses the real clean/process filters to create canonical pointers
+and local objects of varied sizes, with both distinct and repeated objects.
+There is no remote, implicit fetch, or global Git setup. It verifies missing
+and same-size-corrupt object refusals, expanded bytes, Git cleanliness, private
+write isolation, compaction, removal, GC, repair, and final empty state. Trace2
+must show one candidate pointer batch for 127/128 files and two for 129. Raw
+paired cached-add timings and the LFS version are saved. macOS CI runs one pair
+per boundary against the same binary as a correctness gate, not a speedup claim;
+manual comparisons default to three alternating pairs per boundary.
+
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:
 
