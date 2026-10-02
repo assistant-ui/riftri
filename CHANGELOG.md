@@ -7,6 +7,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Removing a worktree that holds a FIFO or a Unix socket, such as a dev
+  server's socket, works as `git worktree remove` does. A clean removal used to
+  unregister the worktree and then fail to delete it, leaving a removal every
+  `riftri repair` refused, and `--force` refused such a worktree outright
+  (#616).
 - `riftri worktree remove --force` no longer deletes a file written into the
   worktree just before its view is moved aside for deletion. The forced
   snapshot is now checked again at the quarantine, as a clean removal already
