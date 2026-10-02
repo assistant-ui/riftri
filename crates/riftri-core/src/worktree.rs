@@ -5721,7 +5721,7 @@ fn inspect_git_lfs_objects(
     entries: &[riftri_git::TreeEntry],
     paths: &[PathBuf],
 ) -> Result<Vec<GitLfsObject>, String> {
-    const MAX_POINTER_BYTES: u64 = 1024;
+    const MAX_POINTER_BYTES: usize = 1024;
     let repository_info = git
         .inspect_repository(repository)
         .map_err(|error| format!("could not locate the Git LFS object store: {error}"))?;
@@ -5741,81 +5741,76 @@ fn inspect_git_lfs_objects(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let ids = selected
-        .iter()
-        .map(|entry| entry.object_id.clone())
-        .collect::<Vec<_>>();
-    let sizes = git
-        .blob_sizes(repository, &ids)
-        .map_err(|error| format!("could not inspect Git LFS pointers: {error}"))?;
-    for ((path, entry), blob_size) in paths.iter().zip(selected).zip(sizes) {
+    for (path, entry) in paths.iter().zip(&selected) {
         if entry.object_kind != b"blob" || !matches!(entry.mode, 0o100644 | 0o100755) {
             return Err(format!(
                 "Git LFS path {} is not a regular file in the exact tree",
                 path.display()
             ));
         }
-        if blob_size > MAX_POINTER_BYTES {
-            return Err(format!(
-                "Git LFS pointer {} is {blob_size} bytes; canonical pointers must be at most {MAX_POINTER_BYTES} bytes",
-                path.display()
-            ));
-        }
-        let bytes = git
-            .read_blob(repository, &entry.object_id)
-            .map_err(|error| {
-                format!("could not read Git LFS pointer {}: {error}", path.display())
+    }
+    // Bound both individual bodies and aggregate buffered pointer bytes.
+    // All local LFS objects still undergo the same validation below.
+    for (paths, entries) in paths.chunks(128).zip(selected.chunks(128)) {
+        let ids = entries
+            .iter()
+            .map(|entry| entry.object_id.clone())
+            .collect::<Vec<_>>();
+        let blobs = git
+            .read_small_blobs(repository, &ids, MAX_POINTER_BYTES)
+            .map_err(|error| format!("could not read Git LFS pointers: {error}"))?;
+        for (path, bytes) in paths.iter().zip(blobs) {
+            let pointer = parse_git_lfs_pointer(&bytes)
+                .map_err(|error| format!("invalid Git LFS pointer {}: {error}", path.display()))?;
+            let source_path = repository_info
+                .identity
+                .common_git_dir
+                .join("lfs/objects")
+                .join(&pointer.oid[..2])
+                .join(&pointer.oid[2..4])
+                .join(&pointer.oid);
+            let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
+                format!(
+                    "local Git LFS object {} for {} is unavailable at {}: {error}",
+                    pointer.oid,
+                    path.display(),
+                    source_path.display()
+                )
             })?;
-        let pointer = parse_git_lfs_pointer(&bytes)
-            .map_err(|error| format!("invalid Git LFS pointer {}: {error}", path.display()))?;
-        let source_path = repository_info
-            .identity
-            .common_git_dir
-            .join("lfs/objects")
-            .join(&pointer.oid[..2])
-            .join(&pointer.oid[2..4])
-            .join(&pointer.oid);
-        let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
-            format!(
-                "local Git LFS object {} for {} is unavailable at {}: {error}",
-                pointer.oid,
-                path.display(),
-                source_path.display()
-            )
-        })?;
-        if !metadata.is_file() || metadata.file_type().is_symlink() {
-            return Err(format!(
-                "local Git LFS object {} for {} is not a regular file",
-                pointer.oid,
-                path.display()
-            ));
-        }
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::fs::MetadataExt;
-            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
                 return Err(format!(
-                    "local Git LFS object {} for {} is a reparse point",
+                    "local Git LFS object {} for {} is not a regular file",
                     pointer.oid,
                     path.display()
                 ));
             }
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::fs::MetadataExt;
+                use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+                if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    return Err(format!(
+                        "local Git LFS object {} for {} is a reparse point",
+                        pointer.oid,
+                        path.display()
+                    ));
+                }
+            }
+            if metadata.len() != pointer.size {
+                return Err(format!(
+                    "local Git LFS object {} for {} has size {}, expected {}",
+                    pointer.oid,
+                    path.display(),
+                    metadata.len(),
+                    pointer.size
+                ));
+            }
+            objects.push(GitLfsObject {
+                checkout_path: path.clone(),
+                source_path,
+                pointer,
+            });
         }
-        if metadata.len() != pointer.size {
-            return Err(format!(
-                "local Git LFS object {} for {} has size {}, expected {}",
-                pointer.oid,
-                path.display(),
-                metadata.len(),
-                pointer.size
-            ));
-        }
-        objects.push(GitLfsObject {
-            checkout_path: path.clone(),
-            source_path,
-            pointer,
-        });
     }
     Ok(objects)
 }

@@ -430,17 +430,17 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
         .filter(|event| event["event"] == "start")
         .collect::<Vec<_>>();
-    let size_batches = starts
+    let pointer_batches = starts
         .iter()
         .filter(|event| {
             event["argv"]
                 .as_array()
-                .is_some_and(|args| args.iter().any(|arg| arg == "--batch-check"))
+                .is_some_and(|args| args.iter().any(|arg| arg == "--batch"))
         })
         .count();
     assert_eq!(
-        size_batches, 1,
-        "all 16 LFS pointers must share one size query"
+        pointer_batches, 1,
+        "all 16 LFS pointer bodies must share one bounded batch"
     );
     assert_eq!(
         fs::read(destination.join("payload.bin")).expect("read expanded payload"),
