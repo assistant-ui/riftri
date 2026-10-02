@@ -172,7 +172,7 @@ fn pending_move_receipts_require_repair_with_the_state_directory() {
     // A move whose outcome Riftri cannot verify leaves a durable pending move
     // journal, exactly as an interrupted process would. A plain Git refusal is
     // not enough: once the paths prove nothing moved, that move is cancelled.
-    let failing_git = git_failing_move_then_inventory(fixture.path());
+    let failing_git = git_failing_then_inventory(fixture.path(), "move");
     let (_, exit_code) = riftri_json_error_with_git(
         &repository,
         &[
@@ -253,8 +253,9 @@ fn pending_removal_receipts_require_repair_with_the_state_directory() {
     init_repository_with_commit(&repository);
     add_managed_worktree(&repository, &worktree, &state);
 
-    // A Git failure after the intent was durably recorded strands the
-    // removal journal, exactly as an interrupted process would.
+    // A removal whose outcome Riftri cannot verify strands its journal,
+    // exactly as an interrupted process would. A plain Git refusal is not
+    // enough: once the view is proven back in place, the removal is cancelled.
     let remove = [
         "worktree",
         "remove",
@@ -262,7 +263,7 @@ fn pending_removal_receipts_require_repair_with_the_state_directory() {
         "--state-dir",
         state.to_str().unwrap(),
     ];
-    let failing_git = git_failing_worktree_subcommand(fixture.path(), "remove");
+    let failing_git = git_failing_then_inventory(fixture.path(), "remove");
     let (_, exit_code) = riftri_json_error_with_git(&repository, &remove, &failing_git);
     assert_ne!(exit_code, Some(0));
 
@@ -659,40 +660,18 @@ fn git(repository: &std::path::Path, arguments: &[&str]) {
     assert!(status.success(), "git {arguments:?} failed");
 }
 
-/// A Git stand-in that fails `git worktree <subcommand>` like a Git refusal
-/// and passes every other command to the real Git.
+/// A Git stand-in that refuses `worktree <subcommand>` and then also fails
+/// every `worktree list`, so the caller cannot tell whether anything changed.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn git_failing_worktree_subcommand(
-    directory: &std::path::Path,
-    subcommand: &str,
-) -> std::path::PathBuf {
+fn git_failing_then_inventory(directory: &std::path::Path, subcommand: &str) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    let wrapper = directory.join(format!("git-failing-worktree-{subcommand}"));
+    let wrapper = directory.join(format!("git-failing-{subcommand}-then-inventory"));
+    let marker = directory.join(format!("git-{subcommand}-was-refused"));
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = {subcommand} ]; then\n    echo 'fatal: injected worktree {subcommand} failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec git \"$@\"\n"
-        ),
-    )
-    .expect("write failing Git stand-in");
-    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
-        .expect("mark Git stand-in executable");
-    wrapper
-}
-
-/// A Git stand-in that refuses `worktree move` and then also fails every
-/// `worktree list`, so the caller cannot tell whether anything moved.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn git_failing_move_then_inventory(directory: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let wrapper = directory.join("git-failing-move-then-inventory");
-    let marker = directory.join("git-move-was-refused");
-    std::fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = move ]; then\n    : > '{marker}'\n    echo 'fatal: injected worktree move failure' >&2\n    exit 128\n  fi\n  if [ -n \"$seen\" ] && [ \"$arg\" = list ] && [ -e '{marker}' ]; then\n    echo 'fatal: injected worktree list failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec git \"$@\"\n",
+            "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = {subcommand} ]; then\n    : > '{marker}'\n    echo 'fatal: injected worktree {subcommand} failure' >&2\n    exit 128\n  fi\n  if [ -n \"$seen\" ] && [ \"$arg\" = list ] && [ -e '{marker}' ]; then\n    echo 'fatal: injected worktree list failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec git \"$@\"\n",
             marker = marker.display()
         ),
     )
