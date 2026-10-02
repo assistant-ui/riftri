@@ -1441,16 +1441,22 @@ pub fn storage_accounting(
     let collection_journals = collection_load.journals;
     let mut removal_journals = Vec::with_capacity(loaded_removal_journals.len());
     let mut invalid_removal_journals = Vec::new();
+    let adds_by_id = index_journals_by(&loaded_add_journals, |journal| {
+        journal.operation_id.as_str()
+    });
     for journal in loaded_removal_journals {
-        match validate_removal_against_add_journals(
+        let source = adds_by_id
+            .get(journal.source_add_operation_id.as_str())
+            .and_then(|group| group.first().copied());
+        match validate_removal_against_add_source(
             &state_directory,
             &journal,
-            &loaded_add_journals,
+            source,
         ) {
             Ok(()) => removal_journals.push(journal),
             // A leftover of an interrupted retirement: finished, and named by
             // its add journal's `.retired` marker.
-            Err(_) if retired_removal_leftover(&state_directory, &journal, &loaded_add_journals) => {
+            Err(_) if retired_removal_without_add(&state_directory, &journal, source.is_none()) => {
                 removal_journals.push(journal)
             }
             Err(error) => invalid_removal_journals.push(StateDiagnosticIssue {
@@ -2154,6 +2160,15 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
         return Ok(0);
     }
     let mut retired = 0;
+    let removals_by_add = index_journals_by(&removals.journals, |journal| {
+        journal.source_add_operation_id.as_str()
+    });
+    let moves_by_add = index_journals_by(&moves.journals, |journal| {
+        journal.source_add_operation_id.as_str()
+    });
+    let compactions_by_add = index_journals_by(&compactions.journals, |journal| {
+        journal.source_add_operation_id.as_str()
+    });
 
     // Finish retirements an earlier run started.
     let operations = state_directory.join("operations");
@@ -2189,21 +2204,18 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
     }
 
     for add in &adds.journals {
-        let own_removals = removals
-            .journals
-            .iter()
-            .filter(|removal| removal.source_add_operation_id == add.operation_id)
-            .collect::<Vec<_>>();
-        let own_moves = moves
-            .journals
-            .iter()
-            .filter(|journal| journal.source_add_operation_id == add.operation_id)
-            .collect::<Vec<_>>();
-        let own_compactions = compactions
-            .journals
-            .iter()
-            .filter(|journal| journal.source_add_operation_id == add.operation_id)
-            .collect::<Vec<_>>();
+        let own_removals = removals_by_add
+            .get(add.operation_id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let own_moves = moves_by_add
+            .get(add.operation_id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let own_compactions = compactions_by_add
+            .get(add.operation_id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let removal_completed = own_removals
             .iter()
             .any(|removal| removal.phase == RemoveWorktreePhase::Complete);
@@ -9152,12 +9164,16 @@ fn validated_completed_removal_ids(
     removal_journals: &[DecodedRemovalJournal],
 ) -> Result<HashSet<String>, WorktreeError> {
     let mut completed = HashSet::new();
+    let adds_by_id = index_journals_by(add_journals, |journal| journal.operation_id.as_str());
     for journal in removal_journals {
+        let source = adds_by_id
+            .get(journal.source_add_operation_id.as_str())
+            .and_then(|group| group.first().copied());
         // A retirement leftover names no live add operation and holds no claim.
-        if retired_removal_leftover(state_directory, journal, add_journals) {
+        if retired_removal_without_add(state_directory, journal, source.is_none()) {
             continue;
         }
-        validate_removal_against_add_journals(state_directory, journal, add_journals)?;
+        validate_removal_against_add_source(state_directory, journal, source)?;
         if journal.phase == RemoveWorktreePhase::Complete {
             completed.insert(journal.source_add_operation_id.clone());
         }
@@ -9172,10 +9188,19 @@ fn retired_removal_leftover(
     journal: &DecodedRemovalJournal,
     add_journals: &[DecodedJournal],
 ) -> bool {
+    let missing = !add_journals
+        .iter()
+        .any(|candidate| candidate.operation_id == journal.source_add_operation_id);
+    retired_removal_without_add(state_directory, journal, missing)
+}
+
+fn retired_removal_without_add(
+    state_directory: &Path,
+    journal: &DecodedRemovalJournal,
+    missing: bool,
+) -> bool {
     journal.phase == RemoveWorktreePhase::Complete
-        && !add_journals
-            .iter()
-            .any(|candidate| candidate.operation_id == journal.source_add_operation_id)
+        && missing
         && add_operation_is_retiring(state_directory, &journal.source_add_operation_id)
 }
 
@@ -9183,6 +9208,31 @@ fn validate_removal_against_add_journals(
     state_directory: &Path,
     journal: &DecodedRemovalJournal,
     add_journals: &[DecodedJournal],
+) -> Result<(), WorktreeError> {
+    let source = add_journals
+        .iter()
+        .find(|candidate| candidate.operation_id == journal.source_add_operation_id);
+    validate_removal_against_add_source(state_directory, journal, source)
+}
+
+// Operation-local indexes only: callers still load a fresh snapshot, and GC
+// re-reads the complete lineage under its add lock before deleting anything.
+// Keep all duplicates and their original order, including first-match lookup.
+fn index_journals_by<'a, T>(
+    journals: &'a [T],
+    key: impl Fn(&'a T) -> &'a str,
+) -> HashMap<&'a str, Vec<&'a T>> {
+    let mut indexed = HashMap::<&str, Vec<&T>>::new();
+    for journal in journals {
+        indexed.entry(key(journal)).or_default().push(journal);
+    }
+    indexed
+}
+
+fn validate_removal_against_add_source(
+    state_directory: &Path,
+    journal: &DecodedRemovalJournal,
+    source: Option<&DecodedJournal>,
 ) -> Result<(), WorktreeError> {
     let bases = state_directory.join("bases/v1");
     if !journal.repository.is_absolute()
@@ -9195,15 +9245,12 @@ fn validate_removal_against_add_journals(
             journal.journal_path.display()
         )));
     }
-    let source = add_journals
-        .iter()
-        .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
-        .ok_or_else(|| {
-            WorktreeError::InvalidRequest(format!(
-                "removal journal {} does not reference a known add operation",
-                journal.journal_path.display()
-            ))
-        })?;
+    let source = source.ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "removal journal {} does not reference a known add operation",
+            journal.journal_path.display()
+        ))
+    })?;
     if source.phase != AddWorktreePhase::Active
         || source.repository != journal.repository
         || source.destination != journal.destination
@@ -12260,6 +12307,73 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use crate::BaseCountImpact;
+    #[test]
+    fn journal_relationship_index_preserves_order_and_duplicates() {
+        let journals = vec![("b", 1), ("a", 2), ("b", 3), ("", 4)];
+        let visits = std::cell::Cell::new(0);
+        let indexed = super::index_journals_by(&journals, |item| {
+            visits.set(visits.get() + 1);
+            item.0
+        });
+        assert_eq!(visits.get(), journals.len());
+        for key in ["a", "b", "", "missing"] {
+            let expected = journals
+                .iter()
+                .filter(|item| item.0 == key)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                indexed.get(key).map(Vec::as_slice).unwrap_or_default(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual journal relationship benchmark; includes index construction"]
+    fn reports_journal_relationship_index_latency() {
+        let journals = (0..10_000)
+            .map(|index| (format!("operation-{}", index / 3), index))
+            .collect::<Vec<_>>();
+        let keys = journals
+            .iter()
+            .step_by(3)
+            .map(|item| item.0.as_str())
+            .collect::<Vec<_>>();
+        for round in 0..4 {
+            for indexed in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let started = std::time::Instant::now();
+                let groups = if indexed {
+                    let index = super::index_journals_by(&journals, |item| item.0.as_str());
+                    keys.iter()
+                        .map(|key| index[*key].iter().map(|item| item.1).collect::<Vec<_>>())
+                        .collect::<Vec<_>>()
+                } else {
+                    keys.iter()
+                        .map(|key| {
+                            journals
+                                .iter()
+                                .filter(|item| item.0 == *key)
+                                .map(|item| item.1)
+                                .collect::<Vec<_>>()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let elapsed = started.elapsed();
+                assert_eq!(
+                    groups.into_iter().flatten().collect::<Vec<_>>(),
+                    (0..10_000).collect::<Vec<_>>()
+                );
+                println!(
+                    "journal-index round={round} indexed={indexed} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
     #[test]
     fn inventory_keys_preserve_path_matching() {
         let mut paths = vec![
