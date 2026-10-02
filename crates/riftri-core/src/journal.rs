@@ -593,6 +593,11 @@ pub(crate) struct CompactJournalRecord {
     pub expected_snapshot: String,
     pub backend: BackendKind,
     pub phase: CompactWorktreePhase,
+    /// The add journal's commit before compaction retargeted it, so undoing a
+    /// compaction restores the journal exactly. Absent from older journals,
+    /// which therefore never undo one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_expected_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -696,6 +701,7 @@ pub(crate) struct DecodedCompactJournal {
     pub expected_snapshot: String,
     pub backend: BackendKind,
     pub phase: CompactWorktreePhase,
+    pub old_expected_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1122,6 +1128,7 @@ impl CompactJournalRecord {
             expected_snapshot,
             backend,
             phase: CompactWorktreePhase::IntentRecorded,
+            old_expected_commit: None,
         }
     }
 
@@ -1173,6 +1180,7 @@ impl CompactJournalRecord {
             expected_snapshot: self.expected_snapshot.to_ascii_lowercase(),
             backend: self.backend,
             phase: self.phase,
+            old_expected_commit: self.old_expected_commit,
             journal_path,
         })
     }

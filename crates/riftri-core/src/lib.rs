@@ -401,6 +401,10 @@ pub enum CompactWorktreePhase {
     AddJournalUpdated,
     Complete,
     Cancelled,
+    /// A Git command ran in the old view after the swap, moving HEAD or the
+    /// index with it, so that view, not the replacement, matches Git. The
+    /// compaction is undone: the views are swapped back and it is cancelled.
+    RestoringOriginal,
 }
 
 impl CompactWorktreePhase {
@@ -408,7 +412,7 @@ impl CompactWorktreePhase {
     pub fn can_transition_to(self, next: Self) -> bool {
         use CompactWorktreePhase::{
             AddJournalUpdated, Cancelled, Complete, IntentRecorded, ReplacementActivated,
-            ReplacementReady,
+            ReplacementReady, RestoringOriginal,
         };
 
         matches!(
@@ -416,7 +420,8 @@ impl CompactWorktreePhase {
             (IntentRecorded, ReplacementReady)
                 | (ReplacementReady, ReplacementActivated)
                 | (ReplacementActivated, AddJournalUpdated)
-                | (AddJournalUpdated, Complete)
+                | (AddJournalUpdated, Complete | RestoringOriginal)
+                | (RestoringOriginal, Cancelled)
                 | (IntentRecorded, Cancelled)
                 | (ReplacementReady, Cancelled)
         )

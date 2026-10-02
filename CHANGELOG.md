@@ -5,6 +5,24 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- `riftri worktree remove --force` no longer deletes a file written into the
+  worktree just before its view is moved aside for deletion. The forced
+  snapshot is now checked again at the quarantine, as a clean removal already
+  is (#609).
+- A removal refused before anything was removed is now `cancelled` and no
+  longer left pending. Before, every `riftri repair` refused it, other
+  lifecycle commands were blocked, and undoing the change let `repair` remove
+  the worktree after all. `status` and `repair` report `cancelled_removals`
+  (#609).
+- A Git command run inside a worktree while `riftri worktree compact` swaps
+  views (a commit, a switch) no longer leaves the worktree out of sync with
+  HEAD. That command updates the old view, so the compaction is now undone and
+  the worktree stays exactly as Git left it. A concurrent Git command holding
+  the index lock, or deleting a file mid-walk, is reported as a change, not as
+  a Git or I/O failure that left the compaction pending (#611).
+
 ## [0.6.0] - 2026-10-02
 
 ### Added

@@ -1517,6 +1517,7 @@ fn compact_phase_name(phase: riftri_core::CompactWorktreePhase) -> &'static str 
         AddJournalUpdated => "add-journal-updated",
         Complete => "complete",
         Cancelled => "cancelled",
+        RestoringOriginal => "restoring-original",
     }
 }
 

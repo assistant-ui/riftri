@@ -3249,7 +3249,8 @@ fn compact_worktree_inner(
     // differently (Unicode normalization on macOS).
     let destination = managed.destination.clone();
     let resolved = git.resolve_revision(&destination, OsStr::new("HEAD"))?;
-    verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)?;
+    verify_compaction_source(&git, &repository_root, &destination, &resolved.commit, None)
+        .map_err(|error| vanished_during_compaction(error, &destination))?;
     // `verify_compaction_source` proved above that `destination` is one of
     // this repository's registered linked worktrees, so it shares the same
     // common Git directory that `inspect_repository` resolved.
@@ -3280,7 +3281,8 @@ fn compact_worktree_inner(
                 .to_owned(),
         ));
     }
-    let expected_snapshot = directory_snapshot(&destination)?;
+    let expected_snapshot = directory_snapshot(&destination)
+        .map_err(|error| vanished_during_compaction(error, &destination))?;
     let base_directory = state_directory.join("bases/v1").join(repository_cache_id(
         &repository.identity.common_git_dir,
         &compatibility.checkout_profile,
@@ -3327,6 +3329,7 @@ fn compact_worktree_inner(
         expected_snapshot,
         managed.backend,
     );
+    journal.old_expected_commit = Some(managed.expected_commit.clone());
     let journal_path = store.persist(&journal)?;
     fail_compaction_if_requested(journal.phase, fail_after)?;
 
@@ -9545,6 +9548,127 @@ enum MoveResumption {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+/// A path that vanished while compaction walked the worktree, such as a file
+/// a concurrent `git switch` deleted, means the worktree changed under it. That
+/// is the same refusal as any other change, not an I/O failure to inspect.
+/// Git failures are left alone: a missing `git` is not a changed worktree.
+fn vanished_during_compaction(error: WorktreeError, destination: &Path) -> WorktreeError {
+    if !matches!(error, WorktreeError::Io { .. } | WorktreeError::Storage(_)) {
+        return error;
+    }
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(cause) = current {
+        if cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
+        {
+            return WorktreeError::InvalidRequest(format!(
+                "worktree {} changed while it was being compacted; compaction was cancelled and nothing changed",
+                destination.display()
+            ));
+        }
+        current = cause.source();
+    }
+    error
+}
+
+/// Whether Git's view of a compacted worktree moved since the compaction
+/// verified it: HEAD left the compacted commit, or the index holds changes.
+fn compacted_git_state_moved(
+    git: &Git,
+    journal: &DecodedCompactJournal,
+) -> Result<bool, WorktreeError> {
+    let expected = ObjectId::parse(journal.expected_commit.clone())?;
+    let head_moved = git
+        .list_worktrees(&journal.repository)?
+        .into_iter()
+        .find(|worktree| paths_match(&worktree.path, &journal.destination))
+        .is_none_or(|worktree| worktree.head.as_ref() != Some(&expected));
+    Ok(head_moved || git.worktree_index_has_changes(&journal.destination)?)
+}
+
+/// Undo a compaction whose old view a Git command updated after the swap.
+///
+/// Each step is decided from the paths alone, so recovery repeats whatever a
+/// kill left undone: move the untouched replacement back to its staging
+/// name, rename Git's view back into place, point the add journal at its
+/// original base and commit again, then delete the replacement.
+fn restore_original_after_compaction(
+    git: &Git,
+    store: &CompactJournalStore,
+    mut record: CompactJournalRecord,
+    journal: &DecodedCompactJournal,
+    fail_after: Option<CompactWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    let state_directory = lifecycle_state_directory(&journal.journal_path, "compaction")?;
+    let old_expected_commit = journal.old_expected_commit.as_deref().ok_or_else(|| {
+        WorktreeError::InvalidRequest(format!(
+            "compaction journal {} cannot restore its original view without the original commit",
+            journal.journal_path.display()
+        ))
+    })?;
+    let _metadata_lock =
+        acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
+    if journal.destination.is_dir() && journal.quarantine.is_dir() && !journal.replacement.exists()
+    {
+        if directory_snapshot(&journal.destination)? != journal.expected_snapshot {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "a Git command updated the pre-compaction view of {} kept at {}, but {} itself \
+                 also changed, so neither can replace the other; both were preserved",
+                journal.destination.display(),
+                journal.quarantine.display(),
+                journal.destination.display()
+            )));
+        }
+        fs::rename(&journal.destination, &journal.replacement)
+            .map_err(|source| io("set the compacted view aside", &journal.replacement, source))?;
+        sync_parent(&journal.replacement)?;
+    }
+    if !journal.destination.exists() && journal.quarantine.is_dir() {
+        fs::rename(&journal.quarantine, &journal.destination).map_err(|source| {
+            io(
+                "restore the worktree Git updated during compaction",
+                &journal.destination,
+                source,
+            )
+        })?;
+        sync_parent(&journal.destination)?;
+    }
+    if !journal.destination.is_dir() || journal.quarantine.exists() {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "compaction journal {} is restoring {}, but the paths disagree; all paths were preserved",
+            journal.journal_path.display(),
+            journal.destination.display()
+        )));
+    }
+    let add_store = JournalStore::open(&state_directory);
+    let managed = add_store
+        .load_all()?
+        .into_iter()
+        .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest(format!(
+                "compaction journal {} does not reference a known add operation",
+                journal.journal_path.display()
+            ))
+        })?;
+    add_store.update_active_base(
+        &managed.journal_path,
+        &journal.destination,
+        &journal.base_path,
+        &journal.old_base_path,
+        old_expected_commit,
+    )?;
+    remove_tree_if_present(&journal.replacement)?;
+    sync_parent(&journal.replacement)?;
+    advance_compaction(
+        store,
+        &mut record,
+        CompactWorktreePhase::Cancelled,
+        fail_after,
+    )
+}
+
 fn resume_compaction(
     git: &Git,
     store: &CompactJournalStore,
@@ -9554,6 +9678,9 @@ fn resume_compaction(
     let state_directory = lifecycle_state_directory(&journal.journal_path, "compaction")?;
     validate_compaction_paths(&state_directory, &journal)?;
     let mut record = store.reload(&journal)?;
+    if record.phase == CompactWorktreePhase::RestoringOriginal {
+        return restore_original_after_compaction(git, store, record, &journal, fail_after);
+    }
 
     if matches!(
         record.phase,
@@ -9621,11 +9748,13 @@ fn resume_compaction(
                 // worktree yet, so cancel and remove only the replacement.
                 // Left pending, repair re-ran this check forever while remove
                 // and compact refused until it passed.
-                Err(WorktreeError::InvalidRequest(_)) => {
-                    cancel_unactivated_compaction(store, &mut record, &journal, fail_after)?;
-                    return Ok(());
-                }
-                Err(error) => return Err(error),
+                Err(error) => match vanished_during_compaction(error, &journal.destination) {
+                    WorktreeError::InvalidRequest(_) => {
+                        cancel_unactivated_compaction(store, &mut record, &journal, fail_after)?;
+                        return Ok(());
+                    }
+                    error => return Err(error),
+                },
             }
             verify_snapshot(&journal.replacement, &journal.expected_snapshot)?;
             fs::rename(&journal.destination, &journal.quarantine).map_err(|source| {
@@ -9683,7 +9812,22 @@ fn resume_compaction(
                 journal.journal_path.display()
             )));
         }
-        git.refresh_worktree_index(&journal.destination)?;
+        // A failure while the lock exists is reported as `IndexLocked`; a
+        // command that released it in between surfaces as a plain failure, so
+        // that one is tried once more.
+        let refreshed = match git.refresh_worktree_index(&journal.destination) {
+            Err(GitError::CommandFailed { .. }) => git.refresh_worktree_index(&journal.destination),
+            refreshed => refreshed,
+        };
+        match refreshed {
+            // The refresh only updates Git's stat cache, which Git refreshes
+            // itself later. A lock means a Git command is running in the
+            // worktree right now; failing here left the compaction pending,
+            // when that command is exactly what the old-view check below
+            // detects and undoes.
+            Ok(()) | Err(GitError::IndexLocked { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
         if !git
             .list_worktrees(&journal.repository)?
             .into_iter()
@@ -9745,6 +9889,22 @@ fn resume_compaction(
                     dropped.display(),
                     journal.quarantine.display()
                 )));
+            }
+            // A Git command that ran in the old view after the swap (a
+            // commit, a switch) moved HEAD or the index with that view, so it,
+            // not the untouched replacement, matches Git. Swap them back.
+            if directory_snapshot(&journal.quarantine)? != journal.expected_snapshot
+                && journal.old_expected_commit.is_some()
+                && compacted_git_state_moved(git, &journal)?
+                && directory_snapshot(&journal.destination)? == journal.expected_snapshot
+            {
+                advance_compaction(
+                    store,
+                    &mut record,
+                    CompactWorktreePhase::RestoringOriginal,
+                    fail_after,
+                )?;
+                return restore_original_after_compaction(git, store, record, &journal, fail_after);
             }
             // A write that reached the old view after it was verified is the
             // caller's data: keep the view and say how to finish. This is not
@@ -13029,6 +13189,207 @@ mod tests {
         let accounting = storage_accounting(&state).expect("account after repair");
         assert_eq!(accounting.pending_compactions, 0);
         assert_eq!(accounting.completed_compactions, 1);
+    }
+
+    fn git_output(directory: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {arguments:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A Git command run in the worktree just after the swap acts on the old
+    /// view, its working directory, while HEAD and the index move with it.
+    /// The compaction used to keep that view aside and leave the replacement
+    /// on the pre-command files, so `git status` showed changes undoing the
+    /// command. It now swaps the views back and cancels the compaction.
+    #[test]
+    fn a_git_command_in_the_old_view_undoes_the_compaction() {
+        for command in ["commit", "switch", "commit-then-killed-mid-restore"] {
+            let (fixture, destination, state) =
+                stopped_compaction(CompactWorktreePhase::ReplacementActivated);
+            let repository = fixture.path().join("repository");
+            let compactions = crate::journal::CompactJournalStore::open(&state);
+            let journal = compactions.load_all().expect("load").remove(0);
+            let old_base = journal.old_base_path.clone();
+            let old_view = journal.quarantine.clone();
+            let head = if command == "switch" {
+                fs::write(repository.join("other.txt"), "other\n").unwrap();
+                git(&repository, &["add", "other.txt"]);
+                git(&repository, &["commit", "--quiet", "-m", "other"]);
+                let other = git_output(&repository, &["rev-parse", "HEAD"]);
+                git(&old_view, &["switch", "--quiet", "--detach", &other]);
+                other
+            } else {
+                fs::write(old_view.join("new.txt"), "new\n").unwrap();
+                git(&old_view, &["add", "new.txt"]);
+                git(&old_view, &["commit", "--quiet", "-m", "during compaction"]);
+                git_output(&old_view, &["rev-parse", "HEAD"])
+            };
+            if command == "commit-then-killed-mid-restore" {
+                // Killed after the compacted view was set aside, before Git's
+                // view was renamed back.
+                let store =
+                    crate::journal::CompactJournalStore::open(&fs::canonicalize(&state).unwrap());
+                let decoded = store.load_all().unwrap().remove(0);
+                let mut record = store.reload(&decoded).unwrap();
+                for phase in [
+                    CompactWorktreePhase::AddJournalUpdated,
+                    CompactWorktreePhase::RestoringOriginal,
+                ] {
+                    if phase == CompactWorktreePhase::AddJournalUpdated {
+                        // Repair would retarget the add journal first.
+                        let add_store = JournalStore::open(&fs::canonicalize(&state).unwrap());
+                        let managed = add_store.load_all().unwrap().remove(0);
+                        add_store
+                            .update_active_base(
+                                &managed.journal_path,
+                                &decoded.destination,
+                                &decoded.old_base_path,
+                                &decoded.base_path,
+                                &decoded.expected_commit,
+                            )
+                            .unwrap();
+                    }
+                    record.transition(phase).unwrap();
+                    store.persist(&record).unwrap();
+                }
+                fs::rename(&destination, &decoded.replacement).expect("set aside");
+            }
+
+            let report = recover_incomplete_operations(&state).expect("repair");
+
+            assert!(report.errors.is_empty(), "{command}: {report:?}");
+            assert_eq!(
+                git_output(&destination, &["rev-parse", "HEAD"]),
+                head,
+                "{command}"
+            );
+            assert_eq!(
+                git_output(&destination, &["status", "--porcelain", "--ignored"]),
+                "",
+                "{command}: the worktree matches what Git left"
+            );
+            assert!(!old_view.exists(), "{command}");
+            assert!(!journal.replacement.exists(), "{command}");
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(
+                accounting.pending_compactions, 0,
+                "{command}: {accounting:?}"
+            );
+            assert_eq!(
+                accounting.cancelled_compactions, 1,
+                "{command}: {accounting:?}"
+            );
+            assert!(
+                accounting.diagnostic_issues.is_empty(),
+                "{command}: {accounting:?}"
+            );
+            let managed = JournalStore::open(&state).load_all().unwrap().remove(0);
+            assert_eq!(
+                managed.base_path, old_base,
+                "{command}: the add journal is restored"
+            );
+        }
+    }
+
+    /// A Git command running in the worktree holds its index lock. The
+    /// post-swap stat refresh then failed and left the compaction pending,
+    /// although the refresh is only a cache Git rebuilds itself.
+    #[test]
+    fn compaction_finishes_while_another_git_command_holds_the_index() {
+        let (_fixture, destination, state) =
+            stopped_compaction(CompactWorktreePhase::ReplacementActivated);
+        let lock = PathBuf::from(git_output(
+            &destination,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "index.lock",
+            ],
+        ));
+        fs::write(&lock, b"").expect("hold the index lock");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
+        assert_eq!(accounting.completed_compactions, 1, "{accounting:?}");
+        assert!(lock.exists(), "another command's lock is never touched");
+        fs::remove_file(&lock).unwrap();
+        assert_eq!(git_output(&destination, &["status", "--porcelain"]), "");
+    }
+
+    #[test]
+    fn a_path_vanishing_mid_walk_is_a_change_not_an_io_failure() {
+        let destination = Path::new("/worktree");
+        let vanished = super::vanished_during_compaction(
+            super::io(
+                "snapshot managed worktree",
+                destination,
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+            ),
+            destination,
+        );
+        assert!(
+            matches!(&vanished, super::WorktreeError::InvalidRequest(message)
+                if message.contains("changed while it was being compacted")),
+            "{vanished}"
+        );
+        // The macOS ACL walker reports through a storage error.
+        let storage = super::vanished_during_compaction(
+            super::WorktreeError::Storage(riftri_storage::StorageError::Io {
+                operation: "inspect macOS ACL",
+                path: destination.join("gone.txt"),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            }),
+            destination,
+        );
+        assert!(
+            matches!(storage, super::WorktreeError::InvalidRequest(_)),
+            "{storage}"
+        );
+        let denied = super::vanished_during_compaction(
+            super::io(
+                "snapshot managed worktree",
+                destination,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            ),
+            destination,
+        );
+        assert!(
+            matches!(denied, super::WorktreeError::Io { .. }),
+            "{denied}"
+        );
+    }
+
+    /// The swap-back needs the replacement untouched. When both views
+    /// changed, neither may replace the other.
+    #[test]
+    fn a_git_command_in_the_old_view_keeps_both_when_the_replacement_changed() {
+        let (_fixture, destination, state) =
+            stopped_compaction(CompactWorktreePhase::ReplacementActivated);
+        let old_view = crate::journal::CompactJournalStore::open(&state)
+            .load_all()
+            .unwrap()
+            .remove(0)
+            .quarantine;
+        fs::write(old_view.join("new.txt"), "new\n").unwrap();
+        git(&old_view, &["add", "new.txt"]);
+        git(&old_view, &["commit", "--quiet", "-m", "during compaction"]);
+        fs::write(destination.join("mine.txt"), "mine\n").unwrap();
+
+        for _ in 0..2 {
+            let report = recover_incomplete_operations(&state).expect("repair report");
+            assert_eq!(report.errors.len(), 1, "{report:?}");
+            assert_eq!(fs::read(old_view.join("new.txt")).unwrap(), b"new\n");
+            assert_eq!(fs::read(destination.join("mine.txt")).unwrap(), b"mine\n");
+        }
     }
 
     /// A write that reached the old view after it was verified is kept, but
