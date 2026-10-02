@@ -3029,11 +3029,8 @@ fn signal_name(signal: i32) -> Option<&'static str> {
 mod tests {
     use std::ffi::{OsStr, OsString};
     use std::fs;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
-
-    #[cfg(unix)]
-    use std::path::PathBuf;
 
     use tempfile::{TempDir, tempdir};
 
@@ -5133,7 +5130,7 @@ mod tests {
             .unwrap();
         assert_eq!(handle.process_attempts() - before, 1);
         assert_eq!(records.len(), paths.len() * 2);
-        for (path, records) in paths.iter().zip(records.chunks_exact(2)) {
+        for (path, records) in paths.iter().zip(records.as_chunks::<2>().0) {
             assert!(records.iter().all(|record| &record.path == path));
             assert!(
                 records
