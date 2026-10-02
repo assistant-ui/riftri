@@ -2455,7 +2455,7 @@ fn read_batch_blob(
     reader
         .read_exact(&mut delimiter)
         .map_err(|error| invalid_blob_batch(error.to_string()))?;
-    if delimiter != [b'\n'] {
+    if delimiter != *b"\n" {
         return Err(invalid_blob_batch("missing blob body delimiter"));
     }
     Ok(bytes)
