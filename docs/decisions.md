@@ -180,6 +180,11 @@ That derivation reads the journals alone: an add journal that is neither rolled
 back nor removal-complete still counts its base even when Git no longer
 registers its destination, so the read-only status report cannot describe a base
 as unreferenced while the collector protects it (#600).
+Each state diagnostic carries a typed `BaseCountImpact` saying whether it can
+conceal a reference, and only a diagnostic that can makes the counts
+unconfirmed. New diagnostics default to the conservative value, so an
+unclassified one keeps the cautious answer rather than silently asserting
+completeness (#603).
 Zero-reference bases remain cached until the explicit garbage collector is
 applied; collection is journaled and independently validates that no active or
 incomplete operation references the base.

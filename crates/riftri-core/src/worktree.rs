@@ -291,10 +291,30 @@ pub struct ViewStorageAccounting {
     pub allocated_bytes: u64,
 }
 
+/// Whether a state diagnostic can conceal a base reference the surrounding
+/// report did not count.
+///
+/// This is deliberately one bit rather than a taxonomy of causes. A consumer
+/// only needs to know whether the reference counts can be trusted, and #598
+/// showed what happens when the renderer asserts a specific cause it cannot
+/// derive. Classify a diagnostic as [`CountsUnaffected`] only where the claim
+/// is provably counted elsewhere; everything else stays conservative.
+///
+/// [`CountsUnaffected`]: BaseCountImpact::CountsUnaffected
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseCountImpact {
+    /// Something was not read, not trusted, or not traversed, so a base
+    /// reference may be missing from the counts.
+    MayHideReference,
+    /// Whatever this diagnostic describes is already reflected in the counts.
+    CountsUnaffected,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateDiagnosticIssue {
     pub path: PathBuf,
     pub reason: String,
+    pub base_count_impact: BaseCountImpact,
 }
 
 #[derive(Debug, Default)]
@@ -995,6 +1015,7 @@ pub fn worktree_inventory_across_states(
         Ok(None) => {}
         Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
             path: default,
+            base_count_impact: BaseCountImpact::MayHideReference,
             reason: format!(
                 "default Riftri state path is not a real directory; discovery did not traverse it: {error}"
             ),
@@ -1005,6 +1026,7 @@ pub fn worktree_inventory_across_states(
         if !configured.is_absolute() {
             inventory.registration_issues.push(StateDiagnosticIssue {
                 path: configured,
+                base_count_impact: BaseCountImpact::MayHideReference,
                 reason: "registered Riftri state directory is not absolute; discovery skipped it"
                     .to_owned(),
             });
@@ -1014,6 +1036,7 @@ pub fn worktree_inventory_across_states(
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
                 inventory.registration_issues.push(StateDiagnosticIssue {
                     path: configured,
+                    base_count_impact: BaseCountImpact::MayHideReference,
                     reason: "registered Riftri state directory is missing; \
                              `riftri state unregister` can remove the stale registration"
                         .to_owned(),
@@ -1023,6 +1046,7 @@ pub fn worktree_inventory_across_states(
             Err(source) => {
                 inventory.registration_issues.push(StateDiagnosticIssue {
                     path: configured,
+                    base_count_impact: BaseCountImpact::MayHideReference,
                     reason: format!(
                         "registered Riftri state directory could not be inspected: {source}"
                     ),
@@ -1032,6 +1056,7 @@ pub fn worktree_inventory_across_states(
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 inventory.registration_issues.push(StateDiagnosticIssue {
                     path: configured,
+                    base_count_impact: BaseCountImpact::MayHideReference,
                     reason: "registered Riftri state path is not a real directory; \
                              discovery did not traverse it"
                         .to_owned(),
@@ -1051,6 +1076,7 @@ pub fn worktree_inventory_across_states(
             }
             Err(error) => inventory.registration_issues.push(StateDiagnosticIssue {
                 path: configured,
+                base_count_impact: BaseCountImpact::MayHideReference,
                 reason: format!("registered Riftri state directory could not be resolved: {error}"),
             }),
         }
@@ -1064,6 +1090,7 @@ pub fn worktree_inventory_across_states(
                 inventory.states.push(StateWorktreeInventory {
                     diagnostic_issues: vec![StateDiagnosticIssue {
                         path: state_directory.clone(),
+                        base_count_impact: BaseCountImpact::MayHideReference,
                         reason: format!(
                             "state directory could not be inventoried; discovery reported it instead of guessing: {error}"
                         ),
@@ -1090,6 +1117,7 @@ pub fn worktree_inventory_across_states(
                 Some(_) => {}
                 None => diagnostic_issues.push(StateDiagnosticIssue {
                     path: view.destination,
+                    base_count_impact: BaseCountImpact::MayHideReference,
                     reason: format!(
                         "managed worktree belongs to a repository that could not be inspected; \
                          it was left out of the repository-filtered inventory: {}",
@@ -1395,6 +1423,7 @@ pub fn storage_accounting(
         .chain(collection_load.issues)
         .map(|issue| StateDiagnosticIssue {
             path: issue.path,
+            base_count_impact: BaseCountImpact::MayHideReference,
             reason: format!(
                 "malformed durable operation journal; Riftri preserved it: {}",
                 issue.reason
@@ -1423,6 +1452,10 @@ pub fn storage_accounting(
             }
             Err(error) => invalid_removal_journals.push(StateDiagnosticIssue {
                 path: journal.journal_path.clone(),
+                // Distrusting this journal keeps its operation out of
+                // `completed`, so the add it claims to have retired stays
+                // counted. That can only over-count a base, never hide one.
+                base_count_impact: BaseCountImpact::CountsUnaffected,
                 reason: format!(
                     "unsafe durable removal journal; Riftri did not trust its lifecycle claim: {error}"
                 ),
@@ -1456,6 +1489,7 @@ pub fn storage_accounting(
             if worktree.head_unresolvable {
                 unresolvable_worktree_issues.push(StateDiagnosticIssue {
                     path: worktree.path,
+                    base_count_impact: BaseCountImpact::MayHideReference,
                     reason: "Git cannot resolve this worktree's HEAD; Riftri left it \
                              alone. `git worktree repair` or removing the worktree \
                              clears this"
@@ -1494,11 +1528,15 @@ pub fn storage_accounting(
                 unregistered_base_claims.push(journal.base_path.clone());
                 invalid_add_journals.push(StateDiagnosticIssue {
                     path: journal.journal_path.clone(),
+                    // The push above counts this journal's base, so the claim
+                    // this diagnostic describes is already in the totals.
+                    base_count_impact: BaseCountImpact::CountsUnaffected,
                     reason,
                 })
             }
             Err(error) => invalid_add_journals.push(StateDiagnosticIssue {
                 path: journal.journal_path.clone(),
+                base_count_impact: BaseCountImpact::MayHideReference,
                 reason: format!(
                     "unsafe durable add journal; Riftri did not inspect its referenced paths: {error}"
                 ),
@@ -1512,6 +1550,7 @@ pub fn storage_accounting(
             Ok(()) => compact_journals.push(journal),
             Err(error) => invalid_compact_journals.push(StateDiagnosticIssue {
                 path: journal.journal_path.clone(),
+                base_count_impact: BaseCountImpact::MayHideReference,
                 reason: format!(
                     "unsafe durable compaction journal; Riftri did not trust its lifecycle claim: {error}"
                 ),
@@ -7534,6 +7573,7 @@ fn add_state_issue(
 ) {
     issues.push(StateDiagnosticIssue {
         path,
+        base_count_impact: BaseCountImpact::MayHideReference,
         reason: reason.into(),
     });
 }
@@ -12036,6 +12076,7 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    use crate::BaseCountImpact;
     use std::collections::HashSet;
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -15372,6 +15413,16 @@ mod tests {
             .collect::<HashSet<_>>();
 
         assert_eq!(reported, malformed);
+        // A journal that could not be parsed may hold an uncounted base
+        // reference, so it must keep the counts conservative.
+        assert!(
+            report
+                .diagnostic_issues
+                .iter()
+                .filter(|issue| issue.reason.contains("malformed durable operation journal"))
+                .all(|issue| issue.base_count_impact == BaseCountImpact::MayHideReference),
+            "an unreadable journal must mark base counts unconfirmed: {report:?}"
+        );
         for path in &malformed {
             assert_eq!(
                 fs::read(path).expect("malformed journal must remain"),
@@ -15512,6 +15563,15 @@ mod tests {
         assert!(
             !status.diagnostic_issues.is_empty(),
             "the unregistered destination must still be reported: {status:?}"
+        );
+        // The claim is counted above, so this diagnostic must not also mark
+        // every base count unconfirmed.
+        assert!(
+            status
+                .diagnostic_issues
+                .iter()
+                .all(|issue| issue.base_count_impact == BaseCountImpact::CountsUnaffected),
+            "a counted claim must not report itself as possibly hidden: {status:?}"
         );
 
         // The claim status now counts is exactly the one gc refuses to release.
