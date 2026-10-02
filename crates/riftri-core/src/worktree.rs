@@ -3980,6 +3980,11 @@ fn perform_add(
     // full stat-and-content comparison that a separate `update-index
     // --refresh` used to run, so any divergence between the cloned view and
     // the exact tree still fails the add before activation.
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::AddCleanCheck,
+        destination,
+    );
     if !git.worktree_is_clean(destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "new worktree {} is not clean; it was not activated",
@@ -11248,18 +11253,21 @@ fn rollback_decoded(
             }
         }
         restore_staged_git_pointer(journal)?;
-        if journal.backend == BackendKind::OverlayFs {
+        let removed = if journal.backend == BackendKind::OverlayFs {
             #[cfg(target_os = "linux")]
-            rollback_overlayfs_worktree(git, journal)?;
+            {
+                rollback_overlayfs_worktree(git, journal)
+            }
             #[cfg(not(target_os = "linux"))]
             return Err(WorktreeError::Unsupported(
                 "OverlayFS recovery requires Linux".to_owned(),
             ));
         } else {
-            restore_pointer_for_rollback(journal)?;
-            remove_registered_worktree_for_rollback(git, journal)?;
-            remove_empty_directory_if_present(&journal.destination)?;
-        }
+            restore_pointer_for_rollback(journal)
+                .and_then(|()| remove_registered_worktree_for_rollback(git, journal))
+                .and_then(|()| remove_empty_directory_if_present(&journal.destination))
+        };
+        removed.map_err(|error| changed_add_destination(error, journal, state_directory))?;
     } else if journal.destination.exists() && !is_empty_real_directory(&journal.destination)? {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination {} exists but is not registered by Git; recovery preserved it",
@@ -11865,6 +11873,34 @@ fn changed_rollback_worktree(journal: &DecodedJournal) -> WorktreeError {
         "worktree {} has changes; recovery preserved it",
         journal.destination.display()
     ))
+}
+
+/// Rolling back an add found its unfinished worktree changed, typically by a
+/// write that landed before the add returned. The change is kept, but the
+/// bare "has changes" refusal left the add pending with every `repair`
+/// failing the same way and nothing saying how to finish, so name the kept
+/// worktree and the steps that let repair complete the rollback.
+fn changed_add_destination(
+    error: WorktreeError,
+    journal: &DecodedJournal,
+    state_directory: &Path,
+) -> WorktreeError {
+    if !matches!(
+        (&error, changed_rollback_worktree(journal)),
+        (WorktreeError::InvalidRequest(found), WorktreeError::InvalidRequest(changed))
+            if *found == changed
+    ) {
+        return error;
+    }
+    let destination = journal.destination.display();
+    recovery_pending_error(
+        format!(
+            "{destination} was not created as a worktree, but it changed before the add \
+             finished, so rollback kept it; copy anything you need out of {destination} \
+             and delete it"
+        ),
+        state_directory,
+    )
 }
 
 fn restore_pointer_for_rollback(journal: &DecodedJournal) -> Result<(), WorktreeError> {
@@ -16296,6 +16332,151 @@ mod tests {
                 "raced write\n"
             );
         }
+    }
+
+    /// A file written into the destination before the add returned failed the
+    /// add, and rollback kept it, but only said "has changes; recovery
+    /// preserved it". The add stayed pending, every `repair` failed the same
+    /// way, and nothing said how to finish.
+    #[cfg(unix)]
+    #[test]
+    fn a_write_into_an_unfinished_add_is_kept_with_steps_to_finish() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        let saved = fixture.path().join("saved.txt");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::AddCleanCheck,
+            |path| fs::write(path.join("mine.txt"), "user data\n").expect("write into the add"),
+        );
+        let error = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect_err("the write fails the add's clean check");
+        let super::WorktreeError::OperationAndRollback { rollback, .. } = &error else {
+            panic!("the add must report its unfinished rollback: {error}");
+        };
+        assert!(
+            matches!(**rollback, super::WorktreeError::RecoveryPending { .. }),
+            "{error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains(&destination.display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains("copy anything you need out of"),
+            "{message}"
+        );
+        assert!(message.contains("riftri repair"), "{message}");
+        assert_eq!(
+            fs::read(destination.join("mine.txt")).unwrap(),
+            b"user data\n"
+        );
+
+        let report = recover_incomplete_operations(&state).expect("repair report");
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(
+            report.errors[0].contains("copy anything you need out of"),
+            "{report:?}"
+        );
+
+        // Following the steps lets repair finish rolling the add back.
+        fs::copy(destination.join("mine.txt"), &saved).expect("copy the write out");
+        fs::remove_dir_all(&destination).expect("delete the kept destination");
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        let registered = Git::default().list_worktrees(&repository).expect("list");
+        assert!(
+            registered
+                .iter()
+                .all(|worktree| worktree.path.file_name() != Some(OsStr::new("worktree"))),
+            "the rolled-back add must not stay registered"
+        );
+        assert_eq!(fs::read(&saved).unwrap(), b"user data\n");
+    }
+
+    /// The same write, landing before the view was swapped in: the destination
+    /// holds only Git's pointer and the caller's file.
+    #[cfg(unix)]
+    #[test]
+    fn repair_explains_a_write_into_an_add_killed_before_its_view() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/late-write")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::GitMetadataCreated),
+            false,
+        )
+        .expect_err("simulate process termination");
+        fs::write(destination.join("mine.txt"), "user data\n").expect("write into the add");
+
+        for _ in 0..2 {
+            let report = recover_incomplete_operations(&state).expect("repair report");
+            assert_eq!(report.errors.len(), 1, "{report:?}");
+            assert!(
+                report.errors[0].contains("copy anything you need out of"),
+                "{report:?}"
+            );
+            assert!(report.errors[0].contains("riftri repair"), "{report:?}");
+            assert_eq!(
+                fs::read(destination.join("mine.txt")).unwrap(),
+                b"user data\n"
+            );
+        }
+
+        fs::remove_dir_all(&destination).expect("delete the kept destination");
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
     }
 
     /// Build a committed repository for the empty-destination rollback tests.
