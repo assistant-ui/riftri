@@ -317,7 +317,17 @@ intent-recorded
   -> worktree-removed
   -> base-released
   -> complete
+intent-recorded | clean-verified -> cancelled
 ```
+
+A removal is `cancelled` when it is refused after recording intent but before
+anything was removed: the native view is back at its path, Git still
+registers it, and no quarantine remains. The worktree simply stays, and the
+refusal's promise that nothing changed is true. Recovery cancels the same way
+when the worktree changed after intent. Before this phase, such a journal made
+every `riftri repair` refuse, blocked other lifecycle commands, and would have
+completed the removal once the change was undone. OverlayFS removals are not
+cancelled, because a failed one may have left the view unmounted.
 
 Clean removal validates cleanliness before recording intent and rechecks it
 when resuming before Git removes a still-registered view.
@@ -344,9 +354,10 @@ do not change this consent. OverlayFS reads Git metadata through its private
 upper-layer pointer while the merged view is unmounted. Legacy content-only
 force snapshots cannot prove this Git state and are preserved for manual
 inspection rather than automatically completing a pending deletion.
-Riftri revalidates the combined snapshot at the final delete boundary and
-during recovery; any later change stops the operation and
-is preserved. Only a still-present native view whose snapshot matches reaches
+Riftri revalidates the combined snapshot at the final delete boundary, again
+at the quarantine path after the rename (a write landing between that check
+and the rename would otherwise be deleted with the quarantine), and during
+recovery; any later change stops the operation and is preserved. Only a still-present native view whose snapshot matches reaches
 Git's force removal. Missing-path metadata cleanup continues through ordinary
 Git safety checks, so recreating the destination cannot turn old force consent
 into deletion of a new path. A missing view plus missing Git registration is
