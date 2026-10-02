@@ -1467,6 +1467,13 @@ pub fn storage_accounting(
     let mut add_journals = Vec::with_capacity(loaded_add_journals.len());
     let mut registered_worktrees = BTreeMap::new();
     let mut invalid_add_journals = Vec::new();
+    // Bases still claimed by an active add journal whose destination Git no
+    // longer registers. `validate_status_add_journal` only reaches its
+    // `Unregistered` arm after rejecting non-active and removal-complete
+    // journals, so these are exactly the claims `protected_bases` refuses to
+    // collect for `gc`. Reporting them as unreferenced would contradict the
+    // command that actually holds them.
+    let mut unregistered_base_claims = Vec::new();
     let claimed = status_claimed_destinations(&loaded_add_journals);
     for journal in loaded_add_journals {
         match validate_status_add_journal(
@@ -1484,6 +1491,7 @@ pub fn storage_accounting(
                 add_journals.push(journal);
             }
             Ok(StatusAddJournal::Unregistered(reason)) => {
+                unregistered_base_claims.push(journal.base_path.clone());
                 invalid_add_journals.push(StateDiagnosticIssue {
                     path: journal.journal_path.clone(),
                     reason,
@@ -1511,6 +1519,9 @@ pub fn storage_accounting(
         }
     }
     let mut references = BTreeMap::<PathBuf, usize>::new();
+    for base_path in unregistered_base_claims {
+        *references.entry(base_path).or_default() += 1;
+    }
     let mut views = Vec::new();
     let mut view_usage_requests = Vec::new();
     for journal in add_journals.iter().filter(|journal| {
@@ -15439,6 +15450,80 @@ mod tests {
         let collection = garbage_collect_inner(&state, false, None)
             .expect_err("garbage collection must reject the invalid removal");
         assert!(collection.to_string().contains("does not match"));
+        assert!(added.base_path.is_dir());
+    }
+
+    #[test]
+    fn an_unregistered_destination_keeps_its_base_counted_for_status() {
+        // `gc` protects a base for any add journal that is neither rolled back
+        // nor removal-complete, without consulting Git's worktree list. Status
+        // used to drop such a journal into its diagnostics and never count the
+        // claim, so it reported `refs=0` for a base `gc` refuses to collect --
+        // and only an unrelated blanket hedge stopped it from calling that base
+        // an unreferenced cache. The two must agree.
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "base\n").expect("write tracked file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/forgotten")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create managed worktree");
+
+        // Out-of-band removal: Git stops registering the destination while the
+        // add journal stays active, which is what the diagnostic describes.
+        git(
+            &repository,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                destination.to_str().expect("destination path"),
+            ],
+        );
+
+        let status = storage_accounting(&state).expect("status after Git forgets the destination");
+        assert_eq!(status.bases.len(), 1);
+        assert_eq!(
+            status.bases[0].reference_count, 1,
+            "an active add journal still claims this base: {status:?}"
+        );
+        assert!(
+            !status.diagnostic_issues.is_empty(),
+            "the unregistered destination must still be reported: {status:?}"
+        );
+
+        // The claim status now counts is exactly the one gc refuses to release.
+        let collection =
+            garbage_collect_inner(&state, false, None).expect("collection plan must succeed");
+        assert!(
+            collection
+                .skipped_protected
+                .iter()
+                .any(|skipped| skipped.base_path == added.base_path),
+            "gc must still protect the base status counts: {collection:?}"
+        );
         assert!(added.base_path.is_dir());
     }
 
