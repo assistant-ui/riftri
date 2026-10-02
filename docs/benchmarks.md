@@ -49,6 +49,28 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+For journal-history scaling, build the baseline and candidate with the same
+release profile, then run this Unix/native-COW fixture:
+
+```sh
+node docs/benchmarks/journal-history.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory 100
+```
+
+It creates the requested number of real add/remove cycles while retaining a
+live anchor, alternates four paired `status` and GC-plan measurements, and
+requires identical complete JSON reports. It then applies retirement, verifies
+the live view, removes it, collects its base, runs repair, and checks empty
+status. A failed run retains its fixture and is not a completed benchmark.
+Use larger cycle counts (up to 1,000) when evaluating long-lived repositories.
+
+The ignored `reports_journal_relationship_index_latency` core test isolates
+grouping 10,000 records, including index construction. A local release run
+measured 45,191–48,072 microseconds for linear grouping and 591–776 microseconds
+for indexed grouping. This does not establish an end-to-end improvement:
+100-cycle command timings were dominated by other costs/noise and did not
+demonstrate a clear benefit. Fresh under-lock deletion validation is unchanged.
+
 For a sparse/full comparison on an exported source tree, run:
 
 ```sh
