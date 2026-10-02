@@ -132,13 +132,17 @@ pub fn is_storage_full(error: &(dyn std::error::Error + 'static)) -> bool {
     if error
         .downcast_ref::<WorktreeError>()
         .is_some_and(WorktreeError::contains_storage_full)
+        || error
+            .downcast_ref::<GitError>()
+            .is_some_and(worktree::git_reported_storage_full)
     {
         return true;
     }
-    matches!(
-        error.downcast_ref::<ActivationError>(),
-        Some(ActivationError::Worktree(worktree)) if worktree.contains_storage_full()
-    )
+    match error.downcast_ref::<ActivationError>() {
+        Some(ActivationError::Worktree(worktree)) => worktree.contains_storage_full(),
+        Some(ActivationError::Git(git)) => worktree::git_reported_storage_full(git),
+        _ => false,
+    }
 }
 pub use shell::{
     command_path, repair_command, shell_quoted_path, status_command, unregister_state_command,

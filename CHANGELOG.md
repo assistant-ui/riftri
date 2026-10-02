@@ -7,6 +7,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Running out of disk space while Git builds a base, for example during
+  `riftri worktree compact`, is reported as `storage-full`, not `git-failed`
+  (#618).
 - `riftri worktree remove --force` no longer deletes a file written into the
   worktree just before its view is moved aside for deletion. The forced
   snapshot is now checked again at the quarantine, as a clean removal already

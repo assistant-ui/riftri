@@ -3292,6 +3292,35 @@ mod tests {
         assert_eq!(receipt["recovery"], "inspect");
     }
 
+    /// Git reports running out of space only in its stderr. Building a base
+    /// with `git checkout-index` on a full volume was a `git-failed` receipt
+    /// to inspect, which never told the caller the disk was full.
+    #[test]
+    fn storage_full_reported_by_git_has_the_same_code() {
+        let error = anyhow::Error::new(riftri_core::WorktreeError::Git(
+            riftri_core::GitError::CommandFailed {
+                arguments: "checkout-index --all".to_owned(),
+                stderr: "error: unable to create file d3/f63: No space left on device\n\
+                         fatal: cannot create directory at 'd4': No space left on device"
+                    .to_owned(),
+                disposition: "exit code 128".to_owned(),
+            },
+        ));
+        let full = receipt("worktree-compact", &error);
+
+        assert_eq!(full["code"], "storage-full");
+        assert_eq!(full["category"], "operational");
+
+        let other = anyhow::Error::new(riftri_core::WorktreeError::Git(
+            riftri_core::GitError::CommandFailed {
+                arguments: "checkout-index --all".to_owned(),
+                stderr: "fatal: bad object".to_owned(),
+                disposition: "exit code 128".to_owned(),
+            },
+        ));
+        assert_eq!(receipt("worktree-compact", &other)["code"], "git-failed");
+    }
+
     /// Combined failures used to stringify both causes, making the typed
     /// ENOSPC impossible to recognize by the time the CLI built a receipt.
     /// The rollback disposition must remain intact while the cause gets its
