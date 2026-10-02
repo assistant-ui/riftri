@@ -11,7 +11,6 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-#[cfg(unix)]
 use std::process::Stdio;
 
 use serde::Serialize;
@@ -726,6 +725,25 @@ impl Git {
             OsString::from(object.as_str()),
         ];
         Ok(self.run_os(Some(path), &arguments)?.stdout)
+    }
+
+    /// Read sizes without reading blob bodies. Exact IDs keep this protocol
+    /// independent of filenames; preserve request order and duplicate IDs.
+    pub fn blob_sizes(&self, path: &Path, objects: &[ObjectId]) -> Result<Vec<u64>, GitError> {
+        if objects.is_empty() {
+            return Ok(Vec::new());
+        }
+        let input = objects
+            .iter()
+            .map(|object| format!("{}\n", object.as_str()))
+            .collect::<String>();
+        let output = self.run_os_with_input(
+            Some(path),
+            &[OsString::from("cat-file"), OsString::from("--batch-check")],
+            &[],
+            input.into_bytes(),
+        )?;
+        parse_blob_sizes(&output.stdout, objects)
     }
 
     /// Return the installed Git LFS version line, or `None` when the standard
@@ -2260,7 +2278,6 @@ impl Git {
         }
     }
 
-    #[cfg(unix)]
     fn run_os_with_input(
         &self,
         path: Option<&Path>,
@@ -2309,6 +2326,38 @@ impl Git {
         })?;
         Ok(output)
     }
+}
+
+fn parse_blob_sizes(bytes: &[u8], objects: &[ObjectId]) -> Result<Vec<u64>, GitError> {
+    let invalid = || GitError::InvalidOutput {
+        context: "blob size batch",
+        detail: "expected one matching blob ID, type and size per request".to_owned(),
+    };
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    let lines = text
+        .strip_suffix('\n')
+        .ok_or_else(invalid)?
+        .split('\n')
+        .collect::<Vec<_>>();
+    if lines.len() != objects.len() {
+        return Err(invalid());
+    }
+    lines
+        .into_iter()
+        .zip(objects)
+        .map(|(line, object)| {
+            let fields = line.split(' ').collect::<Vec<_>>();
+            if fields.len() != 3
+                || fields[0] != object.as_str()
+                || fields[1] != "blob"
+                || fields[2].is_empty()
+                || !fields[2].bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return Err(invalid());
+            }
+            fields[2].parse().map_err(|_| invalid())
+        })
+        .collect()
 }
 
 /// Parse NUL-delimited `git check-attr -z` path/name/value triples.
@@ -2841,6 +2890,120 @@ mod tests {
 
     struct RepositoryFixture {
         directory: TempDir,
+    }
+
+    #[test]
+    fn blob_sizes_batch_preserves_order_duplicates_and_rejects_non_blobs() {
+        let fixture = RepositoryFixture::committed();
+        let handle = Git::default();
+        let revision = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let entries = handle.list_tree(fixture.path(), &revision.tree).unwrap();
+        let object = entries[0].object_id.clone();
+        fs::write(fixture.path().join("other.txt"), "abc").unwrap();
+        let other = Command::new("git")
+            .args(["hash-object", "-w", "other.txt"])
+            .current_dir(fixture.path())
+            .output()
+            .unwrap();
+        assert!(other.status.success());
+        let other =
+            super::ObjectId::parse(String::from_utf8(other.stdout).unwrap().trim()).unwrap();
+        let before = handle
+            .process_attempts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            handle
+                .blob_sizes(fixture.path(), &[object.clone(), other, object])
+                .unwrap(),
+            vec![8, 3, 8]
+        );
+        assert_eq!(
+            handle
+                .process_attempts
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - before,
+            1
+        );
+        assert!(handle.blob_sizes(fixture.path(), &[revision.tree]).is_err());
+        let missing = super::ObjectId::parse("0".repeat(40)).unwrap();
+        assert!(handle.blob_sizes(fixture.path(), &[missing]).is_err());
+        let before = handle
+            .process_attempts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(handle.blob_sizes(fixture.path(), &[]).unwrap().is_empty());
+        assert_eq!(
+            handle
+                .process_attempts
+                .load(std::sync::atomic::Ordering::Relaxed),
+            before
+        );
+    }
+
+    #[test]
+    fn blob_sizes_batch_rejects_malformed_protocol() {
+        let sha256 = super::ObjectId::parse("a".repeat(64)).unwrap();
+        assert_eq!(
+            super::parse_blob_sizes(
+                format!("{} blob 0\n", sha256.as_str()).as_bytes(),
+                &[sha256]
+            )
+            .unwrap(),
+            vec![0]
+        );
+        let id = super::ObjectId::parse("a".repeat(40)).unwrap();
+        for text in [
+            String::new(),
+            format!("{} blob 1", id.as_str()),
+            format!("{} blob -1\n", id.as_str()),
+            format!("{} tree 1\n", id.as_str()),
+            format!("{} missing\n", id.as_str()),
+            format!("{} blob 18446744073709551616\n", id.as_str()),
+            format!("{} blob 1\nextra\n", id.as_str()),
+            format!("{} blob 1\n", "b".repeat(40)),
+        ] {
+            assert!(
+                super::parse_blob_sizes(text.as_bytes(), std::slice::from_ref(&id)).is_err(),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "manual paired size-query benchmark; no host-sensitive timing gate"]
+    fn reports_blob_size_batch_latency() {
+        let fixture = RepositoryFixture::committed();
+        let handle = Git::default();
+        let revision = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let object = handle.list_tree(fixture.path(), &revision.tree).unwrap()[0]
+            .object_id
+            .clone();
+        let objects = vec![object; 64];
+        for round in 0..4 {
+            for batch in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let started = std::time::Instant::now();
+                let sizes = if batch {
+                    handle.blob_sizes(fixture.path(), &objects).unwrap()
+                } else {
+                    objects
+                        .iter()
+                        .map(|id| handle.blob_size(fixture.path(), id).unwrap())
+                        .collect()
+                };
+                assert_eq!(sizes, vec![8; 64]);
+                println!(
+                    "blob-size round={round} batch={batch} elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+            }
+        }
     }
 
     impl RepositoryFixture {

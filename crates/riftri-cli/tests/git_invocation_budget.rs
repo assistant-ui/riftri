@@ -115,7 +115,20 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         git(&repository, arguments);
     }
     fs::write(repository.join("tracked.txt"), "tracked\n").expect("write tracked file");
-    git(&repository, &["add", "--", "tracked.txt"]);
+    // Many small files exercise the metadata-heavy shape the one-large-file
+    // allocation benchmark cannot cover. Process budgets must stay constant.
+    for directory in 0..16 {
+        let path = repository.join(format!("package-{directory:02}"));
+        fs::create_dir(&path).unwrap();
+        for file in 0..64 {
+            fs::write(
+                path.join(format!("file-{file:02}")),
+                format!("{directory}:{file}\n"),
+            )
+            .unwrap();
+        }
+    }
+    git(&repository, &["add", "--all"]);
     git(&repository, &["commit", "--quiet", "-m", "initial"]);
 
     let real_git = real_git();
@@ -183,6 +196,58 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         existing.len(),
         existing.join("\n")
     );
+    for view in ["cold-view", "cached-view", "existing-view"] {
+        let destination = fixture.path().join(view);
+        assert!(
+            git(
+                &destination,
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            )
+            .stdout
+            .is_empty()
+        );
+        for directory in 0..16 {
+            for file in 0..64 {
+                assert_eq!(
+                    fs::read_to_string(
+                        destination.join(format!("package-{directory:02}/file-{file:02}"))
+                    )
+                    .unwrap(),
+                    format!("{directory}:{file}\n")
+                );
+            }
+        }
+    }
+    fs::write(
+        fixture.path().join("cached-view/package-00/file-00"),
+        "private\n",
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(fixture.path().join("cold-view/package-00/file-00")).unwrap(),
+        "0:0\n"
+    );
+    fs::write(
+        fixture.path().join("cached-view/package-00/file-00"),
+        "0:0\n",
+    )
+    .unwrap();
+    for view in ["existing-view", "cached-view", "cold-view"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "remove"])
+            .arg(fixture.path().join(view))
+            .arg("--state-dir")
+            .arg(&state)
+            .current_dir(&repository)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!fixture.path().join(view).exists());
+    }
 }
 
 fn run_with_counted_git(
