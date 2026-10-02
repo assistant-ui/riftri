@@ -48,10 +48,23 @@ pub(crate) const MARKER_V2_PREFIX: &[u8] = b"riftri-base-sha256-v2\n";
 /// digest is retained verbatim because the persisted compaction and
 /// forced-removal snapshot formats compose it.
 pub(crate) fn marker(root: &Path) -> io::Result<Vec<u8>> {
+    marker_v1(root, SpecialEntries::Refuse)
+}
+
+/// The v1 digest of a live worktree rather than a base. FIFOs, sockets, and
+/// device nodes, which a base can never hold but a worktree may (a dev
+/// server's socket), are hashed by kind and mode instead of refused, so
+/// forced removal and compaction can tell whether one appeared or changed.
+/// A tree without them digests exactly as [`marker`] does.
+pub(crate) fn worktree_marker(root: &Path) -> io::Result<Vec<u8>> {
+    marker_v1(root, SpecialEntries::Hash)
+}
+
+fn marker_v1(root: &Path, special: SpecialEntries) -> io::Result<Vec<u8>> {
     let mut digest = Sha256::new();
     let mut scratch = HashScratch::new();
     digest.update(b"riftri-base-content-v1\0");
-    hash_entry(root, &mut digest, MarkerVersion::V1, &mut scratch)?;
+    hash_entry(root, &mut digest, MarkerVersion::V1, special, &mut scratch)?;
     Ok(format!("riftri-base-sha256-v1\n{}\n", hex_lower(digest.finalize())).into_bytes())
 }
 
@@ -65,7 +78,13 @@ pub(crate) fn marker_v2(root: &Path) -> io::Result<Vec<u8>> {
     let mut digest = Sha256::new();
     let mut scratch = HashScratch::new();
     digest.update(b"riftri-base-content-v2\0");
-    hash_entry(root, &mut digest, MarkerVersion::V2, &mut scratch)?;
+    hash_entry(
+        root,
+        &mut digest,
+        MarkerVersion::V2,
+        SpecialEntries::Refuse,
+        &mut scratch,
+    )?;
     Ok(format!("riftri-base-sha256-v2\n{}\n", hex_lower(digest.finalize())).into_bytes())
 }
 
@@ -73,6 +92,14 @@ pub(crate) fn marker_v2(root: &Path) -> io::Result<Vec<u8>> {
 enum MarkerVersion {
     V1,
     V2,
+}
+
+/// What a walk does with an entry that is neither a file, a directory, nor a
+/// symlink.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpecialEntries {
+    Refuse,
+    Hash,
 }
 
 /// Operation-local buffers reused across every entry in one integrity walk.
@@ -242,6 +269,7 @@ fn hash_entry(
     path: &Path,
     digest: &mut Sha256,
     version: MarkerVersion,
+    special: SpecialEntries,
     scratch: &mut HashScratch,
 ) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
@@ -281,12 +309,20 @@ fn hash_entry(
         digest.update((entries.len() as u64).to_le_bytes());
         for (name, path) in entries {
             hash_native(&name, digest);
-            hash_entry(&path, digest, version, scratch)?;
+            hash_entry(&path, digest, version, special, scratch)?;
         }
     } else if metadata.is_file() {
         digest.update(b"file");
         digest.update(metadata.len().to_le_bytes());
         hash_file_bytes(path, metadata.len(), digest, &mut scratch.file_bytes)?;
+    } else if special == SpecialEntries::Hash {
+        digest.update(b"special");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            digest.update(metadata.mode().to_le_bytes());
+            digest.update(metadata.rdev().to_le_bytes());
+        }
     } else {
         return Err(io::Error::other("unsupported entry in immutable base"));
     }

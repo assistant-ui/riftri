@@ -251,9 +251,13 @@ fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
             }
         };
         set_mode(path, mode)?;
-    } else {
+    } else if matches!(update, ModeUpdate::ReadOnly) {
         return Err(StorageError::UnsupportedEntry(path.to_path_buf()));
     }
+    // A FIFO, socket, or device node needs no mode change to be deleted:
+    // unlinking it takes write access to its parent, which is granted above.
+    // Worktrees hold them (a dev server's socket), and refusing here left a
+    // removed worktree's quarantine undeletable.
     Ok(())
 }
 

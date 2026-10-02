@@ -532,7 +532,12 @@ fn update_permissions(path: &Path, read_only: bool) -> Result<(), StorageError> 
             update_permissions(&entry.path(), read_only)?;
         }
     } else if !metadata.is_file() {
-        return Err(StorageError::UnsupportedEntry(path.to_path_buf()));
+        // Deletion needs no mode change on other entries; only a base being
+        // made read-only must refuse them.
+        if read_only {
+            return Err(StorageError::UnsupportedEntry(path.to_path_buf()));
+        }
+        return Ok(());
     }
     if metadata.is_file() || read_only {
         set_read_only(path, &metadata, read_only)?;

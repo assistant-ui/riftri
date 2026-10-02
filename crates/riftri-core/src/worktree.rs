@@ -10189,7 +10189,7 @@ fn verify_compaction_checkout_shape(
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
-    let marker = crate::base_integrity::marker(path)
+    let marker = crate::base_integrity::worktree_marker(path)
         .map_err(|source| io("snapshot managed worktree", path, source))?;
     let mut digest = Sha256::new();
     digest.update(b"riftri-compaction-snapshot-v1\0");
@@ -10927,7 +10927,7 @@ fn snapshot_managed_worktree_for_force(managed: &DecodedJournal) -> Result<Strin
             })?
             .into_bytes()
     } else {
-        crate::base_integrity::marker(&managed.destination).map_err(|source| {
+        crate::base_integrity::worktree_marker(&managed.destination).map_err(|source| {
             io(
                 "snapshot managed worktree before forced removal",
                 &managed.destination,
@@ -18151,6 +18151,144 @@ mod tests {
                 .map(|entries| entries.count())
                 .unwrap_or(0);
             assert_eq!(remaining, 0, "{force} {phase:?}: removal journals retired");
+        }
+    }
+
+    /// A FIFO in a worktree is invisible to `git status`, so compaction's
+    /// snapshot met it first and failed as an I/O error to inspect. Now the
+    /// check for entries outside the Git tree names it as a policy refusal.
+    #[cfg(unix)]
+    #[test]
+    fn compaction_refuses_a_fifo_as_a_difference_from_its_checkout() {
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        fs::write(destination.join("tracked.txt"), "changed\n").unwrap();
+        git(
+            &destination,
+            &["commit", "--quiet", "-am", "worth compacting"],
+        );
+        assert!(
+            Command::new("mkfifo")
+                .arg(destination.join("pipe"))
+                .status()
+                .expect("run mkfifo")
+                .success()
+        );
+
+        let error = compact_worktree_inner(
+            CompactWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect_err("a FIFO is not part of the checkout");
+
+        assert!(
+            matches!(&error, super::WorktreeError::InvalidRequest(message)
+                if message.contains("outside its exact Git tree")),
+            "{error:?}"
+        );
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
+        assert!(destination.join("pipe").exists());
+    }
+
+    /// `git status` ignores FIFOs and sockets, so a worktree holding one is
+    /// clean, and `git worktree remove` deletes it. Riftri unregistered the
+    /// worktree, then failed to delete its quarantine ("unsupported filesystem
+    /// entry"), leaving a removal every `repair` failed the same way.
+    #[cfg(unix)]
+    #[test]
+    fn removal_deletes_fifos_and_sockets_like_git() {
+        for force in [false, true] {
+            let fixture = tempdir().expect("fixture");
+            let repository = fixture.path().join("repository");
+            let destination = fixture.path().join("worktree");
+            let state = fixture.path().join("state");
+            fs::create_dir(&repository).expect("create repository");
+            git(&repository, &["init", "--quiet"]);
+            git(&repository, &["config", "user.name", "Riftri Tests"]);
+            git(
+                &repository,
+                &["config", "user.email", "riftri@example.invalid"],
+            );
+            fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+            git(&repository, &["add", "--", "tracked.txt"]);
+            git(&repository, &["commit", "--quiet", "-m", "initial"]);
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            fs::create_dir(destination.join("run")).unwrap();
+            assert!(
+                Command::new("mkfifo")
+                    .arg(destination.join("run/pipe"))
+                    .status()
+                    .expect("run mkfifo")
+                    .success()
+            );
+            let _socket = std::os::unix::net::UnixListener::bind(destination.join("run/sock"))
+                .expect("create a socket");
+            let request = RemoveWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                state_dir: Some(state.clone()),
+            };
+
+            if force {
+                force_remove_worktree_inner(request, None)
+            } else {
+                remove_worktree_inner(request, None)
+            }
+            .expect("remove a worktree holding special files");
+
+            assert!(!destination.exists(), "force={force}");
+            assert!(!registered(&repository, &destination), "force={force}");
+            let leftovers = fs::read_dir(fixture.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| name.to_string_lossy().starts_with(".riftri-"))
+                .count();
+            assert_eq!(leftovers, 0, "force={force}: the quarantine is deleted");
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(accounting.pending_removals, 0, "{accounting:?}");
+            assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
         }
     }
 
