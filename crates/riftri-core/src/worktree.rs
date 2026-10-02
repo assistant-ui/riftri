@@ -7881,24 +7881,43 @@ fn tree_usages(requests: &[TreeUsageRequest]) -> Result<Vec<(u64, u64)>, Worktre
         .unwrap_or(1)
         .min(MAX_WORKERS)
         .min(requests.len());
-    let chunk_size = requests.len().div_ceil(worker_count);
+    scheduled_tree_usages(requests, worker_count, &measure_tree_usage)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn scheduled_tree_usages(
+    requests: &[TreeUsageRequest],
+    worker_count: usize,
+    measure: &(impl Fn(&TreeUsageRequest) -> Result<(u64, u64), WorktreeError> + Sync),
+) -> Result<Vec<(u64, u64)>, WorktreeError> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
-        let workers = requests
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(measure_tree_usage)
-                        .collect::<Result<Vec<_>, _>>()
+        let workers = (0..worker_count)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut results = Vec::new();
+                    loop {
+                        // This counter only assigns independent requests; no
+                        // filesystem state is published through the atomic.
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(request) = requests.get(index) else {
+                            break;
+                        };
+                        results.push((index, measure(request)));
+                    }
+                    results
                 })
             })
             .collect::<Vec<_>>();
         let mut usages = Vec::with_capacity(requests.len());
         for worker in workers {
-            usages.extend(worker.join().expect("tree-usage worker panicked")?);
+            usages.extend(worker.join().expect("tree-usage worker panicked"));
         }
-        Ok(usages)
+        // Preserve report and first-error order independently of completion
+        // order. All workers are joined before returning either outcome.
+        usages.sort_unstable_by_key(|(index, _)| *index);
+        usages.into_iter().map(|(_, result)| result).collect()
     })
 }
 
@@ -12462,6 +12481,68 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use crate::BaseCountImpact;
+    #[test]
+    fn accounting_workers_take_later_work_while_the_first_tree_is_blocked() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Condvar, Mutex};
+        let requests = (0..8)
+            .map(|index| super::TreeUsageRequest {
+                path: std::path::PathBuf::from(index.to_string()),
+                allocated_path: None,
+            })
+            .collect::<Vec<_>>();
+        let ready = (Mutex::new(false), Condvar::new());
+        let calls = (0..8).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>();
+        let result = super::scheduled_tree_usages(&requests, 2, &|request| {
+            let index = request.path.to_str().unwrap().parse::<usize>().unwrap();
+            calls[index].fetch_add(1, Ordering::Relaxed);
+            if index == 0 {
+                let (guard, _) = ready
+                    .1
+                    .wait_timeout_while(
+                        ready.0.lock().unwrap(),
+                        std::time::Duration::from_secs(5),
+                        |ready| !*ready,
+                    )
+                    .unwrap();
+                if !*guard {
+                    return Err(super::WorktreeError::InvalidRequest(
+                        "later work stayed pinned behind the first tree".into(),
+                    ));
+                }
+            } else if index == 1 {
+                *ready.0.lock().unwrap() = true;
+                ready.1.notify_all();
+            }
+            Ok((index as u64, 100 + index as u64))
+        })
+        .unwrap();
+        assert_eq!(result, (0..8).map(|i| (i, 100 + i)).collect::<Vec<_>>());
+        assert!(calls.iter().all(|count| count.load(Ordering::Relaxed) == 1));
+    }
+
+    #[test]
+    fn accounting_worker_errors_stay_in_request_order() {
+        let requests = (0..8)
+            .map(|index| super::TreeUsageRequest {
+                path: std::path::PathBuf::from(index.to_string()),
+                allocated_path: None,
+            })
+            .collect::<Vec<_>>();
+        let error = super::scheduled_tree_usages(&requests, 2, &|request| {
+            let index = request.path.to_str().unwrap().parse::<u64>().unwrap();
+            if index == 1 || index == 5 {
+                Err(super::WorktreeError::InvalidRequest(format!(
+                    "error-{index}"
+                )))
+            } else {
+                Ok((index, index))
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("error-1"));
+    }
+
     #[test]
     fn journal_relationship_index_preserves_order_and_duplicates() {
         let journals = vec![("b", 1), ("a", 2), ("b", 3), ("", 4)];

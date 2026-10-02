@@ -51,6 +51,22 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+To compare accounting worker scheduling on Unix/native COW volumes:
+
+```sh
+node docs/benchmarks/accounting-workers.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory 20000
+```
+
+This creates eight real views, puts 20,000 untracked files in each of the first
+two views in journal order, and alternates six complete `status --json` pairs.
+It requires identical reports, then removes only its generated untracked trees,
+checks tracked bytes and Git cleanliness, removes the views, and verifies empty
+state after GC and repair. No timing threshold is a correctness gate. This
+deliberately skewed fixture tests queue balancing; it is not representative of
+every repository. Keep the worker cap, traversal checks, and first-error order
+unchanged when comparing scheduling strategies.
+
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:
 
