@@ -86,7 +86,12 @@ jobs:
         env:
           RIFTRI_BENCH_TEST_BINARY: ${{ github.workspace }}/target/release/riftri
           TMPDIR: ${{ runner.temp }}/riftri-apfs
-        run: node --test docs/benchmarks/*.test.mjs
+        run: |
+          if ! command -v git-lfs >/dev/null; then
+            brew install git-lfs
+          fi
+          git-lfs version
+          node --test --test-concurrency=1 docs/benchmarks/*.test.mjs
 
       - name: Record native COW benchmark
         if: matrix.os == 'macos-15'
