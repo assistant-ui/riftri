@@ -563,6 +563,13 @@ impl WorktreeError {
         {
             return operation.contains_storage_full() || rollback.contains_storage_full();
         }
+        // `Git` is transparent, so the chain below never visits the
+        // `GitError` itself; see `is_absent_repository`.
+        if let Self::Git(git) = self
+            && git_reported_storage_full(git)
+        {
+            return true;
+        }
 
         let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
         while let Some(error) = current {
@@ -576,6 +583,16 @@ impl WorktreeError {
         }
         false
     }
+}
+
+/// A Git child that ran out of space reports it only as text, such as a
+/// checkout into a new base failing with "unable to create file …: No space
+/// left on device". Git runs under `LC_ALL=C`, so the C library's wording is
+/// stable. Without this, such a failure was a `git-failed` to inspect rather
+/// than `storage-full`.
+pub(crate) fn git_reported_storage_full(error: &GitError) -> bool {
+    matches!(error, GitError::CommandFailed { stderr, .. }
+        if stderr.contains("No space left on device"))
 }
 
 #[cfg(unix)]

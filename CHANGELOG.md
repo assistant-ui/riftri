@@ -7,6 +7,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Running out of disk space while Git builds a base, for example during
+  `riftri worktree compact`, is reported as `storage-full`, not `git-failed`
+  (#618).
 - Removing a worktree that holds a FIFO or a Unix socket, such as a dev
   server's socket, works as `git worktree remove` does. A clean removal used to
   unregister the worktree and then fail to delete it, leaving a removal every
