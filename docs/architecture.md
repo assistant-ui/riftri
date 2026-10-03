@@ -307,6 +307,16 @@ temporary file; installation cannot overwrite an index created concurrently.
 This also covers a crash after Git initialized the index but before the
 `index-synchronized` journal transition was persisted.
 
+Rollback never deletes work Git commands have already done in an unfinished
+add. A branch the add created that has since moved is kept. If Git commands
+already ran in a complete native view (it reached `index-synchronized`, and
+its HEAD or branch has since moved, such as after a commit or a switch),
+rollback releases it: Riftri's scratch, staging, and journal are rolled back,
+but the worktree stays registered and in place as a plain Git worktree that
+Riftri no longer manages. The add and `riftri repair` both report the release. A view
+that never finished materializing, or an OverlayFS view, is preserved for
+manual attention instead.
+
 ## Removal-operation journal state machine
 
 Removal uses separate journals under `removals/`:

@@ -424,6 +424,10 @@ pub struct RecoveryReport {
     /// Add journals whose worktree Git no longer registers and whose
     /// destination is absent, retired by a journaled completion.
     pub retired_adds: usize,
+    /// Unfinished adds whose complete view Git commands had already used
+    /// (HEAD or branch moved): rolled back, but their worktrees were kept as
+    /// plain Git worktrees that Riftri no longer manages.
+    pub released_adds: Vec<PathBuf>,
     /// Add journals that named a vanished linked worktree as their repository,
     /// re-homed to the repository's main worktree.
     pub rehomed_adds: usize,
@@ -3871,17 +3875,22 @@ fn add_worktree_inner(
                 })
                 .and_then(|()| decoded.map_err(WorktreeError::from))
                 .and_then(|decoded| rollback_decoded(&git, &state_directory, &decoded))
-                .and_then(|()| {
+                .and_then(|outcome| {
                     journal.transition(AddWorktreePhase::RolledBack)?;
                     store.persist(&journal)?;
                     progress::emit(ProgressEvent::AddPhase {
                         phase: AddWorktreePhase::RolledBack,
                     });
-                    Ok(())
+                    Ok(outcome)
                 });
 
             match rollback {
-                Ok(()) => Err(operation_error),
+                Ok(AddRollback::RolledBack) => Err(operation_error),
+                Ok(AddRollback::Released) => Err(WorktreeError::InvalidRequest(format!(
+                    "{operation_error}; Git commands already ran in {}, so it was kept as a \
+                     plain Git worktree that Riftri does not manage",
+                    destination.display()
+                ))),
                 Err(rollback_error) => Err(WorktreeError::OperationAndRollback {
                     operation: Box::new(operation_error),
                     rollback: Box::new(rollback_error),
@@ -8907,21 +8916,23 @@ pub fn recover_incomplete_operations(
                         continue;
                     }
                 }
-                if let Err(error) = validate_recovery_paths(&state_directory, &journal)
+                match validate_recovery_paths(&state_directory, &journal)
                     .and_then(|()| adopt_overlayfs_mount_identity(&store, journal.clone()))
                     .and_then(|journal| {
                         let pending =
                             store.update_phase(&journal, AddWorktreePhase::RollbackPending)?;
-                        rollback_decoded(&git, &state_directory, &journal)?;
+                        let outcome = rollback_decoded(&git, &state_directory, &journal)?;
                         store.update_phase(&pending, AddWorktreePhase::RolledBack)?;
-                        Ok(())
-                    })
-                {
-                    report
+                        Ok(outcome)
+                    }) {
+                    Err(error) => report
                         .errors
-                        .push(format!("operation {}: {error}", journal.operation_id));
-                } else {
-                    report.recovered += 1;
+                        .push(format!("operation {}: {error}", journal.operation_id)),
+                    Ok(AddRollback::RolledBack) => report.recovered += 1,
+                    Ok(AddRollback::Released) => {
+                        report.recovered += 1;
+                        report.released_adds.push(journal.destination.clone());
+                    }
                 }
             }
         }
@@ -11479,13 +11490,27 @@ fn validate_recovery_paths(
     Ok(())
 }
 
+/// How a rollback left an add's destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddRollback {
+    RolledBack,
+    /// Git commands already ran in the complete view (its HEAD or branch
+    /// moved), so the worktree was left registered and in place as a plain Git
+    /// worktree that Riftri does not manage.
+    Released,
+}
+
 fn rollback_decoded(
     git: &Git,
     state_directory: &Path,
     journal: &DecodedJournal,
-) -> Result<(), WorktreeError> {
+) -> Result<AddRollback, WorktreeError> {
     let metadata_lock =
         acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
+    // A branch that moved since the add holds someone's commits: never delete
+    // it. Refusing the whole rollback instead left the add pending forever,
+    // and the only way out was deleting that branch.
+    let mut branch_moved = false;
     let expected_branch_target = if journal.last_forward_phase
         >= AddWorktreePhase::GitMetadataCreated
     {
@@ -11502,10 +11527,7 @@ fn rollback_decoded(
                             && journal.destination.exists()
                             && contains_only_git_pointer(&journal.destination)?;
                         if !recoverable_creation_race {
-                            return Err(WorktreeError::InvalidRequest(format!(
-                                "branch {} moved after creation; recovery preserved its worktree",
-                                branch.to_string_lossy()
-                            )));
+                            branch_moved = true;
                         }
                     }
                     if !journal.branch_created && current.is_none() {
@@ -11529,7 +11551,9 @@ fn rollback_decoded(
     // Set when the registration proves this operation's own `git worktree add
     // -b` created the branch; see the unlock below.
     let mut branch_created_by_interrupted_add = None;
-    if let Some(worktree) = registered {
+    let mut released = false;
+    let was_registered = registered.is_some();
+    if let Some(worktree) = &registered {
         let expected = ObjectId::parse(journal.expected_commit.clone())?;
         let expected_worktree_head = expected_branch_target
             .as_ref()
@@ -11540,16 +11564,37 @@ fn rollback_decoded(
             reference.extend_from_slice(branch.as_encoded_bytes());
             reference
         });
-        if worktree.head.as_ref() != Some(expected_worktree_head)
+        let head_moved = worktree.head.as_ref() != Some(expected_worktree_head)
             || worktree.branch != expected_branch
-            || worktree.detached != journal.branch.is_none()
-            || worktree.bare
-        {
-            return Err(WorktreeError::InvalidRequest(format!(
-                "worktree HEAD changed after creation; recovery preserved {}",
-                journal.destination.display()
-            )));
+            || worktree.detached != journal.branch.is_none();
+        if worktree.bare || head_moved || branch_moved {
+            // Someone already used the worktree: a commit, a switch. Once the
+            // native view was complete it is an ordinary checkout, so it is
+            // released to them as a plain Git worktree. An unfinished view
+            // stays for manual attention.
+            let materialized = journal.backend != BackendKind::OverlayFs
+                && journal.last_forward_phase >= AddWorktreePhase::IndexSynchronized;
+            if worktree.bare || !materialized {
+                return Err(WorktreeError::InvalidRequest(if branch_moved {
+                    format!(
+                        "branch {} moved after creation; recovery preserved its worktree",
+                        journal
+                            .branch
+                            .as_deref()
+                            .map(OsStr::to_string_lossy)
+                            .unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "worktree HEAD changed after creation; recovery preserved {}",
+                        journal.destination.display()
+                    )
+                }));
+            }
+            released = true;
         }
+    }
+    if let Some(worktree) = registered.filter(|_| !released) {
         // `git worktree add` registers a new worktree locked as
         // "initializing" and unlocks it as its very last step. A journal that
         // never reached `git-metadata-created` means this operation's own Git
@@ -11584,7 +11629,10 @@ fn rollback_decoded(
                 .and_then(|()| remove_empty_directory_if_present(&journal.destination))
         };
         removed.map_err(|error| changed_add_destination(error, journal, state_directory))?;
-    } else if journal.destination.exists() && !is_empty_real_directory(&journal.destination)? {
+    } else if !was_registered
+        && journal.destination.exists()
+        && !is_empty_real_directory(&journal.destination)?
+    {
         return Err(WorktreeError::InvalidRequest(format!(
             "destination {} exists but is not registered by Git; recovery preserved it",
             journal.destination.display()
@@ -11605,7 +11653,9 @@ fn rollback_decoded(
     remove_temporary_index(&journal.temporary_index)?;
     remove_file_if_present(&pointer_staging_path(journal))?;
 
-    if journal.branch_created
+    if released || branch_moved {
+        // The branch and the worktree are the user's now.
+    } else if journal.branch_created
         && let Some((branch, Some(_))) = expected_branch_target
     {
         git.delete_branch_force(&journal.repository, branch)?;
@@ -11620,7 +11670,11 @@ fn rollback_decoded(
         }
     }
     drop(metadata_lock);
-    Ok(())
+    Ok(if released {
+        AddRollback::Released
+    } else {
+        AddRollback::RolledBack
+    })
 }
 
 /// Remove the immutable base a rolled-back add left without its completion
@@ -17125,6 +17179,184 @@ mod tests {
         assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
     }
 
+    fn git_stdout(directory: &Path, arguments: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {arguments:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[cfg(unix)]
+    fn committed_repository(fixture: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let repository = fixture.join("repository");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        (repository, fixture.join("worktree"), fixture.join("state"))
+    }
+
+    /// Git commands ran in an add's complete view before the add finished: a
+    /// commit. Rollback refused to delete that work, so every `repair` failed
+    /// forever, and with `-b` the only way out was deleting the branch that
+    /// held the commit. The worktree is now released as a plain Git worktree.
+    #[cfg(unix)]
+    #[test]
+    fn repair_releases_an_unfinished_add_that_git_already_used() {
+        for branch in [None, Some("feature/early")] {
+            let fixture = tempdir().expect("fixture");
+            let (repository, destination, state) = committed_repository(fixture.path());
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: branch.map_or(WorktreeMode::Detached, |branch| {
+                        WorktreeMode::NewBranch(OsString::from(branch))
+                    }),
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                Some(AddWorktreePhase::IndexSynchronized),
+                false,
+            )
+            .expect_err("simulate process termination");
+            fs::write(destination.join("new.txt"), "new\n").unwrap();
+            git(&destination, &["add", "new.txt"]);
+            git(&destination, &["commit", "--quiet", "-m", "early work"]);
+            let head = git_stdout(&destination, &["rev-parse", "HEAD"]);
+
+            let report = recover_incomplete_operations(&state).expect("repair");
+
+            assert!(report.errors.is_empty(), "{branch:?}: {report:?}");
+            assert_eq!(report.released_adds.len(), 1, "{branch:?}: {report:?}");
+            assert!(registered(&repository, &destination), "{branch:?}");
+            assert_eq!(git_stdout(&destination, &["rev-parse", "HEAD"]), head);
+            assert_eq!(git_stdout(&destination, &["status", "--porcelain"]), "");
+            if let Some(branch) = branch {
+                assert_eq!(
+                    git_stdout(&repository, &["rev-parse", branch]),
+                    head,
+                    "the branch holding the commit is kept"
+                );
+            }
+            let accounting = storage_accounting(&state).expect("status");
+            assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+            assert_eq!(accounting.active_views, 0, "{accounting:?}");
+            assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+            assert!(
+                !super::is_managed_worktree(&repository, &destination).unwrap_or(false),
+                "{branch:?}: Riftri no longer manages it"
+            );
+            let again = recover_incomplete_operations(&state).expect("repair again");
+            assert!(
+                again.errors.is_empty() && again.released_adds.is_empty(),
+                "{again:?}"
+            );
+        }
+    }
+
+    /// The `-b` trap on its own: the worktree is gone, but the branch the add
+    /// created moved. Rollback refused forever rather than delete it.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_keeps_a_moved_branch_and_finishes() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = committed_repository(fixture.path());
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/moved")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            Some(AddWorktreePhase::GitMetadataCreated),
+            false,
+        )
+        .expect_err("simulate process termination");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                destination.to_str().unwrap(),
+            ],
+        );
+        git(
+            &repository,
+            &["commit", "--quiet", "--allow-empty", "-m", "later"],
+        );
+        git(&repository, &["branch", "--force", "feature/moved", "HEAD"]);
+        let moved = git_stdout(&repository, &["rev-parse", "feature/moved"]);
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(
+            git_stdout(&repository, &["rev-parse", "feature/moved"]),
+            moved
+        );
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// The live command: someone commits in the destination and keeps editing
+    /// just before the add's clean check, which then fails.
+    #[cfg(unix)]
+    #[test]
+    fn an_add_whose_view_git_already_used_keeps_it_as_a_plain_worktree() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = committed_repository(fixture.path());
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::AddCleanCheck,
+            |path| {
+                fs::write(path.join("new.txt"), "new\n").unwrap();
+                git(path, &["add", "new.txt"]);
+                git(path, &["commit", "--quiet", "-m", "early work"]);
+                fs::write(path.join("draft.txt"), "draft\n").unwrap();
+            },
+        );
+
+        let error = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect_err("the add did not finish");
+
+        assert!(
+            matches!(&error, super::WorktreeError::InvalidRequest(message)
+                if message.contains("plain Git worktree")),
+            "{error:?}"
+        );
+        assert!(registered(&repository, &destination));
+        assert_eq!(fs::read(destination.join("new.txt")).unwrap(), b"new\n");
+        assert_eq!(fs::read(destination.join("draft.txt")).unwrap(), b"draft\n");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
     /// Build a committed repository for the empty-destination rollback tests.
     #[cfg(unix)]
     fn empty_destination_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
@@ -17659,13 +17891,17 @@ mod tests {
         }
     }
 
+    /// Git already used the view of an interrupted add. A complete view is
+    /// released as a plain Git worktree; one whose index was never
+    /// synchronized is still preserved for manual attention.
     #[test]
     fn recovery_preserves_an_interrupted_view_whose_head_changed() {
-        for (detached, change) in [
-            (true, "commit"),
-            (true, "switch"),
-            (false, "switch"),
-            (false, "detach"),
+        for (detached, change, phase) in [
+            (true, "commit", AddWorktreePhase::IndexSynchronized),
+            (true, "switch", AddWorktreePhase::IndexSynchronized),
+            (false, "switch", AddWorktreePhase::IndexSynchronized),
+            (false, "detach", AddWorktreePhase::IndexSynchronized),
+            (false, "detach", AddWorktreePhase::GitPointerRestored),
         ] {
             let fixture = tempdir().expect("fixture");
             let repository = fixture.path().join("repository");
@@ -17695,7 +17931,7 @@ mod tests {
                     state_dir: Some(state.clone()),
                     sparse_directories: Vec::new(),
                 },
-                Some(AddWorktreePhase::IndexSynchronized),
+                Some(phase),
                 false,
             )
             .expect_err("simulate process termination");
@@ -17719,11 +17955,21 @@ mod tests {
             let head = riftri_git::Git::default()
                 .resolve_revision(&destination, std::ffi::OsStr::new("HEAD"))
                 .unwrap();
-            for _ in 0..2 {
+            let released = phase == AddWorktreePhase::IndexSynchronized;
+            for attempt in 0..2 {
                 let report = recover_incomplete_operations(&state).expect("repair report");
-                assert_eq!(report.recovered, 0, "{detached}/{change}: {report:?}");
-                assert_eq!(report.errors.len(), 1, "{report:?}");
-                assert!(report.errors[0].contains("HEAD"), "{report:?}");
+                if released {
+                    assert!(report.errors.is_empty(), "{detached}/{change}: {report:?}");
+                    assert_eq!(
+                        report.released_adds.len(),
+                        usize::from(attempt == 0),
+                        "{detached}/{change}: {report:?}"
+                    );
+                } else {
+                    assert_eq!(report.recovered, 0, "{detached}/{change}: {report:?}");
+                    assert_eq!(report.errors.len(), 1, "{report:?}");
+                    assert!(report.errors[0].contains("HEAD"), "{report:?}");
+                }
                 assert!(destination.exists());
                 assert_eq!(
                     riftri_git::Git::default()
@@ -17772,13 +18018,19 @@ mod tests {
 
         let report = recover_incomplete_operations(&state).expect("attempt recovery");
 
-        assert_eq!(report.recovered, 0);
-        assert_eq!(report.errors.len(), 1);
-        assert!(report.errors[0].contains("branch"));
+        // The complete view was released with its branch, not refused forever.
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.released_adds.len(), 1, "{report:?}");
         assert!(destination.exists());
+        assert!(registered(&repository, &destination));
         assert_eq!(
             fs::read_to_string(destination.join("tracked.txt")).expect("read preserved file"),
             "committed change\n"
+        );
+        assert_eq!(
+            git_stdout(&repository, &["rev-parse", "feature/committed"]),
+            git_stdout(&destination, &["rev-parse", "HEAD"]),
+            "the branch holding the commit is kept"
         );
     }
 
