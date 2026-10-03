@@ -350,10 +350,24 @@ fn hash_file_bytes(
         digest.update(&buffer[..count]);
     }
     if length != expected_length {
-        return Err(io::Error::other("integrity input changed while reading"));
+        return Err(io::Error::other(ChangedWhileReading));
     }
     Ok(())
 }
+
+/// A file's length changed between its metadata and the end of reading it:
+/// something wrote to it during the walk. Typed so a caller walking a live
+/// worktree can tell a concurrent change from a real I/O failure.
+#[derive(Debug)]
+pub(crate) struct ChangedWhileReading;
+
+impl std::fmt::Display for ChangedWhileReading {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("integrity input changed while reading")
+    }
+}
+
+impl std::error::Error for ChangedWhileReading {}
 
 #[cfg(all(test, unix))]
 mod tests {

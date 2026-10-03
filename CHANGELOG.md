@@ -7,6 +7,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A file rewritten while `riftri worktree compact` hashes it is reported as
+  the worktree changing during compaction, not as an I/O failure (#624).
 - Running out of disk space while Git builds a base, for example during
   `riftri worktree compact`, is reported as `storage-full`, not `git-failed`
   (#618).
