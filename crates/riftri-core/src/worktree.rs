@@ -7451,6 +7451,15 @@ fn diagnose_temporary_directory(
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn marker_removed_bases(journals: &[DecodedCollectionJournal]) -> HashSet<&Path> {
+    journals
+        .iter()
+        .filter(|journal| journal.phase == GarbageCollectionPhase::MarkerRemoved)
+        .map(|journal| journal.base_path.as_path())
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn diagnose_base_directories(
     state_directory: &Path,
     collection_journals: &[DecodedCollectionJournal],
@@ -7507,6 +7516,9 @@ fn diagnose_base_directories(
         .map(|journal| journal.quarantine_path.clone())
         .collect::<HashSet<_>>();
 
+    // Index only this decoded snapshot. Keep every filesystem check below
+    // fresh, including the completion-marker check before consulting a claim.
+    let marker_removed = marker_removed_bases(collection_journals);
     for repository_path in child_paths(&root, "read immutable-base root")? {
         if !is_real_directory(&repository_path)? {
             add_state_issue(
@@ -7527,10 +7539,7 @@ fn diagnose_base_directories(
         }
         for path in entries {
             let expected_base = is_regular_file_if_present(&path.with_extension("complete"))?
-                || collection_journals.iter().any(|journal| {
-                    journal.phase == GarbageCollectionPhase::MarkerRemoved
-                        && journal.base_path == path
-                });
+                || marker_removed.contains(path.as_path());
             let expected_staging = pending_staging.contains(&path);
             let expected_quarantine = pending_quarantines.contains(&path);
             let is_complete_marker = path.extension() == Some(OsStr::new("complete"))
@@ -12496,6 +12505,157 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use crate::BaseCountImpact;
+    #[test]
+    fn marker_removed_index_preserves_exact_paths_and_phase_selection() {
+        let fixture = tempdir().unwrap();
+        let paths = [
+            fixture.path().join("a"),
+            fixture.path().join("a.complete"),
+            fixture.path().join("A"),
+        ];
+        let phases = [
+            GarbageCollectionPhase::IntentRecorded,
+            GarbageCollectionPhase::MarkerRemoved,
+            GarbageCollectionPhase::BaseQuarantined,
+            GarbageCollectionPhase::Complete,
+            GarbageCollectionPhase::Cancelled,
+        ];
+        let mut journals = Vec::new();
+        for (i, phase) in phases.into_iter().enumerate() {
+            journals.push(super::DecodedCollectionJournal {
+                journal_path: fixture.path().join(format!("{i}.json")),
+                operation_id: i.to_string(),
+                base_path: paths[i % paths.len()].clone(),
+                quarantine_path: fixture.path().join(format!("q-{i}")),
+                marker_path: fixture.path().join(format!("m-{i}")),
+                phase,
+            });
+        }
+        journals.push(journals[1].clone());
+        let index = super::marker_removed_bases(&journals);
+        assert_eq!(index.len(), 1);
+        for path in &paths {
+            assert_eq!(
+                index.contains(path.as_path()),
+                journals
+                    .iter()
+                    .any(|j| j.phase == GarbageCollectionPhase::MarkerRemoved
+                        && j.base_path == *path)
+            );
+        }
+        assert!(!index.contains(fixture.path().join("missing").as_path()));
+        assert!(super::marker_removed_bases(&[]).is_empty());
+    }
+
+    #[test]
+    fn marker_removed_claim_still_requires_a_real_directory() {
+        let fixture = tempdir().unwrap();
+        let bucket = fixture.path().join("bases/v1/bucket");
+        fs::create_dir_all(&bucket).unwrap();
+        let base = bucket.join("a".repeat(40));
+        fs::write(&base, b"preserve").unwrap();
+        let mut journal = super::DecodedCollectionJournal {
+            journal_path: fixture.path().join("collections/gc.json"),
+            operation_id: "gc".into(),
+            base_path: base.clone(),
+            quarantine_path: bucket.join(".riftri-gc-gc"),
+            marker_path: base.with_extension("complete"),
+            phase: GarbageCollectionPhase::MarkerRemoved,
+        };
+        let inspect = |journal| {
+            let mut issues = Vec::new();
+            super::diagnose_base_directories(
+                fixture.path(),
+                &[journal],
+                &[],
+                &[],
+                &mut issues,
+                &mut 0,
+            )
+            .unwrap();
+            issues
+        };
+        let issues = inspect(journal.clone());
+        assert_eq!(issues.len(), 1);
+        assert!(issues[0].reason.contains("must be a real directory"));
+        assert_eq!(fs::read(&base).unwrap(), b"preserve");
+        fs::remove_file(&base).unwrap();
+        fs::create_dir(&base).unwrap();
+        assert!(inspect(journal.clone()).is_empty());
+        journal.phase = GarbageCollectionPhase::Complete;
+        assert_eq!(
+            inspect(journal).len(),
+            1,
+            "completed collection must not explain an unmarked base"
+        );
+    }
+
+    #[test]
+    #[ignore = "paired diagnostic lookup probe; includes index construction"]
+    fn reports_marker_removed_lookup_latency() {
+        let fixture = tempdir().unwrap();
+        let journals = (0..4000)
+            .map(|index| {
+                let base_path = fixture.path().join(format!("{index:040x}"));
+                super::DecodedCollectionJournal {
+                    journal_path: fixture.path().join(format!("{index}.json")),
+                    operation_id: index.to_string(),
+                    marker_path: base_path.with_extension("complete"),
+                    base_path,
+                    quarantine_path: fixture.path().join(format!("q-{index}")),
+                    phase: if index % 11 == 0 {
+                        GarbageCollectionPhase::MarkerRemoved
+                    } else {
+                        GarbageCollectionPhase::Complete
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
+        let paths = (0..8000)
+            .map(|index| fixture.path().join(format!("{index:040x}")))
+            .collect::<Vec<_>>();
+        let expected = paths
+            .iter()
+            .map(|path| {
+                journals.iter().any(|j| {
+                    j.phase == GarbageCollectionPhase::MarkerRemoved && j.base_path == *path
+                })
+            })
+            .collect::<Vec<_>>();
+        for round in 0..4 {
+            for indexed in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = std::time::Instant::now();
+                let result = if indexed {
+                    let index = super::marker_removed_bases(&journals);
+                    paths
+                        .iter()
+                        .map(|path| index.contains(path.as_path()))
+                        .collect::<Vec<_>>()
+                } else {
+                    paths
+                        .iter()
+                        .map(|path| {
+                            journals.iter().any(|j| {
+                                j.phase == GarbageCollectionPhase::MarkerRemoved
+                                    && j.base_path == *path
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let elapsed = start.elapsed();
+                assert_eq!(std::hint::black_box(result), expected);
+                println!(
+                    "base-claims round={round} indexed={indexed} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
+
     #[test]
     fn accounting_workers_take_later_work_while_the_first_tree_is_blocked() {
         use std::sync::atomic::{AtomicUsize, Ordering};
