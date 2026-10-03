@@ -877,21 +877,19 @@ pub(crate) fn managed_worktree_state_directory(
     let destination_set = destinations.iter().cloned().collect::<HashSet<_>>();
     let mut matches = Vec::new();
     for state_directory in repository_state_directories_with_git(&git, &repository_info)? {
+        let snapshot = ManagedJournalSnapshot::load(&state_directory)?;
         let mut active_add = false;
         for destination in &destinations {
-            if find_managed_add_journal(&state_directory, destination)?.is_some() {
+            if snapshot.find(&state_directory, destination)?.is_some() {
                 active_add = true;
                 break;
             }
         }
-        let pending_move = MoveJournalStore::open(&state_directory)
-            .load_all()?
-            .into_iter()
-            .any(|journal| {
-                !journal.phase.is_finished()
-                    && (destination_set.contains(&journal.source)
-                        || destination_set.contains(&journal.destination))
-            });
+        let pending_move = snapshot.moves.iter().any(|journal| {
+            !journal.phase.is_finished()
+                && (destination_set.contains(&journal.source)
+                    || destination_set.contains(&journal.destination))
+        });
         if active_add || pending_move {
             matches.push(state_directory);
         }
@@ -6695,77 +6693,113 @@ fn find_managed_add_journal(
     state_directory: &Path,
     destination: &Path,
 ) -> Result<Option<DecodedJournal>, WorktreeError> {
-    let adds = JournalStore::open(state_directory).load_all()?;
-    let removals = RemovalJournalStore::open(state_directory).load_all()?;
-    let completed = validated_completed_removal_ids(state_directory, &adds, &removals)?;
-    let pending = removals
-        .iter()
-        .filter(|journal| !journal.phase.is_finished())
-        .map(|journal| journal.source_add_operation_id.as_str())
-        .collect::<HashSet<_>>();
-    let pending_moves = MoveJournalStore::open(state_directory)
-        .load_all()?
-        .into_iter()
-        .filter(|journal| !journal.phase.is_finished())
-        .map(|journal| journal.source_add_operation_id)
-        .collect::<HashSet<_>>();
-    let pending_compactions = CompactJournalStore::open(state_directory)
-        .load_all()?
-        .into_iter()
-        .filter(|journal| {
-            !matches!(
-                journal.phase,
-                CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
-            )
+    // Always reload here: lifecycle callers use this again after taking their
+    // operation lock. Discovery snapshots must never cross that boundary.
+    ManagedJournalSnapshot::load(state_directory)?
+        .find(state_directory, destination)
+        .map(|journal| journal.cloned())
+}
+
+/// One advisory discovery pass, shared only across aliases of the same path.
+struct ManagedJournalSnapshot {
+    adds: Vec<DecodedJournal>,
+    completed: HashSet<String>,
+    pending: HashSet<String>,
+    moves: Vec<DecodedMoveJournal>,
+    pending_moves: HashSet<String>,
+    pending_compactions: HashSet<String>,
+}
+
+impl ManagedJournalSnapshot {
+    fn load(state_directory: &Path) -> Result<Self, WorktreeError> {
+        let adds = JournalStore::open(state_directory).load_all()?;
+        let removals = RemovalJournalStore::open(state_directory).load_all()?;
+        let completed = validated_completed_removal_ids(state_directory, &adds, &removals)?;
+        let pending = removals
+            .into_iter()
+            .filter(|journal| !journal.phase.is_finished())
+            .map(|journal| journal.source_add_operation_id)
+            .collect::<HashSet<_>>();
+        let moves = MoveJournalStore::open(state_directory).load_all()?;
+        let pending_moves = moves
+            .iter()
+            .filter(|journal| !journal.phase.is_finished())
+            .map(|journal| journal.source_add_operation_id.clone())
+            .collect::<HashSet<_>>();
+        let pending_compactions = CompactJournalStore::open(state_directory)
+            .load_all()?
+            .into_iter()
+            .filter(|journal| {
+                !matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+            })
+            .map(|journal| journal.source_add_operation_id)
+            .collect::<HashSet<_>>();
+        Ok(Self {
+            adds,
+            completed,
+            pending,
+            moves,
+            pending_moves,
+            pending_compactions,
         })
-        .map(|journal| journal.source_add_operation_id)
-        .collect::<HashSet<_>>();
-    let mut matches = adds
-        .into_iter()
-        .filter(|journal| {
-            journal.phase == AddWorktreePhase::Active
-                && paths_match(&journal.destination, destination)
-                && !completed.contains(&journal.operation_id)
-        })
-        .collect::<Vec<_>>();
-    if matches.len() > 1 {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "multiple active Riftri journals reference {}",
-            destination.display()
-        )));
     }
-    let managed = matches.pop();
-    if managed
-        .as_ref()
-        .is_some_and(|journal| pending.contains(journal.operation_id.as_str()))
-    {
-        return Err(pending_lifecycle_error(
-            "removal",
-            destination,
-            state_directory,
-        ));
+
+    fn find(
+        &self,
+        state_directory: &Path,
+        destination: &Path,
+    ) -> Result<Option<&DecodedJournal>, WorktreeError> {
+        let mut matches = self
+            .adds
+            .iter()
+            .filter(|journal| {
+                journal.phase == AddWorktreePhase::Active
+                    && paths_match(&journal.destination, destination)
+                    && !self.completed.contains(&journal.operation_id)
+            })
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            return Err(WorktreeError::InvalidRequest(format!(
+                "multiple active Riftri journals reference {}",
+                destination.display()
+            )));
+        }
+        let managed = matches.pop();
+        if managed
+            .as_ref()
+            .is_some_and(|journal| self.pending.contains(journal.operation_id.as_str()))
+        {
+            return Err(pending_lifecycle_error(
+                "removal",
+                destination,
+                state_directory,
+            ));
+        }
+        if managed
+            .as_ref()
+            .is_some_and(|journal| self.pending_moves.contains(journal.operation_id.as_str()))
+        {
+            return Err(pending_lifecycle_error(
+                "move",
+                destination,
+                state_directory,
+            ));
+        }
+        if managed.as_ref().is_some_and(|journal| {
+            self.pending_compactions
+                .contains(journal.operation_id.as_str())
+        }) {
+            return Err(pending_lifecycle_error(
+                "compaction",
+                destination,
+                state_directory,
+            ));
+        }
+        Ok(managed)
     }
-    if managed
-        .as_ref()
-        .is_some_and(|journal| pending_moves.contains(journal.operation_id.as_str()))
-    {
-        return Err(pending_lifecycle_error(
-            "move",
-            destination,
-            state_directory,
-        ));
-    }
-    if managed
-        .as_ref()
-        .is_some_and(|journal| pending_compactions.contains(journal.operation_id.as_str()))
-    {
-        return Err(pending_lifecycle_error(
-            "compaction",
-            destination,
-            state_directory,
-        ));
-    }
-    Ok(managed)
 }
 
 /// A durable journal shows an interrupted lifecycle operation touching this
@@ -17563,6 +17597,51 @@ mod tests {
         git(&repository, &["add", "--", "tracked.txt"]);
         git(&repository, &["commit", "--quiet", "-m", "initial"]);
         (repository, fixture.join("worktree"), fixture.join("state"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_discovery_reads_each_journal_once_across_aliases() {
+        let fixture = tempdir().unwrap();
+        let (repository, destination, state) = committed_repository(fixture.path());
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .unwrap();
+        let moved = fixture.path().join("zz-moved");
+        super::move_worktree(super::MoveWorktreeRequest {
+            repository: repository.clone(),
+            source: destination,
+            destination: moved.clone(),
+            state_dir: Some(state.clone()),
+        })
+        .unwrap();
+        let alias = fixture.path().join("00-alias");
+        std::os::unix::fs::symlink(&moved, &alias).unwrap();
+        let before = crate::test_hooks::journal_open_count();
+        assert_eq!(
+            super::managed_worktree_state_directory(&repository, &alias).unwrap(),
+            Some(state.canonicalize().unwrap())
+        );
+        assert_eq!(
+            crate::test_hooks::journal_open_count() - before,
+            2,
+            "the add and completed move are each read once across path aliases"
+        );
+        // No cross-call cache: a newly malformed journal must fail closed.
+        fs::write(state.join("moves/corrupt.json"), b"invalid").unwrap();
+        assert!(super::managed_worktree_state_directory(&repository, &alias).is_err());
+        assert!(super::find_managed_add_journal(&state, &moved).is_err());
     }
 
     /// Git commands ran in an add's complete view before the add finished: a
