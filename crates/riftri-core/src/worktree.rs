@@ -4875,11 +4875,9 @@ fn validate_destination_path_semantics(
     destination: &Path,
 ) -> Result<(), WorktreeError> {
     for path in paths {
-        let components = path.components().collect::<Vec<_>>();
-        if components.is_empty()
-            || components
-                .iter()
-                .any(|component| !matches!(component, Component::Normal(_)))
+        let mut components = path.components();
+        if components.clone().next().is_none()
+            || components.any(|component| !matches!(component, Component::Normal(_)))
         {
             return Err(WorktreeError::Unsupported(format!(
                 "Git tree path {} is not a relative checkout path",
@@ -4901,9 +4899,12 @@ fn validate_destination_path_semantics(
 
     let validation = (|| {
         for path in paths {
-            let components = path.components().collect::<Vec<_>>();
+            let mut components = path.components();
+            // The leaf is created separately below. Components is double-ended,
+            // so retaining a heap vector just to exclude the leaf is unnecessary.
+            components.next_back();
             let mut relative_parent = PathBuf::new();
-            for component in &components[..components.len() - 1] {
+            for component in components {
                 let Component::Normal(name) = component else {
                     unreachable!("checkout path components were validated above");
                 };
@@ -15184,6 +15185,36 @@ mod tests {
         // A colliding parent must be caught while creating directories, before
         // any leaf is reached.
         assert_path_pair_matches_destination("Ü/one.txt", "ü/two.txt", ("Ü", "ü"));
+    }
+
+    #[test]
+    fn checkout_component_validation_preserves_preflight_and_normalization() {
+        let fixture = tempfile::tempdir().unwrap();
+        let destination = fixture.path().join("missing/view");
+        for invalid in ["", ".", "..", "../escape", "a/../b", "/absolute"] {
+            let paths = [PathBuf::from("café/nested/file"), PathBuf::from(invalid)];
+            let error =
+                super::validate_destination_path_semantics(&paths, &destination).unwrap_err();
+            assert!(
+                error.to_string().contains("not a relative checkout path"),
+                "{invalid:?}: {error}"
+            );
+        }
+        for valid in ["a", "a/b", "a/./b", "a//b"] {
+            super::validate_destination_path_semantics(&[PathBuf::from(valid)], &destination)
+                .unwrap();
+        }
+        assert_eq!(fs::read_dir(fixture.path()).unwrap().count(), 0);
+        let paths = [
+            PathBuf::from("café/nested/a"),
+            PathBuf::from("café/nested/b"),
+        ];
+        super::validate_destination_path_semantics(&paths, &fixture.path().join("view")).unwrap();
+        assert_eq!(
+            fs::read_dir(fixture.path()).unwrap().count(),
+            0,
+            "probe cleanup"
+        );
     }
 
     #[test]
