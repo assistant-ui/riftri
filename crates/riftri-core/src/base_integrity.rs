@@ -241,28 +241,34 @@ fn hash_xattrs(path: &Path, digest: &mut Sha256, scratch: &mut HashScratch) -> i
         rustix::buffer::spare_capacity(&mut scratch.xattr_names),
     )
     .map_err(io::Error::from)?;
-    let mut names = scratch
-        .xattr_names
-        .split(|byte| *byte == 0)
-        .filter(|name| !name.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect::<Vec<_>>();
-    names.sort_unstable();
+    let names = sorted_xattr_names(&scratch.xattr_names);
     digest.update((names.len() as u64).to_le_bytes());
     for name in names {
         scratch.xattr_value.clear();
         rustix::fs::lgetxattr(
             path,
-            OsStr::from_bytes(&name),
+            OsStr::from_bytes(name),
             rustix::buffer::spare_capacity(&mut scratch.xattr_value),
         )
         .map_err(io::Error::from)?;
         digest.update((name.len() as u64).to_le_bytes());
-        digest.update(&name);
+        digest.update(name);
         digest.update((scratch.xattr_value.len() as u64).to_le_bytes());
         digest.update(&scratch.xattr_value);
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn sorted_xattr_names(buffer: &[u8]) -> Vec<&[u8]> {
+    // The list buffer stays fixed while values are read into a separate field.
+    // Borrow native bytes to avoid one allocation and copy per attribute name.
+    let mut names = buffer
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
 }
 
 fn hash_entry(
@@ -464,6 +470,79 @@ mod tests {
         );
         hash_native(OsStr::new("file-\u{fffd}"), &mut lossy);
         assert_ne!(native.finalize(), lossy.finalize());
+    }
+
+    #[test]
+    fn xattr_names_borrow_original_bytes_in_sorted_order() {
+        let bytes = b"z\0\0a\0\xff\0";
+        let names = super::sorted_xattr_names(bytes);
+        assert_eq!(names, vec![&b"a"[..], &b"z"[..], &b"\xff"[..]]);
+        for (name, offset) in names.iter().zip([3, 0, 5]) {
+            assert_eq!(
+                name.as_ptr(),
+                bytes[offset..].as_ptr(),
+                "name must not be copied"
+            );
+        }
+        assert!(super::sorted_xattr_names(b"").is_empty());
+    }
+
+    #[test]
+    fn xattr_digest_preserves_the_owned_name_layout() {
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("file");
+        fs::write(&path, b"contents").unwrap();
+        #[cfg(target_os = "macos")]
+        let prefix = "com.riftri";
+        #[cfg(not(target_os = "macos"))]
+        let prefix = "user.riftri";
+        for (suffix, value) in [
+            ("z", &b"\0\xffbinary"[..]),
+            ("a", &b""[..]),
+            ("unicode-\u{e9}", &b"value"[..]),
+        ] {
+            let name = format!("{prefix}.{suffix}");
+            rustix::fs::setxattr(&path, name.as_str(), value, rustix::fs::XattrFlags::empty())
+                .unwrap();
+        }
+        // Independent reference retains the previous owned-name implementation.
+        let mut buffer = Vec::with_capacity(64 * 1024);
+        rustix::fs::llistxattr(&path, rustix::buffer::spare_capacity(&mut buffer)).unwrap();
+        let mut names = buffer
+            .split(|b| *b == 0)
+            .filter(|n| !n.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        names.sort_unstable();
+        assert!(names.len() >= 3);
+        let mut expected = Sha256::new();
+        expected.update((names.len() as u64).to_le_bytes());
+        for name in names {
+            let mut value = Vec::with_capacity(256 * 1024);
+            rustix::fs::lgetxattr(
+                &path,
+                OsStr::from_bytes(&name),
+                rustix::buffer::spare_capacity(&mut value),
+            )
+            .unwrap();
+            expected.update((name.len() as u64).to_le_bytes());
+            expected.update(&name);
+            expected.update((value.len() as u64).to_le_bytes());
+            expected.update(value);
+        }
+        let mut actual = Sha256::new();
+        let mut scratch = super::HashScratch::new();
+        super::hash_xattrs(&path, &mut actual, &mut scratch).unwrap();
+        assert_eq!(actual.finalize(), expected.finalize());
+        assert!(
+            super::hash_xattrs(
+                &fixture.path().join("missing"),
+                &mut Sha256::new(),
+                &mut scratch
+            )
+            .is_err()
+        );
     }
 
     #[test]
