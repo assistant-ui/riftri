@@ -5266,7 +5266,7 @@ fn analyze_resolved_repository_compatibility(
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
         .iter()
-        .map(|entry| entry.path.clone())
+        .map(|entry| entry.path.as_path())
         .collect::<Vec<_>>();
     let mut blockers = Vec::new();
     let mut has_submodules = false;
@@ -5641,7 +5641,9 @@ fn analyze_resolved_repository_compatibility(
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_profile: profile.finalize().to_vec(),
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-        checkout_paths: paths,
+        // Attribute and LFS inspection only borrow these paths. Transfer the
+        // original buffers after inspection instead of cloning the whole tree.
+        checkout_paths: entries.into_iter().map(|entry| entry.path).collect(),
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_config,
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
