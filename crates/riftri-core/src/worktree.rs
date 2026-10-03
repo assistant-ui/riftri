@@ -10370,6 +10370,17 @@ fn hash_entry_xattrs(
     Ok(())
 }
 
+fn sorted_snapshot_names(entries: Vec<fs::DirEntry>) -> Vec<OsString> {
+    // Cache each native name once, not on every sorting comparison. Construct
+    // child paths only when visiting them, rather than retaining all full paths.
+    let mut names = entries
+        .into_iter()
+        .map(|entry| entry.file_name())
+        .collect::<Vec<_>>();
+    names.sort_unstable();
+    names
+}
+
 // Scratch lives for one metadata walk, never across snapshots. Buffers are
 // allocated lazily and overwritten on every read; no filesystem data is cached.
 #[derive(Default)]
@@ -10408,13 +10419,12 @@ fn hash_extended_attributes(
 
     hash_entry_xattrs(path, digest, scratch)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        let mut entries = fs::read_dir(path)
+        let entries = fs::read_dir(path)
             .map_err(|source| io("read worktree snapshot directory", path, source))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| io("read worktree snapshot entry", path, source))?;
-        entries.sort_unstable_by_key(|entry| entry.file_name());
-        for entry in entries {
-            hash_extended_attributes(&entry.path(), digest, scratch)?;
+        for name in sorted_snapshot_names(entries) {
+            hash_extended_attributes(&path.join(name), digest, scratch)?;
         }
     }
     Ok(())
@@ -10446,14 +10456,12 @@ fn hash_forced_removal_metadata(
         digest.update(metadata.file_attributes().to_le_bytes());
     }
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        let mut entries = fs::read_dir(path)
+        let entries = fs::read_dir(path)
             .map_err(|source| io("read forced removal snapshot directory", path, source))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| io("read forced removal snapshot entry", path, source))?;
-        entries.sort_unstable_by_key(|entry| entry.file_name());
         digest.update((entries.len() as u64).to_le_bytes());
-        for entry in entries {
-            let name = entry.file_name();
+        for name in sorted_snapshot_names(entries) {
             #[cfg(unix)]
             {
                 let bytes = name.as_bytes();
@@ -10469,7 +10477,7 @@ fn hash_forced_removal_metadata(
                 }
             }
             hash_forced_removal_metadata(
-                &entry.path(),
+                &path.join(name),
                 digest,
                 #[cfg(unix)]
                 scratch,
@@ -10487,13 +10495,12 @@ fn hash_windows_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Workt
         .map_err(|source| io("inspect Windows worktree metadata", path, source))?;
     digest.update(metadata.file_attributes().to_le_bytes());
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        let mut entries = fs::read_dir(path)
+        let entries = fs::read_dir(path)
             .map_err(|source| io("read Windows worktree snapshot directory", path, source))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| io("read Windows worktree snapshot entry", path, source))?;
-        entries.sort_unstable_by_key(|entry| entry.file_name());
-        for entry in entries {
-            hash_windows_attributes(&entry.path(), digest)?;
+        for name in sorted_snapshot_names(entries) {
+            hash_windows_attributes(&path.join(name), digest)?;
         }
     }
     Ok(())
@@ -11156,16 +11163,14 @@ fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
             digest.update(value.to_le_bytes());
         }
         if metadata.is_dir() {
-            let mut entries = fs::read_dir(path)
+            let entries = fs::read_dir(path)
                 .map_err(|source| io("read OverlayFS removal snapshot", path, source))?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|source| io("read OverlayFS snapshot entry", path, source))?;
-            entries.sort_unstable_by_key(|entry| entry.file_name());
-            for entry in entries {
-                let name = entry.file_name();
+            for name in sorted_snapshot_names(entries) {
                 digest.update((name.as_bytes().len() as u64).to_le_bytes());
                 digest.update(name.as_bytes());
-                visit(&entry.path(), digest)?;
+                visit(&path.join(name), digest)?;
             }
         } else if metadata.file_type().is_symlink() {
             let target = fs::read_link(path)
@@ -14077,6 +14082,49 @@ mod tests {
 
         assert!(error.to_string().contains("failed SHA-256 verification"));
         assert_eq!(fs::read(source).expect("source preserved"), b"evil");
+    }
+
+    #[test]
+    fn snapshot_entry_order_matches_legacy_sorting() {
+        let fixture = tempdir().unwrap();
+        for name in ["z", "alpha", "unicode-\u{e9}", "space name", "10", "2"] {
+            fs::write(fixture.path().join(name), b"file").unwrap();
+        }
+        // APFS rejects invalid UTF-8 filenames; Linux fixtures cover native bytes.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            fs::write(
+                fixture
+                    .path()
+                    .join(OsString::from_vec(b"native-\xff".to_vec())),
+                b"file",
+            )
+            .unwrap();
+        }
+        let read = || {
+            fs::read_dir(fixture.path())
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let mut legacy = read();
+        legacy.sort_unstable_by_key(|entry| entry.file_name());
+        let expected = legacy
+            .into_iter()
+            .map(|entry| (entry.file_name(), entry.path()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            super::sorted_snapshot_names(read())
+                .into_iter()
+                .map(|name| {
+                    let path = fixture.path().join(&name);
+                    (name, path)
+                })
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(super::sorted_snapshot_names(Vec::new()).is_empty());
     }
 
     #[cfg(unix)]
