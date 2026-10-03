@@ -51,6 +51,44 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+Windows attribute queries now use one NUL-delimited stdin request for Unicode
+paths, as Unix already does for raw native bytes. Non-Unicode Windows input
+retains the native-argument fallback. To compare the previous 128-path argument
+chunks with stdin against the same index and validate identical records:
+
+```sh
+cargo test --release --locked -p riftri-git reports_attribute_stdin_latency \
+  -- --ignored --nocapture
+```
+
+The probe alternates four pairs over 10,000 paths and asserts 79 versus one Git
+start. Windows quality CI records its native timings. A local macOS run of the
+two query strategies measured 983–1,264 ms versus 26–56 ms; that is component
+evidence, not a Windows or complete-worktree timing claim. Real-filesystem tests
+also create two clean, isolated 300-Unicode-file views and refuse external
+attribute filters before creating state.
+
+For base-diagnostic scaling, compare matching release builds on a native COW
+volume using real, distinct-tree lifecycle history:
+
+```sh
+node docs/benchmarks/base-diagnostics.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory 100 100
+```
+
+The fixture creates 100 completed collections, then 100 retained bases through
+ordinary Riftri adds/removals. Six alternating full `status --json` pairs must
+produce identical reports. It checks clean worktrees and bytes during setup,
+then verifies retirement counts, GC, repair, and empty state before marking
+results complete. Inputs are limited to 1,000 collections and 1,000 bases.
+
+The ignored core test `reports_marker_removed_lookup_latency` separately
+compares 4,000 decoded collection records against 8,000 paths, including index
+construction and result equality. Its synthetic phase mix includes interrupted
+collections. A local release run measured 214–226 ms for repeated scans versus
+0.88–1.09 ms for indexing. This is a component result, not a complete-command
+speedup; real history and command timings must be evaluated separately.
+
 To compare accounting worker scheduling on Unix/native COW volumes:
 
 ```sh

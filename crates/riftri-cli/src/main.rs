@@ -1758,6 +1758,11 @@ fn print_recovery_report(
             "completed_collections": report.completed_collections,
             "recovered_collections": report.recovered_collections,
             "retired_adds": report.retired_adds,
+            "released_adds": report
+                .released_adds
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
             "rehomed_adds": report.rehomed_adds,
             "relocated_worktrees": relocated_worktrees_json(report),
             "unresolvable_worktrees": report
@@ -1835,6 +1840,12 @@ fn print_recovery_report(
     outputln!("Completed collections: {}", report.completed_collections);
     outputln!("Recovered collections: {}", report.recovered_collections);
     outputln!("Retired add operations: {}", report.retired_adds);
+    for path in &report.released_adds {
+        outputln!(
+            "Released {}: Git commands already ran in it before its add finished, so it was kept as a plain Git worktree that Riftri does not manage",
+            path.display()
+        );
+    }
     outputln!("Re-homed add operations: {}", report.rehomed_adds);
     outputln!(
         "Reaped interrupted journal writes: {}",

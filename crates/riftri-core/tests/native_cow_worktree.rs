@@ -90,6 +90,67 @@ fn read_private_xattr(path: &Path) -> rustix::io::Result<Vec<u8>> {
 }
 
 #[test]
+fn many_unicode_attribute_paths_create_clean_isolated_views_and_refuse_external_filters() {
+    let fixture = tempdir().unwrap();
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    fs::create_dir(&repository).unwrap();
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "test@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::write(repository.join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+    let paths = (0..300)
+        .map(|i| format!("日本語 space-{i}.txt"))
+        .collect::<Vec<_>>();
+    for path in &paths {
+        fs::write(repository.join(path), "original\n").unwrap();
+    }
+    git(&repository, &["add", "--all"]);
+    git(&repository, &["commit", "--quiet", "-m", "attributes"]);
+    let request = |name: &str, state_dir| AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: fixture.path().join(name),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::Detached,
+        state_dir: Some(state_dir),
+        sparse_directories: Vec::new(),
+    };
+    let first = add_worktree(request("first", state.clone())).unwrap();
+    let second = add_worktree(request("second", state)).unwrap();
+    assert_eq!(first.base_path, second.base_path);
+    for view in [fixture.path().join("first"), fixture.path().join("second")] {
+        assert!(git(&view, &["status", "--porcelain=v1", "-z"]).is_empty());
+        for path in &paths {
+            assert_eq!(fs::read(view.join(path)).unwrap(), b"original\n");
+        }
+    }
+    fs::write(fixture.path().join("first").join(&paths[0]), "private\n").unwrap();
+    assert_eq!(
+        fs::read(fixture.path().join("second").join(&paths[0])).unwrap(),
+        b"original\n"
+    );
+    assert_eq!(
+        fs::read(first.base_path.join(&paths[0])).unwrap(),
+        b"original\n"
+    );
+
+    let external = fixture.path().join("external-attributes");
+    fs::write(&external, "*.txt filter=unsupported\n").unwrap();
+    git(
+        &repository,
+        &["config", "core.attributesFile", external.to_str().unwrap()],
+    );
+    let blocked_state = fixture.path().join("blocked-state");
+    assert!(add_worktree(request("blocked", blocked_state.clone())).is_err());
+    assert!(!fixture.path().join("blocked").exists());
+    assert!(!blocked_state.exists());
+}
+
+#[test]
 fn creates_clean_isolated_linked_worktrees_from_one_base() {
     let fixture = tempdir().expect("fixture directory");
     let fixture_path = fixture.path().to_path_buf();
