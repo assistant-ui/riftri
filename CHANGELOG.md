@@ -7,6 +7,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- A file rewritten while `riftri worktree compact` hashes it is reported as
+  the worktree changing during compaction, not as an I/O failure (#624).
 - Committing or switching in a worktree before its `riftri worktree add`
   finished no longer leaves the add pending forever. If the view was complete,
   the add is rolled back but the worktree is kept as a plain Git worktree that

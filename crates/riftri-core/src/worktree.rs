@@ -9603,8 +9603,9 @@ enum MoveResumption {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 /// A path that vanished while compaction walked the worktree, such as a file
-/// a concurrent `git switch` deleted, means the worktree changed under it. That
-/// is the same refusal as any other change, not an I/O failure to inspect.
+/// a concurrent `git switch` deleted, or a file whose length changed while it
+/// was hashed, means the worktree changed under it. That is the same refusal
+/// as any other change, not an I/O failure to inspect.
 /// Git failures are left alone: a missing `git` is not a changed worktree.
 fn vanished_during_compaction(error: WorktreeError, destination: &Path) -> WorktreeError {
     if !matches!(error, WorktreeError::Io { .. } | WorktreeError::Storage(_)) {
@@ -9612,10 +9613,12 @@ fn vanished_during_compaction(error: WorktreeError, destination: &Path) -> Workt
     }
     let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&error);
     while let Some(cause) = current {
-        if cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|cause| cause.kind() == std::io::ErrorKind::NotFound)
-        {
+        if cause.downcast_ref::<std::io::Error>().is_some_and(|cause| {
+            cause.kind() == std::io::ErrorKind::NotFound
+                || cause
+                    .get_ref()
+                    .is_some_and(|inner| inner.is::<crate::base_integrity::ChangedWhileReading>())
+        }) {
             return WorktreeError::InvalidRequest(format!(
                 "worktree {} changed while it was being compacted; compaction was cancelled and nothing changed",
                 destination.display()
@@ -13650,6 +13653,19 @@ mod tests {
             matches!(&vanished, super::WorktreeError::InvalidRequest(message)
                 if message.contains("changed while it was being compacted")),
             "{vanished}"
+        );
+        // A file written while it was hashed.
+        let rewritten = super::vanished_during_compaction(
+            super::io(
+                "snapshot managed worktree",
+                destination,
+                std::io::Error::other(crate::base_integrity::ChangedWhileReading),
+            ),
+            destination,
+        );
+        assert!(
+            matches!(rewritten, super::WorktreeError::InvalidRequest(_)),
+            "{rewritten}"
         );
         // The macOS ACL walker reports through a storage error.
         let storage = super::vanished_during_compaction(
