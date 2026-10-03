@@ -666,11 +666,28 @@ fn all_states_inventory_discovers_worktrees_across_registered_states() {
 
     // The all-states scope discovers the registered shared state directory and
     // filters out the other repository's worktree.
+    let trace = fixture.path().join("all-states-trace.jsonl");
     let all_states = Command::new(env!("CARGO_BIN_EXE_riftri"))
         .args(["worktree", "list", "--all-states", "--json"])
         .current_dir(first_repository)
+        .env("GIT_TRACE2_EVENT", &trace)
         .output()
         .expect("list all registered states");
+    let inspections = fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|event| {
+            event["event"] == "start"
+                && event["argv"]
+                    .as_array()
+                    .is_some_and(|args| args.iter().any(|arg| arg == "--git-common-dir"))
+        })
+        .count();
+    assert_eq!(
+        inspections, 2,
+        "inspect the queried and foreign repositories once each"
+    );
     assert!(
         all_states.status.success(),
         "riftri worktree list --all-states failed: {}",

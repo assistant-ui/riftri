@@ -59,6 +59,14 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+For `worktree list --all-states` identity reuse, run
+`node docs/benchmarks/listing-identity.mjs BEFORE AFTER NEW_OUTPUT_DIR`.
+The fixture has two repositories sharing a state directory. Six alternating
+pairs require identical complete reports and verify that the queried and
+foreign repositories are each inspected once. A linked-worktree query must
+still inspect its distinct recorded main root. Cleanup is checked through
+remove, GC and repair. This does not skip storage accounting or diagnostics.
+
 For many-cone sparse selection, compare matching release binaries with
 `node docs/benchmarks/sparse-selection.mjs BEFORE AFTER NEW_OUTPUT_DIR`.
 Defaults are 20,000 directories, 1,000 selected cones, and three alternating
