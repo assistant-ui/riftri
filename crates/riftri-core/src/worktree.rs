@@ -4734,18 +4734,29 @@ fn canonicalize_sparse_directories(requested: &[String]) -> Result<Vec<String>, 
     }
     normalized.sort_unstable();
     normalized.dedup();
-    let mut canonical: Vec<String> = Vec::new();
-    for directory in normalized {
-        let covered = canonical.iter().any(|kept| {
-            directory
-                .strip_prefix(kept.as_str())
-                .is_some_and(|rest| rest.starts_with('/'))
-        });
-        if !covered {
-            canonical.push(directory);
-        }
+    if normalized.len() < 2 {
+        return Ok(normalized);
     }
-    Ok(canonical)
+    // Only component-boundary ancestors can cover a cone. Looking them up
+    // avoids comparing each selection with every previously retained cone.
+    let requested = normalized
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let keep = normalized
+        .iter()
+        .map(|directory| {
+            !directory
+                .match_indices('/')
+                .any(|(end, _)| requested.contains(&directory[..end]))
+        })
+        .collect::<Vec<_>>();
+    drop(requested);
+    Ok(normalized
+        .into_iter()
+        .zip(keep)
+        .filter_map(|(directory, keep)| keep.then_some(directory))
+        .collect())
 }
 
 /// Require every requested cone directory to exist as a directory in the
@@ -4757,22 +4768,28 @@ fn validate_sparse_directories_in_tree(
     checkout_paths: &[PathBuf],
     tree: &ObjectId,
 ) -> Result<(), WorktreeError> {
+    // Preserve the allocation-free common case. Multiple cones share an
+    // operation-local index of native parent paths from this exact tree.
+    let directories = (sparse_directories.len() > 1).then(|| {
+        checkout_paths
+            .iter()
+            .flat_map(|path| path.ancestors().skip(1))
+            .collect::<HashSet<_>>()
+    });
     for directory in sparse_directories {
         let prefix = Path::new(directory);
-        let mut is_file = false;
-        let mut is_directory = false;
-        for path in checkout_paths {
-            if path.as_path() == prefix {
-                is_file = true;
-            } else if path.starts_with(prefix) {
-                is_directory = true;
-                break;
-            }
-        }
+        let is_directory = directories.as_ref().map_or_else(
+            || {
+                checkout_paths
+                    .iter()
+                    .any(|path| path.as_path() != prefix && path.starts_with(prefix))
+            },
+            |directories| directories.contains(prefix),
+        );
         if is_directory {
             continue;
         }
-        if is_file {
+        if checkout_paths.iter().any(|path| path.as_path() == prefix) {
             return Err(WorktreeError::InvalidRequest(format!(
                 "sparse directory {directory} is a file in tree {}; cone mode selects directories",
                 tree.as_str()
@@ -12562,6 +12579,111 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use crate::BaseCountImpact;
+    #[test]
+    fn sparse_selection_lookup_matches_linear_reference() {
+        let tree = riftri_git::ObjectId::parse("a".repeat(40)).unwrap();
+        let mut paths = (0..200)
+            .map(|i| PathBuf::from(format!("pkg-{i:03}/src/file")))
+            .collect::<Vec<_>>();
+        paths.extend([
+            PathBuf::from("pkg/file"),
+            PathBuf::from("pkg-foo/file"),
+            PathBuf::from("é/src/file"),
+            PathBuf::from("plain"),
+        ]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(PathBuf::from(std::ffi::OsString::from_vec(
+                b"native/\xff".to_vec(),
+            )));
+        }
+        for selections in [
+            vec![],
+            vec!["pkg"],
+            vec!["pkg", "é"],
+            vec!["plain", "missing"],
+            vec!["missing", "plain"],
+            vec!["pk", "pkg"],
+            vec!["pkg-199", "pkg-000"],
+        ] {
+            let selections = selections
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let expected = selections.iter().find_map(|directory| {
+                let prefix = Path::new(directory);
+                if paths.iter().any(|p| p != prefix && p.starts_with(prefix)) {
+                    None
+                } else {
+                    Some((directory, paths.iter().any(|p| p == prefix)))
+                }
+            });
+            let result = super::validate_sparse_directories_in_tree(&selections, &paths, &tree);
+            match expected {
+                None => result.unwrap(),
+                Some((directory, is_file)) => {
+                    let message = result.unwrap_err().to_string();
+                    assert!(message.contains(&format!("sparse directory {directory} ")));
+                    assert!(message.contains(if is_file {
+                        "is a file"
+                    } else {
+                        "does not exist"
+                    }));
+                }
+            }
+        }
+        let input = [
+            "pkg/a",
+            "pkg-foo/x",
+            "pkg",
+            "pkg/a/b",
+            "é/z",
+            "é",
+            "pkg/",
+            "pkg.foo/a",
+            "pkg.foo",
+        ]
+        .map(str::to_owned);
+        assert_eq!(
+            super::canonicalize_sparse_directories(&input).unwrap(),
+            ["pkg", "pkg-foo/x", "pkg.foo", "é"]
+        );
+    }
+
+    #[test]
+    #[ignore = "manual sparse selection scaling probe"]
+    fn reports_sparse_selection_latency() {
+        let tree = riftri_git::ObjectId::parse("a".repeat(40)).unwrap();
+        let paths = (0..20_000)
+            .map(|i| PathBuf::from(format!("pkg-{i:05}/src/file")))
+            .collect::<Vec<_>>();
+        let selections = (19_000..20_000)
+            .map(|i| format!("pkg-{i:05}"))
+            .collect::<Vec<_>>();
+        for round in 0..4 {
+            for indexed in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = std::time::Instant::now();
+                if indexed {
+                    super::validate_sparse_directories_in_tree(&selections, &paths, &tree).unwrap();
+                } else {
+                    for directory in &selections {
+                        let prefix = Path::new(directory);
+                        assert!(paths.iter().any(|p| p != prefix && p.starts_with(prefix)));
+                    }
+                }
+                eprintln!(
+                    "round={round} indexed={indexed} microseconds={}",
+                    start.elapsed().as_micros()
+                );
+            }
+        }
+    }
+
     #[test]
     fn marker_removed_index_preserves_exact_paths_and_phase_selection() {
         let fixture = tempdir().unwrap();
