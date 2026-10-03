@@ -5652,10 +5652,12 @@ fn analyze_resolved_repository_compatibility(
 }
 
 fn classify_in_tree_attributes(attributes: &[GitAttribute]) -> Result<Vec<PathBuf>, String> {
-    let mut by_path = BTreeMap::<PathBuf, Vec<&GitAttribute>>::new();
+    // Records outlive classification; only accepted LFS paths need ownership.
+    // Borrowing also avoids cloning keys for repeated attributes on one path.
+    let mut by_path = BTreeMap::<&Path, Vec<&GitAttribute>>::new();
     for attribute in attributes {
         by_path
-            .entry(attribute.path.clone())
+            .entry(attribute.path.as_path())
             .or_default()
             .push(attribute);
     }
@@ -5684,7 +5686,7 @@ fn classify_in_tree_attributes(attributes: &[GitAttribute]) -> Result<Vec<PathBu
                     path.display()
                 ));
             }
-            lfs_paths.push(path);
+            lfs_paths.push(path.to_path_buf());
             continue;
         }
         if let Some(attribute) = attributes
@@ -13474,6 +13476,110 @@ mod tests {
                 String::from_utf8_lossy(&rejected.name),
                 String::from_utf8_lossy(&rejected.value),
             );
+        }
+    }
+
+    #[test]
+    fn attribute_grouping_preserves_lfs_and_diagnostic_order() {
+        let attribute = |path: &str, name: &str, value: &str| riftri_git::GitAttribute {
+            path: PathBuf::from(path),
+            name: name.as_bytes().to_vec(),
+            value: value.as_bytes().to_vec(),
+        };
+        let mut records = vec![attribute("z.txt", "text", "auto")];
+        for path in ["b.bin", "a.bin"] {
+            for (name, value) in [
+                ("filter", "lfs"),
+                ("diff", "lfs"),
+                ("merge", "lfs"),
+                ("text", "unset"),
+            ] {
+                records.push(attribute(path, name, value));
+            }
+        }
+        assert_eq!(
+            classify_in_tree_attributes(&records).unwrap(),
+            [PathBuf::from("a.bin"), PathBuf::from("b.bin")]
+        );
+        records.push(attribute("a.bin", "text", "unset"));
+        assert!(
+            classify_in_tree_attributes(&records)
+                .unwrap_err()
+                .contains("must resolve exactly")
+        );
+        records.pop();
+        records.push(attribute("b.bin", "eol", "lf"));
+        assert!(
+            classify_in_tree_attributes(&records)
+                .unwrap_err()
+                .contains("b.bin")
+        );
+
+        let invalid = [
+            attribute("z.txt", "ident", "set"),
+            attribute("a.txt", "unknown", "set"),
+            attribute("a.txt", "ident", "set"),
+        ];
+        let error = classify_in_tree_attributes(&invalid).unwrap_err();
+        assert!(error.contains("unknown=set for a.txt"), "{error}");
+        assert!(classify_in_tree_attributes(&[]).unwrap().is_empty());
+        #[cfg(unix)]
+        {
+            let native = PathBuf::from(OsString::from_vec(b"native-\xff.bin".to_vec()));
+            let mut records = records[1..5].to_vec();
+            for record in &mut records {
+                record.path = native.clone();
+            }
+            assert_eq!(classify_in_tree_attributes(&records).unwrap(), [native]);
+        }
+    }
+
+    #[test]
+    #[ignore = "attribute grouping microbenchmark; no wall-clock threshold"]
+    fn reports_attribute_grouping_latency() {
+        let records = (0..100_000)
+            .flat_map(|i| {
+                ["text", "diff", "merge"].map(|name| riftri_git::GitAttribute {
+                    path: PathBuf::from(format!("packages/package-{i:06}/src/tracked.txt")),
+                    name: name.as_bytes().to_vec(),
+                    value: b"unset".to_vec(),
+                })
+            })
+            .collect::<Vec<_>>();
+        for round in 0..6 {
+            for borrowed in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = std::time::Instant::now();
+                let count = if borrowed {
+                    let mut groups =
+                        std::collections::BTreeMap::<&Path, Vec<&riftri_git::GitAttribute>>::new();
+                    for record in std::hint::black_box(&records) {
+                        groups
+                            .entry(record.path.as_path())
+                            .or_default()
+                            .push(record);
+                    }
+                    std::hint::black_box(&groups).len()
+                } else {
+                    let mut groups =
+                        std::collections::BTreeMap::<PathBuf, Vec<&riftri_git::GitAttribute>>::new(
+                        );
+                    for record in std::hint::black_box(&records) {
+                        groups.entry(record.path.clone()).or_default().push(record);
+                    }
+                    std::hint::black_box(&groups).len()
+                };
+                let elapsed = start.elapsed();
+                assert_eq!(count, 100_000);
+                println!(
+                    "attribute-grouping round={round} borrowed={borrowed} records={} elapsed_us={}",
+                    records.len(),
+                    elapsed.as_micros()
+                );
+            }
         }
     }
 
