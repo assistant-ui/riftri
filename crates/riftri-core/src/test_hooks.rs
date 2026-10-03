@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +21,15 @@ type Hook = Box<dyn FnOnce(&Path)>;
 
 thread_local! {
     static HOOK: RefCell<Option<(FilesystemRacePoint, Hook)>> = RefCell::new(None);
+    static JOURNAL_OPENS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", feature = "native-cow-integration")
+))]
+pub(crate) fn journal_open_count() -> usize {
+    JOURNAL_OPENS.with(Cell::get)
 }
 
 pub(crate) struct FilesystemRaceHookGuard;
@@ -48,6 +57,9 @@ pub(crate) fn install(
 }
 
 pub(crate) fn fire(point: FilesystemRacePoint, path: &Path) {
+    if point == FilesystemRacePoint::JournalOpen {
+        JOURNAL_OPENS.with(|count| count.set(count.get() + 1));
+    }
     HOOK.with(|slot| {
         let installed = slot.borrow_mut().take();
         match installed {
