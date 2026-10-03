@@ -2521,7 +2521,11 @@ fn read_batch_blob(
         .take(128)
         .read_until(b'\n', &mut header)
         .map_err(|error| invalid_blob_batch(error.to_string()))?;
-    let size = parse_blob_sizes(&header, std::slice::from_ref(object))?[0];
+    let line = std::str::from_utf8(&header)
+        .map_err(|_| invalid_blob_sizes())?
+        .strip_suffix('\n')
+        .ok_or_else(invalid_blob_sizes)?;
+    let size = parse_blob_size_line(line, object)?;
     if size > max_bytes as u64 {
         return Err(invalid_blob_batch(format!(
             "blob {} is {size} bytes; limit is {max_bytes}",
@@ -2542,35 +2546,42 @@ fn read_batch_blob(
     Ok(bytes)
 }
 
-fn parse_blob_sizes(bytes: &[u8], objects: &[ObjectId]) -> Result<Vec<u64>, GitError> {
-    let invalid = || GitError::InvalidOutput {
+fn invalid_blob_sizes() -> GitError {
+    GitError::InvalidOutput {
         context: "blob size batch",
         detail: "expected one matching blob ID, type and size per request".to_owned(),
+    }
+}
+
+fn parse_blob_size_line(line: &str, object: &ObjectId) -> Result<u64, GitError> {
+    let mut fields = line.split(' ');
+    let (Some(id), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
+        return Err(invalid_blob_sizes());
     };
-    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    if fields.next().is_some()
+        || id != object.as_str()
+        || kind != "blob"
+        || size.is_empty()
+        || !size.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid_blob_sizes());
+    }
+    size.parse().map_err(|_| invalid_blob_sizes())
+}
+
+fn parse_blob_sizes(bytes: &[u8], objects: &[ObjectId]) -> Result<Vec<u64>, GitError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid_blob_sizes())?;
     let lines = text
         .strip_suffix('\n')
-        .ok_or_else(invalid)?
-        .split('\n')
-        .collect::<Vec<_>>();
-    if lines.len() != objects.len() {
-        return Err(invalid());
+        .ok_or_else(invalid_blob_sizes)?
+        .split('\n');
+    // Preserve whole-response count validation before parsing individual lines.
+    if lines.clone().count() != objects.len() {
+        return Err(invalid_blob_sizes());
     }
     lines
-        .into_iter()
         .zip(objects)
-        .map(|(line, object)| {
-            let fields = line.split(' ').collect::<Vec<_>>();
-            if fields.len() != 3
-                || fields[0] != object.as_str()
-                || fields[1] != "blob"
-                || fields[2].is_empty()
-                || !fields[2].bytes().all(|byte| byte.is_ascii_digit())
-            {
-                return Err(invalid());
-            }
-            fields[2].parse().map_err(|_| invalid())
-        })
+        .map(|(line, object)| parse_blob_size_line(line, object))
         .collect()
 }
 
@@ -3411,6 +3422,40 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             before
         );
+    }
+
+    #[test]
+    fn blob_size_parser_preserves_exact_spacing_and_record_counts() {
+        let id = super::ObjectId::parse("a".repeat(40)).unwrap();
+        for size in ["0", "0001", "18446744073709551615"] {
+            let line = format!("{} blob {size}\n", id.as_str());
+            assert_eq!(
+                super::parse_blob_sizes(line.as_bytes(), std::slice::from_ref(&id)).unwrap(),
+                vec![size.parse::<u64>().unwrap()]
+            );
+        }
+        for suffix in [
+            " blob 1 \n",
+            "  blob 1\n",
+            " blob  1\n",
+            " blob +1\n",
+            " blob 1\r\n",
+            " blob 1\n\n",
+            "\tblob 1\n",
+        ] {
+            let line = format!("{}{suffix}", id.as_str());
+            assert!(
+                super::parse_blob_sizes(line.as_bytes(), std::slice::from_ref(&id)).is_err(),
+                "{line:?}"
+            );
+        }
+        let two = format!("{} blob 7\n{} blob 0\n", id.as_str(), id.as_str());
+        assert_eq!(
+            super::parse_blob_sizes(two.as_bytes(), &[id.clone(), id.clone()]).unwrap(),
+            vec![7, 0]
+        );
+        assert!(super::parse_blob_sizes(two.as_bytes(), std::slice::from_ref(&id)).is_err());
+        assert!(super::parse_blob_sizes(b"", &[]).is_err());
     }
 
     #[test]
