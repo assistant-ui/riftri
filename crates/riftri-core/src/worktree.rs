@@ -5778,15 +5778,22 @@ fn inspect_git_lfs_objects(
             ));
         }
     }
+    if paths.is_empty() {
+        return Ok(objects);
+    }
+    let mut reader = git
+        .small_blob_reader(repository)
+        .map_err(|error| format!("could not read Git LFS pointers: {error}"))?;
     // Bound both individual bodies and aggregate buffered pointer bytes.
+    // Reuse only the process, not pointer or local-object validation results.
     // All local LFS objects still undergo the same validation below.
     for (paths, entries) in paths.chunks(128).zip(selected.chunks(128)) {
         let ids = entries
             .iter()
             .map(|entry| entry.object_id.clone())
             .collect::<Vec<_>>();
-        let blobs = git
-            .read_small_blobs(repository, &ids, MAX_POINTER_BYTES)
+        let blobs = reader
+            .read(&ids, MAX_POINTER_BYTES)
             .map_err(|error| format!("could not read Git LFS pointers: {error}"))?;
         for (path, bytes) in paths.iter().zip(blobs) {
             let pointer = parse_git_lfs_pointer(&bytes)
@@ -5839,6 +5846,9 @@ fn inspect_git_lfs_objects(
             });
         }
     }
+    reader
+        .finish()
+        .map_err(|error| format!("could not read Git LFS pointers: {error}"))?;
     Ok(objects)
 }
 

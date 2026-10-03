@@ -21,7 +21,7 @@ test('real LFS preserves bytes, isolation and refusals across pointer-batch boun
   assert.equal(report.complete, true);
   assert.equal(report.cases.length, 6);
   assert.deepEqual(report.cases.filter(row => row.version === 'after').map(row => [row.count, row.batches]),
-    [[127, 1], [128, 1], [129, 2]]);
+    [[127, 1], [128, 1], [129, 1]]);
   // The fixture has already removed its managed views and collected bases.
   fs.rmSync(root, { recursive: true });
 });

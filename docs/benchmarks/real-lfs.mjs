@@ -104,7 +104,7 @@ for (const count of counts) {
       assert.match(output, /Base: reused/); verify(destination);
       const starts = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === 'start');
       const batches = starts.filter(event => event.argv.includes('cat-file') && event.argv.includes('--batch')).length;
-      if (version === 'after') assert.equal(batches, Math.ceil(count / 128));
+      if (version === 'after') assert.equal(batches, 1);
       fs.writeFileSync(path.join(destination, victim.name), 'private edit');
       assert.deepEqual(fs.readFileSync(path.join(anchor, victim.name)), victim.bytes);
       assert.deepEqual(fs.readFileSync(victim.object), victim.bytes);
