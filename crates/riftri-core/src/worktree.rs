@@ -1107,6 +1107,10 @@ pub fn worktree_inventory_across_states(
     }
 
     let mut identity_cache: BTreeMap<PathBuf, Option<PathBuf>> = BTreeMap::new();
+    // The query root has already passed the same full inspection. Reuse that
+    // snapshot only for this exact path; distinct recorded roots (including a
+    // main root queried from a linked worktree) still get their own inspection.
+    identity_cache.insert(repository_root.to_path_buf(), Some(query_identity.clone()));
     for (state_directory, source) in discovered {
         let report = match storage_accounting(&state_directory) {
             Ok(report) => report,
