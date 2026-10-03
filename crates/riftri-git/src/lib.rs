@@ -248,6 +248,108 @@ pub struct Git {
     process_attempts: Arc<AtomicUsize>,
 }
 
+/// One operation-scoped `cat-file --batch` process. Call `finish` to validate
+/// EOF and the exit status. Dropping an unfinished reader kills and reaps it.
+pub struct SmallBlobReader {
+    command: PathBuf,
+    child: Option<std::process::Child>,
+    input: Option<std::process::ChildStdin>,
+    output: std::io::BufReader<std::process::ChildStdout>,
+    stderr: std::fs::File,
+}
+
+impl SmallBlobReader {
+    /// Read one bounded batch in request order, retaining at most
+    /// `objects.len() * max_bytes` body bytes. Errors invalidate the session.
+    pub fn read(
+        &mut self,
+        objects: &[ObjectId],
+        max_bytes: usize,
+    ) -> Result<Vec<Vec<u8>>, GitError> {
+        use std::io::Write;
+        let result = (|| {
+            let input = self
+                .input
+                .as_mut()
+                .ok_or_else(|| invalid_blob_batch("closed session"))?;
+            let mut blobs = Vec::with_capacity(objects.len());
+            for object in objects {
+                writeln!(input, "{}", object.as_str()).map_err(|source| GitError::WriteInput {
+                    command: self.command.clone(),
+                    source,
+                })?;
+                blobs.push(read_batch_blob(&mut self.output, object, max_bytes)?);
+            }
+            Ok(blobs)
+        })();
+        if result.is_err() {
+            self.abort();
+        }
+        result
+    }
+
+    /// Close input and require no trailing response bytes and a successful exit.
+    pub fn finish(mut self) -> Result<(), GitError> {
+        use std::io::{Read, Seek, SeekFrom};
+        if self.child.is_none() {
+            return Err(invalid_blob_batch("closed session"));
+        }
+        drop(self.input.take());
+        let mut extra = [0];
+        if self
+            .output
+            .read(&mut extra)
+            .map_err(|error| invalid_blob_batch(error.to_string()))?
+            != 0
+        {
+            return Err(invalid_blob_batch("unexpected trailing response bytes"));
+        }
+        let status = self
+            .child
+            .as_mut()
+            .expect("live session")
+            .wait()
+            .map_err(|source| GitError::Wait {
+                command: self.command.clone(),
+                source,
+            })?;
+        self.child.take();
+        if !status.success() {
+            self.stderr
+                .seek(SeekFrom::Start(0))
+                .map_err(|source| GitError::TemporaryState { source })?;
+            let mut diagnostic = Vec::new();
+            (&mut self.stderr)
+                .take(64 * 1024)
+                .read_to_end(&mut diagnostic)
+                .map_err(|source| GitError::TemporaryState { source })?;
+            return Err(command_failed(
+                &[OsString::from("cat-file"), OsString::from("--batch")],
+                &Output {
+                    status,
+                    stdout: Vec::new(),
+                    stderr: diagnostic,
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    fn abort(&mut self) {
+        drop(self.input.take());
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for SmallBlobReader {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
 impl Default for Git {
     fn default() -> Self {
         let scoped_command = std::env::var_os(SHIM_ACTIVE_ENV)
@@ -755,12 +857,18 @@ impl Git {
         objects: &[ObjectId],
         max_bytes: usize,
     ) -> Result<Vec<Vec<u8>>, GitError> {
-        use std::io::{BufReader, Read, Seek, SeekFrom, Write};
         if objects.is_empty() {
             return Ok(Vec::new());
         }
-        let mut stderr =
-            tempfile::tempfile().map_err(|source| GitError::TemporaryState { source })?;
+        let mut reader = self.small_blob_reader(path)?;
+        let blobs = reader.read(objects, max_bytes)?;
+        reader.finish()?;
+        Ok(blobs)
+    }
+
+    /// Start a reader reusable across bounded batches within one operation.
+    pub fn small_blob_reader(&self, path: &Path) -> Result<SmallBlobReader, GitError> {
+        let stderr = tempfile::tempfile().map_err(|source| GitError::TemporaryState { source })?;
         let arguments = [OsString::from("cat-file"), OsString::from("--batch")];
         let mut command = Command::new(&self.command);
         command
@@ -779,65 +887,20 @@ impl Git {
         let mut child = command
             .spawn()
             .map_err(|source| self.start_error(Some(path), source))?;
-        let result = (|| {
-            let mut input = child
-                .stdin
-                .take()
-                .ok_or_else(|| invalid_blob_batch("missing stdin"))?;
-            let mut output = BufReader::new(
-                child
-                    .stdout
-                    .take()
-                    .ok_or_else(|| invalid_blob_batch("missing stdout"))?,
-            );
-            let mut blobs = Vec::with_capacity(objects.len());
-            for object in objects {
-                writeln!(input, "{}", object.as_str()).map_err(|source| GitError::WriteInput {
-                    command: self.command.clone(),
-                    source,
-                })?;
-                blobs.push(read_batch_blob(&mut output, object, max_bytes)?);
-            }
-            drop(input);
-            let mut extra = [0];
-            if output
-                .read(&mut extra)
-                .map_err(|error| invalid_blob_batch(error.to_string()))?
-                != 0
-            {
-                return Err(invalid_blob_batch("unexpected trailing response bytes"));
-            }
-            let status = child.wait().map_err(|source| GitError::Wait {
-                command: self.command.clone(),
-                source,
-            })?;
-            if !status.success() {
-                stderr
-                    .seek(SeekFrom::Start(0))
-                    .map_err(|source| GitError::TemporaryState { source })?;
-                let mut diagnostic = Vec::new();
-                stderr
-                    .take(64 * 1024)
-                    .read_to_end(&mut diagnostic)
-                    .map_err(|source| GitError::TemporaryState { source })?;
-                return Err(command_failed(
-                    &arguments,
-                    &Output {
-                        status,
-                        stdout: Vec::new(),
-                        stderr: diagnostic,
-                    },
-                ));
-            }
-            Ok(blobs)
-        })();
-        if result.is_err() {
-            // An oversized/malformed response must not leave cat-file alive,
-            // blocked writing a body that the caller deliberately won't read.
+        let input = child.stdin.take();
+        let output = child.stdout.take();
+        let (Some(input), Some(output)) = (input, output) else {
             let _ = child.kill();
             let _ = child.wait();
-        }
-        result
+            return Err(invalid_blob_batch("missing child pipes"));
+        };
+        Ok(SmallBlobReader {
+            command: self.command.clone(),
+            child: Some(child),
+            input: Some(input),
+            output: std::io::BufReader::new(output),
+            stderr,
+        })
     }
 
     /// Return the installed Git LFS version line, or `None` when the standard
@@ -3041,6 +3104,79 @@ mod tests {
     }
 
     #[test]
+    fn small_blob_session_reuses_one_process_across_bounded_batches() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        let revision = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let object = git.list_tree(fixture.path(), &revision.tree).unwrap()[0]
+            .object_id
+            .clone();
+        let before = git
+            .process_attempts
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let mut reader = git.small_blob_reader(fixture.path()).unwrap();
+        for count in [128, 128, 1] {
+            assert_eq!(
+                reader.read(&vec![object.clone(); count], 8).unwrap(),
+                vec![b"tracked\n".to_vec(); count]
+            );
+        }
+        reader.finish().unwrap();
+        assert_eq!(
+            git.process_attempts
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - before,
+            1
+        );
+    }
+
+    #[test]
+    fn small_blob_session_rejects_later_oversized_reads_and_cannot_be_reused() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        let revision = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let object = git.list_tree(fixture.path(), &revision.tree).unwrap()[0]
+            .object_id
+            .clone();
+        let mut reader = git.small_blob_reader(fixture.path()).unwrap();
+        reader.read(std::slice::from_ref(&object), 8).unwrap();
+        assert!(reader.read(std::slice::from_ref(&object), 7).is_err());
+        assert!(reader.child.is_none());
+        assert!(reader.read(&[object], 8).is_err());
+        assert!(reader.finish().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn small_blob_session_finish_rejects_trailing_data_and_failed_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let script = fixture.path().join("git-batch");
+        let id = super::ObjectId::parse("a".repeat(40)).unwrap();
+        for ending in ["printf extra", "printf failed >&2; exit 7"] {
+            fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nwhile read request; do printf '{} blob 1\\nx\\n'; done\n{ending}\n",
+                    id.as_str()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            let mut reader = Git::new(&script).small_blob_reader(fixture.path()).unwrap();
+            assert_eq!(
+                reader.read(std::slice::from_ref(&id), 1).unwrap(),
+                vec![b"x".to_vec()]
+            );
+            assert!(reader.finish().is_err());
+        }
+    }
+
+    #[test]
     fn bounded_blob_batch_checks_limits_and_preserves_order() {
         let fixture = RepositoryFixture::committed();
         let handle = Git::default();
@@ -3096,6 +3232,71 @@ mod tests {
                 .process_attempts
                 .load(std::sync::atomic::Ordering::Relaxed),
             before
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release-mode process-reuse benchmark"]
+    fn reports_small_blob_session_latency() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        let revision = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let object = git.list_tree(fixture.path(), &revision.tree).unwrap()[0]
+            .object_id
+            .clone();
+        let ids = vec![object; 10_000];
+        for round in 0..4 {
+            for reuse in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let before = git
+                    .process_attempts
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let start = std::time::Instant::now();
+                let mut reader = reuse.then(|| git.small_blob_reader(fixture.path()).unwrap());
+                for batch in ids.chunks(128) {
+                    let blobs = match &mut reader {
+                        Some(reader) => reader.read(batch, 1024).unwrap(),
+                        None => git.read_small_blobs(fixture.path(), batch, 1024).unwrap(),
+                    };
+                    assert_eq!(blobs, vec![b"tracked\n".to_vec(); batch.len()]);
+                }
+                if let Some(reader) = reader {
+                    reader.finish().unwrap();
+                }
+                let elapsed = start.elapsed();
+                let starts = git
+                    .process_attempts
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    - before;
+                assert_eq!(starts, if reuse { 1 } else { 79 });
+                eprintln!(
+                    "round={round} reuse={reuse} starts={starts} microseconds={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_a_blob_session_reaps_the_child() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        let reader = git.small_blob_reader(fixture.path()).unwrap();
+        let pid = reader.child.as_ref().unwrap().id();
+        drop(reader);
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .output()
+                .unwrap()
+                .status
+                .success()
         );
     }
 

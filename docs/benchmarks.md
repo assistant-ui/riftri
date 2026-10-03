@@ -13,7 +13,7 @@ cargo test --release --locked -p riftri-cli \
 ```
 
 The many-file fixture retains the 19/14/17 Git-process budgets. LFS pointer
-inspection reads at most 128 pointers per Git batch. Each response header is
+inspection reuses one Git process across chunks of at most 128 pointers. Each response header is
 validated against the requested object ID and the 1,024-byte pointer limit
 before its body is allocated or read. Malformed/oversized responses terminate
 and reap the child; pointer bodies consume at most 128 KiB per chunk. Status indexes
@@ -31,6 +31,14 @@ These probes alternate old/new operation order and check result parity. Their
 timings are not end-to-end add/status speedups; use the full CLI workload below
 for those claims. The lookup probe runs on macOS, or with the
 `native-cow-integration` feature on supported Linux/Windows test volumes.
+
+To measure process reuse across pointer chunks, run
+`cargo test --release -p riftri-git reports_small_blob_session_latency -- --ignored --nocapture`.
+It alternates four pairs of 10,000 bounded blob reads, checks every returned
+body, and asserts 79 process starts versus one. The real-LFS harness below
+also checks one pointer-reader process at 127, 128, and 129 paths; its optional
+count argument can exercise larger sets. Neither probe relaxes pointer limits,
+local-object validation, SHA-256 verification, or final Git cleanliness.
 
 Local diagnostic on October 1, 2026 (Apple M1, macOS, release profile): the four
 paired samples below passed result parity. The host was busy with other builds

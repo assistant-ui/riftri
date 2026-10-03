@@ -56,7 +56,7 @@ for (let round = 0; round < 4; round++) {
     assert.equal(run('git', ['status', '--porcelain=v1', '-z'], destination), '');
     const starts = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === 'start');
     const bodyBatches = starts.filter(event => event.argv.includes('--batch')).length;
-    if (version === 'after') assert.equal(bodyBatches, Math.ceil(count / 128));
+    if (version === 'after') assert.equal(bodyBatches, 1);
     fs.writeFileSync(path.join(destination, names[0]), 'private edit');
     assert.deepEqual(fs.readFileSync(path.join(anchor, names[0])), bytes);
     assert.deepEqual(fs.readFileSync(object), bytes);
