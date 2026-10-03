@@ -62,7 +62,8 @@ version; timings are observations, never correctness thresholds.
 
 The ignored `reports_sparse_selection_latency` core test compares the repeated
 linear scan with exact native parent-path indexing, including construction.
-The one-cone path remains allocation-free. No sparse selection, error order,
+The one-cone path and cheap early matches remain allocation-free; indexing
+starts only after cumulative scans reach one full-tree pass. No sparse selection, error order,
 checkout-profile hash, or Git behavior changes.
 
 Windows attribute queries now use one NUL-delimited stdin request for Unicode

@@ -4768,25 +4768,10 @@ fn validate_sparse_directories_in_tree(
     checkout_paths: &[PathBuf],
     tree: &ObjectId,
 ) -> Result<(), WorktreeError> {
-    // Preserve the allocation-free common case. Multiple cones share an
-    // operation-local index of native parent paths from this exact tree.
-    let directories = (sparse_directories.len() > 1).then(|| {
-        checkout_paths
-            .iter()
-            .flat_map(|path| path.ancestors().skip(1))
-            .collect::<HashSet<_>>()
-    });
+    let mut directories = SparseDirectoryIndex::new(checkout_paths);
     for directory in sparse_directories {
         let prefix = Path::new(directory);
-        let is_directory = directories.as_ref().map_or_else(
-            || {
-                checkout_paths
-                    .iter()
-                    .any(|path| path.as_path() != prefix && path.starts_with(prefix))
-            },
-            |directories| directories.contains(prefix),
-        );
-        if is_directory {
+        if directories.contains(prefix) {
             continue;
         }
         if checkout_paths.iter().any(|path| path.as_path() == prefix) {
@@ -4801,6 +4786,49 @@ fn validate_sparse_directories_in_tree(
         )));
     }
     Ok(())
+}
+
+/// Cheap early matches need no index. Bound total linear work to one tree
+/// pass before indexing the exact native parents for the remaining queries.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct SparseDirectoryIndex<'a> {
+    paths: &'a [PathBuf],
+    remaining_scan: usize,
+    directories: Option<HashSet<&'a Path>>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+impl<'a> SparseDirectoryIndex<'a> {
+    fn new(paths: &'a [PathBuf]) -> Self {
+        Self {
+            paths,
+            remaining_scan: paths.len(),
+            directories: None,
+        }
+    }
+
+    fn contains(&mut self, prefix: &Path) -> bool {
+        if let Some(directories) = &self.directories {
+            return directories.contains(prefix);
+        }
+        for path in self.paths {
+            if self.remaining_scan == 0 {
+                let directories = self
+                    .paths
+                    .iter()
+                    .flat_map(|path| path.ancestors().skip(1))
+                    .collect::<HashSet<_>>();
+                let found = directories.contains(prefix);
+                self.directories = Some(directories);
+                return found;
+            }
+            self.remaining_scan -= 1;
+            if path.as_path() != prefix && path.starts_with(prefix) {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -12579,6 +12607,26 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
 ))]
 mod tests {
     use crate::BaseCountImpact;
+    #[test]
+    fn sparse_directory_index_is_lazy_and_bounds_repeated_scans() {
+        let paths = (0..100)
+            .map(|i| PathBuf::from(format!("pkg-{i:03}/file")))
+            .collect::<Vec<_>>();
+        let mut index = super::SparseDirectoryIndex::new(&paths);
+        assert!(index.contains(Path::new("pkg-000")));
+        assert!(index.contains(Path::new("pkg-001")));
+        assert!(index.directories.is_none());
+        assert_eq!(index.remaining_scan, 97);
+        assert!(index.contains(Path::new("pkg-099")));
+        assert!(index.directories.is_some());
+        assert_eq!(index.remaining_scan, 0);
+        assert!(!index.contains(Path::new("pkg")));
+        assert!(!index.contains(Path::new("pkg-000/file")));
+        let mut single = super::SparseDirectoryIndex::new(&paths);
+        assert!(single.contains(Path::new("pkg-099")));
+        assert!(single.directories.is_none());
+    }
+
     #[test]
     fn sparse_selection_lookup_matches_linear_reference() {
         let tree = riftri_git::ObjectId::parse("a".repeat(40)).unwrap();
