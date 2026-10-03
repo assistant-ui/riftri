@@ -59,6 +59,21 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+For many-cone sparse selection, compare matching release binaries with
+`node docs/benchmarks/sparse-selection.mjs BEFORE AFTER NEW_OUTPUT_DIR`.
+Defaults are 20,000 directories, 1,000 selected cones, and three alternating
+pairs. Every view must reuse the same base, match all selected file bytes,
+exclude every unselected directory, retain the root file, and be Git-clean.
+Private-write isolation, sparse compaction, removal, GC and repair must pass
+before results are marked complete. CI runs a smaller 512-directory/32-cone
+version; timings are observations, never correctness thresholds.
+
+The ignored `reports_sparse_selection_latency` core test compares the repeated
+linear scan with exact native parent-path indexing, including construction.
+The one-cone path and cheap early matches remain allocation-free; indexing
+starts only after cumulative scans reach one full-tree pass. No sparse selection, error order,
+checkout-profile hash, or Git behavior changes.
+
 Windows attribute queries now use one NUL-delimited stdin request for Unicode
 paths, as Unix already does for raw native bytes. Non-Unicode Windows input
 retains the native-argument fallback. To compare the previous 128-path argument
