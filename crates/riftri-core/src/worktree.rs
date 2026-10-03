@@ -5349,11 +5349,12 @@ fn analyze_resolved_repository_compatibility(
         // query below: global and system attributes must still be detected
         // and refused rather than becoming part of a supposedly immutable
         // checkout profile.
-        let mut in_tree = if has_in_tree_attribute_file {
-            git.in_tree_attributes_for_index(repository, &tree_index, &paths)?
-        } else {
-            Vec::new()
-        };
+        let (mut in_tree, mut effective) = git.attribute_pair_for_index(
+            repository,
+            &tree_index,
+            &paths,
+            has_in_tree_attribute_file,
+        )?;
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
             Err(explanation) => {
@@ -5364,7 +5365,6 @@ fn analyze_resolved_repository_compatibility(
             }
         }
 
-        let mut effective = git.effective_attributes_for_index(repository, &tree_index, &paths)?;
         in_tree.sort_unstable();
         effective.sort_unstable();
         if effective != in_tree {

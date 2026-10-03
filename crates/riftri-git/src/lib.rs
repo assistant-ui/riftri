@@ -843,7 +843,7 @@ impl Git {
             Some(path),
             &[OsString::from("cat-file"), OsString::from("--batch-check")],
             &[],
-            input.into_bytes(),
+            input.as_bytes(),
         )?;
         parse_blob_sizes(&output.stdout, objects)
     }
@@ -1378,8 +1378,19 @@ impl Git {
         index: &TreeAttributeIndex,
         paths: &[impl AsRef<Path>],
     ) -> Result<Vec<GitAttribute>, GitError> {
+        let input = attribute_stdin(paths);
+        self.effective_attributes_for_index_with_input(path, index, paths, input.as_deref())
+    }
+
+    fn effective_attributes_for_index_with_input(
+        &self,
+        path: &Path,
+        index: &TreeAttributeIndex,
+        paths: &[impl AsRef<Path>],
+        input: Option<&[u8]>,
+    ) -> Result<Vec<GitAttribute>, GitError> {
         let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str())];
-        self.attributes_for_paths_with_environment(path, paths, &[], &index_environment)
+        self.attributes_with_input(path, paths, &[], &index_environment, input)
     }
 
     /// Return attributes from an already indexed tree while disabling global
@@ -1391,6 +1402,39 @@ impl Git {
         path: &Path,
         index: &TreeAttributeIndex,
         paths: &[impl AsRef<Path>],
+    ) -> Result<Vec<GitAttribute>, GitError> {
+        let input = attribute_stdin(paths);
+        self.in_tree_attributes_for_index_with_input(path, index, paths, input.as_deref())
+    }
+
+    /// Query isolated in-tree attributes, then effective attributes, reusing
+    /// only the immutable encoded path input. Environments remain separate.
+    /// Skip the isolated query only when the caller proved the tree has no
+    /// `.gitattributes`; the effective query must still detect external rules.
+    pub fn attribute_pair_for_index(
+        &self,
+        path: &Path,
+        index: &TreeAttributeIndex,
+        paths: &[impl AsRef<Path>],
+        include_in_tree: bool,
+    ) -> Result<(Vec<GitAttribute>, Vec<GitAttribute>), GitError> {
+        let input = attribute_stdin(paths);
+        let in_tree = if include_in_tree {
+            self.in_tree_attributes_for_index_with_input(path, index, paths, input.as_deref())?
+        } else {
+            Vec::new()
+        };
+        let effective =
+            self.effective_attributes_for_index_with_input(path, index, paths, input.as_deref())?;
+        Ok((in_tree, effective))
+    }
+
+    fn in_tree_attributes_for_index_with_input(
+        &self,
+        path: &Path,
+        index: &TreeAttributeIndex,
+        paths: &[impl AsRef<Path>],
+        input: Option<&[u8]>,
     ) -> Result<Vec<GitAttribute>, GitError> {
         #[cfg(unix)]
         let null_device = OsStr::new("/dev/null");
@@ -1406,7 +1450,7 @@ impl Git {
             (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
             (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
         ];
-        self.attributes_for_paths_with_environment(path, paths, &arguments, &environment)
+        self.attributes_with_input(path, paths, &arguments, &environment, input)
     }
 
     fn attributes_for_paths_with_environment(
@@ -1416,11 +1460,23 @@ impl Git {
         argument_prefix: &[OsString],
         environment: &[(&OsStr, &OsStr)],
     ) -> Result<Vec<GitAttribute>, GitError> {
+        let input = attribute_stdin(paths);
+        self.attributes_with_input(path, paths, argument_prefix, environment, input.as_deref())
+    }
+
+    fn attributes_with_input(
+        &self,
+        path: &Path,
+        paths: &[impl AsRef<Path>],
+        argument_prefix: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
+        input: Option<&[u8]>,
+    ) -> Result<Vec<GitAttribute>, GitError> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
 
-        if let Some(input) = attribute_stdin(paths) {
+        if let Some(input) = input {
             let mut arguments = argument_prefix.to_vec();
             arguments.extend([
                 OsString::from("check-attr"),
@@ -2446,7 +2502,7 @@ impl Git {
         path: Option<&Path>,
         arguments: &[OsString],
         environment: &[(&OsStr, &OsStr)],
-        input: Vec<u8>,
+        input: &[u8],
     ) -> Result<Output, GitError> {
         use std::io::Write;
 
@@ -2470,14 +2526,19 @@ impl Git {
             context: "Git command input",
             detail: "piped standard input was unavailable".to_owned(),
         })?;
-        let writer = std::thread::spawn(move || stdin.write_all(&input));
-        let output = child.wait_with_output().map_err(|source| GitError::Wait {
-            command: self.command.clone(),
-            source,
-        })?;
-        let write_result = writer.join().map_err(|_| GitError::InvalidOutput {
-            context: "Git command input",
-            detail: "input writer thread panicked".to_owned(),
+        // The scoped writer borrows reusable input while output is drained
+        // concurrently. It is joined before returning, including wait errors.
+        let (output, write_result) = std::thread::scope(|scope| {
+            let writer = scope.spawn(move || stdin.write_all(input));
+            let output = child.wait_with_output().map_err(|source| GitError::Wait {
+                command: self.command.clone(),
+                source,
+            });
+            let write_result = writer.join().map_err(|_| GitError::InvalidOutput {
+                context: "Git command input",
+                detail: "input writer thread panicked".to_owned(),
+            });
+            Ok::<_, GitError>((output?, write_result?))
         })?;
 
         if !output.status.success() {
@@ -5324,6 +5385,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn paired_attribute_queries_preserve_isolation_native_paths_and_query_counts() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        git(fixture.path(), &["commit", "-m", "attributes"]);
+        let external = fixture.path().join("external-attributes");
+        fs::write(&external, "*.txt filter=external\n").unwrap();
+        git(
+            fixture.path(),
+            &["config", "core.attributesFile", external.to_str().unwrap()],
+        );
+        let handle = Git::default();
+        let tree = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let index = handle.tree_attribute_index(fixture.path(), &tree).unwrap();
+        let mut paths = (0..1000)
+            .map(|i| PathBuf::from(format!("{}/日本語-{i}.txt", "d".repeat(240))))
+            .collect::<Vec<_>>();
+        paths.push(PathBuf::from("-tab\tline\n.txt"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(PathBuf::from(OsString::from_vec(
+                b"native-\xff.txt".to_vec(),
+            )));
+        }
+        let expected_in_tree = handle
+            .in_tree_attributes_for_index(fixture.path(), &index, &paths)
+            .unwrap();
+        let expected_effective = handle
+            .effective_attributes_for_index(fixture.path(), &index, &paths)
+            .unwrap();
+        assert_ne!(expected_in_tree, expected_effective);
+        let borrowed = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+        let before = handle.process_attempts();
+        let (in_tree, effective) = handle
+            .attribute_pair_for_index(fixture.path(), &index, &borrowed, true)
+            .unwrap();
+        assert_eq!(handle.process_attempts() - before, 2);
+        assert_eq!(in_tree, expected_in_tree);
+        assert_eq!(effective, expected_effective);
+        let before = handle.process_attempts();
+        let (in_tree, effective) = handle
+            .attribute_pair_for_index(fixture.path(), &index, &borrowed, false)
+            .unwrap();
+        assert_eq!(handle.process_attempts() - before, 1);
+        assert!(in_tree.is_empty());
+        assert_eq!(effective, expected_effective);
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_index(fixture.path(), &index, &borrowed[..0], true)
+                .unwrap(),
+            (vec![], vec![])
+        );
+        assert_eq!(handle.process_attempts(), before);
+    }
+
+    #[test]
+    fn borrowed_command_input_preserves_git_failure_when_pipe_closes_early() {
+        let fixture = RepositoryFixture::committed();
+        let handle = Git::default();
+        let input = vec![b'x'; 1024 * 1024];
+        for _ in 0..2 {
+            let error = handle
+                .run_os_with_input(
+                    Some(fixture.path()),
+                    &[OsString::from("riftri-nonexistent-command")],
+                    &[],
+                    &input,
+                )
+                .unwrap_err();
+            assert!(
+                matches!(error, super::GitError::CommandFailed { .. }),
+                "{error}"
+            );
+        }
+        assert!(input.iter().all(|byte| *byte == b'x'));
+    }
+
     #[cfg(unix)]
     #[test]
     fn attribute_parser_preserves_non_utf8_paths() {
@@ -5546,6 +5690,46 @@ mod tests {
                 assert_eq!(input, expected);
                 println!(
                     "path-preparation round={round} borrowed={borrowed} paths={} elapsed_us={}",
+                    paths.len(),
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "paired input encoding microbenchmark; no wall-clock threshold"]
+    fn reports_reused_attribute_input_latency() {
+        let paths = (0..100_000)
+            .map(|i| {
+                PathBuf::from(format!(
+                    "packages/package-{i}/src/日本語 long tracked file.txt"
+                ))
+            })
+            .collect::<Vec<_>>();
+        let expected = super::attribute_stdin(&paths).unwrap();
+        for round in 0..6 {
+            for reuse in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = std::time::Instant::now();
+                let bytes = if reuse {
+                    let input = super::attribute_stdin(std::hint::black_box(&paths)).unwrap();
+                    std::hint::black_box(input.as_slice()).len()
+                        + std::hint::black_box(input.as_slice()).len()
+                } else {
+                    let first = super::attribute_stdin(std::hint::black_box(&paths)).unwrap();
+                    let bytes = std::hint::black_box(first.as_slice()).len();
+                    drop(first);
+                    let second = super::attribute_stdin(std::hint::black_box(&paths)).unwrap();
+                    bytes + std::hint::black_box(second.as_slice()).len()
+                };
+                let elapsed = start.elapsed();
+                assert_eq!(bytes, expected.len() * 2);
+                println!(
+                    "attribute-input round={round} reuse={reuse} paths={} elapsed_us={}",
                     paths.len(),
                     elapsed.as_micros()
                 );
