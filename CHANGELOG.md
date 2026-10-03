@@ -7,6 +7,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Committing or switching in a worktree before its `riftri worktree add`
+  finished no longer leaves the add pending forever. If the view was complete,
+  the add is rolled back but the worktree is kept as a plain Git worktree that
+  Riftri does not manage. The add and `riftri repair` both say so; `repair
+  --json` lists such worktrees under `released_adds`. A branch the add created
+  that has since moved is never deleted; before, the only way out was deleting
+  it (#622).
 - Running out of disk space while Git builds a base, for example during
   `riftri worktree compact`, is reported as `storage-full`, not `git-failed`
   (#618).
