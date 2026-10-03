@@ -11140,11 +11140,10 @@ fn managed_worktree_matches_force_snapshot(
 
 #[cfg(target_os = "linux")]
 fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
-    use std::io::Read;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
 
-    fn visit(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+    fn visit(path: &Path, digest: &mut Sha256, buffer: &mut Vec<u8>) -> Result<(), WorktreeError> {
         let metadata = fs::symlink_metadata(path)
             .map_err(|source| io("inspect OverlayFS removal snapshot", path, source))?;
         // Inode and ctime also detect metadata-only copy-up/xattr changes that
@@ -11170,7 +11169,7 @@ fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
             for name in sorted_snapshot_names(entries) {
                 digest.update((name.as_bytes().len() as u64).to_le_bytes());
                 digest.update(name.as_bytes());
-                visit(&path.join(name), digest)?;
+                visit(&path.join(name), digest, buffer)?;
             }
         } else if metadata.file_type().is_symlink() {
             let target = fs::read_link(path)
@@ -11191,35 +11190,88 @@ fn overlayfs_layer_snapshot(root: &Path) -> Result<String, WorktreeError> {
                     "OverlayFS snapshot entry changed type".to_owned(),
                 ));
             }
-            read_into_digest(&mut file, path, digest)?;
+            hash_overlayfs_file_bytes(&mut file, path, digest, buffer)?;
         }
         // Special entries such as kernel whiteouts are represented by metadata;
         // never open a FIFO or device while inspecting the upper layer.
         Ok(())
     }
-    // Out of line with a heap buffer: `visit` recurses once per directory
-    // level, and a 64 KiB stack buffer in every frame overflowed deep trees.
-    #[inline(never)]
-    fn read_into_digest(
-        file: &mut fs::File,
-        path: &Path,
-        digest: &mut Sha256,
-    ) -> Result<(), WorktreeError> {
-        let mut buffer = vec![0; 64 * 1024];
-        loop {
-            let count = file
-                .read(&mut buffer)
-                .map_err(|source| io("read OverlayFS snapshot file", path, source))?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&buffer[..count]);
-        }
-        Ok(())
-    }
     let mut digest = Sha256::new();
-    visit(root, &mut digest)?;
+    visit(root, &mut digest, &mut Vec::new())?;
     Ok(crate::base_integrity::hex_lower(digest.finalize()))
+}
+
+// Keep file storage on the heap, outside the recursive directory frames.
+#[cfg(any(target_os = "linux", test))]
+fn hash_overlayfs_file_bytes(
+    file: &mut impl std::io::Read,
+    path: &Path,
+    digest: &mut Sha256,
+    buffer: &mut Vec<u8>,
+) -> Result<(), WorktreeError> {
+    // Allocate and zero once, lazily at the first file in this snapshot.
+    // Later files overwrite only the bytes that are included in the digest.
+    buffer.resize(64 * 1024, 0);
+    loop {
+        let count = file
+            .read(buffer)
+            .map_err(|source| io("read OverlayFS snapshot file", path, source))?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod overlay_read_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn overlay_file_hash_matches_bytes_across_long_short_and_empty_reads() {
+        let mut scratch = Vec::new();
+        let mut actual = Sha256::new();
+        let mut expected = Sha256::new();
+        let mut allocation = None;
+        for bytes in [
+            vec![42; 150_000],
+            vec![0, 255, 1],
+            Vec::new(),
+            vec![7; 65_537],
+        ] {
+            expected.update(&bytes);
+            hash_overlayfs_file_bytes(
+                &mut std::io::Cursor::new(bytes),
+                Path::new("fixture"),
+                &mut actual,
+                &mut scratch,
+            )
+            .unwrap();
+            let current = (scratch.as_ptr(), scratch.capacity());
+            assert_eq!(*allocation.get_or_insert(current), current);
+            assert_eq!(scratch.len(), 64 * 1024);
+        }
+        assert_eq!(actual.finalize(), expected.finalize());
+    }
+
+    #[test]
+    fn overlay_file_hash_preserves_read_errors() {
+        struct FailedReader;
+        impl std::io::Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("injected read failure"))
+            }
+        }
+        let error = hash_overlayfs_file_bytes(
+            &mut FailedReader,
+            Path::new("fixture"),
+            &mut Sha256::new(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("injected read failure"));
+    }
 }
 
 /// Why Git's own non-force removal would refuse `worktree`, if it would.
