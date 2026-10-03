@@ -1376,7 +1376,7 @@ impl Git {
         &self,
         path: &Path,
         index: &TreeAttributeIndex,
-        paths: &[PathBuf],
+        paths: &[impl AsRef<Path>],
     ) -> Result<Vec<GitAttribute>, GitError> {
         let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str())];
         self.attributes_for_paths_with_environment(path, paths, &[], &index_environment)
@@ -1390,7 +1390,7 @@ impl Git {
         &self,
         path: &Path,
         index: &TreeAttributeIndex,
-        paths: &[PathBuf],
+        paths: &[impl AsRef<Path>],
     ) -> Result<Vec<GitAttribute>, GitError> {
         #[cfg(unix)]
         let null_device = OsStr::new("/dev/null");
@@ -1412,7 +1412,7 @@ impl Git {
     fn attributes_for_paths_with_environment(
         &self,
         path: &Path,
-        paths: &[PathBuf],
+        paths: &[impl AsRef<Path>],
         argument_prefix: &[OsString],
         environment: &[(&OsStr, &OsStr)],
     ) -> Result<Vec<GitAttribute>, GitError> {
@@ -1442,7 +1442,7 @@ impl Git {
     fn attributes_for_paths_as_arguments(
         &self,
         path: &Path,
-        paths: &[PathBuf],
+        paths: &[impl AsRef<Path>],
         argument_prefix: &[OsString],
         environment: &[(&OsStr, &OsStr)],
     ) -> Result<Vec<GitAttribute>, GitError> {
@@ -1456,7 +1456,11 @@ impl Git {
                 OsString::from("-z"),
                 OsString::from("--"),
             ]);
-            arguments.extend(chunk.iter().map(|entry| entry.as_os_str().to_os_string()));
+            arguments.extend(
+                chunk
+                    .iter()
+                    .map(|entry| entry.as_ref().as_os_str().to_os_string()),
+            );
             let output = self.run_os_with_env(Some(path), &arguments, environment)?;
             attributes.extend(parse_attribute_records(&output.stdout)?);
         }
@@ -2487,9 +2491,10 @@ impl Git {
     }
 }
 
-fn attribute_stdin(paths: &[PathBuf]) -> Option<Vec<u8>> {
+fn attribute_stdin(paths: &[impl AsRef<Path>]) -> Option<Vec<u8>> {
     let mut input = Vec::new();
     for path in paths {
+        let path = path.as_ref();
         #[cfg(unix)]
         let bytes = {
             use std::os::unix::ffi::OsStrExt;
@@ -5280,16 +5285,17 @@ mod tests {
         let paths = (0..300)
             .map(|index| PathBuf::from(format!("日本語 path-{index}.txt")))
             .collect::<Vec<_>>();
+        let borrowed = paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
 
         let attempts_before = git_handle.process_attempts();
         let index = git_handle
             .tree_attribute_index(fixture.path(), &tree)
             .expect("load shared tree index");
         let in_tree = git_handle
-            .in_tree_attributes_for_index(fixture.path(), &index, &paths)
+            .in_tree_attributes_for_index(fixture.path(), &index, &borrowed)
             .expect("read isolated attributes");
         let effective = git_handle
-            .effective_attributes_for_index(fixture.path(), &index, &paths)
+            .effective_attributes_for_index(fixture.path(), &index, &borrowed)
             .expect("read effective attributes");
         assert_eq!(
             git_handle.process_attempts() - attempts_before,
@@ -5501,7 +5507,50 @@ mod tests {
     fn attribute_stdin_keeps_non_utf8_bytes() {
         use std::os::unix::ffi::OsStringExt;
         let path = PathBuf::from(OsString::from_vec(b"bad-\xff.txt".to_vec()));
+        assert_eq!(
+            super::attribute_stdin(&[path.as_path()]).unwrap(),
+            b"bad-\xff.txt\0"
+        );
         assert_eq!(super::attribute_stdin(&[path]).unwrap(), b"bad-\xff.txt\0");
+    }
+
+    #[test]
+    #[ignore = "path preparation microbenchmark; no wall-clock threshold"]
+    fn reports_borrowed_attribute_paths_latency() {
+        let paths = (0..100_000)
+            .map(|i| {
+                PathBuf::from(format!(
+                    "packages/package-{i}/src/日本語 long tracked file.txt"
+                ))
+            })
+            .collect::<Vec<_>>();
+        let expected = super::attribute_stdin(&paths).unwrap();
+        for round in 0..6 {
+            for borrowed in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = std::time::Instant::now();
+                let input = if borrowed {
+                    let prepared = std::hint::black_box(&paths)
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .collect::<Vec<_>>();
+                    super::attribute_stdin(&prepared).unwrap()
+                } else {
+                    let prepared = std::hint::black_box(&paths).clone();
+                    super::attribute_stdin(&prepared).unwrap()
+                };
+                let elapsed = start.elapsed();
+                assert_eq!(input, expected);
+                println!(
+                    "path-preparation round={round} borrowed={borrowed} paths={} elapsed_us={}",
+                    paths.len(),
+                    elapsed.as_micros()
+                );
+            }
+        }
     }
 
     #[test]
