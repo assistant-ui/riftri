@@ -10328,44 +10328,63 @@ fn directory_snapshot(path: &Path) -> Result<String, WorktreeError> {
     digest.update(b"riftri-compaction-snapshot-v1\0");
     digest.update(marker);
     #[cfg(unix)]
-    hash_extended_attributes(path, &mut digest)?;
+    hash_extended_attributes(path, &mut digest, &mut SnapshotScratch::default())?;
     #[cfg(target_os = "windows")]
     hash_windows_attributes(path, &mut digest)?;
     Ok(crate::base_integrity::hex_lower(digest.finalize()))
 }
 
 #[cfg(unix)]
-fn hash_entry_xattrs(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+fn hash_entry_xattrs(
+    path: &Path,
+    digest: &mut Sha256,
+    scratch: &mut SnapshotScratch,
+) -> Result<(), WorktreeError> {
     use std::os::unix::ffi::OsStrExt;
 
-    let mut name_buffer: Vec<u8> = Vec::with_capacity(64 * 1024);
-    rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(&mut name_buffer))
+    scratch.names.clear();
+    scratch.names.reserve(64 * 1024);
+    rustix::fs::llistxattr(path, rustix::buffer::spare_capacity(&mut scratch.names))
         .map_err(|source| io("list worktree extended attributes", path, source.into()))?;
-    let mut names = name_buffer
+    let mut names = scratch
+        .names
         .split(|byte| *byte == 0)
         .filter(|name| !name.is_empty())
-        .map(<[u8]>::to_vec)
         .collect::<Vec<_>>();
     names.sort_unstable();
     digest.update((names.len() as u64).to_le_bytes());
     for name in names {
-        let mut value_buffer: Vec<u8> = Vec::with_capacity(256 * 1024);
+        scratch.value.clear();
+        scratch.value.reserve(256 * 1024);
         rustix::fs::lgetxattr(
             path,
-            OsStr::from_bytes(&name),
-            rustix::buffer::spare_capacity(&mut value_buffer),
+            OsStr::from_bytes(name),
+            rustix::buffer::spare_capacity(&mut scratch.value),
         )
         .map_err(|source| io("read worktree extended attribute", path, source.into()))?;
         digest.update((name.len() as u64).to_le_bytes());
-        digest.update(&name);
-        digest.update((value_buffer.len() as u64).to_le_bytes());
-        digest.update(value_buffer);
+        digest.update(name);
+        digest.update((scratch.value.len() as u64).to_le_bytes());
+        digest.update(&scratch.value);
     }
     Ok(())
 }
 
+// Scratch lives for one metadata walk, never across snapshots. Buffers are
+// allocated lazily and overwritten on every read; no filesystem data is cached.
+#[derive(Default)]
 #[cfg(unix)]
-fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+struct SnapshotScratch {
+    names: Vec<u8>,
+    value: Vec<u8>,
+}
+
+#[cfg(unix)]
+fn hash_extended_attributes(
+    path: &Path,
+    digest: &mut Sha256,
+    scratch: &mut SnapshotScratch,
+) -> Result<(), WorktreeError> {
     use std::os::unix::fs::PermissionsExt;
 
     #[cfg(target_os = "macos")]
@@ -10387,7 +10406,7 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
         )));
     }
 
-    hash_entry_xattrs(path, digest)?;
+    hash_entry_xattrs(path, digest, scratch)?;
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         let mut entries = fs::read_dir(path)
             .map_err(|source| io("read worktree snapshot directory", path, source))?
@@ -10395,7 +10414,7 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
             .map_err(|source| io("read worktree snapshot entry", path, source))?;
         entries.sort_unstable_by_key(|entry| entry.file_name());
         for entry in entries {
-            hash_extended_attributes(&entry.path(), digest)?;
+            hash_extended_attributes(&entry.path(), digest, scratch)?;
         }
     }
     Ok(())
@@ -10408,14 +10427,18 @@ fn hash_extended_attributes(path: &Path, digest: &mut Sha256) -> Result<(), Work
 /// adds them separately; metadata-only edits after force intent must stop
 /// deletion. This layout stays frozen — journals recorded it durably.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), WorktreeError> {
+fn hash_forced_removal_metadata(
+    path: &Path,
+    digest: &mut Sha256,
+    #[cfg(unix)] scratch: &mut SnapshotScratch,
+) -> Result<(), WorktreeError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source| io("inspect forced removal snapshot metadata", path, source))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         digest.update(metadata.mode().to_le_bytes());
-        hash_entry_xattrs(path, digest)?;
+        hash_entry_xattrs(path, digest, scratch)?;
     }
     #[cfg(target_os = "windows")]
     {
@@ -10445,7 +10468,12 @@ fn hash_forced_removal_metadata(path: &Path, digest: &mut Sha256) -> Result<(), 
                     digest.update(unit.to_le_bytes());
                 }
             }
-            hash_forced_removal_metadata(&entry.path(), digest)?;
+            hash_forced_removal_metadata(
+                &entry.path(),
+                digest,
+                #[cfg(unix)]
+                scratch,
+            )?;
         }
     }
     Ok(())
@@ -11082,7 +11110,12 @@ fn snapshot_managed_worktree_for_force(managed: &DecodedJournal) -> Result<Strin
         // The OverlayFS private-layer snapshot above already covers native
         // modes and metadata-driven ctime changes; other backends need an
         // explicit metadata pass over the worktree itself.
-        hash_forced_removal_metadata(&managed.destination, &mut digest)?;
+        hash_forced_removal_metadata(
+            &managed.destination,
+            &mut digest,
+            #[cfg(unix)]
+            &mut SnapshotScratch::default(),
+        )?;
     }
     digest.update(git_state);
     Ok(crate::base_integrity::hex_lower(digest.finalize()))
@@ -14044,6 +14077,74 @@ mod tests {
 
         assert!(error.to_string().contains("failed SHA-256 verification"));
         assert_eq!(fs::read(source).expect("source preserved"), b"evil");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_xattrs_match_legacy_layout_across_different_entries() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::ffi::OsStrExt;
+        let fixture = tempdir().unwrap();
+        #[cfg(target_os = "macos")]
+        let prefix = "com.riftri";
+        #[cfg(not(target_os = "macos"))]
+        let prefix = "user.riftri";
+        let mut expected = Sha256::new();
+        let mut actual = Sha256::new();
+        let mut scratch = super::SnapshotScratch::default();
+        let mut allocations = None;
+        for (index, values) in [vec![vec![7; 4096], vec![]], vec![vec![0, 255]], vec![]]
+            .into_iter()
+            .enumerate()
+        {
+            let path = fixture.path().join(index.to_string());
+            fs::write(&path, b"file").unwrap();
+            for (index, value) in values.iter().enumerate() {
+                rustix::fs::setxattr(
+                    &path,
+                    format!("{prefix}.{index}").as_str(),
+                    value,
+                    rustix::fs::XattrFlags::empty(),
+                )
+                .unwrap();
+            }
+            // Independent legacy algorithm: fresh buffers and owned names.
+            let mut buffer = Vec::with_capacity(64 * 1024);
+            rustix::fs::llistxattr(&path, rustix::buffer::spare_capacity(&mut buffer)).unwrap();
+            let mut names = buffer
+                .split(|b| *b == 0)
+                .filter(|n| !n.is_empty())
+                .map(<[u8]>::to_vec)
+                .collect::<Vec<_>>();
+            names.sort_unstable();
+            expected.update((names.len() as u64).to_le_bytes());
+            for name in names {
+                let mut value = Vec::with_capacity(256 * 1024);
+                rustix::fs::lgetxattr(
+                    &path,
+                    std::ffi::OsStr::from_bytes(&name),
+                    rustix::buffer::spare_capacity(&mut value),
+                )
+                .unwrap();
+                expected.update((name.len() as u64).to_le_bytes());
+                expected.update(name);
+                expected.update((value.len() as u64).to_le_bytes());
+                expected.update(value);
+            }
+            super::hash_entry_xattrs(&path, &mut actual, &mut scratch).unwrap();
+            let current = (
+                scratch.names.as_ptr(),
+                scratch.value.as_ptr(),
+                scratch.names.capacity(),
+                scratch.value.capacity(),
+            );
+            assert_eq!(
+                *allocations.get_or_insert(current),
+                current,
+                "reuse both allocations across entries"
+            );
+        }
+        assert_eq!(actual.finalize(), expected.finalize());
     }
 
     #[cfg(unix)]
