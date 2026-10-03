@@ -2586,34 +2586,34 @@ pub fn parse_attribute_records(input: &[u8]) -> Result<Vec<GitAttribute>, GitErr
         });
     }
 
-    let fields = input[..input.len() - 1]
-        .split(|byte| *byte == 0)
-        .collect::<Vec<_>>();
-    if fields.len() % 3 != 0 {
+    let mut fields = input[..input.len() - 1].split(|byte| *byte == 0);
+    // Validate the complete shape first to retain malformed-output error
+    // precedence, without allocating a vector of every intermediate field.
+    let field_count = fields.clone().count();
+    if field_count % 3 != 0 {
         return Err(GitError::InvalidOutput {
             context: "Git attribute records",
             detail: "output did not contain path/name/value triples".to_owned(),
         });
     }
 
-    fields
-        .as_chunks::<3>()
-        .0
-        .iter()
-        .map(|[path, name, value]| {
-            if path.is_empty() || name.is_empty() {
-                return Err(GitError::InvalidOutput {
-                    context: "Git attribute record",
-                    detail: "path and attribute name must not be empty".to_owned(),
-                });
-            }
-            Ok(GitAttribute {
-                path: PathBuf::from(os_string_from_git(path, "attribute path")?),
-                name: name.to_vec(),
-                value: value.to_vec(),
-            })
-        })
-        .collect()
+    let mut attributes = Vec::with_capacity(field_count / 3);
+    while let Some(path) = fields.next() {
+        let name = fields.next().expect("validated attribute triple");
+        let value = fields.next().expect("validated attribute triple");
+        if path.is_empty() || name.is_empty() {
+            return Err(GitError::InvalidOutput {
+                context: "Git attribute record",
+                detail: "path and attribute name must not be empty".to_owned(),
+            });
+        }
+        attributes.push(GitAttribute {
+            path: PathBuf::from(os_string_from_git(path, "attribute path")?),
+            name: name.to_vec(),
+            value: value.to_vec(),
+        });
+    }
+    Ok(attributes)
 }
 
 /// Parse `git worktree list --porcelain -z` without decoding paths as UTF-8.
@@ -5291,6 +5291,107 @@ mod tests {
     fn attribute_parser_rejects_incomplete_records() {
         assert!(parse_attribute_records(b"tracked.txt\0text\0").is_err());
         assert!(parse_attribute_records(b"tracked.txt\0text").is_err());
+    }
+
+    #[test]
+    fn attribute_parser_preserves_error_precedence_and_empty_values() {
+        // The whole record shape is checked before individual empty fields.
+        let error = parse_attribute_records(b"\0text\0value\0extra\0").unwrap_err();
+        assert!(matches!(
+            error,
+            super::GitError::InvalidOutput {
+                context: "Git attribute records",
+                ..
+            }
+        ));
+        let error = parse_attribute_records(b"\0text\0value\0").unwrap_err();
+        assert!(matches!(
+            error,
+            super::GitError::InvalidOutput {
+                context: "Git attribute record",
+                ..
+            }
+        ));
+        let records =
+            parse_attribute_records(b"a\0text\0\0a\0text\0auto\0b\0binary\0set\0").unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].path, PathBuf::from("a"));
+        assert_eq!(records[0].value, b"");
+        assert_eq!(records[1].value, b"auto");
+        assert_eq!(records[2].name, b"binary");
+    }
+
+    #[test]
+    fn attribute_parser_matches_legacy_for_small_inputs() {
+        fn legacy(input: &[u8]) -> Result<Vec<super::GitAttribute>, super::GitError> {
+            use super::GitError;
+            if input.is_empty() {
+                return Ok(Vec::new());
+            }
+            if input.last() != Some(&0) {
+                return Err(GitError::InvalidOutput {
+                    context: "Git attribute records",
+                    detail: "output did not end with a NUL delimiter".to_owned(),
+                });
+            }
+            let fields = input[..input.len() - 1]
+                .split(|b| *b == 0)
+                .collect::<Vec<_>>();
+            if fields.len() % 3 != 0 {
+                return Err(GitError::InvalidOutput {
+                    context: "Git attribute records",
+                    detail: "output did not contain path/name/value triples".to_owned(),
+                });
+            }
+            fields
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|[path, name, value]| {
+                    if path.is_empty() || name.is_empty() {
+                        return Err(GitError::InvalidOutput {
+                            context: "Git attribute record",
+                            detail: "path and attribute name must not be empty".to_owned(),
+                        });
+                    }
+                    Ok(super::GitAttribute {
+                        path: PathBuf::from(super::os_string_from_git(path, "attribute path")?),
+                        name: name.to_vec(),
+                        value: value.to_vec(),
+                    })
+                })
+                .collect()
+        }
+        for length in 0..=7_u32 {
+            for mut number in 0..3_usize.pow(length) {
+                let input = (0..length)
+                    .map(|_| {
+                        let byte = [0, b'a', 255][number % 3];
+                        number /= 3;
+                        byte
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    parse_attribute_records(&input).map_err(|e| format!("{e:?}")),
+                    legacy(&input).map_err(|e| format!("{e:?}")),
+                    "input: {input:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn attribute_parser_handles_large_record_sets_without_losing_duplicates() {
+        let input = b"path\0text\0auto\0".repeat(100_000);
+        let attributes = parse_attribute_records(&input).unwrap();
+        assert_eq!(attributes.len(), 100_000);
+        assert!(
+            attributes
+                .iter()
+                .all(|a| a.path == std::path::Path::new("path")
+                    && a.name == b"text"
+                    && a.value == b"auto")
+        );
     }
 
     #[test]
