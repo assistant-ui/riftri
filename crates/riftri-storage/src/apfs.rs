@@ -95,17 +95,21 @@ fn prepare_clone_directory(
     };
     directories.push((destination.to_path_buf(), final_mode));
 
-    for entry in fs::read_dir(source)
+    // Retain names and cached types, never DirEntry or ReadDir handles,
+    // while descending. Preserve enumeration and per-entry error order.
+    let entries = fs::read_dir(source)
         .map_err(|source_error| io("read clone source directory", source, source_error))?
-    {
-        let entry =
+        .map(|entry| entry.map(|entry| (entry.file_name(), entry.file_type())))
+        .collect::<Vec<_>>();
+    for entry in entries {
+        let (name, file_type) =
             entry.map_err(|source_error| io("read clone source entry", source, source_error))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
+        let source_path = source.join(&name);
+        let destination_path = destination.join(name);
         // APFS directory entries carry their type, and clonefile preserves a
         // regular file's source metadata. Only directories need a separate
         // metadata lookup for the mode restored after their children finish.
-        let file_type = entry.file_type().map_err(|source_error| {
+        let file_type = file_type.map_err(|source_error| {
             io(
                 "inspect clone source entry type",
                 &source_path,
@@ -238,11 +242,16 @@ fn update_modes(path: &Path, update: ModeUpdate, writable_bits: u32) -> Result<(
             // stripped when it cleared every write bit.
             set_mode(path, metadata.permissions().mode() | 0o700 | writable_bits)?;
         }
-        for entry in fs::read_dir(path)
+        let entries = fs::read_dir(path)
             .map_err(|source_error| io("read tree permissions", path, source_error))?
-        {
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Vec<_>>();
+        let mut child = path.to_path_buf();
+        for entry in entries {
             let entry = entry.map_err(|source_error| io("read tree entry", path, source_error))?;
-            update_modes(&entry.path(), update, writable_bits)?;
+            child.push(entry);
+            update_modes(&child, update, writable_bits)?;
+            child.pop();
         }
         if matches!(update, ModeUpdate::ReadOnly) {
             set_mode(path, metadata.permissions().mode() & !0o222)?;

@@ -175,19 +175,23 @@ fn prepare_clone_directory(
         permissions,
     });
 
-    for entry in fs::read_dir(source)
+    // Retain names and cached types, never DirEntry or ReadDir handles,
+    // while descending. Preserve enumeration and per-entry error order.
+    let entries = fs::read_dir(source)
         .map_err(|source_error| io("read clone source directory", source, source_error))?
-    {
-        let entry =
+        .map(|entry| entry.map(|entry| (entry.file_name(), entry.file_type())))
+        .collect::<Vec<_>>();
+    for entry in entries {
+        let (name, file_type) =
             entry.map_err(|source_error| io("read clone source entry", source, source_error))?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
+        let source_path = source.join(&name);
+        let destination_path = destination.join(name);
         // Directory enumeration already carries each entry's type on Windows.
         // Regular-file metadata comes from the opened source handle in
         // `clone_file`, and `clone_symlink` reads the link's own reparse
         // attributes, so only directories need a separate path metadata read
         // here for the permissions restored after recursion.
-        let file_type = entry.file_type().map_err(|source_error| {
+        let file_type = file_type.map_err(|source_error| {
             io(
                 "inspect clone source entry type",
                 &source_path,
@@ -525,11 +529,16 @@ fn update_permissions(path: &Path, read_only: bool) -> Result<(), StorageError> 
         set_read_only(path, &metadata, false)?;
     }
     if metadata.is_dir() {
-        for entry in fs::read_dir(path)
+        let entries = fs::read_dir(path)
             .map_err(|source_error| io("read tree permissions", path, source_error))?
-        {
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Vec<_>>();
+        let mut child = path.to_path_buf();
+        for entry in entries {
             let entry = entry.map_err(|source_error| io("read tree entry", path, source_error))?;
-            update_permissions(&entry.path(), read_only)?;
+            child.push(entry);
+            update_permissions(&child, read_only)?;
+            child.pop();
         }
     } else if !metadata.is_file() {
         // Deletion needs no mode change on other entries; only a base being
