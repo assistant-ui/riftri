@@ -5796,6 +5796,59 @@ fn parse_git_lfs_pointer(bytes: &[u8]) -> Result<GitLfsPointer, String> {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn select_lfs_tree_entries<'a>(
+    entries: &'a [riftri_git::TreeEntry],
+    paths: &[PathBuf],
+) -> Result<Vec<&'a riftri_git::TreeEntry>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let missing = |path: &Path| {
+        format!(
+            "Git LFS path {} is absent from the exact tree",
+            path.display()
+        )
+    };
+    // Measurements favor a requested-path index for sparse selections, but
+    // not for intermediate/dense ones. Use a conservative 1% cutoff and keep
+    // the original full-tree algorithm above it. Nothing is cached across calls.
+    if paths.len() > entries.len() / 100 {
+        let entries_by_path = entries
+            .iter()
+            .map(|entry| (entry.path.as_path(), entry))
+            .collect::<HashMap<_, _>>();
+        return paths
+            .iter()
+            .map(|path| {
+                entries_by_path
+                    .get(path.as_path())
+                    .copied()
+                    .ok_or_else(|| missing(path))
+            })
+            .collect();
+    }
+    let mut entries_by_path = paths
+        .iter()
+        .map(|path| (path.as_path(), None))
+        .collect::<HashMap<_, _>>();
+    for entry in entries {
+        if let Some(slot) = entries_by_path.get_mut(entry.path.as_path()) {
+            *slot = Some(entry);
+        }
+    }
+    paths
+        .iter()
+        .map(|path| {
+            entries_by_path
+                .get(path.as_path())
+                .copied()
+                .flatten()
+                .ok_or_else(|| missing(path))
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn inspect_git_lfs_objects(
     git: &Git,
     repository: &Path,
@@ -5807,21 +5860,7 @@ fn inspect_git_lfs_objects(
     // The caller already inspected repository identity and HEAD. Reuse only
     // that operation-local identity; pointer and local-object checks stay fresh.
     let mut objects = Vec::with_capacity(paths.len());
-    let entries_by_path = entries
-        .iter()
-        .map(|entry| (entry.path.as_path(), entry))
-        .collect::<HashMap<_, _>>();
-    let selected = paths
-        .iter()
-        .map(|path| {
-            entries_by_path.get(path.as_path()).copied().ok_or_else(|| {
-                format!(
-                    "Git LFS path {} is absent from the exact tree",
-                    path.display()
-                )
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let selected = select_lfs_tree_entries(entries, paths)?;
     for (path, entry) in paths.iter().zip(&selected) {
         if entry.object_kind != b"blob" || !matches!(entry.mode, 0o100644 | 0o100755) {
             return Err(format!(
@@ -12749,6 +12788,119 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    fn lfs_selection_fixture() -> Vec<riftri_git::TreeEntry> {
+        (0..100)
+            .map(|i| riftri_git::TreeEntry {
+                mode: 0o100644,
+                object_kind: b"blob".to_vec(),
+                object_id: ObjectId::parse("a".repeat(40)).unwrap(),
+                path: PathBuf::from(format!("package-{i}/file")),
+            })
+            .collect()
+    }
+
+    fn legacy_lfs_selection<'a>(
+        entries: &'a [riftri_git::TreeEntry],
+        paths: &[PathBuf],
+    ) -> Result<Vec<&'a riftri_git::TreeEntry>, String> {
+        let index = entries
+            .iter()
+            .map(|entry| (entry.path.as_path(), entry))
+            .collect::<std::collections::HashMap<_, _>>();
+        paths
+            .iter()
+            .map(|path| {
+                index.get(path.as_path()).copied().ok_or_else(|| {
+                    format!(
+                        "Git LFS path {} is absent from the exact tree",
+                        path.display()
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lfs_selection_matches_full_tree_index() {
+        let mut entries = lfs_selection_fixture();
+        let mut duplicate = entries[0].clone();
+        duplicate.mode = 0o100755;
+        entries.push(duplicate);
+        #[cfg(unix)]
+        {
+            let mut native = entries[1].clone();
+            native.path = PathBuf::from(OsString::from_vec(b"native-\xff".to_vec()));
+            entries.push(native);
+        }
+        let all = entries
+            .iter()
+            .rev()
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>();
+        for paths in [
+            vec![],
+            all.clone(),
+            all[..1].to_vec(),
+            all[..30].to_vec(),
+            vec![entries[0].path.clone(), entries[0].path.clone()],
+            vec![
+                PathBuf::from("missing-first"),
+                PathBuf::from("missing-second"),
+            ],
+            vec![entries[1].path.clone(), PathBuf::from("missing")],
+        ] {
+            let expected = legacy_lfs_selection(&entries, &paths);
+            let actual = super::select_lfs_tree_entries(&entries, &paths);
+            assert_eq!(actual, expected);
+            if let Ok(selected) = actual {
+                for entry in selected {
+                    assert!(entries.iter().any(|original| std::ptr::eq(original, entry)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "sparse/dense LFS index benchmark; no wall-clock threshold"]
+    fn reports_lfs_selection_latency() {
+        let entries = (0..100_000)
+            .map(|i| riftri_git::TreeEntry {
+                mode: 0o100644,
+                object_kind: b"blob".to_vec(),
+                object_id: ObjectId::parse("a".repeat(40)).unwrap(),
+                path: PathBuf::from(format!("packages/package-{i}/src/file.bin")),
+            })
+            .collect::<Vec<_>>();
+        for count in [10, 1000, 25_000, 100_000] {
+            let paths = entries[..count]
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>();
+            let expected = legacy_lfs_selection(&entries, &paths).unwrap();
+            for round in 0..4 {
+                for optimized in if round % 2 == 0 {
+                    [false, true]
+                } else {
+                    [true, false]
+                } {
+                    let start = std::time::Instant::now();
+                    let selected = if optimized {
+                        super::select_lfs_tree_entries(std::hint::black_box(&entries), &paths)
+                    } else {
+                        legacy_lfs_selection(std::hint::black_box(&entries), &paths)
+                    }
+                    .unwrap();
+                    let elapsed = start.elapsed();
+                    assert_eq!(selected, expected);
+                    println!(
+                        "lfs-selection selected={count} total={} round={round} optimized={optimized} elapsed_us={}",
+                        entries.len(),
+                        elapsed.as_micros()
+                    );
+                }
+            }
+        }
+    }
     use crate::BaseCountImpact;
     #[test]
     fn sparse_directory_index_is_lazy_and_bounds_repeated_scans() {
