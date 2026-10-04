@@ -299,23 +299,19 @@ fn hash_entry(
 
     if metadata.is_dir() {
         digest.update(b"directory");
-        // Keep each native name and its path once. `sort_unstable_by_key` on
-        // `DirEntry::file_name()` rebuilt an owned `OsString` for every key
-        // comparison, then the hashing loop allocated both values again.
+        // Retain only native names while sorting; reuse one child path instead
+        // of keeping a full parent-prefixed path for every sibling.
         let mut entries = fs::read_dir(path)?
-            .map(|entry| {
-                entry.map(|entry| {
-                    let name = entry.file_name();
-                    let path = path.join(&name);
-                    (name, path)
-                })
-            })
+            .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<io::Result<Vec<_>>>()?;
-        entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+        entries.sort_unstable();
         digest.update((entries.len() as u64).to_le_bytes());
-        for (name, path) in entries {
+        let mut child = path.to_path_buf();
+        for name in entries {
             hash_native(&name, digest);
-            hash_entry(&path, digest, version, special, scratch)?;
+            child.push(name);
+            hash_entry(&child, digest, version, special, scratch)?;
+            child.pop();
         }
     } else if metadata.is_file() {
         digest.update(b"file");
@@ -381,6 +377,73 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::time::Instant;
+
+    #[test]
+    fn directory_walk_matches_legacy_path_sorting() {
+        fn legacy(
+            path: &Path,
+            digest: &mut Sha256,
+            version: MarkerVersion,
+            scratch: &mut HashScratch,
+        ) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            if !metadata.is_dir() {
+                hash_entry(path, digest, version, SpecialEntries::Hash, scratch).unwrap();
+                return;
+            }
+            if version == MarkerVersion::V2 {
+                hash_v2_metadata(path, &metadata, digest, scratch).unwrap();
+            } else {
+                digest.update((metadata.permissions().mode() & 0o777).to_le_bytes());
+            }
+            digest.update(b"directory");
+            let mut entries = fs::read_dir(path)
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (entry.file_name(), entry.path())
+                })
+                .collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            digest.update((entries.len() as u64).to_le_bytes());
+            for (name, child) in entries {
+                hash_native(&name, digest);
+                legacy(&child, digest, version, scratch);
+            }
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        for directory in ["z", "a/nested", "empty"] {
+            fs::create_dir_all(fixture.path().join(directory)).unwrap();
+        }
+        for i in (0..128).rev() {
+            fs::write(fixture.path().join(format!("a/nested/{i:03}")), b"payload").unwrap();
+        }
+        #[cfg(target_os = "linux")]
+        fs::write(
+            fixture
+                .path()
+                .join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec())),
+            b"native",
+        )
+        .unwrap();
+        fs::write(fixture.path().join("unicode-λ"), b"native").unwrap();
+        symlink("../a", fixture.path().join("z/link")).unwrap();
+        for version in [MarkerVersion::V1, MarkerVersion::V2] {
+            let mut expected = Sha256::new();
+            let mut actual = Sha256::new();
+            let mut scratch = HashScratch::new();
+            legacy(fixture.path(), &mut expected, version, &mut scratch);
+            hash_entry(
+                fixture.path(),
+                &mut actual,
+                version,
+                SpecialEntries::Hash,
+                &mut scratch,
+            )
+            .unwrap();
+            assert_eq!(actual.finalize(), expected.finalize());
+        }
+    }
 
     /// Repeatable microbenchmark for the many-file immutable-base integrity
     /// path. Kept threshold-free because filesystem caches and host load move
