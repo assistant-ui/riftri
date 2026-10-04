@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { distribution } from './latency-summary.mjs';
+import { settleWorkers } from './settle-workers.mjs';
 
 const [before, after, source, revision, outputArgument] = process.argv.slice(2);
 assert.ok(before && after && source && revision && outputArgument, 'Expected BEFORE AFTER SOURCE COMMIT NEW_OUTPUT_DIR');
@@ -92,9 +93,14 @@ async function create(version, mode, label, warm = true) {
       if (line.startsWith('riftri: ')) phases.push({ line, seconds: Number(process.hrtime.bigint() - started) / 1e9 });
     }
   });
-  const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  let launchError;
+  const code = await new Promise(resolve => {
+    child.on('error', error => { launchError = error; });
+    child.on('close', resolve);
+  });
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
   fs.writeFileSync(path.join(output, `${label}.log`), stdout + stderr);
+  if (launchError) throw launchError;
   assert.equal(code, 0, stderr);
   const starts = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === 'start');
   if (version === 'git') {
@@ -154,7 +160,18 @@ for (let round = 0; round < batchRounds; round++) {
     exec('sync', [], output);
     const freeBefore = fs.statfsSync(output);
     const started = process.hrtime.bigint();
-    const records = await Promise.all(Array.from({ length: workers }, (_, worker) => create(version, mode, `parallel-${round}-${mode}-${version}-${worker}`)));
+    const labels = Array.from({ length: workers }, (_, worker) => `parallel-${round}-${mode}-${version}-${worker}`);
+    const records = await settleWorkers(labels, label => create(version, mode, label), outcomes => {
+      result.failedBatches ??= [];
+      result.failedBatches.push({ round, version, mode, workers,
+        seconds: Number(process.hrtime.bigint() - started) / 1e9,
+        outcomes: outcomes.map(outcome => outcome.status === 'fulfilled' ? outcome : {
+          label: outcome.label, status: outcome.status,
+          reason: { message: String(outcome.reason?.message ?? outcome.reason), stack: outcome.reason?.stack },
+        }),
+      });
+      save();
+    });
     const seconds = Number(process.hrtime.bigint() - started) / 1e9;
     exec('sync', [], output);
     const freeAfter = fs.statfsSync(output);
