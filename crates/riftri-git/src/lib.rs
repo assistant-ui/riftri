@@ -37,9 +37,10 @@ pub struct ObjectId(String);
 
 impl ObjectId {
     pub fn parse(value: impl Into<String>) -> Result<Self, GitError> {
-        let value = value.into();
+        let mut value = value.into();
         if matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            Ok(Self(value.to_ascii_lowercase()))
+            value.make_ascii_lowercase();
+            Ok(Self(value))
         } else {
             Err(GitError::InvalidOutput {
                 context: "object ID",
@@ -3167,6 +3168,49 @@ fn signal_name(signal: i32) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn object_id_normalization_reuses_owned_storage_and_preserves_validation() {
+        for length in [40, 64] {
+            for digit in ['a', 'A', '0'] {
+                let mut input = digit.to_string().repeat(length);
+                input.reserve(100);
+                let pointer = input.as_ptr();
+                let capacity = input.capacity();
+                let expected = input.to_ascii_lowercase();
+                let parsed = super::ObjectId::parse(input).unwrap();
+                assert_eq!(parsed.as_str(), expected);
+                assert_eq!(parsed.0.as_ptr(), pointer);
+                assert_eq!(parsed.0.capacity(), capacity);
+            }
+            let mixed = "aB01".repeat(length / 4);
+            assert_eq!(
+                super::ObjectId::parse(mixed.as_str()).unwrap().as_str(),
+                mixed.to_ascii_lowercase()
+            );
+        }
+        for input in [
+            String::new(),
+            "A".repeat(39),
+            "A".repeat(41),
+            "A".repeat(63),
+            "A".repeat(65),
+            "G".repeat(40),
+            "é".repeat(20),
+            format!("{}\n", "A".repeat(39)),
+        ] {
+            let error = super::ObjectId::parse(input.clone()).unwrap_err();
+            match error {
+                super::GitError::InvalidOutput { context, detail } => {
+                    assert_eq!(context, "object ID");
+                    assert_eq!(
+                        detail,
+                        format!("expected 40 or 64 hexadecimal characters, got {input:?}")
+                    );
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+        }
+    }
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::{Path, PathBuf};
