@@ -8015,13 +8015,22 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
             Err(source) if vanished(&source) => return Ok((logical_bytes, allocated_bytes)),
             Err(source) => return Err(io("read storage accounting directory", path, source)),
         };
+        // Drop ReadDir and every DirEntry before descending: both may retain
+        // an open directory handle. Keep names (including errors in their
+        // enumeration order), not full child paths or live directory entries.
+        let entries = entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Vec<_>>();
+        let mut child = path.to_path_buf();
         for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
+            let name = match entry {
+                Ok(name) => name,
                 Err(source) if vanished(&source) => continue,
                 Err(source) => return Err(io("read storage accounting entry", path, source)),
             };
-            let (entry_logical, entry_allocated) = tree_usage(&entry.path())?;
+            child.push(name);
+            let (entry_logical, entry_allocated) = tree_usage(&child)?;
+            child.pop();
             logical_bytes = logical_bytes.saturating_add(entry_logical);
             allocated_bytes = allocated_bytes.saturating_add(entry_allocated);
         }
@@ -21426,6 +21435,61 @@ mod tests {
         fs::write(directory.join("file"), "12345").unwrap();
         let (logical, _) = super::tree_usage(&directory).unwrap();
         assert_eq!(logical, 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accounting_deep_tree_with_low_descriptor_limit() {
+        const CHILD_ROOT: &str = "RIFTRI_TEST_ACCOUNTING_LOW_FD_ROOT";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let mut limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                // SAFETY: `limit` points to a valid writable rlimit. This runs only
+                // in the isolated child test process, never the parent test suite.
+                unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+                0
+            );
+            limit.rlim_cur = limit.rlim_cur.min(64);
+            // SAFETY: `limit` is initialized and only lowers the child's soft limit.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) }, 0);
+            let usage = super::tree_usage(Path::new(&root)).expect("walk below descriptor limit");
+            let expected: (u64, u64) =
+                serde_json::from_str(&std::env::var("RIFTRI_TEST_ACCOUNTING_EXPECTED").unwrap())
+                    .unwrap();
+            assert_eq!(usage, expected);
+            return;
+        }
+        let fixture = tempdir().unwrap();
+        let mut deepest = fixture.path().to_path_buf();
+        for _ in 0..128 {
+            deepest.push("n");
+        }
+        fs::create_dir_all(&deepest).unwrap();
+        fs::write(deepest.join("leaf"), b"payload").unwrap();
+        std::os::unix::fs::symlink("missing", deepest.join("link")).unwrap();
+        let expected = super::tree_usage(fixture.path()).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "worktree::tests::accounting_deep_tree_with_low_descriptor_limit",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, fixture.path())
+            .env(
+                "RIFTRI_TEST_ACCOUNTING_EXPECTED",
+                serde_json::to_string(&expected).unwrap(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// A copy of `removal` under another operation ID: what a concurrent
