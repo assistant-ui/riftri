@@ -4967,10 +4967,16 @@ fn has_ascii_case_alias(paths: &[PathBuf]) -> bool {
             };
             prefix.push(name);
             let folded = ascii_lowercase_path(&prefix);
-            if let Some(previous) = seen.insert(folded, prefix.clone())
-                && previous != prefix
-            {
-                return true;
+            match seen.entry(folded) {
+                std::collections::btree_map::Entry::Occupied(previous) => {
+                    if previous.get() != &prefix {
+                        return true;
+                    }
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    // Shared directory prefixes need only one owned spelling.
+                    entry.insert(prefix.clone());
+                }
             }
         }
     }
@@ -15417,6 +15423,49 @@ mod tests {
             PathBuf::from("docs/one.txt"),
             PathBuf::from("docs/two.txt"),
         ]));
+    }
+
+    #[test]
+    fn ascii_case_alias_scan_matches_replacing_map() {
+        fn reference(paths: &[PathBuf]) -> bool {
+            let mut seen = std::collections::BTreeMap::new();
+            for path in paths {
+                let mut prefix = PathBuf::new();
+                for component in path.components() {
+                    let std::path::Component::Normal(name) = component else {
+                        continue;
+                    };
+                    prefix.push(name);
+                    if let Some(previous) =
+                        seen.insert(super::ascii_lowercase_path(&prefix), prefix.clone())
+                        && previous != prefix
+                    {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        let mut paths = (0..1024)
+            .map(|i| PathBuf::from(format!("packages/shared/src/file-{i}")))
+            .collect::<Vec<_>>();
+        // Identical duplicate paths must not be mistaken for aliases.
+        paths.push(paths[0].clone());
+        for extra in [
+            None,
+            Some("Packages/other"),
+            Some("packages/SHARED"),
+            Some("packages/shared/src/FILE-0"),
+        ] {
+            let mut fixture = paths.clone();
+            if let Some(extra) = extra {
+                fixture.push(PathBuf::from(extra));
+            }
+            for _ in 0..2 {
+                assert_eq!(has_ascii_case_alias(&fixture), reference(&fixture));
+                fixture.reverse();
+            }
+        }
     }
 
     #[cfg(unix)]
