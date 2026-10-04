@@ -31,6 +31,11 @@ where
     }
 
     let worker_count = worker_limit.max(1).min(items.len());
+    // One effective worker needs neither a thread nor a shared queue. This
+    // also covers a one-file checkout on a host with many available CPUs.
+    if worker_count == 1 {
+        return items.into_iter().try_for_each(operation);
+    }
     let queue = Mutex::new(VecDeque::from(items));
     let failed = AtomicBool::new(false);
     let first_error = Mutex::new(None);
@@ -72,6 +77,28 @@ mod tests {
     use std::time::Duration;
 
     use super::try_for_each_bounded;
+
+    #[test]
+    fn single_worker_runs_inline_and_stops_at_the_first_error() {
+        let caller = std::thread::current().id();
+        for limit in [0, 1] {
+            let seen = std::sync::Mutex::new(Vec::new());
+            let error = try_for_each_bounded(vec![0, 1, 2], limit, |item| {
+                assert_eq!(std::thread::current().id(), caller);
+                seen.lock().unwrap().push(item);
+                if item == 1 { Err("failed") } else { Ok(()) }
+            })
+            .unwrap_err();
+            assert_eq!(error, "failed");
+            assert_eq!(*seen.lock().unwrap(), [0, 1]);
+        }
+        // A high worker limit still needs no thread for a single item.
+        try_for_each_bounded(vec![()], 8, |_| -> Result<(), ()> {
+            assert_eq!(std::thread::current().id(), caller);
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn bounds_parallel_work_and_processes_every_item() {
