@@ -64,8 +64,8 @@ pub enum StorageError {
 /// `core.sharedRepository=group`. ORing these bits back in makes a COW
 /// worktree match what a normal checkout under the same umask produces.
 #[cfg(unix)]
-pub(crate) fn umask_writable_bits() -> u32 {
-    writable_bits_for_umask(current_umask())
+pub(crate) fn umask_writable_bits() -> std::io::Result<u32> {
+    current_umask().map(writable_bits_for_umask)
 }
 
 /// Pure computation of the write bits granted under `umask`, split out so the
@@ -75,22 +75,49 @@ fn writable_bits_for_umask(umask: u32) -> u32 {
     0o222 & !umask
 }
 
-/// Read the current process umask without permanently changing it.
+/// Read without ever changing the parent's process-wide mask. Capture this
+/// once per operation, not per file: workers must not race a read/restore pair.
 #[cfg(unix)]
-fn current_umask() -> u32 {
-    // SAFETY: `umask` only reads and replaces the calling process's file-mode
-    // creation mask; it never fails and touches no other state. We immediately
-    // restore the value we observed so the mask is left untouched.
-    let previous = unsafe {
-        let previous = libc::umask(0o022);
-        libc::umask(previous);
-        previous
-    };
-    // `mode_t` is `u16` on macOS and `u32` on Linux; the conversion is a no-op
-    // on the latter, so silence the platform-dependent lint.
-    #[allow(clippy::useless_conversion)]
-    let umask = u32::from(previous) & 0o777;
-    umask
+fn current_umask() -> std::io::Result<u32> {
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = std::fs::read_to_string("/proc/thread-self/status")
+        && let Some(value) = status.lines().find_map(|line| line.strip_prefix("Umask:"))
+    {
+        return parse_umask(value.as_bytes());
+    }
+    // Also supports Linux environments without a readable procfs Umask field.
+    inherited_umask()
+}
+
+#[cfg(unix)]
+fn inherited_umask() -> std::io::Result<u32> {
+    // POSIX children inherit the mask. Only the child shell queries it;
+    // an empty environment prevents startup hooks from changing the value.
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-c", "umask"])
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            "could not query inherited process umask",
+        ));
+    }
+    parse_umask(&output.stdout)
+}
+
+#[cfg(unix)]
+fn parse_umask(bytes: &[u8]) -> std::io::Result<u32> {
+    let invalid = || std::io::Error::other("invalid process umask");
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?.trim();
+    if text.is_empty() || !text.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
+        return Err(invalid());
+    }
+    let mask = u32::from_str_radix(text, 8).map_err(|_| invalid())?;
+    if mask > 0o777 {
+        return Err(invalid());
+    }
+    Ok(mask)
 }
 
 /// Native APFS clone operations used by the explicit macOS prototype.
@@ -1830,13 +1857,87 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn concurrent_umask_reads_preserve_creation_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "RIFTRI_TEST_UMASK_CHILD";
+        if let Ok(mask) = std::env::var(CHILD) {
+            let mask = u32::from_str_radix(&mask, 8).unwrap();
+            let fixture = tempfile::tempdir().unwrap();
+            // SAFETY: only this isolated child process changes its mask, before
+            // starting any workers. The parent test suite is unaffected.
+            unsafe {
+                libc::umask(mask as libc::mode_t);
+            }
+            assert_eq!(super::inherited_umask().unwrap(), mask);
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    scope.spawn(|| {
+                        for _ in 0..128 {
+                            assert_eq!(super::current_umask().unwrap(), mask);
+                        }
+                    });
+                }
+                for i in 0..512 {
+                    let path = fixture.path().join(i.to_string());
+                    std::fs::write(&path, b"private").unwrap();
+                    assert_eq!(
+                        std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                        0o666 & !mask
+                    );
+                }
+            });
+            // SAFETY: workers have joined; read and restore the child's mask.
+            let observed = unsafe { libc::umask(mask as libc::mode_t) };
+            #[allow(clippy::useless_conversion)]
+            let observed = u32::from(observed);
+            assert_eq!(observed, mask);
+            return;
+        }
+        for mask in ["077", "002"] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::concurrent_umask_reads_preserve_creation_permissions",
+                    "--nocapture",
+                ])
+                .env(CHILD, mask)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "mask {mask}: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn umask_parser_rejects_missing_or_non_octal_values() {
+        assert_eq!(super::parse_umask(b"0077\n").unwrap(), 0o077);
+        assert_eq!(super::parse_umask(b"\t0002").unwrap(), 0o002);
+        for invalid in [
+            b"".as_slice(),
+            b"888",
+            b"1000",
+            b"-1",
+            b"+22",
+            b"u=rwx",
+            b"022\n077",
+            b"\xff",
+        ] {
+            assert!(super::parse_umask(invalid).is_err(), "{invalid:?}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn reading_the_umask_leaves_it_unchanged() {
         use super::current_umask;
 
-        let observed = current_umask();
-        // The read-then-restore trick must not leave the temporary `0o022`
-        // behind: a second read observes the same value it started with.
-        assert_eq!(observed, current_umask());
+        let observed = current_umask().unwrap();
+        assert_eq!(observed, current_umask().unwrap());
         assert_eq!(observed & !0o777, 0);
     }
 }
