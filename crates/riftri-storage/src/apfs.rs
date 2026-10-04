@@ -40,6 +40,10 @@ fn clone_tree_with_permissions(
         return Err(StorageError::DestinationExists(destination.to_path_buf()));
     }
 
+    let writable_bits = owner_writable
+        .then(crate::umask_writable_bits)
+        .transpose()
+        .map_err(|error| io("read process umask", destination, error))?;
     let result = (|| {
         let mut files = Vec::new();
         let mut directories = Vec::new();
@@ -47,12 +51,12 @@ fn clone_tree_with_permissions(
             source,
             destination,
             metadata.permissions().mode(),
-            owner_writable,
+            writable_bits,
             &mut files,
             &mut directories,
         )?;
         try_for_each_bounded(files, file_clone_parallelism(), |file| {
-            clone_file(&file.source, &file.destination, owner_writable)
+            clone_file(&file.source, &file.destination, writable_bits)
         })?;
         for (path, mode) in directories.into_iter().rev() {
             set_mode(&path, mode)?;
@@ -70,7 +74,7 @@ fn prepare_clone_directory(
     source: &Path,
     destination: &Path,
     final_mode: u32,
-    owner_writable: bool,
+    writable_bits: Option<u32>,
     files: &mut Vec<FileClone>,
     directories: &mut Vec<(PathBuf, u32)>,
 ) -> Result<(), StorageError> {
@@ -79,13 +83,13 @@ fn prepare_clone_directory(
     fs::set_permissions(destination, fs::Permissions::from_mode(final_mode | 0o700))
         .map_err(|source_error| io("prepare clone directory mode", destination, source_error))?;
 
-    let final_mode = if owner_writable {
+    let final_mode = if let Some(writable_bits) = writable_bits {
         // Owner rwx (`0o700`) guarantees traversal and edits, and the
         // umask-appropriate write bits restore the group/other access a plain
         // `git worktree add` keeps under `umask 002` or
         // `core.sharedRepository=group`. The base tree was made read-only
         // before cloning, so `final_mode` arrives with every write bit cleared.
-        final_mode | 0o700 | crate::umask_writable_bits()
+        final_mode | 0o700 | writable_bits
     } else {
         final_mode
     };
@@ -117,7 +121,7 @@ fn prepare_clone_directory(
                 &source_path,
                 &destination_path,
                 metadata.permissions().mode(),
-                owner_writable,
+                writable_bits,
                 files,
                 directories,
             )?;
@@ -139,17 +143,18 @@ fn prepare_clone_directory(
     Ok(())
 }
 
-fn clone_file(source: &Path, destination: &Path, owner_writable: bool) -> Result<(), StorageError> {
+fn clone_file(
+    source: &Path,
+    destination: &Path,
+    writable_bits: Option<u32>,
+) -> Result<(), StorageError> {
     clone_path(source, destination)?;
-    if owner_writable {
+    if let Some(writable_bits) = writable_bits {
         // Read the clone's actual mode, just like the former second pass:
         // clonefile/umask/inherited ACL semantics remain intact.
         let cloned = fs::symlink_metadata(destination)
             .map_err(|error| io("inspect cloned permissions", destination, error))?;
-        set_mode(
-            destination,
-            cloned.permissions().mode() | crate::umask_writable_bits(),
-        )?;
+        set_mode(destination, cloned.permissions().mode() | writable_bits)?;
     }
     Ok(())
 }
@@ -202,11 +207,13 @@ fn clone_tree_bulk_for_evaluation(source: &Path, destination: &Path) -> Result<(
 }
 
 pub(crate) fn make_tree_read_only(path: &Path) -> Result<(), StorageError> {
-    update_modes(path, ModeUpdate::ReadOnly)
+    update_modes(path, ModeUpdate::ReadOnly, 0)
 }
 
 pub(crate) fn make_tree_owner_writable(path: &Path) -> Result<(), StorageError> {
-    update_modes(path, ModeUpdate::OwnerWritable)
+    let writable_bits =
+        crate::umask_writable_bits().map_err(|error| io("read process umask", path, error))?;
+    update_modes(path, ModeUpdate::OwnerWritable, writable_bits)
 }
 
 #[derive(Clone, Copy)]
@@ -215,7 +222,7 @@ enum ModeUpdate {
     OwnerWritable,
 }
 
-fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
+fn update_modes(path: &Path, update: ModeUpdate, writable_bits: u32) -> Result<(), StorageError> {
     let metadata = fs::symlink_metadata(path)
         .map_err(|source_error| io("inspect tree permissions", path, source_error))?;
     if metadata.file_type().is_symlink() {
@@ -229,16 +236,13 @@ fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
             // plain `git worktree add` keeps under `umask 002` or
             // `core.sharedRepository=group`, which `make_tree_read_only`
             // stripped when it cleared every write bit.
-            set_mode(
-                path,
-                metadata.permissions().mode() | 0o700 | crate::umask_writable_bits(),
-            )?;
+            set_mode(path, metadata.permissions().mode() | 0o700 | writable_bits)?;
         }
         for entry in fs::read_dir(path)
             .map_err(|source_error| io("read tree permissions", path, source_error))?
         {
             let entry = entry.map_err(|source_error| io("read tree entry", path, source_error))?;
-            update_modes(&entry.path(), update)?;
+            update_modes(&entry.path(), update, writable_bits)?;
         }
         if matches!(update, ModeUpdate::ReadOnly) {
             set_mode(path, metadata.permissions().mode() & !0o222)?;
@@ -246,9 +250,7 @@ fn update_modes(path: &Path, update: ModeUpdate) -> Result<(), StorageError> {
     } else if metadata.is_file() {
         let mode = match update {
             ModeUpdate::ReadOnly => metadata.permissions().mode() & !0o222,
-            ModeUpdate::OwnerWritable => {
-                metadata.permissions().mode() | crate::umask_writable_bits()
-            }
+            ModeUpdate::OwnerWritable => metadata.permissions().mode() | writable_bits,
         };
         set_mode(path, mode)?;
     } else if matches!(update, ModeUpdate::ReadOnly) {
@@ -308,7 +310,7 @@ mod tests {
         // umask-appropriate group/other write bits, matching a plain
         // `git worktree add`; owner-only (`0o750`) would leave a second group
         // member unable to create, rename, or delete inside the directory.
-        let expected_dir_mode = 0o550 | 0o700 | crate::umask_writable_bits();
+        let expected_dir_mode = 0o550 | 0o700 | crate::umask_writable_bits().unwrap();
         assert_eq!(
             fs::symlink_metadata(fused.join("directory-00"))
                 .unwrap()
