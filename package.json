@@ -25,6 +25,10 @@
   "engines": {
     "node": ">=18.18"
   },
+  "devDependencies": {
+    "@types/node": "18.19.130",
+    "typescript": "5.9.3"
+  },
   "optionalDependencies": {
     "riftri-darwin-arm64": "file:package/platforms/riftri-darwin-arm64",
     "riftri-darwin-x64": "file:package/platforms/riftri-darwin-x64",

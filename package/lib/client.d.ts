@@ -108,12 +108,35 @@ export interface WorktreeInventory {
   native_path_encoding: string;
 }
 
+/** Lifecycle counters; lower bounds when StatusReport.counts_complete is false. */
+export interface StatusOperations {
+  active_views: number;
+  pending_adds: number;
+  completed_removals: number;
+  cancelled_removals: number;
+  pending_removals: number;
+  completed_moves: number;
+  cancelled_moves: number;
+  pending_moves: number;
+  completed_compactions: number;
+  cancelled_compactions: number;
+  pending_compactions: number;
+  completed_prunes: number;
+  pending_prunes: number;
+  completed_collections: number;
+  cancelled_collections: number;
+  pending_collections: number;
+  coordination_locks: number;
+}
+
 export interface StatusReport {
   schema_version: number;
   state_directory: string;
   bases: unknown[];
   worktrees: unknown[];
-  operations: unknown[];
+  /** False when unreadable journals make operation counts lower bounds. */
+  counts_complete: boolean;
+  operations: StatusOperations;
   diagnostic_issues: unknown[];
   total_allocated_bytes: number;
   total_logical_bytes: number;
