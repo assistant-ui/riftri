@@ -102,9 +102,42 @@ export interface ManagedWorktree {
 }
 
 export interface WorktreeInventory {
-  schema_version: number;
+  schema_version: 1;
   state_directory: string;
+  state_directory_native_hex: string;
   worktrees: ManagedWorktree[];
+  diagnostic_issues: StateDiagnosticIssue[];
+  native_path_encoding: string;
+}
+
+export interface StateDiagnosticIssue {
+  path: string;
+  path_native_hex: string;
+  reason: string;
+  may_hide_base_reference: boolean;
+}
+
+export interface AllStatesManagedWorktree extends ManagedWorktree {
+  state_directory: string;
+  state_directory_native_hex: string;
+}
+
+export interface AllStatesDiagnosticIssue extends StateDiagnosticIssue {
+  /** Null for a registration issue that belongs to no usable state directory. */
+  state_directory: string | null;
+  state_directory_native_hex: string | null;
+}
+
+export interface AllStatesWorktreeInventory {
+  schema_version: 2;
+  scope: "all-registered-states";
+  state_directories: {
+    path: string;
+    path_native_hex: string;
+    source: "default" | "registered";
+  }[];
+  worktrees: AllStatesManagedWorktree[];
+  diagnostic_issues: AllStatesDiagnosticIssue[];
   native_path_encoding: string;
 }
 
@@ -206,7 +239,10 @@ export class Riftri {
 
   readonly worktree: {
     add(destination: string, options?: AddOptions): Promise<AddReport>;
-    list(options?: { allStates?: boolean }): Promise<WorktreeInventory>;
+    list(options: { allStates: true }): Promise<AllStatesWorktreeInventory>;
+    list(options?: { allStates?: false }): Promise<WorktreeInventory>;
+    /** Narrow schema_version when allStates is a runtime boolean. */
+    list(options?: { allStates?: boolean }): Promise<WorktreeInventory | AllStatesWorktreeInventory>;
     /** Refuses a dirty worktree unless `force` is set. */
     remove(destination: string, options?: { force?: boolean }): Promise<unknown>;
     move(source: string, destination: string): Promise<unknown>;
