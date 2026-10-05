@@ -90,6 +90,9 @@ export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
 
     let stdout = "";
     let stderr = "";
+    // Preserve UTF-8 characters split across pipe chunks.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk) => (stdout += chunk));
     child.stderr.on("data", (chunk) => (stderr += chunk));
 
