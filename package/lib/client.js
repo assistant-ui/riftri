@@ -151,6 +151,10 @@ class Riftri {
       }
       let stdout = "";
       let stderr = "";
+      // Pipe chunks need not end on a UTF-8 character boundary. Let each
+      // stream retain incomplete bytes between chunks (and flush at EOF).
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
       child.stdout.on("data", (chunk) => (stdout += chunk));
       child.stderr.on("data", (chunk) => (stderr += chunk));
       child.on("error", reject);

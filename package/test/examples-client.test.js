@@ -17,6 +17,30 @@ const root = path.resolve(__dirname, "../..");
 const client = () => import(pathToFileURL(path.join(root, "examples/lib/riftri.mjs")).href);
 const onWindows = process.platform === "win32";
 
+test("real child output preserves Unicode in example reports and receipts", async () => {
+  const { riftri } = await client();
+  const expected = { message: "café/日本/🚀", nextCommand: "riftri status café/日本/🚀" };
+  for (const code of [0, 1]) {
+    const script = `
+      const stream = process.${code === 0 ? "stdout" : "stderr"};
+      const bytes = Buffer.from(${JSON.stringify(JSON.stringify(expected))});
+      const split = bytes.indexOf(0xc3) + 1;
+      stream.write(bytes.subarray(0, split));
+      setTimeout(() => {
+        stream.write(bytes.subarray(split));
+        process.exitCode = ${code};
+      }, 100);
+    `;
+    const result = riftri(["-e", script, "fixture"], { bin: process.execPath });
+    if (code === 0) assert.deepEqual(await result, expected);
+    else await assert.rejects(result, (error) => {
+      assert.deepEqual(error.receipt, expected);
+      assert.equal(error.message, expected.message);
+      return true;
+    });
+  }
+});
+
 function scratch(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-example-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
