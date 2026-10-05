@@ -12658,7 +12658,7 @@ fn directory_entries(
 }
 
 fn files_equal(left: &Path, right: &Path) -> Result<bool, WorktreeError> {
-    use std::io::{BufReader, Read};
+    use std::io::BufReader;
 
     let mut left = BufReader::new(
         File::open(left).map_err(|source| io("open immutable-base file", left, source))?,
@@ -12666,23 +12666,48 @@ fn files_equal(left: &Path, right: &Path) -> Result<bool, WorktreeError> {
     let mut right = BufReader::new(
         File::open(right).map_err(|source| io("open worktree file", right, source))?,
     );
+    file_readers_equal(&mut left, &mut right)
+}
+
+fn file_readers_equal(
+    left: &mut impl std::io::Read,
+    right: &mut impl std::io::Read,
+) -> Result<bool, WorktreeError> {
     let mut left_buffer = [0_u8; 64 * 1024];
     let mut right_buffer = [0_u8; 64 * 1024];
     loop {
-        let left_length = left
-            .read(&mut left_buffer)
+        let left_length = read_comparison_chunk(left, &mut left_buffer)
             .map_err(|source| WorktreeError::InvalidRequest(format!("read base file: {source}")))?;
-        let right_length = right.read(&mut right_buffer).map_err(|source| {
+        let right_length = read_comparison_chunk(right, &mut right_buffer).map_err(|source| {
             WorktreeError::InvalidRequest(format!("read worktree file: {source}"))
         })?;
         if left_length != right_length || left_buffer[..left_length] != right_buffer[..right_length]
         {
             return Ok(false);
         }
-        if left_length == 0 {
+        // A partial chunk already observed EOF on both sides.
+        if left_length < left_buffer.len() {
             return Ok(true);
         }
     }
+}
+
+// A successful read may return fewer bytes than requested without reaching EOF.
+// Compare filled chunks so unrelated read boundaries cannot reject equal files.
+fn read_comparison_chunk(
+    reader: &mut impl std::io::Read,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    let mut length = 0;
+    while length < buffer.len() {
+        match reader.read(&mut buffer[length..]) {
+            Ok(0) => break,
+            Ok(read) => length += read,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(length)
 }
 
 #[cfg(unix)]
@@ -12803,6 +12828,139 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    struct ChunkedReader<'a> {
+        bytes: &'a [u8],
+        chunk_size: usize,
+    }
+
+    impl std::io::Read for ChunkedReader<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let length = buffer.len().min(self.chunk_size).min(self.bytes.len());
+            buffer[..length].copy_from_slice(&self.bytes[..length]);
+            self.bytes = &self.bytes[length..];
+            Ok(length)
+        }
+    }
+
+    #[test]
+    fn file_comparison_accepts_different_short_read_boundaries() {
+        let bytes = vec![42; 128 * 1024 + 17];
+        let mut left = ChunkedReader {
+            bytes: &bytes,
+            chunk_size: 1009,
+        };
+        let mut right = ChunkedReader {
+            bytes: &bytes,
+            chunk_size: 4093,
+        };
+        assert!(super::file_readers_equal(&mut left, &mut right).unwrap());
+    }
+
+    #[test]
+    fn file_comparison_checks_content_and_eof_across_chunks() {
+        for length in [0, 1, 65535, 65536, 65537, 131072, 131089] {
+            let bytes = vec![42; length];
+            let mut alternatives = vec![bytes.clone()];
+            let mut longer = bytes.clone();
+            longer.push(42);
+            alternatives.push(longer);
+            if length > 0 {
+                alternatives.push(bytes[..length - 1].to_vec());
+                for index in [0, length / 2, length - 1] {
+                    let mut changed = bytes.clone();
+                    changed[index] = 43;
+                    alternatives.push(changed);
+                }
+            }
+            for other in alternatives {
+                for (a, b) in [(&bytes, &other), (&other, &bytes)] {
+                    let mut left = ChunkedReader {
+                        bytes: a,
+                        chunk_size: 1009,
+                    };
+                    let mut right = ChunkedReader {
+                        bytes: b,
+                        chunk_size: 4093,
+                    };
+                    assert_eq!(
+                        super::file_readers_equal(&mut left, &mut right).unwrap(),
+                        a == b
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn file_comparison_does_not_reread_known_eof() {
+        struct EofOnce<'a> {
+            bytes: &'a [u8],
+            eof_seen: bool,
+        }
+        impl std::io::Read for EofOnce<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert!(!self.eof_seen, "comparison repeated an EOF read");
+                let length = std::io::Read::read(&mut self.bytes, buffer)?;
+                self.eof_seen = length == 0;
+                Ok(length)
+            }
+        }
+        for length in [0, 1, 65535, 65536, 65537] {
+            let bytes = vec![42; length];
+            let mut left = EofOnce {
+                bytes: &bytes,
+                eof_seen: false,
+            };
+            let mut right = EofOnce {
+                bytes: &bytes,
+                eof_seen: false,
+            };
+            assert!(super::file_readers_equal(&mut left, &mut right).unwrap());
+        }
+    }
+
+    #[test]
+    fn file_comparison_retries_interrupts_and_propagates_other_errors() {
+        use std::io::{Error, ErrorKind, Read};
+        struct ErrorOnce {
+            error: Option<ErrorKind>,
+        }
+        impl Read for ErrorOnce {
+            fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+                match self.error.take() {
+                    Some(kind) => Err(Error::from(kind)),
+                    None => Ok(0),
+                }
+            }
+        }
+        for kind in [
+            ErrorKind::Interrupted,
+            ErrorKind::PermissionDenied,
+            ErrorKind::UnexpectedEof,
+        ] {
+            for failing_left in [true, false] {
+                // Inject the error after a successful short read, not just at EOF.
+                let mut faulty = (&b"hello"[..]).chain(ErrorOnce { error: Some(kind) });
+                let mut complete = &b"hello"[..];
+                let result = if failing_left {
+                    super::file_readers_equal(&mut faulty, &mut complete)
+                } else {
+                    super::file_readers_equal(&mut complete, &mut faulty)
+                };
+                if kind == ErrorKind::Interrupted {
+                    assert!(result.unwrap());
+                } else {
+                    let message = result.unwrap_err().to_string();
+                    assert!(message.contains(if failing_left {
+                        "read base file"
+                    } else {
+                        "read worktree file"
+                    }));
+                }
+            }
+        }
+    }
+
     fn lfs_selection_fixture() -> Vec<riftri_git::TreeEntry> {
         (0..100)
             .map(|i| riftri_git::TreeEntry {
