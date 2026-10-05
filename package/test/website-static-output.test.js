@@ -165,9 +165,10 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   const { finalizeStaticWebsite } = await import("../scripts/finalize-static-website.mjs");
   await assert.rejects(finalizeStaticWebsite(output, { docs: true }), { code: "ENOENT" });
   const runtime = path.join(output, "functions/__nitro.func");
-  fs.mkdirSync(path.join(runtime, "chunks/nitro/farm-docs-content"), { recursive: true });
+  // Farm.js 0.1.0 places content beside the web-format Nitro entry point.
+  fs.mkdirSync(path.join(runtime, "farm-docs-content"), { recursive: true });
   fs.writeFileSync(path.join(runtime, "index.mjs"), "export default {};");
-  fs.writeFileSync(path.join(runtime, "chunks/nitro/farm-docs-content/page.md"), "# Docs");
+  fs.writeFileSync(path.join(runtime, "farm-docs-content/page.md"), "# Docs");
   await assert.rejects(finalizeStaticWebsite(output, { docs: true }), { code: "ENOENT" });
   const { pages } = await import("../scripts/stage-website-docs.mjs");
   for (const page of pages) {
