@@ -62,6 +62,9 @@ function binaryName(platform = process.platform) {
 
 function assertUsableBinary(candidate, source) {
   try {
+    // Follow executable symlinks, but reject directories and special files
+    // that can pass an access check without being runnable binaries.
+    if (!fs.statSync(candidate).isFile()) throw new Error("not a regular file");
     fs.accessSync(
       candidate,
       process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK,
