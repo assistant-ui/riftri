@@ -12593,11 +12593,13 @@ fn view_matches_base(base: &Path, view: &Path) -> Result<bool, WorktreeError> {
 fn compare_directories(base: &Path, view: &Path, root: bool) -> Result<bool, WorktreeError> {
     let mut base_entries = directory_entries(base, false)?;
     let mut view_entries = directory_entries(view, root)?;
-    base_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    view_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    // Both listings (including root .git filtering) must succeed, but a count
+    // mismatch already proves inequality without sorting either directory.
     if base_entries.len() != view_entries.len() {
         return Ok(false);
     }
+    base_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    view_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     for ((base_name, base_path), (view_name, view_path)) in
         base_entries.into_iter().zip(view_entries)
@@ -12825,6 +12827,35 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    #[test]
+    fn directory_comparison_checks_counts_after_root_git_filtering() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("base");
+        let view = directory.path().join("view");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&view).unwrap();
+        std::fs::write(view.join(".git"), b"gitdir: unused\n").unwrap();
+        assert!(super::compare_directories(&base, &view, true).unwrap());
+        assert!(!super::compare_directories(&base, &view, false).unwrap());
+
+        for name in ["z", "a", "m"] {
+            std::fs::write(base.join(name), b"same").unwrap();
+        }
+        for name in ["m", "z", "a"] {
+            std::fs::write(view.join(name), b"same").unwrap();
+        }
+        assert!(super::compare_directories(&base, &view, true).unwrap());
+        std::fs::write(view.join("extra"), b"private").unwrap();
+        assert!(!super::compare_directories(&base, &view, true).unwrap());
+        std::fs::remove_file(view.join("extra")).unwrap();
+        std::fs::rename(view.join("m"), view.join("different-name")).unwrap();
+        assert!(!super::compare_directories(&base, &view, true).unwrap());
+        std::fs::rename(view.join("different-name"), view.join("m")).unwrap();
+        std::fs::write(view.join("m"), b"diff").unwrap();
+        assert!(!super::compare_directories(&base, &view, true).unwrap());
+        assert!(super::compare_directories(&base, &view.join("missing"), true).is_err());
+    }
+
     #[test]
     fn file_comparison_checks_real_files_at_buffer_boundaries() {
         let directory = tempfile::tempdir().unwrap();
