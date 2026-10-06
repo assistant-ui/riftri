@@ -101,6 +101,10 @@ commands use `https://riftri.dev` on the existing `assistant-ui/riftri`
 Vercel project, with DNS managed by Cloudflare. The Windows/manual guide links
 to the repository's installation documentation.
 
+Website development requires Node.js 22.13 or newer (CI uses Node.js 24),
+matching Farm.js core and CLI 0.1.0. This does not change the npm launcher's
+Node.js requirement.
+
 ```console
 $ pnpm install
 $ pnpm dev

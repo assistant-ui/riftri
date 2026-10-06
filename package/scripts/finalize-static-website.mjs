@@ -65,7 +65,8 @@ export async function finalizeStaticWebsite(
   if (docs) {
     // Fail the build if the official adapter runtime or its content is missing.
     await access(path.join(outputDirectory, "functions/__nitro.func/index.mjs"));
-    await access(path.join(outputDirectory, "functions/__nitro.func/chunks/nitro/farm-docs-content/page.md"));
+    // Farm.js 0.1.0 bundles content beside Nitro's web-format entry point.
+    await access(path.join(outputDirectory, "functions/__nitro.func/farm-docs-content/page.md"));
     // Each page's full reference is served at its own `.md` path.
     for (const page of pages) {
       const reference = page.slug ? path.join(staticDirectory, "docs", `${page.slug}.md`) : path.join(staticDirectory, "docs.md");
