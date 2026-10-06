@@ -458,6 +458,69 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore = "manual paired APFS batch comparison; no timing threshold"]
+    fn reports_batched_clone_comparison() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        write_fixture(&source, 32, 64, 4096);
+        let mut unbounded_us = Vec::new();
+        let mut batched_us = Vec::new();
+        for round in 0..4 {
+            // Alternate order to avoid consistently giving either variant a
+            // warmer cache. Reproduce the previous whole-tree queue only in
+            // this ignored benchmark, not in the production backend.
+            for batched in [round % 2 == 0, round % 2 != 0] {
+                let destination = fixture.path().join(format!("view-{round}-{batched}"));
+                let start = Instant::now();
+                if batched {
+                    clone_tree(&source, &destination).unwrap();
+                } else {
+                    let mut files = Vec::new();
+                    let mut directories = Vec::new();
+                    super::prepare_clone_directory(
+                        &source,
+                        &destination,
+                        fs::metadata(&source).unwrap().permissions().mode(),
+                        None,
+                        &mut |file| {
+                            files.push(file);
+                            Ok(())
+                        },
+                        &mut directories,
+                    )
+                    .unwrap();
+                    crate::parallel::try_for_each_bounded(
+                        files,
+                        crate::parallel::file_clone_parallelism(),
+                        |file| super::clone_file(&file.source, &file.destination, None),
+                    )
+                    .unwrap();
+                    for (path, mode) in directories.into_iter().rev() {
+                        super::set_mode(&path, mode).unwrap();
+                    }
+                }
+                let elapsed = elapsed_microseconds(start.elapsed());
+                if batched {
+                    batched_us.push(elapsed);
+                } else {
+                    unbounded_us.push(elapsed);
+                }
+                assert_tree_matches(&source, &destination);
+                fs::remove_dir_all(&destination).unwrap();
+            }
+        }
+        println!(
+            "RIFTRI_APFS_BATCH_EVALUATION {}",
+            serde_json::json!({
+                "file_count": 2049,
+                "batch_size": crate::parallel::FILE_CLONE_BATCH_SIZE,
+                "unbounded_microseconds": unbounded_us,
+                "batched_microseconds": batched_us,
+            })
+        );
+    }
+
     fn write_fixture(
         source: &Path,
         directory_count: usize,
