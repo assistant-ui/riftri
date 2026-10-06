@@ -359,6 +359,34 @@ test("non-string receipt messages use diagnostic text without coercion", () => {
   assert.equal(new RiftriError(1, { message: "receipt" }, "diagnostic").message, "receipt");
 });
 
+test("a receipt after a large multiline log fits within a small heap", () => {
+  const producer = `
+    const {once} = require("node:events");
+    (async () => {
+      const chunk = "log line\\n".repeat(10000);
+      for (let i = 0; i < 300; i++) {
+        if (!process.stderr.write(chunk)) await once(process.stderr, "drain");
+      }
+      process.stderr.write(JSON.stringify({code:"worktree-busy",message:"busy"}) + "\\n");
+      process.exitCode = 1;
+    })();
+  `;
+  const host = `
+    const {Riftri, RiftriError} = require(${JSON.stringify(require.resolve("../lib/client.js"))});
+    new Riftri({binary:process.execPath}).run(
+      ["-e", ${JSON.stringify(producer)}, "fixture"], {json:false}
+    ).then(() => {process.exitCode=2;}, error => {
+      if (!(error instanceof RiftriError) || !error.isBusy || error.message !== "busy") process.exitCode=3;
+      else console.log("receipt preserved");
+    });
+  `;
+  const result = spawnSync(process.execPath, ["--max-old-space-size=64", "-e", host], {
+    encoding: "utf8", timeout: 60000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /receipt preserved/);
+});
+
 test("non-reporting commands drain large stdout within a small heap", () => {
   const producer = `
     const {once} = require("node:events");

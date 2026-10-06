@@ -200,8 +200,11 @@ class Riftri {
         // child wrote there first (a hook's output, a Git warning) must not
         // cost the caller the receipt's code and category.
         let receipt = null;
-        const lines = stderr.trimEnd().split("\n");
-        for (const candidate of [lines.at(-1), stderr]) {
+        // Preserve the full diagnostic fallback without allocating an array
+        // and a string entry for every line of a verbose child's output.
+        const trimmed = stderr.trimEnd();
+        const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1);
+        for (const candidate of [lastLine, stderr]) {
           try {
             receipt = JSON.parse(candidate);
             break;
