@@ -12658,14 +12658,11 @@ fn directory_entries(
 }
 
 fn files_equal(left: &Path, right: &Path) -> Result<bool, WorktreeError> {
-    use std::io::BufReader;
-
-    let mut left = BufReader::new(
-        File::open(left).map_err(|source| io("open immutable-base file", left, source))?,
-    );
-    let mut right = BufReader::new(
-        File::open(right).map_err(|source| io("open worktree file", right, source))?,
-    );
+    // The comparison owns its read buffers and handles short reads itself;
+    // BufReader would allocate two extra buffers per file pair.
+    let mut left =
+        File::open(left).map_err(|source| io("open immutable-base file", left, source))?;
+    let mut right = File::open(right).map_err(|source| io("open worktree file", right, source))?;
     file_readers_equal(&mut left, &mut right)
 }
 
@@ -12828,6 +12825,31 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    #[test]
+    fn file_comparison_checks_real_files_at_buffer_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left");
+        let right = directory.path().join("right");
+        for length in [0, 1, 8191, 8192, 8193, 65535, 65536, 65537, 131089] {
+            let bytes = vec![42; length];
+            std::fs::write(&left, &bytes).unwrap();
+            std::fs::write(&right, &bytes).unwrap();
+            assert!(super::files_equal(&left, &right).unwrap());
+            let mut longer = bytes.clone();
+            longer.push(42);
+            std::fs::write(&right, &longer).unwrap();
+            assert!(!super::files_equal(&left, &right).unwrap());
+            if length > 0 {
+                let mut changed = bytes;
+                changed[length - 1] = 43;
+                std::fs::write(&right, &changed).unwrap();
+                assert!(!super::files_equal(&left, &right).unwrap());
+            }
+        }
+        std::fs::remove_file(&right).unwrap();
+        assert!(super::files_equal(&left, &right).is_err());
+    }
+
     struct ChunkedReader<'a> {
         bytes: &'a [u8],
         chunk_size: usize,
