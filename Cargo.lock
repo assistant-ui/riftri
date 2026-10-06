@@ -768,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "riftri-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -789,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "riftri-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "fs2",
  "libc",
@@ -807,7 +807,7 @@ dependencies = [
 
 [[package]]
 name = "riftri-git"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "libc",
  "serde",
@@ -817,7 +817,7 @@ dependencies = [
 
 [[package]]
 name = "riftri-storage"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "fs2",
  "libc",
