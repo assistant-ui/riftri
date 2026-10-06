@@ -52,6 +52,60 @@ test("distinguishes GNU libc and musl", () => {
   assert.equal(platformKey("linux", "arm64", muslReport), "linux-arm64-musl");
 });
 
+test("old glibc is refused before resolving a native package", () => {
+  for (const architecture of ["x64", "arm64"]) {
+    for (const version of ["2.9", "2.28", "2.31", "2.33"]) {
+      assert.throws(() => resolveBinary({
+        environment: {}, platform: "linux", architecture,
+        report: { getReport: () => ({ header: { glibcVersionRuntime: version } }) },
+      }), (error) => {
+        assert.match(error.message, /glibc 2\.34 or newer/);
+        assert.ok(error.message.includes(version));
+        assert.match(error.message, /https:\/\/riftri\.dev\/install\.sh/);
+        assert.match(error.message, /RIFTRI_BINARY/);
+        return true;
+      });
+    }
+  }
+});
+
+test("glibc floor comparison is numeric and includes the boundary", () => {
+  for (const version of ["2.34", "2.34.1", "2.39", "2.100", "3.0"]) {
+    const report = { getReport: () => ({ header: { glibcVersionRuntime: version } }) };
+    assert.equal(packageNameForPlatform("linux", "x64", report), "riftri-linux-x64-gnu");
+  }
+});
+
+test("an explicit binary bypasses libc detection", () => {
+  assert.equal(resolveBinary({
+    environment: { RIFTRI_BINARY: process.execPath }, platform: "linux",
+    report: { getReport() { throw new Error("must not inspect libc"); } },
+  }), process.execPath);
+});
+
+test("an unparseable reported glibc version is not assumed compatible", () => {
+  for (const version of ["unknown", "2", "2.34-custom", "999999999999999999999.0"]) {
+    assert.throws(() => packageNameForPlatform("linux", "x64", {
+      getReport: () => ({header: {glibcVersionRuntime: version}}),
+    }), /requires glibc/);
+  }
+});
+
+test("launcher explains old glibc without attempting native execution", () => {
+  const script = `
+    Object.defineProperty(process, "platform", {value:"linux"});
+    process.report.getReport = () => ({header:{glibcVersionRuntime:"2.31"}});
+    require(${JSON.stringify(require.resolve("../bin/riftri.js"))});
+  `;
+  const result = spawnSync(process.execPath, ["-e", script], {
+    encoding: "utf8", timeout: 10000, env: {...process.env, RIFTRI_BINARY:""},
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /glibc 2\.34 or newer/);
+  assert.match(result.stderr, /static musl/);
+  assert.doesNotMatch(result.stderr, /optional native package .* missing/);
+});
+
 test("rejects mismatched native package manifests", () => {
   assert.doesNotThrow(() =>
     assertCompatiblePackageManifest(
@@ -259,4 +313,3 @@ test("Windows ARM64 resolves like every other platform", () => {
     /riftri-win32-arm64 is missing; reinstall without --omit=optional/,
   );
 });
-

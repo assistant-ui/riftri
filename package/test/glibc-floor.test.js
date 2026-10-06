@@ -118,6 +118,7 @@ test("a binary above the floor is rejected and names the symbols", async () => {
 test("the floor is one number shared by the checker, installer, and docs", async () => {
   const { GLIBC_FLOOR } = await import("../scripts/check-glibc-floor.mjs");
   const installer = await readFile(path.join(root, "package/install.sh"), "utf8");
+  assert.equal(require("../lib/platform.js").GLIBC_FLOOR, GLIBC_FLOOR);
   assert.match(
     installer,
     new RegExp(`glibc_floor=${GLIBC_FLOOR.replace(".", "\\.")}\\b`),

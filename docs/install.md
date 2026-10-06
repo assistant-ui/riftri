@@ -95,6 +95,12 @@ glibc below the floor. A GNU binary on a host below the floor does not
 degrade gracefully: it fails at load with
 `version 'GLIBC_2.xx' not found`.
 
+The npm launcher refuses hosts below that floor before starting the GNU
+binary. npm filters musl optional packages out on glibc hosts, so use the
+standalone installer above instead. To use that installed binary with the Node
+SDK, set `RIFTRI_BINARY` to its absolute path; this explicit override bypasses
+automatic platform selection.
+
 The checksum detects corrupted or mismatched downloads; it is not a separate
 signature or a notarization claim. Obtain both files over HTTPS from the
 expected repository. Stop if checksum verification fails.

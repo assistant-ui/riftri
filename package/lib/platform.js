@@ -3,6 +3,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+// Kept in step with the ELF release gate and standalone installer by tests.
+const GLIBC_FLOOR = "2.34";
+
 const PLATFORM_PACKAGES = Object.freeze({
   "darwin-arm64": "riftri-darwin-arm64",
   "darwin-x64": "riftri-darwin-x64",
@@ -20,7 +23,22 @@ function detectLinuxLibc(report = process.report) {
   }
 
   const header = report.getReport()?.header;
-  return header?.glibcVersionRuntime ? "gnu" : "musl";
+  const version = header?.glibcVersionRuntime;
+  if (!version) return "musl";
+  const parts = typeof version === "string" && /^(\d+)\.(\d+)(?:\.\d+)?$/.exec(version);
+  const [major, minor] = parts ? parts.slice(1, 3).map(Number) : [];
+  const [floorMajor, floorMinor] = GLIBC_FLOOR.split(".").map(Number);
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) ||
+      major < floorMajor || (major === floorMajor && minor < floorMinor)) {
+    // npm excludes musl optional dependencies on glibc hosts. Do not select
+    // an absent package or attempt to execute an incompatible GNU binary.
+    throw new Error(
+      `Riftri's GNU npm binary requires glibc ${GLIBC_FLOOR} or newer (detected ${version}); ` +
+      "use the standalone installer at https://riftri.dev/install.sh for the static musl binary, " +
+      "then set RIFTRI_BINARY to its absolute path when using the Node SDK",
+    );
+  }
+  return "gnu";
 }
 
 function platformKey(
@@ -124,6 +142,7 @@ function resolveBinary(options = {}) {
 }
 
 module.exports = {
+  GLIBC_FLOOR,
   PLATFORM_PACKAGES,
   assertCompatiblePackageManifest,
   binaryName,
