@@ -40,7 +40,7 @@ function argvBinary(directory) {
   const log = path.join(directory, "argv.txt");
   fs.writeFileSync(
     file,
-    `#!/bin/sh\n: > ${JSON.stringify(log)}\nfor a in "$@"; do printf '%s\\n' "$a" >> ${JSON.stringify(log)}; done\n`,
+    `#!/bin/sh\n: > ${JSON.stringify(log)}\nfor a in "$@"; do printf '%s\\n' "$a" >> ${JSON.stringify(log)}; done\nprintf '{}\\n'\n`,
   );
   fs.chmodSync(file, 0o755);
   return { binary: file, argv: () => fs.readFileSync(log, "utf8").split("\n").slice(0, -1) };
@@ -335,6 +335,20 @@ test("a command with no payload still receives its flags last", { skip: onWindow
   ]);
 });
 
+test("empty JSON reports reject while non-reporting commands still succeed", async () => {
+  const riftri = new Riftri({ binary: process.execPath });
+  for (const stdout of ["", " \t\r\n"]) {
+    const args = ["-e", `process.stdout.write(${JSON.stringify(stdout)})`, "fixture"];
+    await assert.rejects(riftri.run(args, { json: true }), (error) => {
+      assert.ok(error instanceof RiftriError);
+      assert.equal(error.exitCode, EXIT_OPERATIONAL);
+      assert.match(error.message, /not JSON/);
+      return true;
+    });
+    assert.equal(await riftri.run(args, { json: false }), null);
+  }
+});
+
 test("malformed JSON from a successful run rejects instead of crashing", { skip: onWindows }, async (t) => {
   // Thrown from the close handler, a SyntaxError is uncatchable by the caller
   // and takes the host process down with it.
@@ -429,6 +443,11 @@ test("isOptimizable rejects a broken installation instead of answering false", {
   const garbage = fakeBinary(directory, { stdout: "not json at all" });
   await assert.rejects(
     () => new Riftri({ repository: directory, binary: garbage }).isOptimizable("t"),
+    /not JSON/,
+  );
+  const empty = fakeBinary(directory, {});
+  await assert.rejects(
+    () => new Riftri({ repository: directory, binary: empty }).isOptimizable("t"),
     /not JSON/,
   );
 });

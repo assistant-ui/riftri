@@ -167,7 +167,7 @@ class Riftri {
           return;
         }
         if (exitCode === EXIT_SUCCESS) {
-          if (!json || !stdout.trim()) {
+          if (!json) {
             resolve(null);
             return;
           }
