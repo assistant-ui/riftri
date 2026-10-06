@@ -359,6 +359,32 @@ test("non-string receipt messages use diagnostic text without coercion", () => {
   assert.equal(new RiftriError(1, { message: "receipt" }, "diagnostic").message, "receipt");
 });
 
+test("non-reporting commands drain large stdout within a small heap", () => {
+  const producer = `
+    const {once} = require("node:events");
+    (async () => {
+      const chunk = Buffer.alloc(64 * 1024, 120);
+      for (let i = 0; i < 1024; i++) {
+        if (!process.stdout.write(chunk)) await once(process.stdout, "drain");
+      }
+    })().catch(() => {process.exitCode=1;});
+  `;
+  const host = `
+    const {Riftri} = require(${JSON.stringify(require.resolve("../lib/client.js"))});
+    new Riftri({binary:process.execPath}).run(
+      ["-e", ${JSON.stringify(producer)}, "fixture"], {json:false}
+    ).then(value => {
+      if (value !== null) process.exitCode=2;
+      else console.log("drained 64 MiB");
+    }, () => {process.exitCode=3;});
+  `;
+  const result = spawnSync(process.execPath, ["--max-old-space-size=32", "-e", host], {
+    encoding: "utf8", timeout: 60000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /drained 64 MiB/);
+});
+
 test("empty JSON reports reject while non-reporting commands still succeed", async () => {
   const riftri = new Riftri({ binary: process.execPath });
   for (const stdout of ["", " \t\r\n"]) {
