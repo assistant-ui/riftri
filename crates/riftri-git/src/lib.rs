@@ -3288,7 +3288,12 @@ mod tests {
             )
             .unwrap();
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-            let mut reader = Git::new(&script).small_blob_reader(fixture.path()).unwrap();
+            let git = Git::new(&script);
+            // A freshly written test script can still have a writer inherited
+            // by another test's pre-exec child. Retry only a failed spawn;
+            // protocol reads and finish errors below must never be retried.
+            let mut reader =
+                retry_while_wrapper_is_busy(|| git.small_blob_reader(fixture.path())).unwrap();
             assert_eq!(
                 reader.read(std::slice::from_ref(&id), 1).unwrap(),
                 vec![b"x".to_vec()]
@@ -4250,6 +4255,42 @@ mod tests {
                 result => break result,
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_busy_retry_is_bounded_and_does_not_mask_other_errors() {
+        let start_error = |kind| crate::GitError::Start {
+            command: "test wrapper".into(),
+            source: std::io::Error::from(kind),
+        };
+        let mut attempts = 0;
+        let value = retry_while_wrapper_is_busy(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(start_error(std::io::ErrorKind::ExecutableFileBusy))
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+        assert_eq!((value, attempts), (42, 3));
+
+        let mut attempts = 0;
+        let result: Result<(), _> = retry_while_wrapper_is_busy(|| {
+            attempts += 1;
+            Err(start_error(std::io::ErrorKind::PermissionDenied))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+
+        let mut attempts = 0;
+        let result: Result<(), _> = retry_while_wrapper_is_busy(|| {
+            attempts += 1;
+            Err(start_error(std::io::ErrorKind::ExecutableFileBusy))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 51);
     }
 
     #[cfg(unix)]
