@@ -11,6 +11,7 @@ const {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } = require("node:fs/promises");
 const { test } = require("node:test");
@@ -81,6 +82,31 @@ test("an explicit binary bypasses libc detection", () => {
     environment: { RIFTRI_BINARY: process.execPath }, platform: "linux",
     report: { getReport() { throw new Error("must not inspect libc"); } },
   }), process.execPath);
+});
+
+test("an executable override must be a file, not a directory", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "riftri-binary-directory-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  assert.throws(() => resolveBinary({environment: {RIFTRI_BINARY: directory}}),
+    /RIFTRI_BINARY does not contain an executable Riftri binary/);
+  const result = spawnSync(process.execPath, [require.resolve("../bin/riftri.js"), "--version"], {
+    encoding: "utf8", timeout: 10000, env: {...process.env, RIFTRI_BINARY: directory},
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /RIFTRI_BINARY does not contain an executable Riftri binary/);
+  assert.ok(result.stderr.includes(directory));
+});
+
+test("executable overrides preserve symlink support", {skip: process.platform === "win32"}, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "riftri-binary-link-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const alias = path.join(directory, "binary");
+  await symlink(process.execPath, alias);
+  assert.equal(resolveBinary({environment: {RIFTRI_BINARY: alias}}), alias);
+  const invalid = path.join(directory, "directory-link");
+  await symlink(directory, invalid);
+  assert.throws(() => resolveBinary({environment: {RIFTRI_BINARY: invalid}}),
+    /does not contain an executable Riftri binary/);
 });
 
 test("an unparseable reported glibc version is not assumed compatible", () => {
