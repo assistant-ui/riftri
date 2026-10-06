@@ -155,9 +155,16 @@ class Riftri {
       let stderr = "";
       // Pipe chunks need not end on a UTF-8 character boundary. Let each
       // stream retain incomplete bytes between chunks (and flush at EOF).
-      child.stdout.setEncoding("utf8");
+      if (json) {
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => (stdout += chunk));
+      } else {
+        // The API returns null for non-reporting commands. Drain their output
+        // without decoding or retaining it, so verbose children cannot grow
+        // the host heap in proportion to output that will be discarded.
+        child.stdout.resume();
+      }
       child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => (stdout += chunk));
       child.stderr.on("data", (chunk) => (stderr += chunk));
       child.on("error", reject);
       child.on("close", (exitCode, signal) => {
