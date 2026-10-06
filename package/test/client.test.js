@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "../..");
 const {
@@ -333,6 +334,29 @@ test("a command with no payload still receives its flags last", { skip: onWindow
     "--json",
     "--json-errors",
   ]);
+});
+
+test("malformed receipt messages reject without crashing the host", () => {
+  const producer = `process.stderr.write(JSON.stringify({message:{toString:0,valueOf:0}})); process.exitCode=1;`;
+  const host = `
+    const {Riftri, RiftriError} = require(${JSON.stringify(require.resolve("../lib/client.js"))});
+    new Riftri({binary:process.execPath}).run(
+      ["-e", ${JSON.stringify(producer)}, "fixture"], {json:true}
+    ).then(() => {process.exitCode=2;}, error => {
+      if (!(error instanceof RiftriError) || error.exitCode !== 1) process.exitCode=3;
+      else console.log("rejection caught");
+    });
+  `;
+  const result = spawnSync(process.execPath, ["-e", host], { encoding: "utf8", timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /rejection caught/);
+});
+
+test("non-string receipt messages use diagnostic text without coercion", () => {
+  for (const message of [null, false, 42, [], { toString: 0, valueOf: 0 }]) {
+    assert.equal(new RiftriError(1, { message }, "diagnostic").message, "diagnostic");
+  }
+  assert.equal(new RiftriError(1, { message: "receipt" }, "diagnostic").message, "receipt");
 });
 
 test("empty JSON reports reject while non-reporting commands still succeed", async () => {
