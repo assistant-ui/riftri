@@ -31,7 +31,9 @@ const REPORTING = new Set([
 class RiftriError extends Error {
   constructor(exitCode, receipt, stderr, signal = null) {
     super(
-      receipt?.message ||
+      // JSON is not a guarantee of a valid receipt. Coercing an object here
+      // can throw inside the child close handler instead of rejecting run().
+      (typeof receipt?.message === "string" ? receipt.message : "") ||
         stderr.trim() ||
         (signal ? `riftri terminated by ${signal}` : `riftri exited ${exitCode}`),
     );
