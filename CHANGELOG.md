@@ -5,8 +5,28 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.1] - 2026-10-06
+
+### Changed
+
+- Reduce temporary allocations and repeated Git work during attribute checks,
+  sparse selection, Git LFS reads, integrity hashing, and journal diagnostics.
+  Storage accounting balances work across bounded workers, and single-worker
+  native clones run inline without a worker thread.
+- The Node SDK drains stdout without retaining it for non-reporting commands.
+  JSON reports and stderr diagnostics retain their existing behavior (#659).
+
 ### Fixed
 
+- The Node SDK preserves UTF-8 across output chunks, rejects missing JSON
+  reports, and rejects malformed error messages without crashing the calling
+  process. Type declarations now match status operation counters and all-state
+  inventory reports (#650, #651, #652, #657, #658).
+- Native directory traversal and storage accounting bound open directory
+  handles, allowing deep trees to work under low descriptor limits. Parallel
+  cloning preserves the caller's process umask (#645, #646, #647).
+- File comparisons handle short reads correctly instead of treating equal
+  content as different (#649).
 - A file rewritten while `riftri worktree compact` hashes it is reported as
   the worktree changing during compaction, not as an I/O failure (#624).
 - Committing or switching in a worktree before its `riftri worktree add`
