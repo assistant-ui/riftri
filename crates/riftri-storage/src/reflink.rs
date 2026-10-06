@@ -4,7 +4,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use crate::StorageError;
-use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
+use crate::parallel::{file_clone_parallelism, try_for_each_batched};
 
 struct FileClone {
     source: PathBuf,
@@ -74,19 +74,21 @@ fn clone_tree_with_permissions(
         .transpose()
         .map_err(|error| io("read process umask", destination, error))?;
     let result = (|| {
-        let mut files = Vec::new();
         let mut directories = Vec::new();
-        prepare_clone_directory(
-            source,
-            destination,
-            metadata.permissions().mode(),
-            &mut files,
-            &mut directories,
-            writable_bits,
+        try_for_each_batched(
+            file_clone_parallelism(),
+            |file: FileClone| clone_file(&file.source, &file.destination, writable_bits),
+            |submit| {
+                prepare_clone_directory(
+                    source,
+                    destination,
+                    metadata.permissions().mode(),
+                    submit,
+                    &mut directories,
+                    writable_bits,
+                )
+            },
         )?;
-        try_for_each_bounded(files, file_clone_parallelism(), |file| {
-            clone_file(&file.source, &file.destination, writable_bits)
-        })?;
         for (path, mode) in directories.into_iter().rev() {
             fs::set_permissions(&path, fs::Permissions::from_mode(mode))
                 .map_err(|source_error| io("restore clone directory mode", &path, source_error))?;
@@ -104,7 +106,7 @@ fn prepare_clone_directory(
     source: &Path,
     destination: &Path,
     final_mode: u32,
-    files: &mut Vec<FileClone>,
+    files: &mut dyn FnMut(FileClone) -> Result<(), StorageError>,
     directories: &mut Vec<(PathBuf, u32)>,
     writable_bits: Option<u32>,
 ) -> Result<(), StorageError> {
@@ -155,10 +157,10 @@ fn prepare_clone_directory(
                 writable_bits,
             )?;
         } else if file_type.is_file() {
-            files.push(FileClone {
+            files(FileClone {
                 source: source_path,
                 destination: destination_path,
-            });
+            })?;
         } else if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
                 .map_err(|source_error| io("read source symlink", &source_path, source_error))?;

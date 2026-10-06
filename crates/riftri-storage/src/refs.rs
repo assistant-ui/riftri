@@ -20,7 +20,7 @@ use windows_sys::Win32::System::Ioctl::{
 };
 
 use crate::StorageError;
-use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
+use crate::parallel::{file_clone_parallelism, try_for_each_batched};
 
 const PROBE_BYTES: usize = 64 * 1024;
 const FOUR_GIB: u64 = 4 * 1024 * 1024 * 1024;
@@ -117,24 +117,28 @@ fn clone_tree_with_permissions(
         .map_err(|source_error| io("determine ReFS block-clone alignment", source, source_error))?;
 
     let result = (|| {
-        let mut files = Vec::new();
         let mut directories = Vec::new();
-        prepare_clone_directory(
-            source,
-            destination,
-            metadata.permissions(),
-            &mut files,
-            &mut directories,
-            owner_writable,
+        try_for_each_batched(
+            file_clone_parallelism(),
+            |file: FileClone| {
+                clone_file(
+                    &file.source,
+                    &file.destination,
+                    cluster_size,
+                    owner_writable,
+                )
+            },
+            |submit| {
+                prepare_clone_directory(
+                    source,
+                    destination,
+                    metadata.permissions(),
+                    submit,
+                    &mut directories,
+                    owner_writable,
+                )
+            },
         )?;
-        try_for_each_bounded(files, file_clone_parallelism(), |file| {
-            clone_file(
-                &file.source,
-                &file.destination,
-                cluster_size,
-                owner_writable,
-            )
-        })?;
         for directory in directories.into_iter().rev() {
             fs::set_permissions(&directory.destination, directory.permissions).map_err(
                 |source_error| {
@@ -159,7 +163,7 @@ fn prepare_clone_directory(
     source: &Path,
     destination: &Path,
     permissions: fs::Permissions,
-    files: &mut Vec<FileClone>,
+    files: &mut dyn FnMut(FileClone) -> Result<(), StorageError>,
     directories: &mut Vec<DirectoryClone>,
     owner_writable: bool,
 ) -> Result<(), StorageError> {
@@ -212,10 +216,10 @@ fn prepare_clone_directory(
                 owner_writable,
             )?;
         } else if file_type.is_file() {
-            files.push(FileClone {
+            files(FileClone {
                 source: source_path,
                 destination: destination_path,
-            });
+            })?;
         } else if file_type.is_symlink() {
             clone_symlink(&source_path, &destination_path)?;
         } else {
