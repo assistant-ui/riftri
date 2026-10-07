@@ -57,6 +57,10 @@ export default withDocs(defineConfig({
         return { code: narrowed + COPY_MARKDOWN_CLIENT, map: null };
       },
     }],
+    // Dev pre-bundling would serve the adapter from .vite/deps, where the
+    // transform above never sees its real path, so development would import
+    // every Markdown file in the project and miss the Copy .md listener.
+    optimizeDeps: { exclude: ["@farming-labs/farmjs"] },
   },
   theme: {
     default: "dark",
