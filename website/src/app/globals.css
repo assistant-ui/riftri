@@ -362,7 +362,7 @@ code, pre { font-family: var(--font-mono); }
 .figure-label span { overflow: hidden; color: var(--ink); font-weight: 600; text-overflow: ellipsis; }
 .figure-label b { margin-right: 0.3rem; color: var(--accent); font-weight: 400; }
 .figure-label em { color: var(--accent); font-style: normal; font-weight: 400; }
-.figure-label small { overflow: hidden; color: var(--ink-faint); font-size: 0.68rem; text-overflow: ellipsis; }
+.figure-label small { overflow: hidden; color: var(--ink-faint); font-size: 0.7rem; text-overflow: ellipsis; }
 
 .map-legend {
   display: flex;
@@ -897,8 +897,7 @@ code, pre { font-family: var(--font-mono); }
   .command { grid-template-columns: auto minmax(0, 1fr); }
   .copy-button { min-height: 42px; grid-column: 1 / -1; border-left: 0; }
   .map-head { align-items: flex-start; flex-direction: column; }
-  .figure-label { gap: 0.1rem; font-size: 0.62rem; }
-  .figure-label small { font-size: 0.6rem; }
+  .figure-label { gap: 0.1rem; }
 }
 
 @media (max-width: 360px) {
