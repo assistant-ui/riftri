@@ -71,6 +71,16 @@ wraps onto two rows on phones without hiding links behind a menu. Its section
 links and the skip link transfer keyboard focus to named destinations; keep
 those destinations out of the normal tab order with `tabIndex={-1}`.
 
+The hero's `[ WORKTREE EXAMPLE ]` figure and the four stages of
+`[ FROM TREE TO WORKSPACE ]` are SVG drawings rendered by client components
+(`storage-figure.tsx` and `materialization-track.tsx`) that share the projection
+and frame clock in `figure-kit.ts`. The hero loop lifts three worktrees off one
+immutable base and copies single edited blocks up into them; it runs only while
+it is on screen and holds while a worktree is pointed at. The stage drawings
+follow the backend name's own CSS animation clock, so they always match the name
+shown. Under reduced motion both draw their finished pose and never start a frame
+loop. The block counts illustrate the storage model; they are not measured data.
+
 The FAQ at `/#faq` uses native `details` disclosures so answers remain usable
 without JavaScript. The first answer is open initially; readers can open several
 answers to compare them. Keep its capability claims aligned with the roadmap.
