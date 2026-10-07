@@ -30,6 +30,7 @@ no separate download or path to configure. TypeScript types ship with it.
 | `enable()` / `disable()` | Per-repository opt-in |
 | `worktree.add(path, opts)` | Backend, base, `reused_base`, journal path |
 | `worktree.list()` | Managed worktrees with `allocated_bytes` |
+| `worktree.owner(path)` | Managing `state_directory`, or `null` for an unmanaged path; no disk-usage walk |
 | `worktree.remove(path, { force })` | Refuses a dirty worktree unless forced |
 | `worktree.move` / `compact` / `prune` | Lifecycle operations |
 | `status()` | Bases, totals, pending operations, diagnostics |
@@ -37,6 +38,14 @@ no separate download or path to configure. TypeScript types ship with it.
 | `gc({ apply })` | Plan, or reclaim unreferenced bases |
 
 `run(args)` is the escape hatch for anything not wrapped.
+
+`worktree.owner(path)` always consults the default and every repository-registered
+state directory, even when the client has a `stateDir` configured. A missing or
+invalid registration, ambiguous ownership, or an incomplete operation rejects;
+never turn that error into ordinary-Git cleanup. The result is advisory: pass
+the returned state directory to the lifecycle command, which revalidates under
+its operation lock. The report includes `state_directory_native_hex` so a lossy
+display path need not be used as an identity.
 
 ## Errors
 

@@ -115,6 +115,14 @@ export interface WorktreeInventory {
   native_path_encoding: string;
 }
 
+export interface WorktreeOwner {
+  schema_version: 1;
+  /** Null only when no registered state claims the path. Errors reject. */
+  state_directory: string | null;
+  state_directory_native_hex: string | null;
+  native_path_encoding: string;
+}
+
 export interface StateDiagnosticIssue {
   path: string;
   path_native_hex: string;
@@ -244,6 +252,8 @@ export class Riftri {
 
   readonly worktree: {
     add(destination: string, options?: AddOptions): Promise<AddReport>;
+    /** Advisory ownership lookup without disk accounting; mutations revalidate. */
+    owner(destination: string): Promise<WorktreeOwner>;
     list(options: { allStates: true }): Promise<AllStatesWorktreeInventory>;
     list(options?: { allStates?: false }): Promise<WorktreeInventory>;
     /** Narrow schema_version when allStates is a runtime boolean. */

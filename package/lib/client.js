@@ -126,6 +126,7 @@ class Riftri {
     this.worktree = {
       add: this.#worktreeAdd.bind(this),
       list: this.#worktreeList.bind(this),
+      owner: this.#worktreeOwner.bind(this),
       remove: this.#worktreeRemove.bind(this),
       move: this.#worktreeMove.bind(this),
       compact: this.#worktreeCompact.bind(this),
@@ -315,6 +316,11 @@ class Riftri {
     // rejects it alongside `--state-dir` as a usage error.
     const state = options.allStates ? [] : this.#stateFlag();
     return this.run(["worktree", "list", ...flagsFor(options), ...state]);
+  }
+
+  #worktreeOwner(destination) {
+    // Ownership always consults every registered state, not this.stateDir.
+    return this.run(["worktree", "owner", "--", destination]);
   }
 
   #worktreeRemove(destination, { force = false } = {}) {
