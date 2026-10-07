@@ -5,6 +5,30 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.2] - 2026-10-06
+
+### Changed
+
+- Reduce allocations while extracting Node SDK error receipts and comparing
+  files; reject directory entry-count mismatches before sorting (#663, #665,
+  #668).
+- Run storage accounting inline when only one worker is available, preserving
+  result order and first-error selection without thread startup overhead (#670).
+
+### Fixed
+
+- Reject replacement symlinks and special files when opening comparison inputs,
+  avoiding a blocked FIFO open after an earlier regular-file check (#669).
+- Read unpublished lifecycle intent journals through the guarded journal reader;
+  raced FIFO/symlink replacements no longer block diagnostics or establish
+  cleanup ownership, and unknown temporary files remain preserved (#671).
+- The npm launcher rejects incompatible glibc before native startup and rejects
+  directory-valued executable paths while preserving executable symlinks (#664,
+  #666).
+- Retry only busy-executable startup failures in the Git blob-session test
+  fixture, without retrying protocol operations or changing production Git
+  behavior (#667).
+
 ## [0.6.1] - 2026-10-06
 
 ### Changed
