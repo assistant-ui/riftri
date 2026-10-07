@@ -29,7 +29,7 @@ const REPORTING = new Set([
 ]);
 
 class RiftriError extends Error {
-  constructor(exitCode, receipt, stderr, signal = null) {
+  constructor(exitCode, receipt, stderr, signal = null, report = null) {
     super(
       // JSON is not a guarantee of a valid receipt. Coercing an object here
       // can throw inside the child close handler instead of rejecting run().
@@ -43,6 +43,7 @@ class RiftriError extends Error {
     this.exitCode = exitCode;
     this.signal = signal;
     this.receipt = receipt ?? null;
+    this.report = report;
   }
 
   /** The process was killed rather than exiting on its own. */
@@ -52,7 +53,12 @@ class RiftriError extends Error {
 
   /** Riftri declined before touching anything. Falling back is safe. */
   get isPolicyRefusal() {
-    return this.exitCode === EXIT_POLICY;
+    // Hooks and `exec` children can return 3 after performing work. Only a
+    // native refusal receipt proves the operation stopped before mutation.
+    return this.exitCode === EXIT_POLICY && this.signal === null && this.report === null &&
+      this.receipt?.schemaVersion === 1 && this.receipt?.outcome === "failed" &&
+      this.receipt?.category === "policy" && this.receipt?.cleanup === "not-needed" &&
+      typeof this.receipt?.code === "string";
   }
 
   /** The request itself was malformed. Never retry unchanged. */
@@ -212,7 +218,18 @@ class Riftri {
             // Plain text, as from a binary that predates usage receipts.
           }
         }
-        reject(new RiftriError(exitCode, receipt, stderr));
+        let report = null;
+        if (json && stdout.trim()) {
+          // A failed post-checkout hook leaves a created worktree in place.
+          // Preserve that report even though the hook's status rejects run().
+          try {
+            report = JSON.parse(stdout);
+          } catch {
+            // Malformed output cannot prove that a fallback is safe either.
+          }
+          receipt = null;
+        }
+        reject(new RiftriError(exitCode, receipt, stderr, null, report));
       });
     });
   }
@@ -322,6 +339,7 @@ class Riftri {
 module.exports = {
   Riftri,
   RiftriError,
+  resolveBinary,
   EXIT_SUCCESS,
   EXIT_OPERATIONAL,
   EXIT_USAGE,
