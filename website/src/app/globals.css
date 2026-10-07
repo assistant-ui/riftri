@@ -172,11 +172,78 @@ code, pre { font-family: var(--font-mono); }
 .hero h1 > span { color: var(--ink-muted); }
 
 .hero-highlight {
-  padding: 0 0.025em;
+  position: relative;
+  /* One line tall, so the box never reaches into the line above; the bottom
+     padding keeps the descender of the g inside it. */
+  display: inline-block;
+  margin-bottom: -0.05em;
+  padding: 0 0.025em 0.1em;
   background: var(--accent);
+  line-height: 0.96;
   color: var(--canvas-deep);
   white-space: nowrap;
+  transition: color 200ms var(--ease-out);
 }
+
+/* Before the drag completes the word reads like the rest of its line. */
+.hero-highlight.is-plain { background: transparent; }
+.hero-highlight.is-unlit { color: inherit; }
+.highlight-text { position: relative; }
+
+.highlight-pixels {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Each cell turns on once the fill passes its own threshold. */
+.highlight-pixels rect { fill: var(--accent); opacity: clamp(0, calc((var(--fill) - var(--at)) * 40), 1); }
+
+/* The selection and cursor follow the farmjs.dev hero: a dashed box with
+   square corner handles, opened from just outside the word's top-left corner
+   to its bottom-right one, and a small arrowhead cursor. */
+.highlight-selection {
+  --span: calc(100% + 0.1em);
+  position: absolute;
+  top: calc(-0.06em + var(--span) * var(--from));
+  left: calc(-0.06em + var(--span) * var(--from));
+  width: calc(var(--span) * (var(--to) - var(--from)));
+  height: calc(var(--span) * (var(--to) - var(--from)));
+  border: 1px dashed rgb(255 255 255 / 0.34);
+  pointer-events: none;
+}
+
+.highlight-selection i {
+  position: absolute;
+  display: none;
+  width: 7px;
+  height: 7px;
+  border: 1px solid rgb(255 255 255 / 0.42);
+  background: #000;
+}
+
+.highlight-selection.has-corners i { display: block; }
+.highlight-selection .corner-tl { top: -4px; left: -4px; }
+.highlight-selection .corner-tr { top: -4px; right: -4px; }
+.highlight-selection .corner-bl { bottom: -4px; left: -4px; }
+.highlight-selection .corner-br { right: -4px; bottom: -4px; }
+
+.highlight-cursor {
+  position: absolute;
+  top: calc(-0.06em + (100% + 0.1em) * var(--at) + var(--dy) - 2px);
+  left: calc(-0.06em + (100% + 0.1em) * var(--at) + var(--dx) - 3px);
+  z-index: 1;
+  width: 18px;
+  height: 18px;
+  overflow: visible;
+  pointer-events: none;
+  transform-origin: 3px 2px;
+  transition: transform 120ms var(--ease-out);
+}
+
+.highlight-cursor path { fill: #fff; stroke: #000; stroke-width: 1.2; stroke-linejoin: round; }
 
 .hero-kicker {
   max-width: 34rem;
@@ -243,8 +310,6 @@ code, pre { font-family: var(--font-mono); }
   background-color: var(--canvas-deep);
 }
 
-.hero-graph-label { display: flex; justify-content: space-between; gap: 1rem; margin: 0 0 1.75rem; color: var(--ink-faint); font-size: 0.7rem; letter-spacing: 0.06em; }
-.hero-graph-label > span:first-child::before { display: inline-block; width: 5px; height: 5px; margin: 0 0.55rem 0.1rem 0; background: var(--accent); content: ""; }
 .hero-graph-caption { margin: 1.5rem 0 0; color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.8rem; line-height: 1.5; }
 
 .storage-backends { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; padding: 1.5rem var(--gutter); border-bottom: 1px solid var(--line); }
@@ -822,7 +887,7 @@ code, pre { font-family: var(--font-mono); }
   .hero { grid-template-columns: 1fr; }
   .hero-graph { border-top: 1px solid var(--line); border-left: 0; }
   .hero-graph .storage-map { max-width: 640px; align-self: center; }
-  .hero-graph-label, .hero-graph-caption { width: min(100%, 640px); align-self: center; }
+  .hero-graph-caption { width: min(100%, 640px); align-self: center; }
   .hero-copy { padding-block: 3.5rem; }
   .storage-backends ul { gap: 0.75rem 1.5rem; }
   .split-heading { grid-template-columns: 1fr; gap: 1.25rem; }

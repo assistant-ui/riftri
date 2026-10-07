@@ -27,7 +27,10 @@ test("small fixed-size text does not shrink below 0.7rem", () => {
 
 test("the storage headline has an accessible selection-style highlight", () => {
   const page = fs.readFileSync(path.resolve(__dirname, "../../website/src/app/page.tsx"), "utf8");
-  assert.match(page, /Shared <mark className="hero-highlight">storage\.<\/mark>/);
+  assert.match(page, /Shared <HeroHighlight>storage\.<\/HeroHighlight>/);
+  const component = fs.readFileSync(path.resolve(__dirname, "../../website/src/components/hero-highlight.tsx"), "utf8");
+  assert.match(component, /<mark\b/);
+  assert.match(component, /"hero-highlight"/);
   const highlight = css.match(/\.hero-highlight\s*\{([^}]+)\}/)?.[1];
   assert.ok(highlight);
   assert.match(highlight, /background:\s*var\(--accent\)/);
