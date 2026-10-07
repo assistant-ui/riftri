@@ -10,6 +10,61 @@ use tempfile::tempdir;
 mod support;
 use support::{WritableTempDir, writable_tempdir};
 
+fn fresh_shell_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    // These fixtures test initial activation, not the caller's active session.
+    // Strip only its recorded shim directories; preserve other PATH entries
+    // (including non-UTF-8 paths) and never mutate the test process environment.
+    let shim_directories: Vec<_> = ["RIFTRI_SHELL_SHIM_DIR", "RIFTRI_PROCESS_SHIM_DIR"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .collect();
+    let mut command = Command::new(program);
+    if let Some(path) = std::env::var_os("PATH") {
+        command.env(
+            "PATH",
+            std::env::join_paths(
+                std::env::split_paths(&path).filter(|entry| !shim_directories.contains(entry)),
+            )
+            .expect("fixture PATH"),
+        );
+    }
+    for variable in [
+        "RIFTRI_SHELL_SHIM_DIR",
+        "RIFTRI_PROCESS_SHIM_DIR",
+        "RIFTRI_SHIM_ACTIVE",
+        "RIFTRI_REAL_GIT",
+        "RIFTRI_CACHE_DIR",
+        "RIFTRI_BYPASS",
+    ] {
+        command.env_remove(variable);
+    }
+    command
+}
+
+#[cfg(unix)]
+#[test]
+fn activation_fixtures_do_not_reuse_an_inherited_hook() {
+    let cache = tempdir().expect("parent shell cache");
+    let output = fresh_shell_command("sh")
+        .args([
+            "-ec",
+            "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
+             exec \"$RIFTRI_TEST_EXECUTABLE\" shell_ --test-threads=1",
+        ])
+        .env("RIFTRI_TEST_BIN", env!("CARGO_BIN_EXE_riftri"))
+        .env("RIFTRI_TEST_EXECUTABLE", std::env::current_exe().unwrap())
+        .env("RIFTRI_CACHE_DIR", cache.path())
+        .output()
+        .expect("run activation fixtures inside a hooked shell");
+    assert!(
+        output.status.success(),
+        "inherited-hook fixtures failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 struct RepositoryFixture {
     directory: WritableTempDir,
     repository: PathBuf,
@@ -1240,7 +1295,7 @@ fn exec_leaves_worktree_add_untouched_for_a_disabled_repository() {
 fn shell_hook_places_a_durable_riftri_git_shim_first_on_path() {
     let cache = tempdir().expect("shell hook cache");
     let cache_root = cache.path().join("cache with ' quote");
-    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+    let output = fresh_shell_command(env!("CARGO_BIN_EXE_riftri"))
         .args(["shell", "hook", "sh"])
         .env("RIFTRI_CACHE_DIR", &cache_root)
         .output()
@@ -1252,7 +1307,7 @@ fn shell_hook_places_a_durable_riftri_git_shim_first_on_path() {
         String::from_utf8_lossy(&output.stderr)
     );
     let hook = String::from_utf8(output.stdout).expect("UTF-8 shell hook");
-    let repeated = Command::new(env!("CARGO_BIN_EXE_riftri"))
+    let repeated = fresh_shell_command(env!("CARGO_BIN_EXE_riftri"))
         .args(["shell", "hook", "sh"])
         .env("RIFTRI_CACHE_DIR", &cache_root)
         .output()
@@ -1262,7 +1317,7 @@ fn shell_hook_places_a_durable_riftri_git_shim_first_on_path() {
         "repeated shell hook failed: {}",
         String::from_utf8_lossy(&repeated.stderr)
     );
-    let shell = Command::new("sh")
+    let shell = fresh_shell_command("sh")
         .args(["-c", &format!("{hook}\ncommand -v git")])
         .output()
         .expect("evaluate shell hook");
@@ -1304,7 +1359,7 @@ fn shell_hook_rejects_a_symlinked_shim_directory() {
     std::os::unix::fs::symlink(&outside, cache_root.join("shims/v1"))
         .expect("symlink shim directory");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+    let output = fresh_shell_command(env!("CARGO_BIN_EXE_riftri"))
         .args(["shell", "hook", "sh"])
         .env("RIFTRI_CACHE_DIR", &cache_root)
         .output()
@@ -1325,7 +1380,7 @@ fn shell_status_explains_global_scope_and_deactivation_restores_git() {
     let cache = tempdir().expect("shell hook cache");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
     let binary = env!("CARGO_BIN_EXE_riftri");
-    let output = Command::new("sh")
+    let output = fresh_shell_command("sh")
         .args([
             "-c",
             "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
@@ -1373,7 +1428,7 @@ fn shell_status_reports_bypass_without_deactivating_the_hook() {
         ("false", "active"),
         ("", "active"),
     ] {
-        let output = Command::new("sh")
+        let output = fresh_shell_command("sh")
             .args([
                 "-ec",
                 "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
@@ -1408,7 +1463,7 @@ fn shell_hook_leaves_disabled_repository_adds_with_real_git() {
     let fixture = RepositoryFixture::new();
     let cache = tempdir().expect("shell hook cache");
     let destination = fixture.directory.path().join("ordinary-shell-view");
-    let output = Command::new("sh")
+    let output = fresh_shell_command("sh")
         .args([
             "-c",
             "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
@@ -1465,7 +1520,7 @@ if (Test-Path Env:RIFTRI_SHELL_SHIM_DIR) { exit 45 }
 if ((Get-Command git -CommandType Application).Source -eq $shim) { exit 44 }
 Write-Output 'deactivated=true'
 "#;
-    let output = Command::new("powershell.exe")
+    let output = fresh_shell_command("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -2498,7 +2553,7 @@ fn shell_hook_routes_normal_git_adds_in_enabled_repositories_through_apfs() {
     let destination = fixture.directory.path().join("optimized-shell-view");
     assert!(riftri(&fixture.repository, &["enable"]).status.success());
 
-    let output = Command::new("sh")
+    let output = fresh_shell_command("sh")
         .args([
             "-c",
             "eval \"$(\"$RIFTRI_TEST_BIN\" shell hook sh)\"\n\
