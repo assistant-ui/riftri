@@ -12662,9 +12662,12 @@ fn directory_entries(
 fn files_equal(left: &Path, right: &Path) -> Result<bool, WorktreeError> {
     // The comparison owns its read buffers and handles short reads itself;
     // BufReader would allocate two extra buffers per file pair.
-    let mut left =
-        File::open(left).map_err(|source| io("open immutable-base file", left, source))?;
-    let mut right = File::open(right).map_err(|source| io("open worktree file", right, source))?;
+    // A path can change after the caller's metadata check. Reject symlinks and
+    // special files on the opened handle, without waiting for a FIFO writer.
+    let mut left = crate::base_integrity::open_regular(left)
+        .map_err(|source| io("open immutable-base file", left, source))?;
+    let mut right = crate::base_integrity::open_regular(right)
+        .map_err(|source| io("open worktree file", right, source))?;
     file_readers_equal(&mut left, &mut right)
 }
 
@@ -12827,6 +12830,78 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn file_comparison_rejects_replaced_inputs_without_blocking() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        const CHILD: &str = "RIFTRI_TEST_COMPARISON_REPLACEMENT";
+        const ROOT: &str = "RIFTRI_TEST_COMPARISON_ROOT";
+        if let Ok(case) = std::env::var(CHILD) {
+            let directory = std::path::PathBuf::from(std::env::var_os(ROOT).unwrap());
+            let left = directory.join("left");
+            let right = directory.join("right");
+            std::fs::write(&left, b"same").unwrap();
+            std::fs::write(&right, b"same").unwrap();
+            // Reproduce replacement after the caller's regular-file check,
+            // without relying on a racing thread to hit the open window.
+            assert!(std::fs::symlink_metadata(&left).unwrap().is_file());
+            assert!(std::fs::symlink_metadata(&right).unwrap().is_file());
+            let (replaced, other) = if case.starts_with("left") {
+                (&left, &right)
+            } else {
+                (&right, &left)
+            };
+            std::fs::remove_file(replaced).unwrap();
+            if case.ends_with("fifo") {
+                assert!(
+                    Command::new("mkfifo")
+                        .arg(replaced)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            } else {
+                symlink(other, replaced).unwrap();
+            }
+            assert!(super::files_equal(&left, &right).is_err());
+            assert_eq!(std::fs::read(other).unwrap(), b"same");
+            assert!(std::fs::symlink_metadata(replaced).is_ok());
+            return;
+        }
+
+        // Keep a regression bounded: the old blocking FIFO open must fail the
+        // test instead of hanging the entire recovery test suite.
+        for case in ["left-fifo", "right-fifo", "left-symlink", "right-symlink"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "worktree::tests::file_comparison_rejects_replaced_inputs_without_blocking",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .env(ROOT, directory.path())
+                .spawn()
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "comparison child failed: {case}");
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(10) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("comparison blocked on replacement: {case}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
     #[test]
     fn directory_comparison_checks_counts_after_root_git_filtering() {
         let directory = tempfile::tempdir().unwrap();
