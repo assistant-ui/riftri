@@ -214,7 +214,10 @@ fn open_real_journal(path: &Path, operation: &'static str) -> Result<File, Journ
 /// journal open while deserializing can make the owner's phase persist fail.
 /// Holding the handle only for one buffered read shrinks that window from a
 /// parse to a syscall.
-fn read_real_journal(path: &Path, operation: &'static str) -> Result<Vec<u8>, JournalError> {
+pub(crate) fn read_real_journal(
+    path: &Path,
+    operation: &'static str,
+) -> Result<Vec<u8>, JournalError> {
     use std::io::Read;
 
     let mut file = open_real_journal(path, operation)?;

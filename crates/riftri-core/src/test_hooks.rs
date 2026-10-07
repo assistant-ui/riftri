@@ -4,6 +4,7 @@ use std::path::Path;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FilesystemRacePoint {
     JournalOpen,
+    UnpublishedIntentOpen,
     DestinationParentProbe,
     JournalOpened,
     EmptyDirectoryRemoval,
