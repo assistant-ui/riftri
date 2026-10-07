@@ -135,7 +135,8 @@ test("isOptimizable answers false only for a refusal", { skip: onWindows }, asyn
   const { isOptimizable, EXIT } = await client();
   const directory = scratch(t);
 
-  const refused = stub(directory, `printf '%s' '{"code":"unsupported"}' >&2\nexit ${3}`, "refuse");
+  const receipt = { schemaVersion: 1, outcome: "failed", code: "unsupported", category: "policy", cleanup: "not-needed" };
+  const refused = stub(directory, `printf '%s' '${JSON.stringify(receipt)}' >&2\nexit ${3}`, "refuse");
   assert.equal(await isOptimizable(directory, "t", { bin: refused }), false);
   assert.equal(EXIT.POLICY, 3);
 
@@ -156,6 +157,7 @@ test("the example client matches the package client's error contract", async () 
     "exitCode",
     "signal",
     "receipt",
+    "report",
     "wasSignalled",
     "isPolicyRefusal",
     "isUsageError",
@@ -171,5 +173,17 @@ test("the example client matches the package client's error contract", async () 
     );
   }
   assert.equal(error.exitCode, packaged.exitCode);
-  assert.equal(error.isPolicyRefusal, true);
+  assert.equal(error.isPolicyRefusal, false);
+});
+
+test("example fallback refuses to retry a worktree created before a failed hook", { skip: onWindows }, async (t) => {
+  const { riftri } = await client();
+  const directory = scratch(t);
+  const report = { schema_version: 1, destination: "../created", post_checkout: { exit_code: 3 } };
+  const bin = stub(directory, `printf '%s' '${JSON.stringify(report)}'\nexit 3`);
+  await assert.rejects(riftri(["worktree", "add", "../created"], { bin, cwd: directory }), (error) => {
+    assert.equal(error.isPolicyRefusal, false);
+    assert.deepEqual(error.report, report);
+    return true;
+  });
 });

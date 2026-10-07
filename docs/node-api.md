@@ -67,6 +67,14 @@ try {
 `128 +` the signal number, the same convention native `riftri exec` uses, and
 sets `error.signal` and `error.wasSignalled`.
 
+A failed `post-checkout` hook leaves the newly created worktree in place, as
+Git does. The API rejects with the hook's exit code and preserves the parsed
+creation report in `error.report` (typed `unknown`; validate it before use).
+Do not retry creation or fall back to Git in this case. In particular, a hook
+exiting `3` is **not** `isPolicyRefusal`: safe fallback requires a native policy
+receipt confirming that no cleanup is needed, not just an exit code. Plain
+`exec` child exits and malformed or missing receipts are not safe refusals either.
+
 ### When `isOptimizable()` returns false
 
 `false` means Riftri answered the question: no copy-on-write backend is active
@@ -102,6 +110,14 @@ new Riftri({
 ```
 
 ## How it relates to the CLI
+
+Runners that already supervise child processes can import `resolveBinary()`
+from `riftri` to get the verified native executable path without starting it.
+It uses the same platform/version checks and `RIFTRI_BINARY` override as the
+launcher. Spawn it directly (without a shell) and use the CLI's structured
+reports, receipts, and journal recovery contract. Keep the `riftri` package and
+its native optional dependency external when bundling: resolution depends on
+their installed files. A missing or unusable executable throws before spawning.
 
 The binary is the implementation. This client spawns it, adds `--json` where
 the command supports it and `--json-errors` everywhere, parses the single

@@ -5,6 +5,9 @@ export const EXIT_OPERATIONAL: 1;
 export const EXIT_USAGE: 2;
 export const EXIT_POLICY: 3;
 
+/** Resolve and validate the installed native executable, honoring RIFTRI_BINARY. Does not spawn. */
+export function resolveBinary(): string;
+
 /** One versioned failure receipt, as emitted by `--json-errors`. */
 export interface FailureReceipt {
   schemaVersion: number;
@@ -37,7 +40,9 @@ export class RiftriError extends Error {
   /** The process was killed rather than exiting on its own. */
   readonly wasSignalled: boolean;
   readonly receipt: FailureReceipt | null;
-  /** Riftri declined before touching anything; falling back is safe. */
+  /** Parsed stdout on a nonzero exit (for example a failed post-checkout hook), or null. Validate before use. */
+  readonly report: unknown;
+  /** A native policy receipt confirms no mutation; an exit code alone is insufficient. */
   readonly isPolicyRefusal: boolean;
   /** The request was malformed; never retry it unchanged. */
   readonly isUsageError: boolean;

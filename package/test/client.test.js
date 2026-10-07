@@ -85,6 +85,15 @@ test("the package exposes the client as its main entry point", () => {
   assert.ok(fs.existsSync(path.join(root, manifest.types)), "types file must exist");
 });
 
+test("a process-owning harness can resolve the same verified native executable", () => {
+  const { execFileSync } = require("node:child_process");
+  const output = execFileSync(process.execPath, ["-e", `
+    const { resolveBinary } = require(${JSON.stringify(path.join(root, "package/lib/client.js"))});
+    process.stdout.write(resolveBinary());
+  `], { encoding: "utf8", env: { ...process.env, RIFTRI_BINARY: process.execPath } });
+  assert.equal(output, process.execPath);
+});
+
 test("release staging rewrites entry points to the tarball layout", async () => {
   // The tarball puts lib/ at its root, so a published `package/` prefix would
   // make require("riftri") unresolvable.
@@ -148,6 +157,38 @@ test("a policy refusal becomes a typed error carrying its receipt", { skip: onWi
     },
   );
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a checkout hook exit of 3 retains the created report and never permits fallback", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const report = {
+    schema_version: 1,
+    destination: "../created",
+    backend: "apfs-clone",
+    post_checkout: { hook: "post-checkout", started: true, exit_code: 3 },
+  };
+  const binary = fakeBinary(directory, { stdout: JSON.stringify(report), code: 3 });
+  await assert.rejects(new Riftri({ repository: directory, binary }).worktree.add("../created"), (error) => {
+    assert.equal(error.isPolicyRefusal, false);
+    assert.equal(error.exitCode, 3);
+    assert.equal(error.receipt, null);
+    assert.deepEqual(error.report, report);
+    return true;
+  });
+});
+
+test("exit 3 without an intact refusal receipt is not a safe fallback", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  for (const receipt of [null, {}, { category: "policy" }, {
+    schemaVersion: 1, outcome: "failed", code: "failed-add", category: "policy", cleanup: "pending",
+  }]) {
+    const binary = fakeBinary(directory, { stderr: JSON.stringify(receipt), code: 3 });
+    await assert.rejects(new Riftri({ repository: directory, binary }).worktree.add("../task"), (error) => {
+      assert.equal(error.isPolicyRefusal, false);
+      assert.equal(error.report, null);
+      return true;
+    });
+  }
 });
 
 test("a receipt after other stderr output is still parsed", { skip: onWindows }, async () => {
@@ -484,7 +525,7 @@ test("isOptimizable answers false only when Riftri answers", { skip: onWindows }
 
   // A refusal is Riftri saying no: a legitimate false.
   const refused = fakeBinary(directory, {
-    stderr: JSON.stringify({ code: "unsupported-filesystem", message: "no backend" }),
+    stderr: JSON.stringify({ schemaVersion: 1, outcome: "failed", category: "policy", cleanup: "not-needed", code: "unsupported-filesystem", message: "no backend" }),
     code: EXIT_POLICY,
   });
   assert.equal(await new Riftri({ repository: directory, binary: refused }).isOptimizable("t"), false);
