@@ -7428,7 +7428,14 @@ fn unpublished_intent_add_journal(
     if symlink_metadata_if_present(&published)?.is_some() || !is_regular_file_if_present(path)? {
         return Ok(None);
     }
-    let Ok(bytes) = fs::read(path) else {
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::UnpublishedIntentOpen,
+        path,
+    );
+    // A temporary can change after inspection just like a published journal.
+    // Unknown/replaced inputs prove no cleanup ownership and remain preserved.
+    let Ok(bytes) = crate::journal::read_real_journal(path, "read unpublished intent") else {
         return Ok(None);
     };
     let intent = match name {
@@ -12840,6 +12847,86 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn unpublished_intent_rejects_replacement_before_read() {
+        use crate::test_hooks::{FilesystemRacePoint, install};
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "RIFTRI_TEST_INTENT_REPLACEMENT";
+        const ROOT: &str = "RIFTRI_TEST_INTENT_ROOT";
+        if let Ok(kind) = std::env::var(CHILD) {
+            let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+            fs::create_dir(root.join("operations")).unwrap();
+            fs::create_dir(root.join("removals")).unwrap();
+            let add = root.join("operations/add-test.json");
+            fs::write(&add, b"unused").unwrap();
+            fs::write(add.with_extension("lock"), b"").unwrap();
+            let record = RemovalJournalRecord::new(
+                "remove-test".into(),
+                super::RemovalJournalPaths {
+                    repository: &root,
+                    destination: &root.join("view"),
+                    base_path: &root.join("base"),
+                },
+                "add-test".into(),
+            );
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let temporary = root.join("removals/.remove-test.fixture.tmp");
+            let external = root.join("external.json");
+            fs::write(&temporary, &bytes).unwrap();
+            fs::write(&external, &bytes).unwrap();
+            assert_eq!(
+                super::unpublished_intent_add_journal(&root, "removals", "remove-test", &temporary)
+                    .unwrap(),
+                Some(add)
+            );
+            let target = external.clone();
+            let _hook = install(FilesystemRacePoint::UnpublishedIntentOpen, move |path| {
+                fs::remove_file(path).unwrap();
+                if kind == "fifo" {
+                    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+                } else {
+                    symlink(target, path).unwrap();
+                }
+            });
+            assert!(
+                super::unpublished_intent_add_journal(&root, "removals", "remove-test", &temporary)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(fs::symlink_metadata(&temporary).is_ok());
+            assert_eq!(fs::read(external).unwrap(), bytes);
+            return;
+        }
+        for kind in ["fifo", "symlink"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "worktree::tests::unpublished_intent_rejects_replacement_before_read",
+                    "--nocapture",
+                ])
+                .env(CHILD, kind)
+                .env(ROOT, root.path())
+                .spawn()
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "intent child failed: {kind}");
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(10) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("intent read blocked on {kind}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn file_comparison_rejects_replaced_inputs_without_blocking() {
