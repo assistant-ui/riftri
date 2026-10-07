@@ -420,6 +420,17 @@ accepted as a hidden compatibility alias.
 All `riftri worktree` subcommands accept `--repository <REPOSITORY>`
 (default `.`), `--state-dir <STATE_DIR>`, and `--json`.
 
+### `riftri worktree owner <path>`
+
+Read-only ownership discovery across the default and every registered state
+directory, without traversing worktree files or computing storage accounting.
+Accepts `--repository <path>` and `--json`. JSON schema version 1 reports
+`state_directory` and `state_directory_native_hex` (both null if unmanaged),
+plus `native_path_encoding`. Missing or malformed registrations and incomplete
+operations fail closed rather than reporting an unmanaged path. This is advisory
+routing, not permission to delete: subsequent lifecycle commands still validate
+their state and acquire their own locks. No repository enable flag is required.
+
 ### `riftri worktree list`
 
 List active Riftri-managed worktrees and their storage use.

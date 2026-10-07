@@ -279,6 +279,7 @@ impl Command {
             | Self::Gc { json, .. } => *json,
             Self::Worktree { command } => match command {
                 WorktreeCommand::List { json, .. }
+                | WorktreeCommand::Owner { json, .. }
                 | WorktreeCommand::Add { json, .. }
                 | WorktreeCommand::Remove { json, .. }
                 | WorktreeCommand::Move { json, .. }
@@ -309,6 +310,7 @@ impl Command {
             Self::State { .. } => "state",
             Self::Worktree { command } => match command {
                 WorktreeCommand::List { .. } => "worktree-list",
+                WorktreeCommand::Owner { .. } => "worktree-owner",
                 WorktreeCommand::Add { .. } => "worktree-add",
                 WorktreeCommand::Remove { .. } => "worktree-remove",
                 WorktreeCommand::Move { .. } => "worktree-move",
@@ -362,6 +364,9 @@ impl Command {
                 }
             },
             Self::Worktree { command } => match command {
+                WorktreeCommand::Owner { repository, .. } => {
+                    InvocationContext::for_repository(repository)
+                }
                 WorktreeCommand::List {
                     repository,
                     state_dir,
@@ -449,6 +454,20 @@ impl InvocationContext {
 
 #[derive(Debug, Subcommand)]
 enum WorktreeCommand {
+    /// Find a worktree's managing state directory without calculating disk usage.
+    Owner {
+        /// Worktree root to look up (existing, missing, or an alias).
+        path: PathBuf,
+
+        /// Repository whose registered state directories should be inspected.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Emit stable machine-readable JSON; an unmanaged path has a null owner.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List active Riftri-managed worktrees and their storage use.
     List {
         /// Repository whose default Riftri state should be inspected.
@@ -989,6 +1008,30 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Worktree { command } => match command {
+            WorktreeCommand::Owner {
+                path,
+                repository,
+                json,
+            } => {
+                let state = riftri_core::managed_worktree_state_directory(&repository, &path)?;
+                if json {
+                    let output = serde_json::json!({
+                        "schema_version": 1,
+                        "state_directory": state.as_deref().map(|path| path.to_string_lossy()),
+                        "state_directory_native_hex": state.as_deref().map(native_path_hex),
+                        "native_path_encoding": native_path_encoding(),
+                    });
+                    machineln!(
+                        "{}",
+                        serde_json::to_string_pretty(&output)
+                            .context("serialize worktree owner")?
+                    );
+                } else if let Some(state) = state {
+                    outputln!("State: {}", state.display());
+                } else {
+                    outputln!("No Riftri state claims this worktree.");
+                }
+            }
             WorktreeCommand::List {
                 repository,
                 state_dir,
@@ -3176,6 +3219,7 @@ mod tests {
                 | WorktreeCommand::Move { json, .. }
                 | WorktreeCommand::Compact { json, .. }
                 | WorktreeCommand::Prune { json, .. }
+                | WorktreeCommand::Owner { json, .. }
                 | WorktreeCommand::List { json, .. } => json,
             };
             assert!(json, "JSON flag not parsed for {arguments:?}");

@@ -867,7 +867,13 @@ pub fn forget_missing_state_directory(
     ))
 }
 
-pub(crate) fn managed_worktree_state_directory(
+/// Discover the state directory claiming a destination across all registered
+/// states, without traversing worktree contents or computing disk usage.
+///
+/// This is advisory routing information, not authorization to delete. Lifecycle
+/// operations revalidate ownership under their locks. Missing or invalid state
+/// and pending operations fail closed rather than reporting an unmanaged path.
+pub fn managed_worktree_state_directory(
     repository: &Path,
     destination: &Path,
 ) -> Result<Option<PathBuf>, WorktreeError> {
@@ -878,6 +884,20 @@ pub(crate) fn managed_worktree_state_directory(
     let mut matches = Vec::new();
     for state_directory in repository_state_directories_with_git(&git, &repository_info)? {
         let snapshot = ManagedJournalSnapshot::load(&state_directory)?;
+        if snapshot.adds.iter().any(|journal| {
+            !matches!(
+                journal.phase,
+                AddWorktreePhase::Active | AddWorktreePhase::RolledBack
+            ) && destinations
+                .iter()
+                .any(|destination| paths_match(&journal.destination, destination))
+        }) {
+            return Err(pending_lifecycle_error(
+                "add",
+                destination,
+                &state_directory,
+            ));
+        }
         let mut active_add = false;
         for destination in &destinations {
             if snapshot.find(&state_directory, destination)?.is_some() {
@@ -890,7 +910,14 @@ pub(crate) fn managed_worktree_state_directory(
                 && (destination_set.contains(&journal.source)
                     || destination_set.contains(&journal.destination))
         });
-        if active_add || pending_move {
+        if pending_move {
+            return Err(pending_lifecycle_error(
+                "move",
+                destination,
+                &state_directory,
+            ));
+        }
+        if active_add {
             matches.push(state_directory);
         }
     }

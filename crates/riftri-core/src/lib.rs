@@ -156,9 +156,9 @@ pub use worktree::{
     StateDiagnosticIssue, StateDirectorySource, StateWorktreeInventory, StorageAccountingReport,
     ViewStorageAccounting, WorktreeError, WorktreeMode, add_worktree, compact_worktree,
     default_state_directory, force_remove_worktree, forget_missing_state_directory,
-    garbage_collect, is_managed_worktree, move_worktree, prune_worktrees,
-    recover_incomplete_operations, recovery_pending_error, remove_worktree, storage_accounting,
-    validate_new_worktree_destination, worktree_inventory_across_states,
+    garbage_collect, is_managed_worktree, managed_worktree_state_directory, move_worktree,
+    prune_worktrees, recover_incomplete_operations, recovery_pending_error, remove_worktree,
+    storage_accounting, validate_new_worktree_destination, worktree_inventory_across_states,
 };
 
 /// A diagnostic check and its optional failure explanation.

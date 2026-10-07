@@ -356,6 +356,14 @@ test("listing every state never also names the configured one", { skip: onWindow
   assert.ok(stub.argv().includes("--state-dir=state"), stub.argv().join(" "));
 });
 
+test("ownership looks across registered states and protects option-like paths", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "state" });
+  await riftri.worktree.owner("-view");
+  assert.deepEqual(stub.argv(), ["worktree", "owner", "--json", "--json-errors", "--", "-view"]);
+});
+
 test("a relative binary is relative to the caller, not the repository", { skip: onWindows }, async (t) => {
   // spawn resolves a relative command against its cwd, so this failed with
   // ENOENT whenever `repository` was not the caller's own directory.
