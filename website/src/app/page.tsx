@@ -231,10 +231,12 @@ function GetStarted() {
       <ol className="start-list">
         {startSteps.map((step) => (
           <li key={step.index}>
-            <span className="start-index">{step.index}</span>
-            <div className="start-copy">
-              <strong>{step.title}</strong>
-              <p>{step.description}</p>
+            <div className="start-step">
+              <span className="start-index">{step.index}</span>
+              <div className="start-copy">
+                <strong>{step.title}</strong>
+                <p>{step.description}</p>
+              </div>
             </div>
             {step.index === "01" ? (
               <div className="install-options">

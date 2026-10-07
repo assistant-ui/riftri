@@ -8,7 +8,9 @@ import { clamp01, easeOut, smooth, span, usePlayhead } from "./figure-kit";
 // with the accent a pixel at a time, lets go, holds, then empties.
 const STEPS = [
   ["rest", 1.2],
-  ["glide", 0.6],
+  ["glide", 0.7],
+  // The cursor sits on the corner for a beat, so it is seen before it selects.
+  ["aim", 0.25],
   ["press", 0.1],
   ["drag", 0.75],
   ["release", 0.12],
@@ -27,8 +29,10 @@ for (const [step, length] of STEPS) {
   elapsed += length;
 }
 const PERIOD = elapsed;
-// Server render, first paint, and reduced motion show the finished highlight.
+// Reduced motion shows the finished highlight. Everyone else starts with the
+// plain word and the cursor already on its way in.
 const REST = AT.hold + 0.3;
+const START = AT.glide;
 const progress = (t: number, step: Step) => span(t, AT[step], LENGTH[step]);
 const lerp = (from: number, to: number, amount: number) => from + (to - from) * amount;
 
@@ -49,7 +53,7 @@ const cells = Array.from({ length: COLUMNS * ROWS }, (_, index) => {
 export function HeroHighlight({ children }: { children: string }) {
   const mark = useRef<HTMLElement>(null);
   const [held, setHeld] = useState(false);
-  const t = usePlayhead(mark, { period: PERIOD, rest: REST, hold: held });
+  const t = usePlayhead(mark, { period: PERIOD, rest: REST, start: START, hold: held });
 
   const drag = smooth(progress(t, "drag"));
   const deselect = smooth(progress(t, "deselect"));
@@ -67,7 +71,7 @@ export function HeroHighlight({ children }: { children: string }) {
   let cursor: { at: number; dx: number; dy: number; opacity: number; pressed: boolean } | null = null;
   if (t >= AT.glide && t < AT.press) {
     const glide = smooth(progress(t, "glide"));
-    cursor = { at: 0, dx: lerp(-34, 0, glide), dy: lerp(-26, 0, glide), opacity: glide, pressed: false };
+    cursor = { at: 0, dx: lerp(-34, 0, glide), dy: lerp(-26, 0, glide), opacity: Math.min(1, glide * 2.5), pressed: false };
   } else if (t >= AT.press && t < AT.release) {
     cursor = { at: t < AT.drag ? 0 : drag, dx: 0, dy: 0, opacity: 1, pressed: true };
   } else if (t >= AT.release && t < AT.fill + 0.4) {
