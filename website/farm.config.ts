@@ -1,5 +1,15 @@
 import { defineConfig } from "@farm.js/core";
 import { withDocs } from "@farming-labs/farmjs/config";
+import type { IncomingMessage, ServerResponse } from "node:http";
+
+// The two dev-server members the Markdown middleware below uses, typed
+// structurally because Farm's types and this site resolve different Vite majors.
+type DevServer = {
+  middlewares: {
+    use(handler: (req: IncomingMessage, res: ServerResponse, next: (error?: unknown) => void) => void): unknown;
+  };
+  transformRequest(url: string): Promise<{ code: string } | null>;
+};
 
 // Client-only snippet appended to the docs adapter (react.js). It runs once in
 // the browser and delegates clicks on the "Copy .md" link to a clipboard copy
@@ -40,6 +50,21 @@ export default withDocs(defineConfig({
     plugins: [{
       name: "riftri-public-docs-only",
       enforce: "pre",
+      configureServer(server: DevServer) {
+        // Farm 0.1.0's dev Markdown routes answer every `*.md` URL, including
+        // the module requests Vite makes for the docs pages (`page.md?import`).
+        // The failed import stops every page from hydrating in development,
+        // so hand those requests to Vite's own transform first.
+        server.middlewares.use((req, res, next) => {
+          const url = req.url ?? "";
+          if (!/\.mdx?\?(?:[^#]*&)?import(?:[&=#]|$)/.test(url)) return next();
+          server.transformRequest(url).then((result) => {
+            if (!result) return next();
+            res.setHeader("Content-Type", "text/javascript");
+            res.end(result.code);
+          }, next);
+        });
+      },
       transform(code: string, id: string) {
         if (!id.split("?")[0].replace(/\\/g, "/").endsWith("/@farming-labs/farmjs/dist/react.js")) return null;
         // Adapter 0.2.115 eagerly imports every Markdown file in the project.
@@ -57,6 +82,11 @@ export default withDocs(defineConfig({
         return { code: narrowed + COPY_MARKDOWN_CLIENT, map: null };
       },
     }],
+    // Dev pre-bundling would serve the adapter from .vite/deps, where the
+    // transform above never sees its real path. The unnarrowed glob then
+    // imports Markdown files the dev server cannot serve, and the failed
+    // import stops every page from hydrating.
+    optimizeDeps: { exclude: ["@farming-labs/farmjs"] },
   },
   theme: {
     default: "dark",
