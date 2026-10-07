@@ -93,6 +93,16 @@ $ riftri worktree list --json
 $ riftri status --json
 ```
 
+For startup readiness without disk accounting, use
+`riftri worktree inspect --json -- <path>...`. It reports ownership and backend
+for each requested path, plus the actual OverlayFS mount state. An absent or
+not-yet-adopted mount reports `recovery-required`; repair its exact owning state
+directory and inspect again before launching a process in the worktree. A busy
+operation can be skipped by repair, so repair success alone is insufficient.
+Foreign mounts, other live namespaces, invalid registrations, and incomplete
+operations must never be treated as unmanaged or ready. The query is read-only
+and includes exact native path encodings; it does not scan user files.
+
 Reports carry `schema_version`, display paths beside `*_native_hex` fields
 with the exact native encoding named in `native_path_encoding`, and raw Git
 ref bytes beside lossy display strings, so non-UTF-8 paths and refs remain

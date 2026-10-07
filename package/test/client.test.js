@@ -364,6 +364,14 @@ test("ownership looks across registered states and protects option-like paths", 
   assert.deepEqual(stub.argv(), ["worktree", "owner", "--json", "--json-errors", "--", "-view"]);
 });
 
+test("batch inspection keeps all paths behind the option boundary and ignores client stateDir", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "state" });
+  await riftri.worktree.inspect(["-view", "view with spaces"]);
+  assert.deepEqual(stub.argv(), ["worktree", "inspect", "--json", "--json-errors", "--", "-view", "view with spaces"]);
+});
+
 test("a relative binary is relative to the caller, not the repository", { skip: onWindows }, async (t) => {
   // spawn resolves a relative command against its cwd, so this failed with
   // ENOENT whenever `repository` was not the caller's own directory.

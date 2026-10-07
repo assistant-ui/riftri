@@ -877,57 +877,172 @@ pub fn managed_worktree_state_directory(
     repository: &Path,
     destination: &Path,
 ) -> Result<Option<PathBuf>, WorktreeError> {
+    Ok(
+        find_managed_worktrees(repository, &[destination.to_path_buf()])?
+            .pop()
+            .flatten()
+            .map(|(state, _)| state),
+    )
+}
+
+/// Advisory mount readiness, not an authorization to mutate or delete a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorktreeMountStatus {
+    Active,
+    RecoveryRequired,
+    DifferentNamespace,
+    Foreign,
+    Unavailable,
+}
+
+/// Lightweight lifecycle metadata. No worktree contents or allocation walk is
+/// needed, and an unmanaged path has no state, backend, or mount status.
+#[derive(Debug, Clone)]
+pub struct ManagedWorktreeInspection {
+    pub path: PathBuf,
+    pub state_directory: Option<PathBuf>,
+    pub backend: Option<BackendKind>,
+    /// None for unmanaged paths and backends that do not require a mount.
+    pub mount_status: Option<WorktreeMountStatus>,
+}
+
+/// Inspect a batch with one repository/state discovery pass. Incomplete or
+/// ambiguous ownership fails the whole query; it never becomes "unmanaged".
+/// Mount inspection is read-only, including an interrupted remount's private
+/// work directory. Callers must re-query after repair before starting work.
+pub fn inspect_managed_worktrees(
+    repository: &Path,
+    destinations: &[PathBuf],
+) -> Result<Vec<ManagedWorktreeInspection>, WorktreeError> {
+    find_managed_worktrees(repository, destinations)?
+        .into_iter()
+        .zip(destinations)
+        .map(|(owner, path)| {
+            let mut report = ManagedWorktreeInspection {
+                path: path.clone(),
+                state_directory: None,
+                backend: None,
+                mount_status: None,
+            };
+            if let Some((state, journal)) = owner {
+                report.state_directory = Some(state);
+                report.backend = Some(journal.backend);
+                if journal.backend == BackendKind::OverlayFs {
+                    report.mount_status = Some(inspect_worktree_mount(&journal)?);
+                }
+            }
+            Ok(report)
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inspect_worktree_mount(_journal: &DecodedJournal) -> Result<WorktreeMountStatus, WorktreeError> {
+    Ok(WorktreeMountStatus::Unavailable)
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_worktree_mount(journal: &DecodedJournal) -> Result<WorktreeMountStatus, WorktreeError> {
+    let Some(overlayfs) = &journal.overlayfs else {
+        return Ok(WorktreeMountStatus::Unavailable);
+    };
+    if let Some(identity) = &overlayfs.mount_identity {
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )?;
+        return Ok(match OverlayFsMounter::mount_state(&layout, identity)? {
+            OverlayFsMountState::Active => WorktreeMountStatus::Active,
+            OverlayFsMountState::Absent => WorktreeMountStatus::RecoveryRequired,
+            OverlayFsMountState::DifferentNamespace => WorktreeMountStatus::DifferentNamespace,
+            OverlayFsMountState::Foreign => WorktreeMountStatus::Foreign,
+        });
+    }
+    let Some(context) = &overlayfs.mount_context else {
+        return Ok(WorktreeMountStatus::Unavailable);
+    };
+    // The recovery loader can recreate a missing disposable work directory;
+    // a read-only query must fail closed instead of doing that mutation.
+    let layout = OverlayFsMounter::load(
+        &overlayfs.layout_root,
+        &journal.base_path,
+        &journal.destination,
+    )?;
+    Ok(
+        match OverlayFsMounter::recover_mount(&layout, context, &overlayfs.recovery_token)? {
+            // Even a live token-bound mount needs its identity durably adopted.
+            OverlayFsRecoveryState::Mounted(_)
+            | OverlayFsRecoveryState::Absent
+            | OverlayFsRecoveryState::Prepared => WorktreeMountStatus::RecoveryRequired,
+            OverlayFsRecoveryState::DifferentNamespace => WorktreeMountStatus::DifferentNamespace,
+            OverlayFsRecoveryState::Foreign => WorktreeMountStatus::Foreign,
+        },
+    )
+}
+
+fn find_managed_worktrees(
+    repository: &Path,
+    destinations: &[PathBuf],
+) -> Result<Vec<Option<(PathBuf, DecodedJournal)>>, WorktreeError> {
     let git = Git::default();
     let repository_info = git.inspect_repository(repository)?;
-    let destinations = managed_destination_candidates(destination)?;
-    let destination_set = destinations.iter().cloned().collect::<HashSet<_>>();
-    let mut matches = Vec::new();
+    let candidates = destinations
+        .iter()
+        .map(|destination| managed_destination_candidates(destination))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut matches = vec![None; destinations.len()];
     for state_directory in repository_state_directories_with_git(&git, &repository_info)? {
         let snapshot = ManagedJournalSnapshot::load(&state_directory)?;
-        if snapshot.adds.iter().any(|journal| {
-            !matches!(
-                journal.phase,
-                AddWorktreePhase::Active | AddWorktreePhase::RolledBack
-            ) && destinations
-                .iter()
-                .any(|destination| paths_match(&journal.destination, destination))
-        }) {
-            return Err(pending_lifecycle_error(
-                "add",
-                destination,
-                &state_directory,
-            ));
-        }
-        let mut active_add = false;
-        for destination in &destinations {
-            if snapshot.find(&state_directory, destination)?.is_some() {
-                active_add = true;
-                break;
+        for (index, (destination, candidates)) in destinations.iter().zip(&candidates).enumerate() {
+            if snapshot.adds.iter().any(|journal| {
+                !matches!(
+                    journal.phase,
+                    AddWorktreePhase::Active | AddWorktreePhase::RolledBack
+                ) && candidates
+                    .iter()
+                    .any(|destination| paths_match(&journal.destination, destination))
+            }) {
+                return Err(pending_lifecycle_error(
+                    "add",
+                    destination,
+                    &state_directory,
+                ));
+            }
+            let mut active_add = None;
+            for candidate in candidates {
+                if let Some(journal) = snapshot.find(&state_directory, candidate)? {
+                    active_add = Some(journal);
+                    break;
+                }
+            }
+            let pending_move = snapshot.moves.iter().any(|journal| {
+                !journal.phase.is_finished()
+                    && candidates.iter().any(|candidate| {
+                        paths_match(candidate, &journal.source)
+                            || paths_match(candidate, &journal.destination)
+                    })
+            });
+            if pending_move {
+                return Err(pending_lifecycle_error(
+                    "move",
+                    destination,
+                    &state_directory,
+                ));
+            }
+            if let Some(journal) = active_add {
+                if matches[index].is_some() {
+                    return Err(WorktreeError::InvalidRequest(format!(
+                        "multiple registered Riftri state directories manage {}",
+                        destination.display()
+                    )));
+                }
+                matches[index] = Some((state_directory.clone(), journal.clone()));
             }
         }
-        let pending_move = snapshot.moves.iter().any(|journal| {
-            !journal.phase.is_finished()
-                && (destination_set.contains(&journal.source)
-                    || destination_set.contains(&journal.destination))
-        });
-        if pending_move {
-            return Err(pending_lifecycle_error(
-                "move",
-                destination,
-                &state_directory,
-            ));
-        }
-        if active_add {
-            matches.push(state_directory);
-        }
     }
-    if matches.len() > 1 {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "multiple registered Riftri state directories manage {}",
-            destination.display()
-        )));
-    }
-    Ok(matches.pop())
+    Ok(matches)
 }
 
 pub(crate) fn repository_state_directories(
@@ -6777,7 +6892,7 @@ fn find_managed_add_journal(
         .map(|journal| journal.cloned())
 }
 
-/// One advisory discovery pass, shared only across aliases of the same path.
+/// One advisory discovery pass, shared across requested paths and their aliases.
 struct ManagedJournalSnapshot {
     adds: Vec<DecodedJournal>,
     completed: HashSet<String>,
@@ -16625,6 +16740,102 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn overlayfs_inspection_and_repair_preserve_private_data_after_a_boot_change() {
+        use riftri_storage::OverlayFsMounter;
+
+        let fixture = tempdir().expect("fixture");
+        if !require_overlayfs_test_namespace(fixture.path()) {
+            return;
+        }
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        create_overlayfs_repository(&repository);
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create mounted view");
+        assert_eq!(added.backend, BackendKind::OverlayFs);
+        fs::write(destination.join("tracked.txt"), b"private edit\n").unwrap();
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .unwrap()
+            .pop()
+            .unwrap();
+        let overlay = journal.overlayfs.as_ref().unwrap();
+        let layout =
+            OverlayFsMounter::load(&overlay.layout_root, &journal.base_path, &destination).unwrap();
+        let inspect =
+            || super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination));
+        assert_eq!(
+            inspect().unwrap()[0].mount_status,
+            Some(super::WorktreeMountStatus::Active)
+        );
+        OverlayFsMounter::unmount(&layout, overlay.mount_identity.as_ref().unwrap()).unwrap();
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal.journal_path).unwrap()).unwrap();
+        for field in ["mount_context", "mount_identity"] {
+            record["overlayfs"][field]["boot_id"] = "00000000-0000-0000-0000-000000000000".into();
+        }
+        fs::write(&journal.journal_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let before = fs::read(&journal.journal_path).unwrap();
+        assert_eq!(
+            inspect().unwrap()[0].mount_status,
+            Some(super::WorktreeMountStatus::RecoveryRequired)
+        );
+        assert_eq!(fs::read(&journal.journal_path).unwrap(), before);
+        assert!(
+            !destination.join("tracked.txt").exists(),
+            "inspection must not mount"
+        );
+        assert_eq!(
+            fs::read(layout.upper().join("tracked.txt")).unwrap(),
+            b"private edit\n"
+        );
+
+        // A kill inside the remount reset can leave work missing and identity
+        // unset. Inspection still cannot create even a disposable directory.
+        record["overlayfs"]["mount_identity"] = serde_json::Value::Null;
+        fs::write(&journal.journal_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::remove_dir_all(layout.work()).unwrap();
+        assert!(inspect().is_err());
+        assert!(
+            !layout.work().exists(),
+            "inspection recreated a recovery directory"
+        );
+        let repaired = recover_incomplete_operations(&state).unwrap();
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        assert_eq!(
+            inspect().unwrap()[0].mount_status,
+            Some(super::WorktreeMountStatus::Active)
+        );
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).unwrap(),
+            b"private edit\n"
+        );
+        assert_eq!(
+            fs::read(journal.base_path.join("tracked.txt")).unwrap(),
+            b"tracked\n"
+        );
+        super::force_remove_worktree(super::RemoveWorktreeRequest {
+            repository,
+            destination,
+            state_dir: Some(state),
+        })
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn overlayfs_recovery_preserves_a_workdir_the_journaled_namespace_cannot_rule_out() {
         use riftri_storage::{OverlayFsMounter, OverlayFsRecoveryState};
 
@@ -16698,6 +16909,15 @@ mod tests {
         let sentinel = layout.work().join("live-mount-sentinel");
         fs::write(&sentinel, b"must survive").expect("plant work-directory sentinel");
 
+        let inspection =
+            super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination))
+                .expect("inspect a possibly live mount without recovery");
+        assert_eq!(
+            inspection[0].mount_status,
+            Some(super::WorktreeMountStatus::DifferentNamespace)
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must survive");
+
         let preserved =
             recover_incomplete_operations(&state).expect("repair with a possibly live mount");
         assert_eq!(preserved.recovered_mounts, 0);
@@ -16722,10 +16942,25 @@ mod tests {
             serde_json::to_vec_pretty(&record).expect("encode restored journal"),
         )
         .expect("persist restored journal");
+        let inspection =
+            super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination))
+                .expect("inspect an absent mount without recovery");
+        assert_eq!(
+            inspection[0].mount_status,
+            Some(super::WorktreeMountStatus::RecoveryRequired)
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must survive");
         let repaired =
             recover_incomplete_operations(&state).expect("repair in the journaled namespace");
         assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
         assert_eq!(repaired.recovered_mounts, 1);
+        let inspection =
+            super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination))
+                .expect("inspect a recovered mount");
+        assert_eq!(
+            inspection[0].mount_status,
+            Some(super::WorktreeMountStatus::Active)
+        );
         assert!(
             Command::new("mountpoint")
                 .arg("--quiet")
