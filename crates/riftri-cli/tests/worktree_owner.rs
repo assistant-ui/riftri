@@ -26,6 +26,46 @@ fn owner(repository: &Path, destination: &Path) -> Output {
         .unwrap()
 }
 
+fn inspect(repository: &Path, destinations: &[&Path]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "inspect", "--json", "--json-errors", "--"])
+        .args(destinations)
+        .current_dir(repository)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn batch_inspection_reports_unmanaged_paths_without_creating_state() {
+    let fixture = tempdir().unwrap();
+    let repository = fixture.path();
+    git(repository, &["init", "--quiet"]);
+    let first = repository.join("-first");
+    let second = repository.join("second");
+    let output = inspect(repository, &[&first, &second]);
+    assert!(output.status.success(), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    let worktrees = report["worktrees"].as_array().unwrap();
+    assert_eq!(worktrees.len(), 2);
+    for (view, path) in worktrees.iter().zip([&first, &second]) {
+        assert_eq!(view["path"], path.display().to_string());
+        assert!(view["state_directory"].is_null());
+        assert!(view["backend"].is_null());
+        assert!(view["mount_status"].is_null());
+        assert!(view["path_native_hex"].is_string());
+    }
+    assert!(!repository.join(".git/riftri").exists());
+    let stale = repository.join("missing-state");
+    git(
+        repository,
+        &["config", "riftri.stateDirectory", stale.to_str().unwrap()],
+    );
+    let failed = inspect(repository, &[&first, &second]);
+    assert!(!failed.status.success());
+    assert!(failed.stdout.is_empty());
+}
+
 #[test]
 fn owner_reports_unmanaged_without_creating_state_and_refuses_stale_registrations() {
     let fixture = tempdir().unwrap();
@@ -118,6 +158,23 @@ fn owner_finds_custom_state_aliases_and_refuses_incomplete_adds() {
     }
 
     let journal_path = add["journal_path"].as_str().unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o0)).unwrap();
+    let inspection = inspect(
+        &repository,
+        &[&destination, &alias, &repository.join("ordinary")],
+    );
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(inspection.status.success(), "{inspection:?}");
+    let report: serde_json::Value = serde_json::from_slice(&inspection.stdout).unwrap();
+    for view in &report["worktrees"].as_array().unwrap()[..2] {
+        assert_eq!(view["backend"], "apfs-clone");
+        assert!(view["mount_status"].is_null());
+        assert_eq!(
+            view["state_directory"],
+            state.canonicalize().unwrap().display().to_string()
+        );
+    }
+    assert!(report["worktrees"][2]["state_directory"].is_null());
     let original = fs::read(journal_path).unwrap();
     let mut journal: serde_json::Value = serde_json::from_slice(&original).unwrap();
     journal["phase"] = serde_json::json!("index-synchronized");
@@ -128,6 +185,12 @@ fn owner_finds_custom_state_aliases_and_refuses_incomplete_adds() {
         "unfinished add must not become ordinary Git: {failed:?}"
     );
     assert!(failed.stdout.is_empty());
+    let failed = inspect(&repository, &[&repository.join("ordinary"), &destination]);
+    assert!(!failed.status.success());
+    assert!(
+        failed.stdout.is_empty(),
+        "a partial batch must not appear successful"
+    );
     assert_eq!(
         fs::read_to_string(destination.join("tracked.txt")).unwrap(),
         "private edit\n"

@@ -123,6 +123,20 @@ export interface WorktreeOwner {
   native_path_encoding: string;
 }
 
+export interface WorktreeInspectionReport {
+  schema_version: 1;
+  native_path_encoding: string;
+  worktrees: Array<{
+    path: string;
+    path_native_hex: string;
+    state_directory: string | null;
+    state_directory_native_hex: string | null;
+    backend: string | null;
+    /** Null unless the managed backend needs a mount. Inspection never repairs. */
+    mount_status: "active" | "recovery-required" | "different-namespace" | "foreign" | "unavailable" | null;
+  }>;
+}
+
 export interface StateDiagnosticIssue {
   path: string;
   path_native_hex: string;
@@ -254,6 +268,8 @@ export class Riftri {
     add(destination: string, options?: AddOptions): Promise<AddReport>;
     /** Advisory ownership lookup without disk accounting; mutations revalidate. */
     owner(destination: string): Promise<WorktreeOwner>;
+    /** One read-only discovery pass; paths retain the requested order. */
+    inspect(destinations: readonly string[]): Promise<WorktreeInspectionReport>;
     list(options: { allStates: true }): Promise<AllStatesWorktreeInventory>;
     list(options?: { allStates?: false }): Promise<WorktreeInventory>;
     /** Narrow schema_version when allStates is a runtime boolean. */

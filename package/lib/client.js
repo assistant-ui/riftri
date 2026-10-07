@@ -127,6 +127,7 @@ class Riftri {
       add: this.#worktreeAdd.bind(this),
       list: this.#worktreeList.bind(this),
       owner: this.#worktreeOwner.bind(this),
+      inspect: this.#worktreeInspect.bind(this),
       remove: this.#worktreeRemove.bind(this),
       move: this.#worktreeMove.bind(this),
       compact: this.#worktreeCompact.bind(this),
@@ -321,6 +322,10 @@ class Riftri {
   #worktreeOwner(destination) {
     // Ownership always consults every registered state, not this.stateDir.
     return this.run(["worktree", "owner", "--", destination]);
+  }
+
+  #worktreeInspect(destinations) {
+    return this.run(["worktree", "inspect", "--", ...destinations]);
   }
 
   #worktreeRemove(destination, { force = false } = {}) {

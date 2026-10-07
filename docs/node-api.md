@@ -31,6 +31,7 @@ no separate download or path to configure. TypeScript types ship with it.
 | `worktree.add(path, opts)` | Backend, base, `reused_base`, journal path |
 | `worktree.list()` | Managed worktrees with `allocated_bytes` |
 | `worktree.owner(path)` | Managing `state_directory`, or `null` for an unmanaged path; no disk-usage walk |
+| `worktree.inspect(paths)` | Ordered batch of ownership, backend, and mount readiness; no content or disk-usage walk |
 | `worktree.remove(path, { force })` | Refuses a dirty worktree unless forced |
 | `worktree.move` / `compact` / `prune` | Lifecycle operations |
 | `status()` | Bases, totals, pending operations, diagnostics |
@@ -46,6 +47,18 @@ never turn that error into ordinary-Git cleanup. The result is advisory: pass
 the returned state directory to the lifecycle command, which revalidates under
 its operation lock. The report includes `state_directory_native_hex` so a lossy
 display path need not be used as an identity.
+
+Before resuming persistent workspaces, `worktree.inspect(paths)` can inspect a
+batch with one repository/state discovery pass. It uses the same fail-closed
+ownership rules as `owner`. `mount_status` is `null` for ordinary directories
+and native-clone backends, `active` for a verified live OverlayFS mount, or
+`recovery-required` when repair must restore or adopt its journaled mount.
+`different-namespace`, `foreign`, and `unavailable` require attention; do not
+start a process against that view. Inspection never mounts, resets private
+layers, traverses worktree contents, or repairs state. Run `repair()` with the
+reported owning `stateDir` only when recovery is required, then inspect again:
+a successful repair may have skipped a busy operation and is not by itself a
+readiness receipt. Exact native path encodings accompany every path.
 
 ## Errors
 

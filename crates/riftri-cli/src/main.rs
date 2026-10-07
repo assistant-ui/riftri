@@ -279,6 +279,7 @@ impl Command {
             | Self::Gc { json, .. } => *json,
             Self::Worktree { command } => match command {
                 WorktreeCommand::List { json, .. }
+                | WorktreeCommand::Inspect { json, .. }
                 | WorktreeCommand::Owner { json, .. }
                 | WorktreeCommand::Add { json, .. }
                 | WorktreeCommand::Remove { json, .. }
@@ -311,6 +312,7 @@ impl Command {
             Self::Worktree { command } => match command {
                 WorktreeCommand::List { .. } => "worktree-list",
                 WorktreeCommand::Owner { .. } => "worktree-owner",
+                WorktreeCommand::Inspect { .. } => "worktree-inspect",
                 WorktreeCommand::Add { .. } => "worktree-add",
                 WorktreeCommand::Remove { .. } => "worktree-remove",
                 WorktreeCommand::Move { .. } => "worktree-move",
@@ -364,7 +366,8 @@ impl Command {
                 }
             },
             Self::Worktree { command } => match command {
-                WorktreeCommand::Owner { repository, .. } => {
+                WorktreeCommand::Owner { repository, .. }
+                | WorktreeCommand::Inspect { repository, .. } => {
                     InvocationContext::for_repository(repository)
                 }
                 WorktreeCommand::List {
@@ -454,6 +457,21 @@ impl InvocationContext {
 
 #[derive(Debug, Subcommand)]
 enum WorktreeCommand {
+    /// Inspect ownership and mount readiness without traversing worktree files.
+    Inspect {
+        /// Exact worktree roots to inspect, in the requested order.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+
+        /// Repository whose registered state directories should be inspected.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Emit a versioned batch report, including exact native path encodings.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Find a worktree's managing state directory without calculating disk usage.
     Owner {
         /// Worktree root to look up (existing, missing, or an alias).
@@ -1008,6 +1026,44 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Worktree { command } => match command {
+            WorktreeCommand::Inspect {
+                paths,
+                repository,
+                json,
+            } => {
+                let views = riftri_core::inspect_managed_worktrees(&repository, &paths)?;
+                if json {
+                    let worktrees: Vec<_> = views.iter().map(|view| serde_json::json!({
+                        "path": view.path.to_string_lossy(),
+                        "path_native_hex": native_path_hex(&view.path),
+                        "state_directory": view.state_directory.as_deref().map(|path| path.to_string_lossy()),
+                        "state_directory_native_hex": view.state_directory.as_deref().map(native_path_hex),
+                        "backend": view.backend,
+                        "mount_status": view.mount_status,
+                    })).collect();
+                    machineln!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "schema_version": 1,
+                            "native_path_encoding": native_path_encoding(),
+                            "worktrees": worktrees,
+                        }))
+                        .context("serialize worktree inspection")?
+                    );
+                } else {
+                    for view in views {
+                        outputln!("Worktree: {}", view.path.display());
+                        if let Some(state) = view.state_directory {
+                            outputln!("State: {}", state.display());
+                        } else {
+                            outputln!("Unmanaged by Riftri");
+                        }
+                        if let Some(mount) = view.mount_status {
+                            outputln!("Mount: {}", serde_json::to_string(&mount)?);
+                        }
+                    }
+                }
+            }
             WorktreeCommand::Owner {
                 path,
                 repository,
@@ -3220,6 +3276,7 @@ mod tests {
                 | WorktreeCommand::Compact { json, .. }
                 | WorktreeCommand::Prune { json, .. }
                 | WorktreeCommand::Owner { json, .. }
+                | WorktreeCommand::Inspect { json, .. }
                 | WorktreeCommand::List { json, .. } => json,
             };
             assert!(json, "JSON flag not parsed for {arguments:?}");
