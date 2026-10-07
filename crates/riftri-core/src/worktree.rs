@@ -8076,6 +8076,16 @@ fn scheduled_tree_usages(
     measure: &(impl Fn(&TreeUsageRequest) -> Result<(u64, u64), WorktreeError> + Sync),
 ) -> Result<Vec<(u64, u64)>, WorktreeError> {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    if worker_count == 1 {
+        // Keep measuring every request before returning the first error, just
+        // like the joined worker path, but avoid a thread, queue, and sorting.
+        return requests
+            .iter()
+            .map(measure)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
+    }
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         let workers = (0..worker_count)
@@ -13401,6 +13411,81 @@ mod tests {
                     elapsed.as_micros()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn single_accounting_worker_runs_inline_and_preserves_all_results() {
+        use std::sync::Mutex;
+        let requests = (0..4)
+            .map(|index| super::TreeUsageRequest {
+                path: std::path::PathBuf::from(index.to_string()),
+                allocated_path: None,
+            })
+            .collect::<Vec<_>>();
+        let caller = std::thread::current().id();
+        for fail in [false, true] {
+            let calls = Mutex::new(Vec::new());
+            let result = super::scheduled_tree_usages(&requests, 1, &|request| {
+                assert_eq!(std::thread::current().id(), caller);
+                let index = request.path.to_str().unwrap().parse::<u64>().unwrap();
+                calls.lock().unwrap().push(index);
+                if fail && (index == 1 || index == 3) {
+                    Err(super::WorktreeError::InvalidRequest(format!(
+                        "error-{index}"
+                    )))
+                } else {
+                    Ok((index, 100 + index))
+                }
+            });
+            assert_eq!(*calls.lock().unwrap(), vec![0, 1, 2, 3]);
+            if fail {
+                assert!(result.unwrap_err().to_string().contains("error-1"));
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    vec![(0, 100), (1, 101), (2, 102), (3, 103)]
+                );
+            }
+        }
+        assert!(
+            super::scheduled_tree_usages(&[], 1, &|_| panic!("empty request"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual single-worker accounting benchmark; no timing threshold"]
+    fn reports_single_worker_accounting_latency() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = (0..8)
+            .map(|index| {
+                let path = directory.path().join(index.to_string());
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(path.join("file"), b"small accounting fixture").unwrap();
+                super::TreeUsageRequest {
+                    path,
+                    allocated_path: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected = requests
+            .iter()
+            .map(super::measure_tree_usage)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for round in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..500 {
+                let actual =
+                    super::scheduled_tree_usages(&requests, 1, &super::measure_tree_usage).unwrap();
+                assert_eq!(std::hint::black_box(actual), expected);
+            }
+            println!(
+                "single-worker-accounting round={round} iterations=500 elapsed_us={}",
+                start.elapsed().as_micros()
+            );
         }
     }
 
