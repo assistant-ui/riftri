@@ -141,6 +141,11 @@ reports, receipts, and journal recovery contract. Keep the `riftri` package and
 its native optional dependency external when bundling: resolution depends on
 their installed files. A missing or unusable executable throws before spawning.
 
+Electron distributions must unpack `**/node_modules/riftri-*/bin/*` from ASAR
+archives. In Electron, the package resolves and validates the native executable
+in the archive's `.asar.unpacked` sibling, because the OS cannot spawn a virtual
+ASAR path. Explicit binary overrides are not rewritten.
+
 The binary is the implementation. This client spawns it, adds `--json` where
 the command supports it and `--json-errors` everywhere, parses the single
 report on stdout, and converts a non-zero exit into a `RiftriError`. It
