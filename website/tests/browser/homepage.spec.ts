@@ -300,7 +300,7 @@ test("wrapped backend status stays inside the animated diagram", async ({ page }
 test("reduced motion stops loops while preserving readable diagram content", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".storage-map, .materialization-map").getByRole("button")).toHaveCount(0);
-  const names = await page.locator(".track-counter, .backend-cycle-item, .savings-backend-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName));
+  const names = await page.locator(".backend-cycle-item, .savings-backend-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName));
   expect(names.every((name) => name === "none")).toBe(true);
   const underline = await page.locator(".savings-backend-item").first().evaluate((element) => {
     const range = document.createRange();
@@ -313,6 +313,43 @@ test("reduced motion stops loops while preserving readable diagram content", asy
   expect(underline.border).toBe("dotted");
   expect(Math.abs(underline.excess)).toBeLessThanOrEqual(1);
   await expect(page.locator(".materialization-map")).toContainText("FROM TREE TO WORKSPACE");
+  // The drawn figures hold their finished pose instead of looping.
+  const figure = page.locator(".storage-figure");
+  await expect(figure.locator(".fig-private")).toHaveCount(6);
+  await expect(figure.locator(".figure-readout")).toHaveText("3 worktrees · 6 private blocks");
+  await expect(figure.locator(".figure-label.is-shown")).toHaveCount(4);
+  await expect(page.locator(".materialization-map .fig-status.is-on")).toHaveCount(1);
+  const pose = await figure.locator("svg").innerHTML();
+  await page.waitForTimeout(600);
+  expect(await figure.locator("svg").innerHTML()).toBe(pose);
+});
+
+test("storage figure loops through its story and holds while pointed at", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "pointer behavior is exercised once");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await page.clock.install();
+  await page.goto("/");
+  const readout = page.locator(".storage-figure .figure-readout");
+  await expect(readout).toHaveText("3 worktrees · 6 private blocks");
+
+  // Pointing at a worktree names it and holds the loop where it is.
+  await page.locator(".figure-label", { hasText: "auth/" }).hover();
+  await expect(readout).toHaveText("auth/ · 3 private · 13 shared");
+  await expect(page.locator(".storage-figure .fig-view.is-lit")).toHaveCount(1);
+  await page.clock.runFor(6000);
+  await expect(readout).toHaveText("auth/ · 3 private · 13 shared");
+  await expect(page.locator(".storage-figure .fig-private")).toHaveCount(6);
+
+  // Released, the worktrees settle back onto the base and are created again.
+  await page.mouse.move(0, 0);
+  await expect.poll(async () => {
+    await page.clock.runFor(250);
+    return readout.textContent();
+  }, { timeout: 15_000 }).toBe("0 worktrees · 0 private blocks");
+  await expect.poll(async () => {
+    await page.clock.runFor(250);
+    return readout.textContent();
+  }, { timeout: 15_000 }).toBe("3 worktrees · 6 private blocks");
 });
 
 test("Windows onboarding separates review from running the installer", async ({ page }, testInfo) => {
