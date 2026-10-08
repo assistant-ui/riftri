@@ -725,7 +725,16 @@ code, pre { font-family: var(--font-mono); }
   border-bottom: 1px solid var(--line);
 }
 
-.start-index { align-self: start; padding-top: 0.2rem; color: var(--accent); font-size: 0.7rem; }
+/* The number and the step's text share the row's first two columns and sit on
+   the title's baseline, so each number lines up with its title. */
+.start-step {
+  display: grid;
+  grid-column: 1 / 3;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+}
+
+.start-index { color: var(--accent); font-size: 0.7rem; }
 .start-copy { min-width: 0; }
 .start-copy strong { font-family: var(--font-sans); font-size: 0.9rem; font-weight: 500; }
 .start-copy p { margin: 0.35rem 0 0; color: var(--ink-muted); font-family: var(--font-sans); font-size: 0.8rem; line-height: 1.6; }

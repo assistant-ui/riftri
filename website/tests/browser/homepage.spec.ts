@@ -334,24 +334,25 @@ async function pauseClock(page: Page) {
   await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
 }
 
-test("the storage highlight is dragged open and filled on a loop", async ({ page }, testInfo) => {
+test("the storage highlight starts with the cursor drag and fills on a loop", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "motion is exercised once");
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await pauseClock(page);
   const highlight = page.locator(".hero-highlight");
-  // The first paint is the finished highlight (4.4s into its 8.4s loop).
-  await expect(highlight).toHaveClass("hero-highlight");
-  // 8.2s: the fill empties and the word reads like the rest of its line.
-  await page.clock.runFor(3800);
+  // The page opens on the plain word with the cursor on its way in (1.2s into
+  // the 8.8s loop), not on the finished highlight.
   await expect(highlight).toHaveClass(/is-plain/);
-  // 2.6s of the next loop: the cursor has dragged the selection almost open.
-  await page.clock.runFor(2800);
-  await expect(page.locator(".highlight-selection.has-corners")).toHaveCount(1);
   await expect(page.locator(".highlight-cursor")).toHaveCount(1);
-  // 4.4s: filled and settled again.
-  await page.clock.runFor(1820);
+  // 2.5s: the cursor has pressed and is dragging the selection open.
+  await page.clock.runFor(1300);
+  await expect(page.locator(".highlight-selection.has-corners")).toHaveCount(1);
+  // 5.0s: filled and settled.
+  await page.clock.runFor(2500);
   await expect(highlight).toHaveClass("hero-highlight");
   await expect(highlight).toHaveText("storage.");
+  // 8.5s: the fill empties before the next drag.
+  await page.clock.runFor(3500);
+  await expect(highlight).toHaveClass(/is-plain/);
   await expect(page.getByRole("heading", { name: "Git worktrees. Shared storage.", exact: true })).toBeVisible();
 });
 

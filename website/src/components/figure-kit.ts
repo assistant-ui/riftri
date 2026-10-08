@@ -89,15 +89,16 @@ export function solid(view: Lens, outline: Point[], z0: number, z1: number): { t
 
 /**
  * A clock in seconds that only runs while `target` is on screen and the reader
- * allows motion. Under reduced motion it stays at `rest`, a finished pose.
- * `hold` eases time to a stop instead of freezing it mid-step.
+ * allows motion. It starts at `start` (the server-rendered pose, `rest` unless
+ * given). Under reduced motion it stays at `rest`, a finished pose. `hold`
+ * eases time to a stop instead of freezing it mid-step.
  */
 export function usePlayhead(
   target: RefObject<Element | null>,
-  { period, rest, hold }: { period: number; rest: number; hold: boolean },
+  { period, rest, start = rest, hold }: { period: number; rest: number; start?: number; hold: boolean },
 ): number {
-  const [time, setTime] = useState(rest);
-  const [state] = useState(() => ({ time: rest, speed: 1, hold }));
+  const [time, setTime] = useState(start);
+  const [state] = useState(() => ({ time: start, speed: 1, hold }));
   state.hold = hold;
 
   useEffect(() => {
