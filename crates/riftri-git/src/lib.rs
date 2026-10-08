@@ -4835,6 +4835,295 @@ mod tests {
         );
     }
 
+    // Test-only candidate: the query-level win did not translate to a reliable
+    // full lifecycle win. Keep production materialization sequential until a
+    // paired end-to-end comparison supports changing the default.
+    fn bounded_checkout_workers(available: usize) -> usize {
+        available.clamp(1, 4)
+    }
+
+    fn bounded_checkout_configuration() -> Vec<(String, Vec<u8>)> {
+        let workers =
+            bounded_checkout_workers(std::thread::available_parallelism().map_or(1, |n| n.get()));
+        vec![
+            (
+                "checkout.workers".to_owned(),
+                workers.to_string().into_bytes(),
+            ),
+            (
+                "checkout.thresholdForParallelism".to_owned(),
+                b"1024".to_vec(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn checkout_worker_limit_is_bounded_and_never_means_all_cpus() {
+        for (available, expected) in [(0, 1), (1, 1), (2, 2), (4, 4), (64, 4)] {
+            assert_eq!(bounded_checkout_workers(available), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_applies_explicit_worker_settings_without_using_repository_settings() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["config", "checkout.workers", "99"]);
+        git(
+            fixture.path(),
+            &["config", "checkout.thresholdForParallelism", "0"],
+        );
+        let scratch = tempdir().unwrap();
+        let wrapper = scratch.path().join("git-wrapper");
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.log\"\nexec git \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let client = Git::new(&wrapper);
+        retry_while_wrapper_is_busy(|| client.detect()).unwrap();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let output = tempdir().unwrap();
+        client
+            .materialize_tree_with_config(
+                fixture.path(),
+                &tree,
+                output.path(),
+                &scratch.path().join("index"),
+                &bounded_checkout_configuration(),
+            )
+            .unwrap();
+        let log = fs::read_to_string(scratch.path().join("git-wrapper.log")).unwrap();
+        let checkout = log
+            .lines()
+            .find(|line| line.contains(" checkout-index "))
+            .unwrap();
+        let workers =
+            bounded_checkout_workers(std::thread::available_parallelism().map_or(1, |n| n.get()));
+        assert!(
+            checkout.contains(&format!("-c checkout.workers={workers} ")),
+            "{checkout}"
+        );
+        assert!(
+            checkout.contains("-c checkout.thresholdForParallelism=1024 "),
+            "{checkout}"
+        );
+        assert_eq!(
+            fs::read(output.path().join("tracked.txt")).unwrap(),
+            b"tracked\n"
+        );
+    }
+
+    #[test]
+    fn many_file_materialization_preserves_attributes_modes_and_sparse_selection() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(
+            fixture.path().join(".gitattributes"),
+            "*.txt text eol=crlf\n*.bin binary\n",
+        )
+        .unwrap();
+        fs::write(fixture.path().join("tracked.txt"), b"tracked\r\n").unwrap();
+        for folder in ["selected", "excluded"] {
+            fs::create_dir(fixture.path().join(folder)).unwrap();
+            for i in 0..600 {
+                fs::write(
+                    fixture.path().join(format!("{folder}/{i}.txt")),
+                    format!("{folder}:{i}\r\n"),
+                )
+                .unwrap();
+            }
+        }
+        fs::write(fixture.path().join("bytes.bin"), b"\0\xff\r\n\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            fs::write(fixture.path().join("executable"), b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(
+                fixture.path().join("executable"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            symlink("selected/0.txt", fixture.path().join("link")).unwrap();
+        }
+        git(fixture.path(), &["add", "."]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "many attributed files"],
+        );
+        let client = Git::default();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        // These mutable inputs cannot leak into either sequential or parallel
+        // materialization after the exact checkout profile has been captured.
+        fs::write(fixture.path().join(".gitattributes"), "*.txt -text\n").unwrap();
+        fs::write(fixture.path().join(".git/info/attributes"), "*.txt -text\n").unwrap();
+        for (name, configuration, sparse) in [
+            ("parallel", bounded_checkout_configuration(), vec![]),
+            (
+                "sequential",
+                vec![("checkout.workers".to_owned(), b"1".to_vec())],
+                vec![],
+            ),
+            (
+                "sparse",
+                bounded_checkout_configuration(),
+                vec!["selected".to_owned()],
+            ),
+        ] {
+            let output = tempdir().unwrap();
+            let index = tempdir().unwrap();
+            client
+                .materialize_sparse_tree_with_config(
+                    fixture.path(),
+                    &tree,
+                    output.path(),
+                    &index.path().join("index"),
+                    &configuration,
+                    &sparse,
+                )
+                .unwrap();
+            for folder in ["selected", "excluded"] {
+                for i in 0..600 {
+                    let path = output.path().join(format!("{folder}/{i}.txt"));
+                    if name == "sparse" && folder == "excluded" {
+                        assert!(!path.exists());
+                    } else {
+                        assert_eq!(
+                            fs::read(path).unwrap(),
+                            format!("{folder}:{i}\r\n").as_bytes(),
+                            "{name}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                fs::read(output.path().join("bytes.bin")).unwrap(),
+                b"\0\xff\r\n\n"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::read_link(output.path().join("link")).unwrap(),
+                    Path::new("selected/0.txt")
+                );
+                assert_eq!(
+                    fs::metadata(output.path().join("executable"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o111,
+                    0o111
+                );
+            }
+        }
+        // Inject a missing blob through Git, without assuming add stored its
+        // objects loose (newer Git can pack bulk inserts immediately).
+        let missing = "a".repeat(tree.as_str().len());
+        assert!(
+            client
+                .run(Some(fixture.path()), &["cat-file", "-e", &missing])
+                .is_err()
+        );
+        git(
+            fixture.path(),
+            &[
+                "update-index",
+                "--cacheinfo",
+                "100644",
+                &missing,
+                "selected/599.txt",
+            ],
+        );
+        let damaged = client
+            .run(Some(fixture.path()), &["write-tree", "--missing-ok"])
+            .unwrap();
+        let damaged = super::parse_object_output(&damaged.stdout).unwrap();
+        let output = tempdir().unwrap();
+        let index = tempdir().unwrap();
+        client
+            .materialize_tree_with_config(
+                fixture.path(),
+                &damaged,
+                output.path(),
+                &index.path().join("index"),
+                &bounded_checkout_configuration(),
+            )
+            .expect_err("a worker missing an object must fail the entire checkout");
+    }
+
+    #[test]
+    #[ignore = "paired release-mode cold materialization benchmark; no wall-clock threshold"]
+    fn reports_bounded_checkout_worker_latency() {
+        let fixture = RepositoryFixture::committed();
+        for directory in 0..16 {
+            fs::create_dir(fixture.path().join(format!("p{directory}"))).unwrap();
+            for file in 0..256 {
+                let mut bytes = vec![b'x'; 8192];
+                let header = format!("{directory}:{file}\n");
+                bytes[..header.len()].copy_from_slice(header.as_bytes());
+                fs::write(fixture.path().join(format!("p{directory}/{file}")), bytes).unwrap();
+            }
+        }
+        git(fixture.path(), &["add", "."]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "cold materialization fixture"],
+        );
+        let client = Git::default();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        for round in 0..4 {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for parallel in order {
+                let output = tempdir().unwrap();
+                let index = tempdir().unwrap();
+                let configuration = if parallel {
+                    bounded_checkout_configuration()
+                } else {
+                    vec![("checkout.workers".to_owned(), b"1".to_vec())]
+                };
+                let start = std::time::Instant::now();
+                client
+                    .materialize_tree_with_config(
+                        fixture.path(),
+                        &tree,
+                        output.path(),
+                        &index.path().join("index"),
+                        &configuration,
+                    )
+                    .unwrap();
+                let elapsed = start.elapsed();
+                for directory in 0..16 {
+                    for file in 0..256 {
+                        let name = format!("p{directory}/{file}");
+                        assert_eq!(
+                            fs::read(output.path().join(&name)).unwrap(),
+                            fs::read(fixture.path().join(name)).unwrap()
+                        );
+                    }
+                }
+                eprintln!(
+                    "bounded-checkout round={round} parallel={parallel} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
+
     /// `remove_worktree` has always passed `--`; the force variant did not, so
     /// a selector beginning with `-` was parsed as a bundle of short options
     /// instead of a worktree. Force is the path that bypasses Git's own
