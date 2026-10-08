@@ -26,8 +26,8 @@
     "node": ">=18.18"
   },
   "devDependencies": {
-    "@types/node": "18.19.130",
-    "typescript": "5.9.3"
+    "@types/node": "26.6.4",
+    "typescript": "7.0.2"
   },
   "optionalDependencies": {
     "riftri-darwin-arm64": "file:package/platforms/riftri-darwin-arm64",
