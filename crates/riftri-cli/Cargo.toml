@@ -39,6 +39,7 @@ libc.workspace = true
 
 [dev-dependencies]
 fs2.workspace = true
+riftri-git = { path = "../riftri-git" }
 sha2.workspace = true
 tempfile.workspace = true
 

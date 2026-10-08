@@ -5421,6 +5421,7 @@ fn analyze_resolved_repository_compatibility(
     sparse_directories: &[String],
     captured_config: Option<ConfigValues>,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
+    let git_info = git.detect()?;
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
         .iter()
@@ -5497,21 +5498,17 @@ fn analyze_resolved_repository_compatibility(
         }
     };
     if info_attributes_safe && !paths.is_empty() {
-        // Both attribute passes query the same exact tree, so populate one
-        // temporary index once instead of running `git read-tree` twice; the
-        // isolated and effective environments still apply per `check-attr`
-        // query, which never writes the shared index.
-        let tree_index = git.tree_attribute_index(repository, &resolved.tree)?;
         // With no `.gitattributes` entry anywhere in the exact tree, the
         // isolated in-tree result is necessarily empty. Keep the effective
         // query below: global and system attributes must still be detected
         // and refused rather than becoming part of a supposedly immutable
         // checkout profile.
-        let (mut in_tree, mut effective) = git.attribute_pair_for_index(
+        let (mut in_tree, mut effective) = git.attribute_pair_for_tree(
             repository,
-            &tree_index,
+            &resolved.tree,
             &paths,
             has_in_tree_attribute_file,
+            &git_info,
         )?;
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
@@ -5537,8 +5534,11 @@ fn analyze_resolved_repository_compatibility(
     let mut profile = {
         let mut profile = Sha256::new();
         profile.update(b"riftri-checkout-profile-v4-sparse\0");
-        let git_version = git.detect()?.version;
-        hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
+        hash_profile_input(
+            &mut profile,
+            b"git.version",
+            Some(git_info.version.as_bytes()),
+        );
         // The canonical cone directory list is part of the checkout profile,
         // so two sparse selections at the same tree, or a sparse and a full
         // request, can never resolve to the same immutable-base key. Full
