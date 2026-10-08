@@ -75,6 +75,17 @@ function assertUsableBinary(candidate, source) {
   return candidate;
 }
 
+function unpackedElectronBinary(candidate) {
+  if (!process.versions.electron) return candidate;
+  const segments = candidate.split(path.sep);
+  const archive = segments.findLastIndex((segment) => segment.endsWith(".asar"));
+  if (archive < 0) return candidate;
+  // Electron can read an archived executable, but the OS cannot spawn it.
+  // Validate the physical file below instead of relying on Electron's virtual fs.
+  segments[archive] += ".unpacked";
+  return segments.join(path.sep);
+}
+
 function launcherVersion() {
   for (const candidate of [
     path.join(__dirname, "..", "package.json"),
@@ -141,7 +152,7 @@ function resolveBinary(options = {}) {
   );
 
   const candidate = path.join(path.dirname(packageJson), "bin", binaryName(platform));
-  return assertUsableBinary(candidate, packageName);
+  return assertUsableBinary(unpackedElectronBinary(candidate), packageName);
 }
 
 module.exports = {
