@@ -30,6 +30,36 @@ pub struct GitInfo {
     pub version: String,
 }
 
+impl GitInfo {
+    /// `check-attr --source` was introduced in Git 2.43. Unknown version
+    /// formats and prereleases use the existing private-index path.
+    pub fn supports_attribute_source(&self) -> bool {
+        let Some(version) = self
+            .version
+            .strip_prefix("git version ")
+            .and_then(|version| version.split_whitespace().next())
+        else {
+            return false;
+        };
+        let mut parts = version.split('.');
+        let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let (Ok(major), Ok(minor), Ok(_patch)) = (
+            major.parse::<u32>(),
+            minor.parse::<u32>(),
+            patch.parse::<u32>(),
+        ) else {
+            return false;
+        };
+        if parts.next().is_some_and(|suffix| suffix != "windows") {
+            return false;
+        }
+        (major, minor) >= (2, 43)
+    }
+}
+
 /// A validated Git object ID. SHA-1 and SHA-256 repositories are supported.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -1391,7 +1421,7 @@ impl Git {
         input: Option<&[u8]>,
     ) -> Result<Vec<GitAttribute>, GitError> {
         let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str())];
-        self.attributes_with_input(path, paths, &[], &index_environment, input)
+        self.attributes_with_input(path, paths, &[], &index_environment, input, None)
     }
 
     /// Return attributes from an already indexed tree while disabling global
@@ -1430,6 +1460,33 @@ impl Git {
         Ok((in_tree, effective))
     }
 
+    /// Query an attribute-free exact tree without constructing an index.
+    /// Reuse the caller's version receipt; do not add a probe to the hot path.
+    /// The caller proves absence of `.gitattributes` from a recursive listing
+    /// before passing `include_in_tree = false`. Trees with attributes keep
+    /// the index path, including its handling of missing subtrees and symlink
+    /// attribute entries. Older/unknown Git also retains that path.
+    pub fn attribute_pair_for_tree(
+        &self,
+        path: &Path,
+        tree: &ObjectId,
+        paths: &[impl AsRef<Path>],
+        include_in_tree: bool,
+        info: &GitInfo,
+    ) -> Result<(Vec<GitAttribute>, Vec<GitAttribute>), GitError> {
+        if paths.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        if include_in_tree || !info.supports_attribute_source() {
+            let index = self.tree_attribute_index(path, tree)?;
+            return self.attribute_pair_for_index(path, &index, paths, include_in_tree);
+        }
+        let input = attribute_stdin(paths);
+        let effective =
+            self.attributes_with_input(path, paths, &[], &[], input.as_deref(), Some(tree))?;
+        Ok((Vec::new(), effective))
+    }
+
     fn in_tree_attributes_for_index_with_input(
         &self,
         path: &Path,
@@ -1451,7 +1508,7 @@ impl Git {
             (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
             (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
         ];
-        self.attributes_with_input(path, paths, &arguments, &environment, input)
+        self.attributes_with_input(path, paths, &arguments, &environment, input, None)
     }
 
     fn attributes_for_paths_with_environment(
@@ -1462,7 +1519,14 @@ impl Git {
         environment: &[(&OsStr, &OsStr)],
     ) -> Result<Vec<GitAttribute>, GitError> {
         let input = attribute_stdin(paths);
-        self.attributes_with_input(path, paths, argument_prefix, environment, input.as_deref())
+        self.attributes_with_input(
+            path,
+            paths,
+            argument_prefix,
+            environment,
+            input.as_deref(),
+            None,
+        )
     }
 
     fn attributes_with_input(
@@ -1472,6 +1536,7 @@ impl Git {
         argument_prefix: &[OsString],
         environment: &[(&OsStr, &OsStr)],
         input: Option<&[u8]>,
+        tree: Option<&ObjectId>,
     ) -> Result<Vec<GitAttribute>, GitError> {
         if paths.is_empty() {
             return Ok(Vec::new());
@@ -1481,7 +1546,7 @@ impl Git {
             let mut arguments = argument_prefix.to_vec();
             arguments.extend([
                 OsString::from("check-attr"),
-                OsString::from("--cached"),
+                attribute_source_argument(tree),
                 OsString::from("--all"),
                 OsString::from("-z"),
                 OsString::from("--stdin"),
@@ -1492,7 +1557,7 @@ impl Git {
             // Preserve the native-argument path for non-Unicode Windows input
             // instead of replacing unpaired UTF-16 surrogates lossily. Exact
             // tree paths decoded from Git are UTF-8 and use the fast path.
-            self.attributes_for_paths_as_arguments(path, paths, argument_prefix, environment)
+            self.attributes_for_paths_as_arguments(path, paths, argument_prefix, environment, tree)
         }
     }
 
@@ -1502,13 +1567,14 @@ impl Git {
         paths: &[impl AsRef<Path>],
         argument_prefix: &[OsString],
         environment: &[(&OsStr, &OsStr)],
+        tree: Option<&ObjectId>,
     ) -> Result<Vec<GitAttribute>, GitError> {
         let mut attributes = Vec::new();
         for chunk in paths.chunks(128) {
             let mut arguments = argument_prefix.to_vec();
             arguments.extend([
                 OsString::from("check-attr"),
-                OsString::from("--cached"),
+                attribute_source_argument(tree),
                 OsString::from("--all"),
                 OsString::from("-z"),
                 OsString::from("--"),
@@ -2550,6 +2616,16 @@ impl Git {
             source,
         })?;
         Ok(output)
+    }
+}
+
+fn attribute_source_argument(tree: Option<&ObjectId>) -> OsString {
+    match tree {
+        // A raw, full-length nonexistent object ID is accepted by check-attr
+        // as an empty attribute source. Peeling forces Git to read and verify
+        // that the requested object is a tree before answering any paths.
+        Some(tree) => OsString::from(format!("--source={}^{{tree}}", tree.as_str())),
+        None => OsString::from("--cached"),
     }
 }
 
@@ -5532,6 +5608,277 @@ mod tests {
     }
 
     #[test]
+    fn attributed_tree_queries_retain_private_index_semantics() {
+        let fixture = RepositoryFixture::committed();
+        fs::create_dir(fixture.path().join("nested")).unwrap();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+        fs::write(
+            fixture.path().join("nested/.gitattributes"),
+            "*.txt -text\n",
+        )
+        .unwrap();
+        git(fixture.path(), &["add", "."]);
+        git(fixture.path(), &["commit", "-m", "attribute tree"]);
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        if !info.supports_attribute_source() {
+            return;
+        }
+        let tree = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let mut paths = vec![
+            PathBuf::from("tracked.txt"),
+            PathBuf::from("nested/日本語.txt"),
+        ];
+        paths.push(PathBuf::from("-tab\tline\n.txt"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(PathBuf::from(OsString::from_vec(
+                b"native-\xff.txt".to_vec(),
+            )));
+        }
+        // A staged/working-tree edit must not override the requested tree.
+        fs::write(fixture.path().join(".gitattributes"), "* ident\n").unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        let external = fixture.path().join("external-attributes");
+        fs::write(&external, "*.txt filter=external\n").unwrap();
+        git(
+            fixture.path(),
+            &["config", "core.attributesFile", external.to_str().unwrap()],
+        );
+        let index = handle.tree_attribute_index(fixture.path(), &tree).unwrap();
+        let expected = handle
+            .attribute_pair_for_index(fixture.path(), &index, &paths, true)
+            .unwrap();
+        assert_ne!(expected.0, expected.1);
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &tree, &paths, true, &info)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            handle.process_attempts() - before,
+            3,
+            "trees with attributes must retain the private index"
+        );
+        assert!(
+            !expected
+                .0
+                .iter()
+                .any(|attribute| attribute.name == b"ident")
+        );
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &tree, &paths[..0], true, &info)
+                .unwrap(),
+            (vec![], vec![])
+        );
+        assert_eq!(handle.process_attempts(), before);
+        // Older/unknown versions retain the exact existing index path.
+        for version in ["git version 2.42.4", "unrecognized vendor version"] {
+            let legacy = super::GitInfo {
+                command: info.command.clone(),
+                version: version.to_owned(),
+            };
+            let before = handle.process_attempts();
+            assert_eq!(
+                handle
+                    .attribute_pair_for_tree(fixture.path(), &tree, &paths, true, &legacy)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(handle.process_attempts() - before, 3);
+        }
+        let plain_tree = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD^"))
+            .unwrap()
+            .tree;
+        let plain_index = handle
+            .tree_attribute_index(fixture.path(), &plain_tree)
+            .unwrap();
+        let expected = handle
+            .attribute_pair_for_index(fixture.path(), &plain_index, &paths, false)
+            .unwrap();
+        assert!(expected.0.is_empty());
+        assert!(
+            !expected
+                .1
+                .iter()
+                .any(|attribute| attribute.name == b"ident")
+        );
+        assert!(
+            expected
+                .1
+                .iter()
+                .any(|attribute| attribute.name == b"filter")
+        );
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &plain_tree, &paths, false, &info)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            handle.process_attempts() - before,
+            1,
+            "attribute-free trees avoid read-tree and preserve native paths"
+        );
+        let legacy = super::GitInfo {
+            command: info.command.clone(),
+            version: "git version 2.42.4".to_owned(),
+        };
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &plain_tree, &paths, false, &legacy)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(handle.process_attempts() - before, 2);
+    }
+
+    #[test]
+    fn attribute_source_support_requires_a_known_supported_git_version() {
+        for (version, supported) in [
+            ("git version 2.42.4", false),
+            ("git version 2.43.0", true),
+            ("git version 2.50.1 (Apple Git-155)", true),
+            ("git version 2.47.1.windows.1", true),
+            ("git version 2.43.0.rc0", false),
+            ("git version 2.43", false),
+            ("unknown", false),
+        ] {
+            let info = super::GitInfo {
+                command: "git".into(),
+                version: version.to_owned(),
+            };
+            assert_eq!(info.supports_attribute_source(), supported, "{version}");
+        }
+    }
+
+    #[test]
+    fn direct_tree_attributes_preserve_bare_sha256_info_rules_and_errors() {
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        if !info.supports_attribute_source() {
+            return;
+        }
+        let fixture = tempdir().unwrap();
+        git(
+            fixture.path(),
+            &["init", "--quiet", "--object-format=sha256"],
+        );
+        git(fixture.path(), &["config", "user.name", "Test"]);
+        git(
+            fixture.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        fs::write(fixture.path().join("tracked.txt"), "tracked\n").unwrap();
+        git(fixture.path(), &["add", "."]);
+        git(fixture.path(), &["commit", "--quiet", "-m", "fixture"]);
+        git(
+            fixture.path(),
+            &["clone", "--quiet", "--bare", ".", "bare.git"],
+        );
+        let bare = fixture.path().join("bare.git");
+        let tree = handle
+            .resolve_revision(&bare, OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        assert_eq!(tree.as_str().len(), 64);
+        fs::write(bare.join("info/attributes"), "*.txt ident\n").unwrap();
+        let paths = [PathBuf::from("tracked.txt")];
+        let index = handle.tree_attribute_index(&bare, &tree).unwrap();
+        let expected = handle
+            .attribute_pair_for_index(&bare, &index, &paths, false)
+            .unwrap();
+        assert!(
+            expected
+                .1
+                .iter()
+                .any(|attribute| attribute.name == b"ident")
+        );
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(&bare, &tree, &paths, false, &info)
+                .unwrap(),
+            expected
+        );
+        let absent = super::ObjectId::parse("f".repeat(64)).unwrap();
+        let before = handle.process_attempts();
+        assert!(matches!(
+            handle.attribute_pair_for_tree(&bare, &absent, &paths, false, &info),
+            Err(super::GitError::CommandFailed { .. })
+        ));
+        assert_eq!(
+            handle.process_attempts() - before,
+            1,
+            "do not retry a failed source query through a different path"
+        );
+    }
+
+    #[test]
+    #[ignore = "paired direct-tree attribute benchmark; no wall-clock threshold"]
+    fn reports_direct_tree_attribute_latency() {
+        let fixture = RepositoryFixture::committed();
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        if !info.supports_attribute_source() {
+            return;
+        }
+        let legacy = super::GitInfo {
+            command: info.command.clone(),
+            version: "git version 2.42.4".to_owned(),
+        };
+        let tree = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let paths = (0..1000)
+            .map(|i| PathBuf::from(format!("path-{i}.txt")))
+            .collect::<Vec<_>>();
+        let expected = handle
+            .attribute_pair_for_tree(fixture.path(), &tree, &paths, false, &legacy)
+            .unwrap();
+        for round in 0..6 {
+            for direct in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let starts = handle.process_attempts();
+                let start = std::time::Instant::now();
+                let records = handle
+                    .attribute_pair_for_tree(
+                        fixture.path(),
+                        &tree,
+                        &paths,
+                        false,
+                        if direct { &info } else { &legacy },
+                    )
+                    .unwrap();
+                let elapsed = start.elapsed();
+                assert_eq!(records, expected);
+                assert_eq!(
+                    handle.process_attempts() - starts,
+                    if direct { 1 } else { 2 }
+                );
+                println!(
+                    "direct-tree-attributes round={round} direct={direct} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn borrowed_command_input_preserves_git_failure_when_pipe_closes_early() {
         let fixture = RepositoryFixture::committed();
         let handle = Git::default();
@@ -5849,7 +6196,7 @@ mod tests {
                         .unwrap()
                 } else {
                     handle
-                        .attributes_for_paths_as_arguments(fixture.path(), &paths, &[], &[])
+                        .attributes_for_paths_as_arguments(fixture.path(), &paths, &[], &[], None)
                         .unwrap()
                 };
                 let elapsed = start.elapsed();

@@ -779,6 +779,7 @@ dependencies = [
  "libc",
  "ratatui",
  "riftri-core",
+ "riftri-git",
  "riftri-storage",
  "rustix",
  "serde_json",

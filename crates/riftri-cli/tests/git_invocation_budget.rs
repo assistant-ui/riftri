@@ -5,8 +5,8 @@
 //! Every Git invocation costs a process spawn on the critical path of
 //! worktree creation, so the budget below is part of the performance
 //! contract: raising it needs the same scrutiny as weakening a safety check.
-//! The counts are driven entirely by Riftri's own code path, not by the
-//! installed Git version, which keeps the assertions stable.
+//! Older Git retains the private attribute index; Git 2.43+ must save its
+//! read-tree process without weakening the lifecycle checks.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -17,11 +17,11 @@ mod support;
 use support::writable_tempdir as tempdir;
 
 /// Git invocations for an add that must build the immutable base first.
-const COLD_ADD_BUDGET: usize = 19;
+const COLD_ADD_BUDGET: usize = 18;
 /// Git invocations for an add that reuses a verified immutable base.
-const CACHED_ADD_BUDGET: usize = 14;
+const CACHED_ADD_BUDGET: usize = 13;
 /// Git invocations for a cached add that checks out an existing local branch.
-const CACHED_EXISTING_BRANCH_ADD_BUDGET: usize = 17;
+const CACHED_EXISTING_BRANCH_ADD_BUDGET: usize = 16;
 
 fn git(path: &Path, arguments: &[&str]) -> Output {
     let output = Command::new("git")
@@ -134,6 +134,13 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
     let real_git = real_git();
     install_counting_shim(&shim_directory);
 
+    let legacy_attribute_index = usize::from(
+        !riftri_git::Git::new(&real_git)
+            .detect()
+            .unwrap()
+            .supports_attribute_source(),
+    );
+
     let cold_log = fixture.path().join("cold-invocations");
     let cold = add_worktree_with_counted_git(
         &repository,
@@ -145,7 +152,7 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         &cold_log,
     );
     assert!(
-        cold.len() <= COLD_ADD_BUDGET,
+        cold.len() <= COLD_ADD_BUDGET + legacy_attribute_index,
         "cold add spawned {} Git processes, budget is {COLD_ADD_BUDGET}:\n{}",
         cold.len(),
         cold.join("\n")
@@ -162,7 +169,7 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         &cached_log,
     );
     assert!(
-        cached.len() <= CACHED_ADD_BUDGET,
+        cached.len() <= CACHED_ADD_BUDGET + legacy_attribute_index,
         "cached add spawned {} Git processes, budget is {CACHED_ADD_BUDGET}:\n{}",
         cached.len(),
         cached.join("\n")
@@ -190,7 +197,7 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         &existing_log,
     );
     assert!(
-        existing.len() <= CACHED_EXISTING_BRANCH_ADD_BUDGET,
+        existing.len() <= CACHED_EXISTING_BRANCH_ADD_BUDGET + legacy_attribute_index,
         "cached existing-branch add spawned {} Git processes, budget is \
          {CACHED_EXISTING_BRANCH_ADD_BUDGET}:\n{}",
         existing.len(),

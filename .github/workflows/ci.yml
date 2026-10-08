@@ -61,6 +61,9 @@ jobs:
         if: matrix.os == 'windows-2025'
         run: cargo test --release --locked -p riftri-git reports_attribute_stdin_latency -- --ignored --nocapture
 
+      - name: Measure exact-tree attribute queries
+        run: cargo test --release --locked -p riftri-git reports_direct_tree_attribute_latency -- --ignored --nocapture
+
       # The tui feature deselects crates/riftri-cli/src/ui/plain.rs, so the
       # default/plain build shipped by `cargo install riftri-cli` and
       # `npm run build:native` is never test-executed by the run above. Exercise
