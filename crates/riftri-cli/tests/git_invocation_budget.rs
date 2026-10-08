@@ -21,7 +21,9 @@ const COLD_ADD_BUDGET: usize = 18;
 /// Git invocations for an add that reuses a verified immutable base.
 const CACHED_ADD_BUDGET: usize = 13;
 /// Git invocations for a cached add that checks out an existing local branch.
-const CACHED_EXISTING_BRANCH_ADD_BUDGET: usize = 16;
+const CACHED_EXISTING_BRANCH_ADD_BUDGET: usize = 15;
+/// Named revisions share HEAD's lookup; branch creation keeps its safety checks.
+const CACHED_NEW_BRANCH_ADD_BUDGET: usize = 15;
 
 fn git(path: &Path, arguments: &[&str]) -> Output {
     let output = Command::new("git")
@@ -203,7 +205,43 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         existing.len(),
         existing.join("\n")
     );
-    for view in ["cold-view", "cached-view", "existing-view"] {
+    let named_log = fixture.path().join("named-invocations");
+    let named = add_worktree_with_counted_git(
+        &repository,
+        &fixture.path().join("named-view"),
+        &state,
+        &["--detach", "refs/heads/existing"],
+        &shim_directory,
+        &real_git,
+        &named_log,
+    );
+    assert!(
+        named.len() <= CACHED_ADD_BUDGET + legacy_attribute_index,
+        "named add: {}",
+        named.join("\n")
+    );
+    let new_log = fixture.path().join("new-branch-invocations");
+    let new_branch = add_worktree_with_counted_git(
+        &repository,
+        &fixture.path().join("new-view"),
+        &state,
+        &["-b", "new-branch", "refs/heads/existing"],
+        &shim_directory,
+        &real_git,
+        &new_log,
+    );
+    assert!(
+        new_branch.len() <= CACHED_NEW_BRANCH_ADD_BUDGET + legacy_attribute_index,
+        "new branch add: {}",
+        new_branch.join("\n")
+    );
+    for view in [
+        "cold-view",
+        "cached-view",
+        "existing-view",
+        "named-view",
+        "new-view",
+    ] {
         let destination = fixture.path().join(view);
         assert!(
             git(
@@ -239,7 +277,13 @@ fn worktree_add_stays_within_its_git_invocation_budget() {
         "0:0\n",
     )
     .unwrap();
-    for view in ["existing-view", "cached-view", "cold-view"] {
+    for view in [
+        "new-view",
+        "named-view",
+        "existing-view",
+        "cached-view",
+        "cold-view",
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
             .args(["worktree", "remove"])
             .arg(fixture.path().join(view))
