@@ -1,8 +1,8 @@
 // Manual benchmark: node checkout-config-batching.mjs BEFORE AFTER SOURCE COMMIT NEW_OUTPUT_DIR
 // Uses an independent exact-tree snapshot; never creates worktrees in SOURCE.
+// RIFTRI_BENCH_COLD_ROUNDS repeats alternating-order empty-base-cache creation.
 // Optional RIFTRI_BENCH_SINGLE_ROUNDS, RIFTRI_BENCH_BATCH_ROUNDS, and
 // RIFTRI_BENCH_WORKERS also support follow-up creation optimizations.
-// RIFTRI_BENCH_COLD_ROUNDS repeats alternating-order empty-base-cache creation.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -68,7 +68,6 @@ function fingerprint(directory, name) {
 }
 const manifest = names.map(name => fingerprint(repository, name));
 const result = { commit, tree, fixtureTree, hardware: { platform: process.platform, arch: process.arch, os: os.release(), cpu: os.cpus()[0].model, memory: os.totalmem() }, files: names.length, logicalBytes: manifest.reduce((sum, file) => sum + file.size, 0), binaries, singleRounds, batchRounds, workers, startedAt: new Date().toISOString(), git: exec('git', ['--version']).toString().trim(), cases: [], batches: [] };
-result.coldRounds = coldRounds;
 function save() { fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2)); }
 function verify(directory) {
   assert.equal(exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], directory).length, 0);
@@ -139,6 +138,7 @@ function remove(record) {
 }
 
 // Cold creation samples use an empty base cache, separate from cached timings.
+result.coldRounds = coldRounds;
 for (let round = 0; round < coldRounds; round++) {
   for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
     const cold = await create(version, 'explicit', round === 0 ? `cold-${version}` : `cold-${round}-${version}`, false);
