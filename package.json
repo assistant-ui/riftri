@@ -1,6 +1,6 @@
 {
   "name": "riftri",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Experimental lightweight Git workspaces for parallel development",
   "license": "MIT",
   "author": "Assistant UI contributors",
