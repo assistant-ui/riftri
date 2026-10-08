@@ -1708,6 +1708,19 @@ impl Git {
         ] {
             prefix.extend([OsString::from("-c"), OsString::from(setting)]);
         }
+        // Git still owns checkout semantics. Bound its native worker pool
+        // only inside this private materialization environment; never inherit
+        // mutable global/repository worker settings or change the user's Git.
+        // Small selections stay sequential to avoid worker startup overhead.
+        let workers = bounded_checkout_workers(
+            std::thread::available_parallelism().map_or(1, |count| count.get()),
+        );
+        prefix.extend([
+            OsString::from("-c"),
+            OsString::from(format!("checkout.workers={workers}")),
+            OsString::from("-c"),
+            OsString::from("checkout.thresholdForParallelism=1024"),
+        ]);
         for (key, value) in configuration {
             let mut setting = OsString::from(format!("{key}="));
             setting.push(os_string_from_git(
@@ -2886,6 +2899,10 @@ fn parse_object_output(bytes: &[u8]) -> Result<ObjectId, GitError> {
 /// are resolved to an object first and peeled after. No refname contains `:`.
 fn must_resolve_before_peeling(revision: &OsStr) -> bool {
     revision.as_encoded_bytes().contains(&b':')
+}
+
+fn bounded_checkout_workers(available: usize) -> usize {
+    available.clamp(1, 4)
 }
 
 /// Whether `git show` would parse `revision` as a range or a negation. No
@@ -4523,6 +4540,251 @@ mod tests {
             fs::read(output.path().join("tracked.txt")).unwrap(),
             b"tracked\n"
         );
+    }
+
+    #[test]
+    fn checkout_worker_limit_is_bounded_and_never_means_all_cpus() {
+        for (available, expected) in [(0, 1), (1, 1), (2, 2), (4, 4), (64, 4)] {
+            assert_eq!(super::bounded_checkout_workers(available), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_sets_bounded_workers_without_using_repository_settings() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["config", "checkout.workers", "99"]);
+        git(
+            fixture.path(),
+            &["config", "checkout.thresholdForParallelism", "0"],
+        );
+        let scratch = tempdir().unwrap();
+        let wrapper = scratch.path().join("git-wrapper");
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.log\"\nexec git \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let client = Git::new(&wrapper);
+        retry_while_wrapper_is_busy(|| client.detect()).unwrap();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let output = tempdir().unwrap();
+        client
+            .materialize_tree(
+                fixture.path(),
+                &tree,
+                output.path(),
+                &scratch.path().join("index"),
+            )
+            .unwrap();
+        let log = fs::read_to_string(scratch.path().join("git-wrapper.log")).unwrap();
+        let checkout = log
+            .lines()
+            .find(|line| line.contains(" checkout-index "))
+            .unwrap();
+        let workers = super::bounded_checkout_workers(
+            std::thread::available_parallelism().map_or(1, |n| n.get()),
+        );
+        assert!(
+            checkout.contains(&format!("-c checkout.workers={workers} ")),
+            "{checkout}"
+        );
+        assert!(
+            checkout.contains("-c checkout.thresholdForParallelism=1024 "),
+            "{checkout}"
+        );
+        assert_eq!(
+            fs::read(output.path().join("tracked.txt")).unwrap(),
+            b"tracked\n"
+        );
+    }
+
+    #[test]
+    fn many_file_materialization_preserves_attributes_modes_and_sparse_selection() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(
+            fixture.path().join(".gitattributes"),
+            "*.txt text eol=crlf\n*.bin binary\n",
+        )
+        .unwrap();
+        for folder in ["selected", "excluded"] {
+            fs::create_dir(fixture.path().join(folder)).unwrap();
+            for i in 0..600 {
+                fs::write(
+                    fixture.path().join(format!("{folder}/{i}.txt")),
+                    format!("{folder}:{i}\n"),
+                )
+                .unwrap();
+            }
+        }
+        fs::write(fixture.path().join("bytes.bin"), b"\0\xff\r\n\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            fs::write(fixture.path().join("executable"), b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(
+                fixture.path().join("executable"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            symlink("selected/0.txt", fixture.path().join("link")).unwrap();
+        }
+        git(fixture.path(), &["add", "."]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "many attributed files"],
+        );
+        let client = Git::default();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        // These mutable inputs cannot leak into either sequential or parallel
+        // materialization after the exact checkout profile has been captured.
+        fs::write(fixture.path().join(".gitattributes"), "*.txt -text\n").unwrap();
+        fs::write(fixture.path().join(".git/info/attributes"), "*.txt -text\n").unwrap();
+        for (name, configuration, sparse) in [
+            ("default", vec![], vec![]),
+            (
+                "sequential",
+                vec![("checkout.workers".to_owned(), b"1".to_vec())],
+                vec![],
+            ),
+            ("sparse", vec![], vec!["selected".to_owned()]),
+        ] {
+            let output = tempdir().unwrap();
+            let index = tempdir().unwrap();
+            client
+                .materialize_sparse_tree_with_config(
+                    fixture.path(),
+                    &tree,
+                    output.path(),
+                    &index.path().join("index"),
+                    &configuration,
+                    &sparse,
+                )
+                .unwrap();
+            for folder in ["selected", "excluded"] {
+                for i in 0..600 {
+                    let path = output.path().join(format!("{folder}/{i}.txt"));
+                    if name == "sparse" && folder == "excluded" {
+                        assert!(!path.exists());
+                    } else {
+                        assert_eq!(
+                            fs::read(path).unwrap(),
+                            format!("{folder}:{i}\r\n").as_bytes(),
+                            "{name}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                fs::read(output.path().join("bytes.bin")).unwrap(),
+                b"\0\xff\r\n\n"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::read_link(output.path().join("link")).unwrap(),
+                    Path::new("selected/0.txt")
+                );
+                assert_eq!(
+                    fs::metadata(output.path().join("executable"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o111,
+                    0o111
+                );
+            }
+        }
+        let entries = client.list_tree(fixture.path(), &tree).unwrap();
+        let missing = entries
+            .iter()
+            .find(|entry| entry.path == Path::new("selected/599.txt"))
+            .unwrap();
+        delete_loose_object(fixture.path(), missing.object_id.as_str());
+        let output = tempdir().unwrap();
+        let index = tempdir().unwrap();
+        client
+            .materialize_tree(
+                fixture.path(),
+                &tree,
+                output.path(),
+                &index.path().join("index"),
+            )
+            .expect_err("a worker missing an object must fail the entire checkout");
+    }
+
+    #[test]
+    #[ignore = "paired release-mode cold materialization benchmark; no wall-clock threshold"]
+    fn reports_bounded_checkout_worker_latency() {
+        let fixture = RepositoryFixture::committed();
+        for directory in 0..16 {
+            fs::create_dir(fixture.path().join(format!("p{directory}"))).unwrap();
+            for file in 0..256 {
+                let mut bytes = vec![b'x'; 8192];
+                let header = format!("{directory}:{file}\n");
+                bytes[..header.len()].copy_from_slice(header.as_bytes());
+                fs::write(fixture.path().join(format!("p{directory}/{file}")), bytes).unwrap();
+            }
+        }
+        git(fixture.path(), &["add", "."]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "cold materialization fixture"],
+        );
+        let client = Git::default();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        for round in 0..4 {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for parallel in order {
+                let output = tempdir().unwrap();
+                let index = tempdir().unwrap();
+                let configuration = if parallel {
+                    vec![]
+                } else {
+                    vec![("checkout.workers".to_owned(), b"1".to_vec())]
+                };
+                let start = std::time::Instant::now();
+                client
+                    .materialize_tree_with_config(
+                        fixture.path(),
+                        &tree,
+                        output.path(),
+                        &index.path().join("index"),
+                        &configuration,
+                    )
+                    .unwrap();
+                let elapsed = start.elapsed();
+                for directory in 0..16 {
+                    for file in 0..256 {
+                        let name = format!("p{directory}/{file}");
+                        assert_eq!(
+                            fs::read(output.path().join(&name)).unwrap(),
+                            fs::read(fixture.path().join(name)).unwrap()
+                        );
+                    }
+                }
+                eprintln!(
+                    "bounded-checkout round={round} parallel={parallel} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
     }
 
     /// `remove_worktree` has always passed `--`; the force variant did not, so

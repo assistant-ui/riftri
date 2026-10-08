@@ -2,6 +2,7 @@
 // Uses an independent exact-tree snapshot; never creates worktrees in SOURCE.
 // Optional RIFTRI_BENCH_SINGLE_ROUNDS, RIFTRI_BENCH_BATCH_ROUNDS, and
 // RIFTRI_BENCH_WORKERS also support follow-up creation optimizations.
+// RIFTRI_BENCH_COLD_ROUNDS repeats alternating-order empty-base-cache creation.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -19,6 +20,7 @@ function count(name, fallback, maximum) {
   return value;
 }
 const singleRounds = count('RIFTRI_BENCH_SINGLE_ROUNDS', 8, 30);
+const coldRounds = count('RIFTRI_BENCH_COLD_ROUNDS', 1, 10);
 const batchRounds = count('RIFTRI_BENCH_BATCH_ROUNDS', 2, 30);
 const workers = count('RIFTRI_BENCH_WORKERS', 10, 16);
 // Large exact-tree fixtures can legitimately spend more than a minute in Git
@@ -66,6 +68,7 @@ function fingerprint(directory, name) {
 }
 const manifest = names.map(name => fingerprint(repository, name));
 const result = { commit, tree, fixtureTree, hardware: { platform: process.platform, arch: process.arch, os: os.release(), cpu: os.cpus()[0].model, memory: os.totalmem() }, files: names.length, logicalBytes: manifest.reduce((sum, file) => sum + file.size, 0), binaries, singleRounds, batchRounds, workers, startedAt: new Date().toISOString(), git: exec('git', ['--version']).toString().trim(), cases: [], batches: [] };
+result.coldRounds = coldRounds;
 function save() { fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(result, null, 2)); }
 function verify(directory) {
   assert.equal(exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], directory).length, 0);
@@ -136,10 +139,13 @@ function remove(record) {
 }
 
 // Cold creation samples use an empty base cache, separate from cached timings.
-for (const version of ['before', 'after']) {
-  const cold = await create(version, 'explicit', `cold-${version}`, false);
-  remove(cold);
-  exec(binaries[version], ['gc', repository, '--apply']);
+for (let round = 0; round < coldRounds; round++) {
+  for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
+    const cold = await create(version, 'explicit', round === 0 ? `cold-${version}` : `cold-${round}-${version}`, false);
+    remove(cold);
+    exec(binaries[version], ['gc', repository, '--apply']);
+    console.log(`${cold.label}: ${cold.seconds.toFixed(3)}s`);
+  }
 }
 // Keep a baseline-created anchor alive: both versions must reuse its exact base.
 const anchor = await create('before', 'explicit', 'anchor', false);
@@ -202,6 +208,9 @@ result.completedAt = new Date().toISOString();
 result.allViewsVerifiedAndRemoved = result.cases.every(record => record.verifiedAndRemoved);
 assert.ok(result.allViewsVerifiedAndRemoved);
 result.summaries = [];
+result.coldSummaries = ['before', 'after'].map(version => ({ version,
+  seconds: distribution(result.cases.filter(record => record.version === version && record.label.startsWith('cold-')).map(record => record.seconds)),
+}));
 for (const [version, mode] of [['before', 'explicit'], ['after', 'explicit'], ['before', 'shim'], ['after', 'shim'], ['git', 'git']]) {
   result.summaries.push({ version, mode,
     serialSeconds: distribution(result.cases.filter(record => record.version === version && record.mode === mode && record.label.startsWith('single-')).map(record => record.seconds)),

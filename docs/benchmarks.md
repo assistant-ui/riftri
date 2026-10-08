@@ -271,7 +271,12 @@ Use matching build profiles and a quiet volume with ample free space. The
 harness also runs ordinary Git as a control, alternating its position between
 rounds. It defaults to ten workers and writes nearest-rank p50/p95 summaries
 for serial adds, concurrent views, and batch wall times, retaining every sample.
-Cold samples and the warm-up anchor are excluded from cached summaries. Small
+Cold samples and the warm-up anchor are excluded from cached summaries.
+
+`RIFTRI_BENCH_COLD_ROUNDS=4` repeats empty-base-cache creation in alternating
+before/after order, with managed removal and garbage collection between each
+sample. `coldSummaries` reports these samples separately; this is a cold Riftri
+base cache, not a claim that the OS page cache was flushed. Small
 sample counts are exposed; a p95 from one or two samples is not a stable tail
 estimate. Summaries are written only after content/mode/symlink checks, private
 write isolation, removal, and final empty-state checks all succeed. Timings
