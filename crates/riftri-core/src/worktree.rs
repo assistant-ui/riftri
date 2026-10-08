@@ -3646,14 +3646,6 @@ fn add_worktree_inner(
     rollback_on_error: bool,
 ) -> Result<AddWorktreeResult, WorktreeError> {
     let git = Git::default();
-    let repository = git.inspect_repository_with_head_tree(&request.repository)?;
-    let repository_root = git_command_root(&repository)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| {
-            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-        })?;
-    let destination =
-        normalize_new_destination(&request.destination, DestinationRules::WorktreeAdd)?;
     // An existing-branch add checks out the branch, as `git worktree add
     // <path> <branch>` does, even when a tag has the same name: resolving the
     // bare name would pick the tag and then refuse because "the branch moved".
@@ -3665,7 +3657,18 @@ fn add_worktree_inner(
         }
         WorktreeMode::NewBranch(_) | WorktreeMode::Detached => request.revision.clone(),
     };
-    let resolved = if requested == OsStr::new("HEAD") {
+    let (repository, pre_resolved) =
+        git.inspect_repository_for_add(&request.repository, &requested)?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
+    let destination =
+        normalize_new_destination(&request.destination, DestinationRules::WorktreeAdd)?;
+    let resolved = if let Some(resolved) = pre_resolved {
+        resolved
+    } else if requested == OsStr::new("HEAD") {
         match (repository.head_commit.clone(), repository.head_tree.clone()) {
             (Some(commit), Some(tree)) => ResolvedRevision { commit, tree },
             _ => resolve_requested_revision(&git, &repository_root, &requested)?,

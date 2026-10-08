@@ -466,6 +466,69 @@ impl Git {
         path: &Path,
         include_head_tree: bool,
     ) -> Result<RepositoryInfo, GitError> {
+        let mut info = self.inspect_repository_identity(path)?;
+        // HEAD remains an object-store health check, even when the caller
+        // plans to check out a different revision.
+        if include_head_tree {
+            self.populate_head_revision(path, &mut info)?;
+        } else {
+            info.head_commit = self.resolve_optional_object(path, "HEAD^{commit}")?;
+        }
+        Ok(info)
+    }
+
+    /// Inspect HEAD and, for ordinary revision names, resolve the add target
+    /// in the same Git process. A missing or special target returns no cached
+    /// resolution so the caller retains its established usage-error handling.
+    pub fn inspect_repository_for_add(
+        &self,
+        path: &Path,
+        revision: &OsStr,
+    ) -> Result<(RepositoryInfo, Option<ResolvedRevision>), GitError> {
+        let mut info = self.inspect_repository_identity(path)?;
+        if revision != OsStr::new("HEAD")
+            && !must_resolve_before_peeling(revision)
+            && !is_revision_walk(revision)
+        {
+            let mut arguments = resolved_revision_arguments(OsStr::new("HEAD")).to_vec();
+            // No traversal and no timestamp sorting: the first record must
+            // remain HEAD even if the requested commit is newer. Git emits
+            // one record if both expressions resolve to the same commit.
+            arguments.insert(1, OsString::from("--no-walk=unsorted"));
+            let mut requested = revision.to_os_string();
+            requested.push("^{commit}");
+            arguments.insert(arguments.len() - 1, requested);
+            let output = self.output_os(Some(path), &arguments)?;
+            if output.status.success() {
+                let (head, requested) = parse_paired_revision_output(&output.stdout)?;
+                info.head_commit = Some(head.commit);
+                info.head_tree = Some(head.tree);
+                return Ok((info, Some(requested)));
+            }
+            if output.status.code().is_none() {
+                return Err(command_failed(&arguments, &output));
+            }
+            // Recheck HEAD independently on a failed batch. A valid target
+            // must never hide a corrupt HEAD; an unborn HEAD is still valid
+            // repository state. Do not cache any partial batch output.
+        }
+        self.populate_head_revision(path, &mut info)?;
+        Ok((info, None))
+    }
+
+    fn populate_head_revision(
+        &self,
+        path: &Path,
+        info: &mut RepositoryInfo,
+    ) -> Result<(), GitError> {
+        if let Some(resolved) = self.resolve_optional_head_revision(path)? {
+            info.head_commit = Some(resolved.commit);
+            info.head_tree = Some(resolved.tree);
+        }
+        Ok(())
+    }
+
+    fn inspect_repository_identity(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
         // One invocation answers both identity questions; each Git subprocess
         // costs more in spawn and startup than in work. The bare flag is a
         // fixed `true`/`false` first line, so everything after it stays
@@ -543,25 +606,12 @@ impl Git {
             )?)
         };
 
-        // Resolving HEAD's commit does double duty: it is the value `riftri
-        // doctor` reports and the probe that surfaces a corrupt object store
-        // as an inspection failure (relied on to fail lifecycle commands
-        // closed on an unhealthy repository). Most callers do not need its
-        // tree, while add can request both from one Git process.
-        let (head_commit, head_tree) = if include_head_tree {
-            match self.resolve_optional_head_revision(path)? {
-                Some(resolved) => (Some(resolved.commit), Some(resolved.tree)),
-                None => (None, None),
-            }
-        } else {
-            (self.resolve_optional_object(path, "HEAD^{commit}")?, None)
-        };
         Ok(RepositoryInfo {
             root,
             identity: RepositoryIdentity { common_git_dir },
             is_bare,
-            head_commit,
-            head_tree,
+            head_commit: None,
+            head_tree: None,
             // Deliberately not probed here: cleanliness costs a full
             // `git status` traversal, this runs on the path of every lifecycle
             // operation, and only `doctor` ever reads it. Callers that need it
@@ -2927,6 +2977,26 @@ fn parse_resolved_revision_output(bytes: &[u8]) -> Result<ResolvedRevision, GitE
     })
 }
 
+fn parse_paired_revision_output(
+    bytes: &[u8],
+) -> Result<(ResolvedRevision, ResolvedRevision), GitError> {
+    // The IDs are strictly hexadecimal, so Git's record-separating newline
+    // is unambiguous. Each record still requires its two trailing NULs.
+    let mut records = bytes.split(|byte| *byte == b'\n');
+    let head = parse_resolved_revision_output(records.next().unwrap_or_default())?;
+    let requested = match records.next() {
+        Some(record) => parse_resolved_revision_output(record)?,
+        None => head.clone(),
+    };
+    if records.next().is_some() {
+        return Err(GitError::InvalidOutput {
+            context: "paired revisions",
+            detail: "expected HEAD and at most one requested revision".to_owned(),
+        });
+    }
+    Ok((head, requested))
+}
+
 fn parse_object_bytes(bytes: &[u8]) -> Result<ObjectId, GitError> {
     let value = std::str::from_utf8(bytes).map_err(|error| GitError::InvalidOutput {
         context: "object ID",
@@ -4308,6 +4378,246 @@ mod tests {
             super::parse_resolved_revision_output(oid).is_err(),
             "missing delimiters must fail closed"
         );
+    }
+
+    #[test]
+    fn add_inspection_batches_head_and_requested_revision_without_reordering() {
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["branch", "original"]);
+        fs::write(fixture.path().join("tracked.txt"), "second\n").unwrap();
+        git(fixture.path(), &["commit", "-am", "second"]);
+        git(
+            fixture.path(),
+            &["tag", "-a", "tagged", "original", "-m", "tag"],
+        );
+        // Even an ambient log ordering preference cannot reorder the two IDs.
+        git(fixture.path(), &["config", "log.dateOrder", "true"]);
+        let git = Git::default();
+        let head = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        for name in ["original", "tagged", "HEAD~1", "HEAD~0", "HEAD^{commit}"] {
+            let expected = git
+                .resolve_revision(fixture.path(), OsStr::new(name))
+                .unwrap();
+            let before = git.process_attempts();
+            let (info, requested) = git
+                .inspect_repository_for_add(fixture.path(), OsStr::new(name))
+                .unwrap();
+            assert_eq!(git.process_attempts() - before, 3, "{name}");
+            assert_eq!(info.head_commit, Some(head.commit.clone()), "{name}");
+            assert_eq!(info.head_tree, Some(head.tree.clone()), "{name}");
+            assert_eq!(requested, Some(expected), "{name}");
+            assert!(info.clean.is_none());
+        }
+        let before = git.process_attempts();
+        let (info, requested) = git
+            .inspect_repository_for_add(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        assert_eq!(git.process_attempts() - before, 3);
+        assert_eq!(info.head_commit, Some(head.commit));
+        assert!(
+            requested.is_none(),
+            "literal HEAD uses the existing inspection result"
+        );
+        self::git(fixture.path(), &["branch", "latest"]);
+        self::git(
+            fixture.path(),
+            &["checkout", "--quiet", "--detach", "original"],
+        );
+        let head = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let latest = git
+            .resolve_revision(fixture.path(), OsStr::new("latest"))
+            .unwrap();
+        let (info, requested) = git
+            .inspect_repository_for_add(fixture.path(), OsStr::new("latest"))
+            .unwrap();
+        assert_eq!(info.head_commit, Some(head.commit));
+        assert_eq!(requested, Some(latest));
+    }
+
+    #[test]
+    fn add_inspection_falls_back_for_absent_and_special_revisions() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        let head = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        for name in [
+            "missing",
+            "HEAD:tracked.txt",
+            ":/initial",
+            "HEAD..HEAD",
+            "^HEAD",
+            "HEAD^@",
+        ] {
+            let (info, requested) = git
+                .inspect_repository_for_add(fixture.path(), OsStr::new(name))
+                .unwrap();
+            assert_eq!(info.head_commit, Some(head.commit.clone()), "{name}");
+            assert!(
+                requested.is_none(),
+                "{name} must keep the established resolution/error path"
+            );
+        }
+        // A valid requested ref must not conceal an unborn or corrupt HEAD.
+        self::git(fixture.path(), &["branch", "saved"]);
+        self::git(
+            fixture.path(),
+            &["symbolic-ref", "HEAD", "refs/heads/unborn"],
+        );
+        let (info, requested) = git
+            .inspect_repository_for_add(fixture.path(), OsStr::new("saved"))
+            .unwrap();
+        assert!(info.head_commit.is_none());
+        assert!(requested.is_none());
+        self::git(
+            fixture.path(),
+            &["symbolic-ref", "HEAD", "refs/heads/saved"],
+        );
+        delete_loose_object(fixture.path(), head.commit.as_str());
+        assert!(matches!(
+            git.inspect_repository_for_add(fixture.path(), OsStr::new("missing")),
+            Err(super::GitError::UnreadableObject { .. })
+        ));
+    }
+
+    #[test]
+    fn paired_revision_parser_requires_one_or_two_complete_records() {
+        for width in [40, 64] {
+            let record = format!("{}\0{}\0", "a".repeat(width), "b".repeat(width));
+            let other = format!("{}\0{}\0", "c".repeat(width), "d".repeat(width));
+            let (head, requested) = super::parse_paired_revision_output(record.as_bytes()).unwrap();
+            assert_eq!(head, requested);
+            let pair = format!("{record}\n{other}");
+            let (head, requested) = super::parse_paired_revision_output(pair.as_bytes()).unwrap();
+            assert_eq!(head.commit.as_str(), "a".repeat(width));
+            assert_eq!(requested.commit.as_str(), "c".repeat(width));
+            for invalid in [
+                String::new(),
+                format!("{record}\n"),
+                format!("{pair}\n{other}"),
+                format!("{record}{other}"),
+                format!("{record}\ninvalid"),
+            ] {
+                assert!(super::parse_paired_revision_output(invalid.as_bytes()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn add_inspection_preserves_bare_sha256_repository_identity() {
+        let parent = tempdir().unwrap();
+        let repo = parent.path().join("source-日本");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "--object-format=sha256"]);
+        git(&repo, &["config", "user.name", "Fixture"]);
+        git(&repo, &["config", "user.email", "fixture@example.invalid"]);
+        git(
+            &repo,
+            &["commit", "--allow-empty", "--quiet", "-m", "initial"],
+        );
+        git(&repo, &["branch", "saved"]);
+        let bare = parent.path().join("bare-日本.git");
+        let git = Git::default();
+        git.run_os(
+            Some(parent.path()),
+            &[
+                OsString::from("clone"),
+                OsString::from("--bare"),
+                repo.into_os_string(),
+                bare.clone().into_os_string(),
+            ],
+        )
+        .unwrap();
+        let before = git.process_attempts();
+        let (info, requested) = git
+            .inspect_repository_for_add(&bare, OsStr::new("saved"))
+            .unwrap();
+        assert_eq!(git.process_attempts() - before, 2);
+        assert!(info.is_bare);
+        assert!(info.root.is_none());
+        assert_eq!(
+            info.identity.common_git_dir.canonicalize().unwrap(),
+            bare.canonicalize().unwrap()
+        );
+        assert_eq!(info.head_commit.unwrap().as_str().len(), 64);
+        assert_eq!(requested.unwrap().tree.as_str().len(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_inspection_does_not_retry_a_killed_batch_or_accept_malformed_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = RepositoryFixture::committed();
+        let directory = tempdir().unwrap();
+        for (name, action) in [
+            ("killed", "kill -9 $$"),
+            ("invalid", "printf 'invalid'; exit 0"),
+        ] {
+            let wrapper = directory.path().join(name);
+            fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nif [ \"$1\" = show ]; then {action}; fi\nexec git \"$@\"\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            let git = Git::new(&wrapper);
+            retry_while_wrapper_is_busy(|| git.detect()).unwrap();
+            let before = git.process_attempts();
+            let error = git
+                .inspect_repository_for_add(fixture.path(), OsStr::new("HEAD~0"))
+                .unwrap_err();
+            assert_eq!(git.process_attempts() - before, 3);
+            match name {
+                "killed" => assert!(error.to_string().contains("killed by signal 9")),
+                _ => assert!(matches!(error, super::GitError::InvalidOutput { .. })),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "paired release-mode revision benchmark; no host-sensitive timing gate"]
+    fn reports_add_revision_batch_latency() {
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["branch", "saved"]);
+        let git = Git::default();
+        let expected = git
+            .resolve_revision(fixture.path(), OsStr::new("saved"))
+            .unwrap();
+        for round in 0..8 {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for batched in order {
+                let before = git.process_attempts();
+                let start = std::time::Instant::now();
+                let (info, requested) = if batched {
+                    git.inspect_repository_for_add(fixture.path(), OsStr::new("saved"))
+                        .unwrap()
+                } else {
+                    let info = git
+                        .inspect_repository_with_head_tree(fixture.path())
+                        .unwrap();
+                    let requested = git
+                        .resolve_requested_revision(fixture.path(), OsStr::new("saved"))
+                        .unwrap();
+                    (info, requested)
+                };
+                let elapsed = start.elapsed();
+                assert_eq!(requested, Some(expected.clone()));
+                assert_eq!(info.head_commit, Some(expected.commit.clone()));
+                assert_eq!(git.process_attempts() - before, if batched { 3 } else { 4 });
+                eprintln!(
+                    "add-revision-batch round={round} batched={batched} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
     }
 
     /// Spawning a freshly written script can fail with ETXTBSY when a
