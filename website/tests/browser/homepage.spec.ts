@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 const install = "curl -fsSL https://riftri.dev/install.sh | bash";
 
@@ -300,7 +300,7 @@ test("wrapped backend status stays inside the animated diagram", async ({ page }
 test("reduced motion stops loops while preserving readable diagram content", async ({ page }) => {
   await page.goto("/");
   await expect(page.locator(".storage-map, .materialization-map").getByRole("button")).toHaveCount(0);
-  const names = await page.locator(".track-counter, .backend-cycle-item, .savings-backend-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName));
+  const names = await page.locator(".backend-cycle-item, .savings-backend-item").evaluateAll((elements) => elements.map((element) => getComputedStyle(element).animationName));
   expect(names.every((name) => name === "none")).toBe(true);
   const underline = await page.locator(".savings-backend-item").first().evaluate((element) => {
     const range = document.createRange();
@@ -313,6 +313,71 @@ test("reduced motion stops loops while preserving readable diagram content", asy
   expect(underline.border).toBe("dotted");
   expect(Math.abs(underline.excess)).toBeLessThanOrEqual(1);
   await expect(page.locator(".materialization-map")).toContainText("FROM TREE TO WORKSPACE");
+  // The drawn figures hold their finished pose instead of looping.
+  const figure = page.locator(".storage-figure");
+  await expect(figure.locator(".fig-private")).toHaveCount(6);
+  await expect(figure.locator(".figure-readout")).toHaveText("3 worktrees · 6 private blocks");
+  await expect(figure.locator(".figure-label.is-shown")).toHaveCount(4);
+  await expect(page.locator(".materialization-map .fig-status.is-on")).toHaveCount(1);
+  const pose = await figure.locator("svg").innerHTML();
+  await page.waitForTimeout(600);
+  expect(await figure.locator("svg").innerHTML()).toBe(pose);
+});
+
+// Installs a fake clock and stops it right after load, so only runFor moves
+// time and each check lands at a known point of an animation loop. Pausing a
+// second ahead never targets the past on a busy machine; the jump fires due
+// frames once, and the figures cap a frame's step, so they barely move.
+async function pauseClock(page: Page) {
+  await page.clock.install();
+  await page.goto("/");
+  await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+}
+
+test("the storage highlight starts with the cursor drag and fills on a loop", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "motion is exercised once");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await pauseClock(page);
+  const highlight = page.locator(".hero-highlight");
+  // The page opens on the plain word with the cursor on its way in (1.2s into
+  // the 8.8s loop), not on the finished highlight.
+  await expect(highlight).toHaveClass(/is-plain/);
+  await expect(page.locator(".highlight-cursor")).toHaveCount(1);
+  // 2.5s: the cursor has pressed and is dragging the selection open.
+  await page.clock.runFor(1300);
+  await expect(page.locator(".highlight-selection.has-corners")).toHaveCount(1);
+  // 5.0s: filled and settled.
+  await page.clock.runFor(2500);
+  await expect(highlight).toHaveClass("hero-highlight");
+  await expect(highlight).toHaveText("storage.");
+  // 8.5s: the fill empties before the next drag.
+  await page.clock.runFor(3500);
+  await expect(highlight).toHaveClass(/is-plain/);
+  await expect(page.getByRole("heading", { name: "Git worktrees. Shared storage.", exact: true })).toBeVisible();
+});
+
+test("storage figure loops through its story and holds while pointed at", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "pointer behavior is exercised once");
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  await pauseClock(page);
+  const readout = page.locator(".storage-figure .figure-readout");
+  await expect(readout).toHaveText("3 worktrees · 6 private blocks");
+
+  // Pointing at a worktree names it and holds the loop where it is.
+  await page.locator(".figure-label", { hasText: "auth/" }).hover();
+  await expect(readout).toHaveText("auth/ · 3 private · 13 shared");
+  await expect(page.locator(".storage-figure .fig-view.is-lit")).toHaveCount(1);
+  await page.clock.runFor(2000);
+  await expect(readout).toHaveText("auth/ · 3 private · 13 shared");
+  await expect(page.locator(".storage-figure .fig-private")).toHaveCount(6);
+
+  // Released at 6.6s of the 12s loop: by 11.8s the worktrees have settled back
+  // onto the base, and 2.4s into the next loop all three are lifted again.
+  await page.mouse.move(0, 0);
+  await page.clock.runFor(5400);
+  await expect(readout).toHaveText("0 worktrees · 0 private blocks");
+  await page.clock.runFor(2600);
+  await expect(readout).toHaveText("3 worktrees · 0 private blocks");
 });
 
 test("Windows onboarding separates review from running the installer", async ({ page }, testInfo) => {

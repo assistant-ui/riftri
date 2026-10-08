@@ -30,6 +30,36 @@ pub struct GitInfo {
     pub version: String,
 }
 
+impl GitInfo {
+    /// `check-attr --source` was introduced in Git 2.43. Unknown version
+    /// formats and prereleases use the existing private-index path.
+    pub fn supports_attribute_source(&self) -> bool {
+        let Some(version) = self
+            .version
+            .strip_prefix("git version ")
+            .and_then(|version| version.split_whitespace().next())
+        else {
+            return false;
+        };
+        let mut parts = version.split('.');
+        let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let (Ok(major), Ok(minor), Ok(_patch)) = (
+            major.parse::<u32>(),
+            minor.parse::<u32>(),
+            patch.parse::<u32>(),
+        ) else {
+            return false;
+        };
+        if parts.next().is_some_and(|suffix| suffix != "windows") {
+            return false;
+        }
+        (major, minor) >= (2, 43)
+    }
+}
+
 /// A validated Git object ID. SHA-1 and SHA-256 repositories are supported.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
@@ -436,6 +466,69 @@ impl Git {
         path: &Path,
         include_head_tree: bool,
     ) -> Result<RepositoryInfo, GitError> {
+        let mut info = self.inspect_repository_identity(path)?;
+        // HEAD remains an object-store health check, even when the caller
+        // plans to check out a different revision.
+        if include_head_tree {
+            self.populate_head_revision(path, &mut info)?;
+        } else {
+            info.head_commit = self.resolve_optional_object(path, "HEAD^{commit}")?;
+        }
+        Ok(info)
+    }
+
+    /// Inspect HEAD and, for ordinary revision names, resolve the add target
+    /// in the same Git process. A missing or special target returns no cached
+    /// resolution so the caller retains its established usage-error handling.
+    pub fn inspect_repository_for_add(
+        &self,
+        path: &Path,
+        revision: &OsStr,
+    ) -> Result<(RepositoryInfo, Option<ResolvedRevision>), GitError> {
+        let mut info = self.inspect_repository_identity(path)?;
+        if revision != OsStr::new("HEAD")
+            && !must_resolve_before_peeling(revision)
+            && !is_revision_walk(revision)
+        {
+            let mut arguments = resolved_revision_arguments(OsStr::new("HEAD")).to_vec();
+            // No traversal and no timestamp sorting: the first record must
+            // remain HEAD even if the requested commit is newer. Git emits
+            // one record if both expressions resolve to the same commit.
+            arguments.insert(1, OsString::from("--no-walk=unsorted"));
+            let mut requested = revision.to_os_string();
+            requested.push("^{commit}");
+            arguments.insert(arguments.len() - 1, requested);
+            let output = self.output_os(Some(path), &arguments)?;
+            if output.status.success() {
+                let (head, requested) = parse_paired_revision_output(&output.stdout)?;
+                info.head_commit = Some(head.commit);
+                info.head_tree = Some(head.tree);
+                return Ok((info, Some(requested)));
+            }
+            if output.status.code().is_none() {
+                return Err(command_failed(&arguments, &output));
+            }
+            // Recheck HEAD independently on a failed batch. A valid target
+            // must never hide a corrupt HEAD; an unborn HEAD is still valid
+            // repository state. Do not cache any partial batch output.
+        }
+        self.populate_head_revision(path, &mut info)?;
+        Ok((info, None))
+    }
+
+    fn populate_head_revision(
+        &self,
+        path: &Path,
+        info: &mut RepositoryInfo,
+    ) -> Result<(), GitError> {
+        if let Some(resolved) = self.resolve_optional_head_revision(path)? {
+            info.head_commit = Some(resolved.commit);
+            info.head_tree = Some(resolved.tree);
+        }
+        Ok(())
+    }
+
+    fn inspect_repository_identity(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
         // One invocation answers both identity questions; each Git subprocess
         // costs more in spawn and startup than in work. The bare flag is a
         // fixed `true`/`false` first line, so everything after it stays
@@ -513,25 +606,12 @@ impl Git {
             )?)
         };
 
-        // Resolving HEAD's commit does double duty: it is the value `riftri
-        // doctor` reports and the probe that surfaces a corrupt object store
-        // as an inspection failure (relied on to fail lifecycle commands
-        // closed on an unhealthy repository). Most callers do not need its
-        // tree, while add can request both from one Git process.
-        let (head_commit, head_tree) = if include_head_tree {
-            match self.resolve_optional_head_revision(path)? {
-                Some(resolved) => (Some(resolved.commit), Some(resolved.tree)),
-                None => (None, None),
-            }
-        } else {
-            (self.resolve_optional_object(path, "HEAD^{commit}")?, None)
-        };
         Ok(RepositoryInfo {
             root,
             identity: RepositoryIdentity { common_git_dir },
             is_bare,
-            head_commit,
-            head_tree,
+            head_commit: None,
+            head_tree: None,
             // Deliberately not probed here: cleanliness costs a full
             // `git status` traversal, this runs on the path of every lifecycle
             // operation, and only `doctor` ever reads it. Callers that need it
@@ -1391,7 +1471,7 @@ impl Git {
         input: Option<&[u8]>,
     ) -> Result<Vec<GitAttribute>, GitError> {
         let index_environment = [(OsStr::new("GIT_INDEX_FILE"), index.index.as_os_str())];
-        self.attributes_with_input(path, paths, &[], &index_environment, input)
+        self.attributes_with_input(path, paths, &[], &index_environment, input, None)
     }
 
     /// Return attributes from an already indexed tree while disabling global
@@ -1430,6 +1510,33 @@ impl Git {
         Ok((in_tree, effective))
     }
 
+    /// Query an attribute-free exact tree without constructing an index.
+    /// Reuse the caller's version receipt; do not add a probe to the hot path.
+    /// The caller proves absence of `.gitattributes` from a recursive listing
+    /// before passing `include_in_tree = false`. Trees with attributes keep
+    /// the index path, including its handling of missing subtrees and symlink
+    /// attribute entries. Older/unknown Git also retains that path.
+    pub fn attribute_pair_for_tree(
+        &self,
+        path: &Path,
+        tree: &ObjectId,
+        paths: &[impl AsRef<Path>],
+        include_in_tree: bool,
+        info: &GitInfo,
+    ) -> Result<(Vec<GitAttribute>, Vec<GitAttribute>), GitError> {
+        if paths.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        if include_in_tree || !info.supports_attribute_source() {
+            let index = self.tree_attribute_index(path, tree)?;
+            return self.attribute_pair_for_index(path, &index, paths, include_in_tree);
+        }
+        let input = attribute_stdin(paths);
+        let effective =
+            self.attributes_with_input(path, paths, &[], &[], input.as_deref(), Some(tree))?;
+        Ok((Vec::new(), effective))
+    }
+
     fn in_tree_attributes_for_index_with_input(
         &self,
         path: &Path,
@@ -1451,7 +1558,7 @@ impl Git {
             (OsStr::new("GIT_CONFIG_GLOBAL"), null_device),
             (OsStr::new("GIT_CONFIG_SYSTEM"), null_device),
         ];
-        self.attributes_with_input(path, paths, &arguments, &environment, input)
+        self.attributes_with_input(path, paths, &arguments, &environment, input, None)
     }
 
     fn attributes_for_paths_with_environment(
@@ -1462,7 +1569,14 @@ impl Git {
         environment: &[(&OsStr, &OsStr)],
     ) -> Result<Vec<GitAttribute>, GitError> {
         let input = attribute_stdin(paths);
-        self.attributes_with_input(path, paths, argument_prefix, environment, input.as_deref())
+        self.attributes_with_input(
+            path,
+            paths,
+            argument_prefix,
+            environment,
+            input.as_deref(),
+            None,
+        )
     }
 
     fn attributes_with_input(
@@ -1472,6 +1586,7 @@ impl Git {
         argument_prefix: &[OsString],
         environment: &[(&OsStr, &OsStr)],
         input: Option<&[u8]>,
+        tree: Option<&ObjectId>,
     ) -> Result<Vec<GitAttribute>, GitError> {
         if paths.is_empty() {
             return Ok(Vec::new());
@@ -1481,7 +1596,7 @@ impl Git {
             let mut arguments = argument_prefix.to_vec();
             arguments.extend([
                 OsString::from("check-attr"),
-                OsString::from("--cached"),
+                attribute_source_argument(tree),
                 OsString::from("--all"),
                 OsString::from("-z"),
                 OsString::from("--stdin"),
@@ -1492,7 +1607,7 @@ impl Git {
             // Preserve the native-argument path for non-Unicode Windows input
             // instead of replacing unpaired UTF-16 surrogates lossily. Exact
             // tree paths decoded from Git are UTF-8 and use the fast path.
-            self.attributes_for_paths_as_arguments(path, paths, argument_prefix, environment)
+            self.attributes_for_paths_as_arguments(path, paths, argument_prefix, environment, tree)
         }
     }
 
@@ -1502,13 +1617,14 @@ impl Git {
         paths: &[impl AsRef<Path>],
         argument_prefix: &[OsString],
         environment: &[(&OsStr, &OsStr)],
+        tree: Option<&ObjectId>,
     ) -> Result<Vec<GitAttribute>, GitError> {
         let mut attributes = Vec::new();
         for chunk in paths.chunks(128) {
             let mut arguments = argument_prefix.to_vec();
             arguments.extend([
                 OsString::from("check-attr"),
-                OsString::from("--cached"),
+                attribute_source_argument(tree),
                 OsString::from("--all"),
                 OsString::from("-z"),
                 OsString::from("--"),
@@ -2553,6 +2669,16 @@ impl Git {
     }
 }
 
+fn attribute_source_argument(tree: Option<&ObjectId>) -> OsString {
+    match tree {
+        // A raw, full-length nonexistent object ID is accepted by check-attr
+        // as an empty attribute source. Peeling forces Git to read and verify
+        // that the requested object is a tree before answering any paths.
+        Some(tree) => OsString::from(format!("--source={}^{{tree}}", tree.as_str())),
+        None => OsString::from("--cached"),
+    }
+}
+
 fn attribute_stdin(paths: &[impl AsRef<Path>]) -> Option<Vec<u8>> {
     let mut input = Vec::new();
     for path in paths {
@@ -2849,6 +2975,26 @@ fn parse_resolved_revision_output(bytes: &[u8]) -> Result<ResolvedRevision, GitE
         commit: parse_object_bytes(commit)?,
         tree: parse_object_bytes(tree)?,
     })
+}
+
+fn parse_paired_revision_output(
+    bytes: &[u8],
+) -> Result<(ResolvedRevision, ResolvedRevision), GitError> {
+    // The IDs are strictly hexadecimal, so Git's record-separating newline
+    // is unambiguous. Each record still requires its two trailing NULs.
+    let mut records = bytes.split(|byte| *byte == b'\n');
+    let head = parse_resolved_revision_output(records.next().unwrap_or_default())?;
+    let requested = match records.next() {
+        Some(record) => parse_resolved_revision_output(record)?,
+        None => head.clone(),
+    };
+    if records.next().is_some() {
+        return Err(GitError::InvalidOutput {
+            context: "paired revisions",
+            detail: "expected HEAD and at most one requested revision".to_owned(),
+        });
+    }
+    Ok((head, requested))
 }
 
 fn parse_object_bytes(bytes: &[u8]) -> Result<ObjectId, GitError> {
@@ -3288,7 +3434,12 @@ mod tests {
             )
             .unwrap();
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-            let mut reader = Git::new(&script).small_blob_reader(fixture.path()).unwrap();
+            let git = Git::new(&script);
+            // A freshly written test script can still have a writer inherited
+            // by another test's pre-exec child. Retry only a failed spawn;
+            // protocol reads and finish errors below must never be retried.
+            let mut reader =
+                retry_while_wrapper_is_busy(|| git.small_blob_reader(fixture.path())).unwrap();
             assert_eq!(
                 reader.read(std::slice::from_ref(&id), 1).unwrap(),
                 vec![b"x".to_vec()]
@@ -4229,6 +4380,246 @@ mod tests {
         );
     }
 
+    #[test]
+    fn add_inspection_batches_head_and_requested_revision_without_reordering() {
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["branch", "original"]);
+        fs::write(fixture.path().join("tracked.txt"), "second\n").unwrap();
+        git(fixture.path(), &["commit", "-am", "second"]);
+        git(
+            fixture.path(),
+            &["tag", "-a", "tagged", "original", "-m", "tag"],
+        );
+        // Even an ambient log ordering preference cannot reorder the two IDs.
+        git(fixture.path(), &["config", "log.dateOrder", "true"]);
+        let git = Git::default();
+        let head = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        for name in ["original", "tagged", "HEAD~1", "HEAD~0", "HEAD^{commit}"] {
+            let expected = git
+                .resolve_revision(fixture.path(), OsStr::new(name))
+                .unwrap();
+            let before = git.process_attempts();
+            let (info, requested) = git
+                .inspect_repository_for_add(fixture.path(), OsStr::new(name))
+                .unwrap();
+            assert_eq!(git.process_attempts() - before, 3, "{name}");
+            assert_eq!(info.head_commit, Some(head.commit.clone()), "{name}");
+            assert_eq!(info.head_tree, Some(head.tree.clone()), "{name}");
+            assert_eq!(requested, Some(expected), "{name}");
+            assert!(info.clean.is_none());
+        }
+        let before = git.process_attempts();
+        let (info, requested) = git
+            .inspect_repository_for_add(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        assert_eq!(git.process_attempts() - before, 3);
+        assert_eq!(info.head_commit, Some(head.commit));
+        assert!(
+            requested.is_none(),
+            "literal HEAD uses the existing inspection result"
+        );
+        self::git(fixture.path(), &["branch", "latest"]);
+        self::git(
+            fixture.path(),
+            &["checkout", "--quiet", "--detach", "original"],
+        );
+        let head = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        let latest = git
+            .resolve_revision(fixture.path(), OsStr::new("latest"))
+            .unwrap();
+        let (info, requested) = git
+            .inspect_repository_for_add(fixture.path(), OsStr::new("latest"))
+            .unwrap();
+        assert_eq!(info.head_commit, Some(head.commit));
+        assert_eq!(requested, Some(latest));
+    }
+
+    #[test]
+    fn add_inspection_falls_back_for_absent_and_special_revisions() {
+        let fixture = RepositoryFixture::committed();
+        let git = Git::default();
+        let head = git
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap();
+        for name in [
+            "missing",
+            "HEAD:tracked.txt",
+            ":/initial",
+            "HEAD..HEAD",
+            "^HEAD",
+            "HEAD^@",
+        ] {
+            let (info, requested) = git
+                .inspect_repository_for_add(fixture.path(), OsStr::new(name))
+                .unwrap();
+            assert_eq!(info.head_commit, Some(head.commit.clone()), "{name}");
+            assert!(
+                requested.is_none(),
+                "{name} must keep the established resolution/error path"
+            );
+        }
+        // A valid requested ref must not conceal an unborn or corrupt HEAD.
+        self::git(fixture.path(), &["branch", "saved"]);
+        self::git(
+            fixture.path(),
+            &["symbolic-ref", "HEAD", "refs/heads/unborn"],
+        );
+        let (info, requested) = git
+            .inspect_repository_for_add(fixture.path(), OsStr::new("saved"))
+            .unwrap();
+        assert!(info.head_commit.is_none());
+        assert!(requested.is_none());
+        self::git(
+            fixture.path(),
+            &["symbolic-ref", "HEAD", "refs/heads/saved"],
+        );
+        delete_loose_object(fixture.path(), head.commit.as_str());
+        assert!(matches!(
+            git.inspect_repository_for_add(fixture.path(), OsStr::new("missing")),
+            Err(super::GitError::UnreadableObject { .. })
+        ));
+    }
+
+    #[test]
+    fn paired_revision_parser_requires_one_or_two_complete_records() {
+        for width in [40, 64] {
+            let record = format!("{}\0{}\0", "a".repeat(width), "b".repeat(width));
+            let other = format!("{}\0{}\0", "c".repeat(width), "d".repeat(width));
+            let (head, requested) = super::parse_paired_revision_output(record.as_bytes()).unwrap();
+            assert_eq!(head, requested);
+            let pair = format!("{record}\n{other}");
+            let (head, requested) = super::parse_paired_revision_output(pair.as_bytes()).unwrap();
+            assert_eq!(head.commit.as_str(), "a".repeat(width));
+            assert_eq!(requested.commit.as_str(), "c".repeat(width));
+            for invalid in [
+                String::new(),
+                format!("{record}\n"),
+                format!("{pair}\n{other}"),
+                format!("{record}{other}"),
+                format!("{record}\ninvalid"),
+            ] {
+                assert!(super::parse_paired_revision_output(invalid.as_bytes()).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn add_inspection_preserves_bare_sha256_repository_identity() {
+        let parent = tempdir().unwrap();
+        let repo = parent.path().join("source-日本");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "--quiet", "--object-format=sha256"]);
+        git(&repo, &["config", "user.name", "Fixture"]);
+        git(&repo, &["config", "user.email", "fixture@example.invalid"]);
+        git(
+            &repo,
+            &["commit", "--allow-empty", "--quiet", "-m", "initial"],
+        );
+        git(&repo, &["branch", "saved"]);
+        let bare = parent.path().join("bare-日本.git");
+        let git = Git::default();
+        git.run_os(
+            Some(parent.path()),
+            &[
+                OsString::from("clone"),
+                OsString::from("--bare"),
+                repo.into_os_string(),
+                bare.clone().into_os_string(),
+            ],
+        )
+        .unwrap();
+        let before = git.process_attempts();
+        let (info, requested) = git
+            .inspect_repository_for_add(&bare, OsStr::new("saved"))
+            .unwrap();
+        assert_eq!(git.process_attempts() - before, 2);
+        assert!(info.is_bare);
+        assert!(info.root.is_none());
+        assert_eq!(
+            info.identity.common_git_dir.canonicalize().unwrap(),
+            bare.canonicalize().unwrap()
+        );
+        assert_eq!(info.head_commit.unwrap().as_str().len(), 64);
+        assert_eq!(requested.unwrap().tree.as_str().len(), 64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn add_inspection_does_not_retry_a_killed_batch_or_accept_malformed_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = RepositoryFixture::committed();
+        let directory = tempdir().unwrap();
+        for (name, action) in [
+            ("killed", "kill -9 $$"),
+            ("invalid", "printf 'invalid'; exit 0"),
+        ] {
+            let wrapper = directory.path().join(name);
+            fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nif [ \"$1\" = show ]; then {action}; fi\nexec git \"$@\"\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            let git = Git::new(&wrapper);
+            retry_while_wrapper_is_busy(|| git.detect()).unwrap();
+            let before = git.process_attempts();
+            let error = git
+                .inspect_repository_for_add(fixture.path(), OsStr::new("HEAD~0"))
+                .unwrap_err();
+            assert_eq!(git.process_attempts() - before, 3);
+            match name {
+                "killed" => assert!(error.to_string().contains("killed by signal 9")),
+                _ => assert!(matches!(error, super::GitError::InvalidOutput { .. })),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "paired release-mode revision benchmark; no host-sensitive timing gate"]
+    fn reports_add_revision_batch_latency() {
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["branch", "saved"]);
+        let git = Git::default();
+        let expected = git
+            .resolve_revision(fixture.path(), OsStr::new("saved"))
+            .unwrap();
+        for round in 0..8 {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for batched in order {
+                let before = git.process_attempts();
+                let start = std::time::Instant::now();
+                let (info, requested) = if batched {
+                    git.inspect_repository_for_add(fixture.path(), OsStr::new("saved"))
+                        .unwrap()
+                } else {
+                    let info = git
+                        .inspect_repository_with_head_tree(fixture.path())
+                        .unwrap();
+                    let requested = git
+                        .resolve_requested_revision(fixture.path(), OsStr::new("saved"))
+                        .unwrap();
+                    (info, requested)
+                };
+                let elapsed = start.elapsed();
+                assert_eq!(requested, Some(expected.clone()));
+                assert_eq!(info.head_commit, Some(expected.commit.clone()));
+                assert_eq!(git.process_attempts() - before, if batched { 3 } else { 4 });
+                eprintln!(
+                    "add-revision-batch round={round} batched={batched} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
+
     /// Spawning a freshly written script can fail with ETXTBSY when a
     /// concurrent test forks while the writer's descriptor is still duplicated
     /// into a not-yet-exec'd child. A busy failure means the script never ran,
@@ -4250,6 +4641,42 @@ mod tests {
                 result => break result,
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wrapper_busy_retry_is_bounded_and_does_not_mask_other_errors() {
+        let start_error = |kind| crate::GitError::Start {
+            command: "test wrapper".into(),
+            source: std::io::Error::from(kind),
+        };
+        let mut attempts = 0;
+        let value = retry_while_wrapper_is_busy(|| {
+            attempts += 1;
+            if attempts < 3 {
+                Err(start_error(std::io::ErrorKind::ExecutableFileBusy))
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+        assert_eq!((value, attempts), (42, 3));
+
+        let mut attempts = 0;
+        let result: Result<(), _> = retry_while_wrapper_is_busy(|| {
+            attempts += 1;
+            Err(start_error(std::io::ErrorKind::PermissionDenied))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 1);
+
+        let mut attempts = 0;
+        let result: Result<(), _> = retry_while_wrapper_is_busy(|| {
+            attempts += 1;
+            Err(start_error(std::io::ErrorKind::ExecutableFileBusy))
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 51);
     }
 
     #[cfg(unix)]
@@ -4406,6 +4833,295 @@ mod tests {
             fs::read(output.path().join("tracked.txt")).unwrap(),
             b"tracked\n"
         );
+    }
+
+    // Test-only candidate: the query-level win did not translate to a reliable
+    // full lifecycle win. Keep production materialization sequential until a
+    // paired end-to-end comparison supports changing the default.
+    fn bounded_checkout_workers(available: usize) -> usize {
+        available.clamp(1, 4)
+    }
+
+    fn bounded_checkout_configuration() -> Vec<(String, Vec<u8>)> {
+        let workers =
+            bounded_checkout_workers(std::thread::available_parallelism().map_or(1, |n| n.get()));
+        vec![
+            (
+                "checkout.workers".to_owned(),
+                workers.to_string().into_bytes(),
+            ),
+            (
+                "checkout.thresholdForParallelism".to_owned(),
+                b"1024".to_vec(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn checkout_worker_limit_is_bounded_and_never_means_all_cpus() {
+        for (available, expected) in [(0, 1), (1, 1), (2, 2), (4, 4), (64, 4)] {
+            assert_eq!(bounded_checkout_workers(available), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialization_applies_explicit_worker_settings_without_using_repository_settings() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = RepositoryFixture::committed();
+        git(fixture.path(), &["config", "checkout.workers", "99"]);
+        git(
+            fixture.path(),
+            &["config", "checkout.thresholdForParallelism", "0"],
+        );
+        let scratch = tempdir().unwrap();
+        let wrapper = scratch.path().join("git-wrapper");
+        fs::write(
+            &wrapper,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$0.log\"\nexec git \"$@\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        let client = Git::new(&wrapper);
+        retry_while_wrapper_is_busy(|| client.detect()).unwrap();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let output = tempdir().unwrap();
+        client
+            .materialize_tree_with_config(
+                fixture.path(),
+                &tree,
+                output.path(),
+                &scratch.path().join("index"),
+                &bounded_checkout_configuration(),
+            )
+            .unwrap();
+        let log = fs::read_to_string(scratch.path().join("git-wrapper.log")).unwrap();
+        let checkout = log
+            .lines()
+            .find(|line| line.contains(" checkout-index "))
+            .unwrap();
+        let workers =
+            bounded_checkout_workers(std::thread::available_parallelism().map_or(1, |n| n.get()));
+        assert!(
+            checkout.contains(&format!("-c checkout.workers={workers} ")),
+            "{checkout}"
+        );
+        assert!(
+            checkout.contains("-c checkout.thresholdForParallelism=1024 "),
+            "{checkout}"
+        );
+        assert_eq!(
+            fs::read(output.path().join("tracked.txt")).unwrap(),
+            b"tracked\n"
+        );
+    }
+
+    #[test]
+    fn many_file_materialization_preserves_attributes_modes_and_sparse_selection() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(
+            fixture.path().join(".gitattributes"),
+            "*.txt text eol=crlf\n*.bin binary\n",
+        )
+        .unwrap();
+        fs::write(fixture.path().join("tracked.txt"), b"tracked\r\n").unwrap();
+        for folder in ["selected", "excluded"] {
+            fs::create_dir(fixture.path().join(folder)).unwrap();
+            for i in 0..600 {
+                fs::write(
+                    fixture.path().join(format!("{folder}/{i}.txt")),
+                    format!("{folder}:{i}\r\n"),
+                )
+                .unwrap();
+            }
+        }
+        fs::write(fixture.path().join("bytes.bin"), b"\0\xff\r\n\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{PermissionsExt, symlink};
+            fs::write(fixture.path().join("executable"), b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(
+                fixture.path().join("executable"),
+                fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+            symlink("selected/0.txt", fixture.path().join("link")).unwrap();
+        }
+        git(fixture.path(), &["add", "."]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "many attributed files"],
+        );
+        let client = Git::default();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        // These mutable inputs cannot leak into either sequential or parallel
+        // materialization after the exact checkout profile has been captured.
+        fs::write(fixture.path().join(".gitattributes"), "*.txt -text\n").unwrap();
+        fs::write(fixture.path().join(".git/info/attributes"), "*.txt -text\n").unwrap();
+        for (name, configuration, sparse) in [
+            ("parallel", bounded_checkout_configuration(), vec![]),
+            (
+                "sequential",
+                vec![("checkout.workers".to_owned(), b"1".to_vec())],
+                vec![],
+            ),
+            (
+                "sparse",
+                bounded_checkout_configuration(),
+                vec!["selected".to_owned()],
+            ),
+        ] {
+            let output = tempdir().unwrap();
+            let index = tempdir().unwrap();
+            client
+                .materialize_sparse_tree_with_config(
+                    fixture.path(),
+                    &tree,
+                    output.path(),
+                    &index.path().join("index"),
+                    &configuration,
+                    &sparse,
+                )
+                .unwrap();
+            for folder in ["selected", "excluded"] {
+                for i in 0..600 {
+                    let path = output.path().join(format!("{folder}/{i}.txt"));
+                    if name == "sparse" && folder == "excluded" {
+                        assert!(!path.exists());
+                    } else {
+                        assert_eq!(
+                            fs::read(path).unwrap(),
+                            format!("{folder}:{i}\r\n").as_bytes(),
+                            "{name}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                fs::read(output.path().join("bytes.bin")).unwrap(),
+                b"\0\xff\r\n\n"
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    fs::read_link(output.path().join("link")).unwrap(),
+                    Path::new("selected/0.txt")
+                );
+                assert_eq!(
+                    fs::metadata(output.path().join("executable"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o111,
+                    0o111
+                );
+            }
+        }
+        // Inject a missing blob through Git, without assuming add stored its
+        // objects loose (newer Git can pack bulk inserts immediately).
+        let missing = "a".repeat(tree.as_str().len());
+        assert!(
+            client
+                .run(Some(fixture.path()), &["cat-file", "-e", &missing])
+                .is_err()
+        );
+        git(
+            fixture.path(),
+            &[
+                "update-index",
+                "--cacheinfo",
+                "100644",
+                &missing,
+                "selected/599.txt",
+            ],
+        );
+        let damaged = client
+            .run(Some(fixture.path()), &["write-tree", "--missing-ok"])
+            .unwrap();
+        let damaged = super::parse_object_output(&damaged.stdout).unwrap();
+        let output = tempdir().unwrap();
+        let index = tempdir().unwrap();
+        client
+            .materialize_tree_with_config(
+                fixture.path(),
+                &damaged,
+                output.path(),
+                &index.path().join("index"),
+                &bounded_checkout_configuration(),
+            )
+            .expect_err("a worker missing an object must fail the entire checkout");
+    }
+
+    #[test]
+    #[ignore = "paired release-mode cold materialization benchmark; no wall-clock threshold"]
+    fn reports_bounded_checkout_worker_latency() {
+        let fixture = RepositoryFixture::committed();
+        for directory in 0..16 {
+            fs::create_dir(fixture.path().join(format!("p{directory}"))).unwrap();
+            for file in 0..256 {
+                let mut bytes = vec![b'x'; 8192];
+                let header = format!("{directory}:{file}\n");
+                bytes[..header.len()].copy_from_slice(header.as_bytes());
+                fs::write(fixture.path().join(format!("p{directory}/{file}")), bytes).unwrap();
+            }
+        }
+        git(fixture.path(), &["add", "."]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "cold materialization fixture"],
+        );
+        let client = Git::default();
+        let tree = client
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        for round in 0..4 {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for parallel in order {
+                let output = tempdir().unwrap();
+                let index = tempdir().unwrap();
+                let configuration = if parallel {
+                    bounded_checkout_configuration()
+                } else {
+                    vec![("checkout.workers".to_owned(), b"1".to_vec())]
+                };
+                let start = std::time::Instant::now();
+                client
+                    .materialize_tree_with_config(
+                        fixture.path(),
+                        &tree,
+                        output.path(),
+                        &index.path().join("index"),
+                        &configuration,
+                    )
+                    .unwrap();
+                let elapsed = start.elapsed();
+                for directory in 0..16 {
+                    for file in 0..256 {
+                        let name = format!("p{directory}/{file}");
+                        assert_eq!(
+                            fs::read(output.path().join(&name)).unwrap(),
+                            fs::read(fixture.path().join(name)).unwrap()
+                        );
+                    }
+                }
+                eprintln!(
+                    "bounded-checkout round={round} parallel={parallel} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
     }
 
     /// `remove_worktree` has always passed `--`; the force variant did not, so
@@ -5491,6 +6207,277 @@ mod tests {
     }
 
     #[test]
+    fn attributed_tree_queries_retain_private_index_semantics() {
+        let fixture = RepositoryFixture::committed();
+        fs::create_dir(fixture.path().join("nested")).unwrap();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text eol=lf\n").unwrap();
+        fs::write(
+            fixture.path().join("nested/.gitattributes"),
+            "*.txt -text\n",
+        )
+        .unwrap();
+        git(fixture.path(), &["add", "."]);
+        git(fixture.path(), &["commit", "-m", "attribute tree"]);
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        if !info.supports_attribute_source() {
+            return;
+        }
+        let tree = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let mut paths = vec![
+            PathBuf::from("tracked.txt"),
+            PathBuf::from("nested/日本語.txt"),
+        ];
+        paths.push(PathBuf::from("-tab\tline\n.txt"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(PathBuf::from(OsString::from_vec(
+                b"native-\xff.txt".to_vec(),
+            )));
+        }
+        // A staged/working-tree edit must not override the requested tree.
+        fs::write(fixture.path().join(".gitattributes"), "* ident\n").unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        let external = fixture.path().join("external-attributes");
+        fs::write(&external, "*.txt filter=external\n").unwrap();
+        git(
+            fixture.path(),
+            &["config", "core.attributesFile", external.to_str().unwrap()],
+        );
+        let index = handle.tree_attribute_index(fixture.path(), &tree).unwrap();
+        let expected = handle
+            .attribute_pair_for_index(fixture.path(), &index, &paths, true)
+            .unwrap();
+        assert_ne!(expected.0, expected.1);
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &tree, &paths, true, &info)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            handle.process_attempts() - before,
+            3,
+            "trees with attributes must retain the private index"
+        );
+        assert!(
+            !expected
+                .0
+                .iter()
+                .any(|attribute| attribute.name == b"ident")
+        );
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &tree, &paths[..0], true, &info)
+                .unwrap(),
+            (vec![], vec![])
+        );
+        assert_eq!(handle.process_attempts(), before);
+        // Older/unknown versions retain the exact existing index path.
+        for version in ["git version 2.42.4", "unrecognized vendor version"] {
+            let legacy = super::GitInfo {
+                command: info.command.clone(),
+                version: version.to_owned(),
+            };
+            let before = handle.process_attempts();
+            assert_eq!(
+                handle
+                    .attribute_pair_for_tree(fixture.path(), &tree, &paths, true, &legacy)
+                    .unwrap(),
+                expected
+            );
+            assert_eq!(handle.process_attempts() - before, 3);
+        }
+        let plain_tree = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD^"))
+            .unwrap()
+            .tree;
+        let plain_index = handle
+            .tree_attribute_index(fixture.path(), &plain_tree)
+            .unwrap();
+        let expected = handle
+            .attribute_pair_for_index(fixture.path(), &plain_index, &paths, false)
+            .unwrap();
+        assert!(expected.0.is_empty());
+        assert!(
+            !expected
+                .1
+                .iter()
+                .any(|attribute| attribute.name == b"ident")
+        );
+        assert!(
+            expected
+                .1
+                .iter()
+                .any(|attribute| attribute.name == b"filter")
+        );
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &plain_tree, &paths, false, &info)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            handle.process_attempts() - before,
+            1,
+            "attribute-free trees avoid read-tree and preserve native paths"
+        );
+        let legacy = super::GitInfo {
+            command: info.command.clone(),
+            version: "git version 2.42.4".to_owned(),
+        };
+        let before = handle.process_attempts();
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(fixture.path(), &plain_tree, &paths, false, &legacy)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(handle.process_attempts() - before, 2);
+    }
+
+    #[test]
+    fn attribute_source_support_requires_a_known_supported_git_version() {
+        for (version, supported) in [
+            ("git version 2.42.4", false),
+            ("git version 2.43.0", true),
+            ("git version 2.50.1 (Apple Git-155)", true),
+            ("git version 2.47.1.windows.1", true),
+            ("git version 2.43.0.rc0", false),
+            ("git version 2.43", false),
+            ("unknown", false),
+        ] {
+            let info = super::GitInfo {
+                command: "git".into(),
+                version: version.to_owned(),
+            };
+            assert_eq!(info.supports_attribute_source(), supported, "{version}");
+        }
+    }
+
+    #[test]
+    fn direct_tree_attributes_preserve_bare_sha256_info_rules_and_errors() {
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        if !info.supports_attribute_source() {
+            return;
+        }
+        let fixture = tempdir().unwrap();
+        git(
+            fixture.path(),
+            &["init", "--quiet", "--object-format=sha256"],
+        );
+        git(fixture.path(), &["config", "user.name", "Test"]);
+        git(
+            fixture.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        fs::write(fixture.path().join("tracked.txt"), "tracked\n").unwrap();
+        git(fixture.path(), &["add", "."]);
+        git(fixture.path(), &["commit", "--quiet", "-m", "fixture"]);
+        git(
+            fixture.path(),
+            &["clone", "--quiet", "--bare", ".", "bare.git"],
+        );
+        let bare = fixture.path().join("bare.git");
+        let tree = handle
+            .resolve_revision(&bare, OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        assert_eq!(tree.as_str().len(), 64);
+        fs::write(bare.join("info/attributes"), "*.txt ident\n").unwrap();
+        let paths = [PathBuf::from("tracked.txt")];
+        let index = handle.tree_attribute_index(&bare, &tree).unwrap();
+        let expected = handle
+            .attribute_pair_for_index(&bare, &index, &paths, false)
+            .unwrap();
+        assert!(
+            expected
+                .1
+                .iter()
+                .any(|attribute| attribute.name == b"ident")
+        );
+        assert_eq!(
+            handle
+                .attribute_pair_for_tree(&bare, &tree, &paths, false, &info)
+                .unwrap(),
+            expected
+        );
+        let absent = super::ObjectId::parse("f".repeat(64)).unwrap();
+        let before = handle.process_attempts();
+        assert!(matches!(
+            handle.attribute_pair_for_tree(&bare, &absent, &paths, false, &info),
+            Err(super::GitError::CommandFailed { .. })
+        ));
+        assert_eq!(
+            handle.process_attempts() - before,
+            1,
+            "do not retry a failed source query through a different path"
+        );
+    }
+
+    #[test]
+    #[ignore = "paired direct-tree attribute benchmark; no wall-clock threshold"]
+    fn reports_direct_tree_attribute_latency() {
+        let fixture = RepositoryFixture::committed();
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        if !info.supports_attribute_source() {
+            return;
+        }
+        let legacy = super::GitInfo {
+            command: info.command.clone(),
+            version: "git version 2.42.4".to_owned(),
+        };
+        let tree = handle
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .unwrap()
+            .tree;
+        let paths = (0..1000)
+            .map(|i| PathBuf::from(format!("path-{i}.txt")))
+            .collect::<Vec<_>>();
+        let expected = handle
+            .attribute_pair_for_tree(fixture.path(), &tree, &paths, false, &legacy)
+            .unwrap();
+        for round in 0..6 {
+            for direct in if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let starts = handle.process_attempts();
+                let start = std::time::Instant::now();
+                let records = handle
+                    .attribute_pair_for_tree(
+                        fixture.path(),
+                        &tree,
+                        &paths,
+                        false,
+                        if direct { &info } else { &legacy },
+                    )
+                    .unwrap();
+                let elapsed = start.elapsed();
+                assert_eq!(records, expected);
+                assert_eq!(
+                    handle.process_attempts() - starts,
+                    if direct { 1 } else { 2 }
+                );
+                println!(
+                    "direct-tree-attributes round={round} direct={direct} elapsed_us={}",
+                    elapsed.as_micros()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn borrowed_command_input_preserves_git_failure_when_pipe_closes_early() {
         let fixture = RepositoryFixture::committed();
         let handle = Git::default();
@@ -5808,7 +6795,7 @@ mod tests {
                         .unwrap()
                 } else {
                     handle
-                        .attributes_for_paths_as_arguments(fixture.path(), &paths, &[], &[])
+                        .attributes_for_paths_as_arguments(fixture.path(), &paths, &[], &[], None)
                         .unwrap()
                 };
                 let elapsed = start.elapsed();

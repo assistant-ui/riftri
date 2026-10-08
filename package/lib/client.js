@@ -29,9 +29,11 @@ const REPORTING = new Set([
 ]);
 
 class RiftriError extends Error {
-  constructor(exitCode, receipt, stderr, signal = null) {
+  constructor(exitCode, receipt, stderr, signal = null, report = null) {
     super(
-      receipt?.message ||
+      // JSON is not a guarantee of a valid receipt. Coercing an object here
+      // can throw inside the child close handler instead of rejecting run().
+      (typeof receipt?.message === "string" ? receipt.message : "") ||
         stderr.trim() ||
         (signal ? `riftri terminated by ${signal}` : `riftri exited ${exitCode}`),
     );
@@ -41,6 +43,7 @@ class RiftriError extends Error {
     this.exitCode = exitCode;
     this.signal = signal;
     this.receipt = receipt ?? null;
+    this.report = report;
   }
 
   /** The process was killed rather than exiting on its own. */
@@ -50,7 +53,12 @@ class RiftriError extends Error {
 
   /** Riftri declined before touching anything. Falling back is safe. */
   get isPolicyRefusal() {
-    return this.exitCode === EXIT_POLICY;
+    // Hooks and `exec` children can return 3 after performing work. Only a
+    // native refusal receipt proves the operation stopped before mutation.
+    return this.exitCode === EXIT_POLICY && this.signal === null && this.report === null &&
+      this.receipt?.schemaVersion === 1 && this.receipt?.outcome === "failed" &&
+      this.receipt?.category === "policy" && this.receipt?.cleanup === "not-needed" &&
+      typeof this.receipt?.code === "string";
   }
 
   /** The request itself was malformed. Never retry unchanged. */
@@ -118,6 +126,8 @@ class Riftri {
     this.worktree = {
       add: this.#worktreeAdd.bind(this),
       list: this.#worktreeList.bind(this),
+      owner: this.#worktreeOwner.bind(this),
+      inspect: this.#worktreeInspect.bind(this),
       remove: this.#worktreeRemove.bind(this),
       move: this.#worktreeMove.bind(this),
       compact: this.#worktreeCompact.bind(this),
@@ -153,9 +163,16 @@ class Riftri {
       let stderr = "";
       // Pipe chunks need not end on a UTF-8 character boundary. Let each
       // stream retain incomplete bytes between chunks (and flush at EOF).
-      child.stdout.setEncoding("utf8");
+      if (json) {
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (chunk) => (stdout += chunk));
+      } else {
+        // The API returns null for non-reporting commands. Drain their output
+        // without decoding or retaining it, so verbose children cannot grow
+        // the host heap in proportion to output that will be discarded.
+        child.stdout.resume();
+      }
       child.stderr.setEncoding("utf8");
-      child.stdout.on("data", (chunk) => (stdout += chunk));
       child.stderr.on("data", (chunk) => (stderr += chunk));
       child.on("error", reject);
       child.on("close", (exitCode, signal) => {
@@ -167,7 +184,7 @@ class Riftri {
           return;
         }
         if (exitCode === EXIT_SUCCESS) {
-          if (!json || !stdout.trim()) {
+          if (!json) {
             resolve(null);
             return;
           }
@@ -191,8 +208,11 @@ class Riftri {
         // child wrote there first (a hook's output, a Git warning) must not
         // cost the caller the receipt's code and category.
         let receipt = null;
-        const lines = stderr.trimEnd().split("\n");
-        for (const candidate of [lines.at(-1), stderr]) {
+        // Preserve the full diagnostic fallback without allocating an array
+        // and a string entry for every line of a verbose child's output.
+        const trimmed = stderr.trimEnd();
+        const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1);
+        for (const candidate of [lastLine, stderr]) {
           try {
             receipt = JSON.parse(candidate);
             break;
@@ -200,7 +220,18 @@ class Riftri {
             // Plain text, as from a binary that predates usage receipts.
           }
         }
-        reject(new RiftriError(exitCode, receipt, stderr));
+        let report = null;
+        if (json && stdout.trim()) {
+          // A failed post-checkout hook leaves a created worktree in place.
+          // Preserve that report even though the hook's status rejects run().
+          try {
+            report = JSON.parse(stdout);
+          } catch {
+            // Malformed output cannot prove that a fallback is safe either.
+          }
+          receipt = null;
+        }
+        reject(new RiftriError(exitCode, receipt, stderr, null, report));
       });
     });
   }
@@ -288,6 +319,15 @@ class Riftri {
     return this.run(["worktree", "list", ...flagsFor(options), ...state]);
   }
 
+  #worktreeOwner(destination) {
+    // Ownership always consults every registered state, not this.stateDir.
+    return this.run(["worktree", "owner", "--", destination]);
+  }
+
+  #worktreeInspect(destinations) {
+    return this.run(["worktree", "inspect", "--", ...destinations]);
+  }
+
   #worktreeRemove(destination, { force = false } = {}) {
     const args = ["worktree", "remove"];
     if (force) args.push("--force", "--yes");
@@ -310,6 +350,7 @@ class Riftri {
 module.exports = {
   Riftri,
   RiftriError,
+  resolveBinary,
   EXIT_SUCCESS,
   EXIT_OPERATIONAL,
   EXIT_USAGE,

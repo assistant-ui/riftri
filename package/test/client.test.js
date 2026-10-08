@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { spawnSync } = require("node:child_process");
 
 const root = path.resolve(__dirname, "../..");
 const {
@@ -40,7 +41,7 @@ function argvBinary(directory) {
   const log = path.join(directory, "argv.txt");
   fs.writeFileSync(
     file,
-    `#!/bin/sh\n: > ${JSON.stringify(log)}\nfor a in "$@"; do printf '%s\\n' "$a" >> ${JSON.stringify(log)}; done\n`,
+    `#!/bin/sh\n: > ${JSON.stringify(log)}\nfor a in "$@"; do printf '%s\\n' "$a" >> ${JSON.stringify(log)}; done\nprintf '{}\\n'\n`,
   );
   fs.chmodSync(file, 0o755);
   return { binary: file, argv: () => fs.readFileSync(log, "utf8").split("\n").slice(0, -1) };
@@ -82,6 +83,15 @@ test("the package exposes the client as its main entry point", () => {
   assert.equal(manifest.types, "package/lib/client.d.ts");
   assert.equal(manifest.exports["."].require, "./package/lib/client.js");
   assert.ok(fs.existsSync(path.join(root, manifest.types)), "types file must exist");
+});
+
+test("a process-owning harness can resolve the same verified native executable", () => {
+  const { execFileSync } = require("node:child_process");
+  const output = execFileSync(process.execPath, ["-e", `
+    const { resolveBinary } = require(${JSON.stringify(path.join(root, "package/lib/client.js"))});
+    process.stdout.write(resolveBinary());
+  `], { encoding: "utf8", env: { ...process.env, RIFTRI_BINARY: process.execPath } });
+  assert.equal(output, process.execPath);
 });
 
 test("release staging rewrites entry points to the tarball layout", async () => {
@@ -147,6 +157,38 @@ test("a policy refusal becomes a typed error carrying its receipt", { skip: onWi
     },
   );
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("a checkout hook exit of 3 retains the created report and never permits fallback", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const report = {
+    schema_version: 1,
+    destination: "../created",
+    backend: "apfs-clone",
+    post_checkout: { hook: "post-checkout", started: true, exit_code: 3 },
+  };
+  const binary = fakeBinary(directory, { stdout: JSON.stringify(report), code: 3 });
+  await assert.rejects(new Riftri({ repository: directory, binary }).worktree.add("../created"), (error) => {
+    assert.equal(error.isPolicyRefusal, false);
+    assert.equal(error.exitCode, 3);
+    assert.equal(error.receipt, null);
+    assert.deepEqual(error.report, report);
+    return true;
+  });
+});
+
+test("exit 3 without an intact refusal receipt is not a safe fallback", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  for (const receipt of [null, {}, { category: "policy" }, {
+    schemaVersion: 1, outcome: "failed", code: "failed-add", category: "policy", cleanup: "pending",
+  }]) {
+    const binary = fakeBinary(directory, { stderr: JSON.stringify(receipt), code: 3 });
+    await assert.rejects(new Riftri({ repository: directory, binary }).worktree.add("../task"), (error) => {
+      assert.equal(error.isPolicyRefusal, false);
+      assert.equal(error.report, null);
+      return true;
+    });
+  }
 });
 
 test("a receipt after other stderr output is still parsed", { skip: onWindows }, async () => {
@@ -314,6 +356,22 @@ test("listing every state never also names the configured one", { skip: onWindow
   assert.ok(stub.argv().includes("--state-dir=state"), stub.argv().join(" "));
 });
 
+test("ownership looks across registered states and protects option-like paths", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "state" });
+  await riftri.worktree.owner("-view");
+  assert.deepEqual(stub.argv(), ["worktree", "owner", "--json", "--json-errors", "--", "-view"]);
+});
+
+test("batch inspection keeps all paths behind the option boundary and ignores client stateDir", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "state" });
+  await riftri.worktree.inspect(["-view", "view with spaces"]);
+  assert.deepEqual(stub.argv(), ["worktree", "inspect", "--json", "--json-errors", "--", "-view", "view with spaces"]);
+});
+
 test("a relative binary is relative to the caller, not the repository", { skip: onWindows }, async (t) => {
   // spawn resolves a relative command against its cwd, so this failed with
   // ENOENT whenever `repository` was not the caller's own directory.
@@ -333,6 +391,97 @@ test("a command with no payload still receives its flags last", { skip: onWindow
     "--json",
     "--json-errors",
   ]);
+});
+
+test("malformed receipt messages reject without crashing the host", () => {
+  const producer = `process.stderr.write(JSON.stringify({message:{toString:0,valueOf:0}})); process.exitCode=1;`;
+  const host = `
+    const {Riftri, RiftriError} = require(${JSON.stringify(require.resolve("../lib/client.js"))});
+    new Riftri({binary:process.execPath}).run(
+      ["-e", ${JSON.stringify(producer)}, "fixture"], {json:true}
+    ).then(() => {process.exitCode=2;}, error => {
+      if (!(error instanceof RiftriError) || error.exitCode !== 1) process.exitCode=3;
+      else console.log("rejection caught");
+    });
+  `;
+  const result = spawnSync(process.execPath, ["-e", host], { encoding: "utf8", timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /rejection caught/);
+});
+
+test("non-string receipt messages use diagnostic text without coercion", () => {
+  for (const message of [null, false, 42, [], { toString: 0, valueOf: 0 }]) {
+    assert.equal(new RiftriError(1, { message }, "diagnostic").message, "diagnostic");
+  }
+  assert.equal(new RiftriError(1, { message: "receipt" }, "diagnostic").message, "receipt");
+});
+
+test("a receipt after a large multiline log fits within a small heap", () => {
+  const producer = `
+    const {once} = require("node:events");
+    (async () => {
+      const chunk = "log line\\n".repeat(10000);
+      for (let i = 0; i < 300; i++) {
+        if (!process.stderr.write(chunk)) await once(process.stderr, "drain");
+      }
+      process.stderr.write(JSON.stringify({code:"worktree-busy",message:"busy"}) + "\\n");
+      process.exitCode = 1;
+    })();
+  `;
+  const host = `
+    const {Riftri, RiftriError} = require(${JSON.stringify(require.resolve("../lib/client.js"))});
+    new Riftri({binary:process.execPath}).run(
+      ["-e", ${JSON.stringify(producer)}, "fixture"], {json:false}
+    ).then(() => {process.exitCode=2;}, error => {
+      if (!(error instanceof RiftriError) || !error.isBusy || error.message !== "busy") process.exitCode=3;
+      else console.log("receipt preserved");
+    });
+  `;
+  const result = spawnSync(process.execPath, ["--max-old-space-size=64", "-e", host], {
+    encoding: "utf8", timeout: 60000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /receipt preserved/);
+});
+
+test("non-reporting commands drain large stdout within a small heap", () => {
+  const producer = `
+    const {once} = require("node:events");
+    (async () => {
+      const chunk = Buffer.alloc(64 * 1024, 120);
+      for (let i = 0; i < 1024; i++) {
+        if (!process.stdout.write(chunk)) await once(process.stdout, "drain");
+      }
+    })().catch(() => {process.exitCode=1;});
+  `;
+  const host = `
+    const {Riftri} = require(${JSON.stringify(require.resolve("../lib/client.js"))});
+    new Riftri({binary:process.execPath}).run(
+      ["-e", ${JSON.stringify(producer)}, "fixture"], {json:false}
+    ).then(value => {
+      if (value !== null) process.exitCode=2;
+      else console.log("drained 64 MiB");
+    }, () => {process.exitCode=3;});
+  `;
+  const result = spawnSync(process.execPath, ["--max-old-space-size=32", "-e", host], {
+    encoding: "utf8", timeout: 60000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /drained 64 MiB/);
+});
+
+test("empty JSON reports reject while non-reporting commands still succeed", async () => {
+  const riftri = new Riftri({ binary: process.execPath });
+  for (const stdout of ["", " \t\r\n"]) {
+    const args = ["-e", `process.stdout.write(${JSON.stringify(stdout)})`, "fixture"];
+    await assert.rejects(riftri.run(args, { json: true }), (error) => {
+      assert.ok(error instanceof RiftriError);
+      assert.equal(error.exitCode, EXIT_OPERATIONAL);
+      assert.match(error.message, /not JSON/);
+      return true;
+    });
+    assert.equal(await riftri.run(args, { json: false }), null);
+  }
 });
 
 test("malformed JSON from a successful run rejects instead of crashing", { skip: onWindows }, async (t) => {
@@ -392,7 +541,7 @@ test("isOptimizable answers false only when Riftri answers", { skip: onWindows }
 
   // A refusal is Riftri saying no: a legitimate false.
   const refused = fakeBinary(directory, {
-    stderr: JSON.stringify({ code: "unsupported-filesystem", message: "no backend" }),
+    stderr: JSON.stringify({ schemaVersion: 1, outcome: "failed", category: "policy", cleanup: "not-needed", code: "unsupported-filesystem", message: "no backend" }),
     code: EXIT_POLICY,
   });
   assert.equal(await new Riftri({ repository: directory, binary: refused }).isOptimizable("t"), false);
@@ -429,6 +578,11 @@ test("isOptimizable rejects a broken installation instead of answering false", {
   const garbage = fakeBinary(directory, { stdout: "not json at all" });
   await assert.rejects(
     () => new Riftri({ repository: directory, binary: garbage }).isOptimizable("t"),
+    /not JSON/,
+  );
+  const empty = fakeBinary(directory, {});
+  await assert.rejects(
+    () => new Riftri({ repository: directory, binary: empty }).isOptimizable("t"),
     /not JSON/,
   );
 });

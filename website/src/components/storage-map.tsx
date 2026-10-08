@@ -1,22 +1,4 @@
-
-const views = [
-  { index: "01", name: "auth", branch: "feature/auth", changed: 3 },
-  { index: "02", name: "billing", branch: "feature/billing", changed: 2 },
-  { index: "03", name: "tests", branch: "fix/worktree-tests", changed: 1 },
-] as const;
-
-function BlockTrack({ changed }: { changed: number }) {
-  return (
-    <span className="block-track" aria-hidden="true">
-      <span className="track-line">
-        {Array.from({ length: 16 }, (_, index) => <span key={index}>·</span>)}
-      </span>
-      <span className="track-counter" style={{ animationTimingFunction: `steps(${changed}, end)` }}>
-        {Array.from({ length: changed }, (_, index) => <span key={index}>█</span>)}
-      </span>
-    </span>
-  );
-}
+import { StorageFigure } from "./storage-figure";
 
 export function StorageMap() {
   return (
@@ -30,31 +12,13 @@ export function StorageMap() {
         <span>REPOSITORY / EXACT TREE</span>
         <span>a4d2c19</span>
       </div>
-      <div className="base-node">
-        <span className="node-index">00</span>
-        <div>
-          <strong>immutable base</strong>
-          <small>one materialized Git tree / read only</small>
-        </div>
-        <span className="base-track" aria-hidden="true">████████████████</span>
-      </div>
-      <div className="branch-line" aria-hidden="true">└──────────────┬──────────────┐</div>
-      <div className="view-list">
-        {views.map((view) => (
-          <div className="view-row" key={view.name}>
-            <span className="node-index">{view.index}</span>
-            <div>
-              <strong>{view.name}/</strong>
-              <small>{view.branch}</small>
-            </div>
-            <BlockTrack changed={view.changed} />
-          </div>
-        ))}
-      </div>
-      <div className="map-legend">
-        <span><i>·</i> shared block</span>
-        <span><i>█</i> private edit</span>
-      </div>
+      <p className="visually-hidden">
+        One immutable base holds the exact Git tree once. Three worktrees, auth, billing, and
+        tests, are copy-on-write views over it. Each edit copies only the changed block into
+        its worktree: three blocks in auth, two in billing, and one in tests. Every other block
+        stays shared with the base.
+      </p>
+      <StorageFigure />
     </figure>
   );
 }

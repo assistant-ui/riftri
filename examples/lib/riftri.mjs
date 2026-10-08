@@ -17,7 +17,7 @@ export const EXIT = {
 
 /** Thrown for any non-zero exit, carrying the parsed receipt when present. */
 export class RiftriError extends Error {
-  constructor(exitCode, receipt, stderr, signal = null) {
+  constructor(exitCode, receipt, stderr, signal = null, report = null) {
     // `??` would keep an empty string, so a silent failure had no message.
     super(
       receipt?.message ||
@@ -31,6 +31,7 @@ export class RiftriError extends Error {
     this.exitCode = exitCode;
     this.signal = signal;
     this.receipt = receipt; // parsed --json-errors receipt, or null
+    this.report = report;
   }
 
   /** The process was killed rather than exiting on its own. */
@@ -40,7 +41,10 @@ export class RiftriError extends Error {
 
   /** Riftri declined before touching anything: safe to fall back. */
   get isPolicyRefusal() {
-    return this.exitCode === EXIT.POLICY;
+    return this.exitCode === EXIT.POLICY && this.signal === null && this.report === null &&
+      this.receipt?.schemaVersion === 1 && this.receipt?.outcome === "failed" &&
+      this.receipt?.category === "policy" && this.receipt?.cleanup === "not-needed" &&
+      typeof this.receipt?.code === "string";
   }
 
   /** The request itself was malformed. Never retry unchanged. */
@@ -141,7 +145,16 @@ export function riftri(args, { cwd, bin = "riftri", json = true } = {}) {
         // A usage error (exit 2) is reported by the argument parser and never
         // produces a receipt, so leaving this null is expected.
       }
-      reject(new RiftriError(code, receipt, stderr));
+      let report = null;
+      if (json && stdout.trim()) {
+        try {
+          report = JSON.parse(stdout);
+        } catch {
+          // Ambiguous output must not permit a second checkout via fallback.
+        }
+        receipt = null;
+      }
+      reject(new RiftriError(code, receipt, stderr, null, report));
     });
   });
 }

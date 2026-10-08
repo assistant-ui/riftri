@@ -100,13 +100,17 @@ test('full comparison verifies a thousand-file fixture and ten concurrent CLI vi
   const binary = path.resolve(process.env.RIFTRI_BENCH_TEST_BINARY);
   const output = path.join(root, 'results');
   run(process.execPath, [fileURLToPath(new URL('./checkout-config-batching.mjs', import.meta.url)), binary, binary, source, 'HEAD', output], source,
-    { ...process.env, RIFTRI_BENCH_SINGLE_ROUNDS: '1', RIFTRI_BENCH_BATCH_ROUNDS: '1', RIFTRI_BENCH_WORKERS: '10' });
+    { ...process.env, RIFTRI_BENCH_COLD_ROUNDS: '2', RIFTRI_BENCH_SINGLE_ROUNDS: '1', RIFTRI_BENCH_BATCH_ROUNDS: '1', RIFTRI_BENCH_WORKERS: '10' });
   const result = JSON.parse(fs.readFileSync(path.join(output, 'results.json')));
   assert.ok(result.completedAt);
   assert.equal(result.allViewsVerifiedAndRemoved, true);
   assert.equal(result.files, 1026);
   assert.equal(result.batches.length, 5);
   assert.equal(result.summaries.length, 5);
+  assert.equal(result.coldRounds, 2);
+  assert.equal(result.coldSummaries.length, 2);
+  for (const summary of result.coldSummaries) assert.equal(summary.seconds.samples, 2);
+  assert.deepEqual(result.cases.filter(record => record.label.startsWith('cold-')).map(record => record.version), ['before', 'after', 'after', 'before']);
   for (const summary of result.summaries) {
     assert.equal(summary.serialSeconds.samples, 1);
     assert.equal(summary.concurrentViewSeconds.samples, 10);

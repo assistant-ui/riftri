@@ -57,9 +57,18 @@ jobs:
       - name: Run Rust tests (tui feature)
         run: cargo test --workspace --locked --features riftri-cli/tui
 
+      - name: Measure bounded cold checkout workers
+        run: cargo test --release --locked -p riftri-git reports_bounded_checkout_worker_latency -- --ignored --nocapture
+
       - name: Measure Windows attribute batching
         if: matrix.os == 'windows-2025'
         run: cargo test --release --locked -p riftri-git reports_attribute_stdin_latency -- --ignored --nocapture
+
+      - name: Measure exact-tree attribute queries
+        run: cargo test --release --locked -p riftri-git reports_direct_tree_attribute_latency -- --ignored --nocapture
+
+      - name: Measure add revision batching
+        run: cargo test --release --locked -p riftri-git reports_add_revision_batch_latency -- --ignored --nocapture
 
       # The tui feature deselects crates/riftri-cli/src/ui/plain.rs, so the
       # default/plain build shipped by `cargo install riftri-cli` and

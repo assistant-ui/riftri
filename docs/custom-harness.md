@@ -131,9 +131,18 @@ a repository reports `"code": "not-a-repository"` with `category` `policy` and
 exit code `3`, so a runner in the wrong working directory is told to fix the
 call rather than to retry or inspect.
 
-Three more carry their own codes, also `policy` with exit `3`, `cleanup`
-`not-needed`, and no `nextCommand`, because no Riftri command can fix them:
+These preflight refusals also carry their own codes, with `category` `policy`,
+exit `3`, `cleanup` `not-needed`, and no `nextCommand`, because no Riftri command
+can fix them:
 
+- `branch-already-exists` — a new branch was requested with a name that already
+  exists. Choose another name or use an existing-branch add.
+- `branch-checked-out` — an existing branch is already checked out in a
+  registered worktree. Use that worktree or another branch. If the holder was
+  deleted, inspect Git's registrations before pruning them.
+- `destination-exists` — the destination is occupied. Existing empty real
+  directories remain accepted for adds; files, nonempty directories, and
+  symbolic links are not overwritten.
 - `bare-repository` — enabling Git interception (`riftri enable`) ran in a
   bare repository. Worktree lifecycle commands, `status`, `gc`, and `repair`
   all work in one;
@@ -152,7 +161,7 @@ With `--json-errors`, the failure arrives as one receipt on stderr:
   "schemaVersion": 1,
   "outcome": "failed",
   "operation": "worktree-add",
-  "code": "invalid-request",
+  "code": "destination-exists",
   "category": "policy",
   "message": "invalid worktree request: destination already exists: ../t1",
   "phase": null,
@@ -265,9 +274,16 @@ The report answers the question directly:
 The resulting policy is simple:
 
 - Ready → use `riftri worktree add`
-- `needs-activation` → run `riftri enable` once, then use Riftri
-- No supported backend, or exit code `3` from an add → **fall back to plain
-  `git worktree add`** and continue
+- `needs-activation` → use the explicit Riftri command; enablement only gates
+  interception, which a direct integration does not need
+- No supported backend, or exit code `3` **with a native policy receipt and
+  `cleanup: "not-needed"`** from an add → **fall back to plain `git worktree
+  add`** and continue
+
+An exit code alone is insufficient: a failed checkout hook can also exit `3`
+after creating a worktree. Preserve that worktree and surface the hook failure,
+never retry its creation. The Node API's `isPolicyRefusal` checks the receipt;
+`error.report` retains a creation report returned with a failed hook.
 
 That last branch is what makes Riftri safe to adopt as a default. A policy
 refusal changed nothing, so falling back to ordinary Git is always

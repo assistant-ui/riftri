@@ -3,6 +3,9 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+// Kept in step with the ELF release gate and standalone installer by tests.
+const GLIBC_FLOOR = "2.34";
+
 const PLATFORM_PACKAGES = Object.freeze({
   "darwin-arm64": "riftri-darwin-arm64",
   "darwin-x64": "riftri-darwin-x64",
@@ -20,7 +23,22 @@ function detectLinuxLibc(report = process.report) {
   }
 
   const header = report.getReport()?.header;
-  return header?.glibcVersionRuntime ? "gnu" : "musl";
+  const version = header?.glibcVersionRuntime;
+  if (!version) return "musl";
+  const parts = typeof version === "string" && /^(\d+)\.(\d+)(?:\.\d+)?$/.exec(version);
+  const [major, minor] = parts ? parts.slice(1, 3).map(Number) : [];
+  const [floorMajor, floorMinor] = GLIBC_FLOOR.split(".").map(Number);
+  if (!Number.isSafeInteger(major) || !Number.isSafeInteger(minor) ||
+      major < floorMajor || (major === floorMajor && minor < floorMinor)) {
+    // npm excludes musl optional dependencies on glibc hosts. Do not select
+    // an absent package or attempt to execute an incompatible GNU binary.
+    throw new Error(
+      `Riftri's GNU npm binary requires glibc ${GLIBC_FLOOR} or newer (detected ${version}); ` +
+      "use the standalone installer at https://riftri.dev/install.sh for the static musl binary, " +
+      "then set RIFTRI_BINARY to its absolute path when using the Node SDK",
+    );
+  }
+  return "gnu";
 }
 
 function platformKey(
@@ -44,6 +62,9 @@ function binaryName(platform = process.platform) {
 
 function assertUsableBinary(candidate, source) {
   try {
+    // Follow executable symlinks, but reject directories and special files
+    // that can pass an access check without being runnable binaries.
+    if (!fs.statSync(candidate).isFile()) throw new Error("not a regular file");
     fs.accessSync(
       candidate,
       process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK,
@@ -52,6 +73,17 @@ function assertUsableBinary(candidate, source) {
     throw new Error(`${source} does not contain an executable Riftri binary: ${candidate}`);
   }
   return candidate;
+}
+
+function unpackedElectronBinary(candidate) {
+  if (!process.versions.electron) return candidate;
+  const segments = candidate.split(path.sep);
+  const archive = segments.findLastIndex((segment) => segment.endsWith(".asar"));
+  if (archive < 0) return candidate;
+  // Electron can read an archived executable, but the OS cannot spawn it.
+  // Validate the physical file below instead of relying on Electron's virtual fs.
+  segments[archive] += ".unpacked";
+  return segments.join(path.sep);
 }
 
 function launcherVersion() {
@@ -120,10 +152,11 @@ function resolveBinary(options = {}) {
   );
 
   const candidate = path.join(path.dirname(packageJson), "bin", binaryName(platform));
-  return assertUsableBinary(candidate, packageName);
+  return assertUsableBinary(unpackedElectronBinary(candidate), packageName);
 }
 
 module.exports = {
+  GLIBC_FLOOR,
   PLATFORM_PACKAGES,
   assertCompatiblePackageManifest,
   binaryName,

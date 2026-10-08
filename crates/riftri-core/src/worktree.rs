@@ -479,6 +479,16 @@ pub enum WorktreeError {
 
     #[error("invalid worktree request: {0}")]
     InvalidRequest(String),
+
+    /// Preflight conflicts remain policy refusals, but harnesses can identify
+    /// them without parsing Git's or Riftri's human-readable diagnostics.
+    #[error("invalid worktree request: {0}")]
+    BranchAlreadyExists(String),
+    #[error("invalid worktree request: {0}")]
+    BranchCheckedOut(String),
+    #[error("invalid worktree request: {0}")]
+    DestinationExists(String),
+
     /// The requested start point is `HEAD`, and `HEAD` names no commit: the
     /// repository or its current branch has no commits yet. A policy refusal
     /// like `InvalidRequest`; it is typed separately so the Git shim can hand
@@ -867,40 +877,182 @@ pub fn forget_missing_state_directory(
     ))
 }
 
-pub(crate) fn managed_worktree_state_directory(
+/// Discover the state directory claiming a destination across all registered
+/// states, without traversing worktree contents or computing disk usage.
+///
+/// This is advisory routing information, not authorization to delete. Lifecycle
+/// operations revalidate ownership under their locks. Missing or invalid state
+/// and pending operations fail closed rather than reporting an unmanaged path.
+pub fn managed_worktree_state_directory(
     repository: &Path,
     destination: &Path,
 ) -> Result<Option<PathBuf>, WorktreeError> {
+    Ok(
+        find_managed_worktrees(repository, &[destination.to_path_buf()])?
+            .pop()
+            .flatten()
+            .map(|(state, _)| state),
+    )
+}
+
+/// Advisory mount readiness, not an authorization to mutate or delete a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WorktreeMountStatus {
+    Active,
+    RecoveryRequired,
+    DifferentNamespace,
+    Foreign,
+    Unavailable,
+}
+
+/// Lightweight lifecycle metadata. No worktree contents or allocation walk is
+/// needed, and an unmanaged path has no state, backend, or mount status.
+#[derive(Debug, Clone)]
+pub struct ManagedWorktreeInspection {
+    pub path: PathBuf,
+    pub state_directory: Option<PathBuf>,
+    pub backend: Option<BackendKind>,
+    /// None for unmanaged paths and backends that do not require a mount.
+    pub mount_status: Option<WorktreeMountStatus>,
+}
+
+/// Inspect a batch with one repository/state discovery pass. Incomplete or
+/// ambiguous ownership fails the whole query; it never becomes "unmanaged".
+/// Mount inspection is read-only, including an interrupted remount's private
+/// work directory. Callers must re-query after repair before starting work.
+pub fn inspect_managed_worktrees(
+    repository: &Path,
+    destinations: &[PathBuf],
+) -> Result<Vec<ManagedWorktreeInspection>, WorktreeError> {
+    find_managed_worktrees(repository, destinations)?
+        .into_iter()
+        .zip(destinations)
+        .map(|(owner, path)| {
+            let mut report = ManagedWorktreeInspection {
+                path: path.clone(),
+                state_directory: None,
+                backend: None,
+                mount_status: None,
+            };
+            if let Some((state, journal)) = owner {
+                report.state_directory = Some(state);
+                report.backend = Some(journal.backend);
+                if journal.backend == BackendKind::OverlayFs {
+                    report.mount_status = Some(inspect_worktree_mount(&journal)?);
+                }
+            }
+            Ok(report)
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn inspect_worktree_mount(_journal: &DecodedJournal) -> Result<WorktreeMountStatus, WorktreeError> {
+    Ok(WorktreeMountStatus::Unavailable)
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_worktree_mount(journal: &DecodedJournal) -> Result<WorktreeMountStatus, WorktreeError> {
+    let Some(overlayfs) = &journal.overlayfs else {
+        return Ok(WorktreeMountStatus::Unavailable);
+    };
+    if let Some(identity) = &overlayfs.mount_identity {
+        let layout = OverlayFsMounter::load(
+            &overlayfs.layout_root,
+            &journal.base_path,
+            &journal.destination,
+        )?;
+        return Ok(match OverlayFsMounter::mount_state(&layout, identity)? {
+            OverlayFsMountState::Active => WorktreeMountStatus::Active,
+            OverlayFsMountState::Absent => WorktreeMountStatus::RecoveryRequired,
+            OverlayFsMountState::DifferentNamespace => WorktreeMountStatus::DifferentNamespace,
+            OverlayFsMountState::Foreign => WorktreeMountStatus::Foreign,
+        });
+    }
+    let Some(context) = &overlayfs.mount_context else {
+        return Ok(WorktreeMountStatus::Unavailable);
+    };
+    // The recovery loader can recreate a missing disposable work directory;
+    // a read-only query must fail closed instead of doing that mutation.
+    let layout = OverlayFsMounter::load(
+        &overlayfs.layout_root,
+        &journal.base_path,
+        &journal.destination,
+    )?;
+    Ok(
+        match OverlayFsMounter::recover_mount(&layout, context, &overlayfs.recovery_token)? {
+            // Even a live token-bound mount needs its identity durably adopted.
+            OverlayFsRecoveryState::Mounted(_)
+            | OverlayFsRecoveryState::Absent
+            | OverlayFsRecoveryState::Prepared => WorktreeMountStatus::RecoveryRequired,
+            OverlayFsRecoveryState::DifferentNamespace => WorktreeMountStatus::DifferentNamespace,
+            OverlayFsRecoveryState::Foreign => WorktreeMountStatus::Foreign,
+        },
+    )
+}
+
+fn find_managed_worktrees(
+    repository: &Path,
+    destinations: &[PathBuf],
+) -> Result<Vec<Option<(PathBuf, DecodedJournal)>>, WorktreeError> {
     let git = Git::default();
     let repository_info = git.inspect_repository(repository)?;
-    let destinations = managed_destination_candidates(destination)?;
-    let destination_set = destinations.iter().cloned().collect::<HashSet<_>>();
-    let mut matches = Vec::new();
+    let candidates = destinations
+        .iter()
+        .map(|destination| managed_destination_candidates(destination))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut matches = vec![None; destinations.len()];
     for state_directory in repository_state_directories_with_git(&git, &repository_info)? {
         let snapshot = ManagedJournalSnapshot::load(&state_directory)?;
-        let mut active_add = false;
-        for destination in &destinations {
-            if snapshot.find(&state_directory, destination)?.is_some() {
-                active_add = true;
-                break;
+        for (index, (destination, candidates)) in destinations.iter().zip(&candidates).enumerate() {
+            if snapshot.adds.iter().any(|journal| {
+                !matches!(
+                    journal.phase,
+                    AddWorktreePhase::Active | AddWorktreePhase::RolledBack
+                ) && candidates
+                    .iter()
+                    .any(|destination| paths_match(&journal.destination, destination))
+            }) {
+                return Err(pending_lifecycle_error(
+                    "add",
+                    destination,
+                    &state_directory,
+                ));
+            }
+            let mut active_add = None;
+            for candidate in candidates {
+                if let Some(journal) = snapshot.find(&state_directory, candidate)? {
+                    active_add = Some(journal);
+                    break;
+                }
+            }
+            let pending_move = snapshot.moves.iter().any(|journal| {
+                !journal.phase.is_finished()
+                    && candidates.iter().any(|candidate| {
+                        paths_match(candidate, &journal.source)
+                            || paths_match(candidate, &journal.destination)
+                    })
+            });
+            if pending_move {
+                return Err(pending_lifecycle_error(
+                    "move",
+                    destination,
+                    &state_directory,
+                ));
+            }
+            if let Some(journal) = active_add {
+                if matches[index].is_some() {
+                    return Err(WorktreeError::InvalidRequest(format!(
+                        "multiple registered Riftri state directories manage {}",
+                        destination.display()
+                    )));
+                }
+                matches[index] = Some((state_directory.clone(), journal.clone()));
             }
         }
-        let pending_move = snapshot.moves.iter().any(|journal| {
-            !journal.phase.is_finished()
-                && (destination_set.contains(&journal.source)
-                    || destination_set.contains(&journal.destination))
-        });
-        if active_add || pending_move {
-            matches.push(state_directory);
-        }
     }
-    if matches.len() > 1 {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "multiple registered Riftri state directories manage {}",
-            destination.display()
-        )));
-    }
-    Ok(matches.pop())
+    Ok(matches)
 }
 
 pub(crate) fn repository_state_directories(
@@ -3494,14 +3646,6 @@ fn add_worktree_inner(
     rollback_on_error: bool,
 ) -> Result<AddWorktreeResult, WorktreeError> {
     let git = Git::default();
-    let repository = git.inspect_repository_with_head_tree(&request.repository)?;
-    let repository_root = git_command_root(&repository)
-        .map(Path::to_path_buf)
-        .ok_or_else(|| {
-            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
-        })?;
-    let destination =
-        normalize_new_destination(&request.destination, DestinationRules::WorktreeAdd)?;
     // An existing-branch add checks out the branch, as `git worktree add
     // <path> <branch>` does, even when a tag has the same name: resolving the
     // bare name would pick the tag and then refuse because "the branch moved".
@@ -3513,7 +3657,18 @@ fn add_worktree_inner(
         }
         WorktreeMode::NewBranch(_) | WorktreeMode::Detached => request.revision.clone(),
     };
-    let resolved = if requested == OsStr::new("HEAD") {
+    let (repository, pre_resolved) =
+        git.inspect_repository_for_add(&request.repository, &requested)?;
+    let repository_root = git_command_root(&repository)
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
+        })?;
+    let destination =
+        normalize_new_destination(&request.destination, DestinationRules::WorktreeAdd)?;
+    let resolved = if let Some(resolved) = pre_resolved {
+        resolved
+    } else if requested == OsStr::new("HEAD") {
         match (repository.head_commit.clone(), repository.head_tree.clone()) {
             (Some(commit), Some(tree)) => ResolvedRevision { commit, tree },
             _ => resolve_requested_revision(&git, &repository_root, &requested)?,
@@ -3541,7 +3696,7 @@ fn add_worktree_inner(
     if let WorktreeMode::NewBranch(branch) = &request.mode
         && git.local_branch_target(&repository_root, branch)?.is_some()
     {
-        return Err(WorktreeError::InvalidRequest(format!(
+        return Err(WorktreeError::BranchAlreadyExists(format!(
             "a branch named {} already exists; choose another name or check it out with an existing-branch add",
             branch.to_string_lossy()
         )));
@@ -3596,7 +3751,7 @@ fn add_worktree_inner(
             } else {
                 ""
             };
-            return Err(WorktreeError::InvalidRequest(format!(
+            return Err(WorktreeError::BranchCheckedOut(format!(
                 "branch {} is already checked out at {}{clear}",
                 branch.to_string_lossy(),
                 holder.path.display()
@@ -5269,6 +5424,7 @@ fn analyze_resolved_repository_compatibility(
     sparse_directories: &[String],
     captured_config: Option<ConfigValues>,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
+    let git_info = git.detect()?;
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
         .iter()
@@ -5345,21 +5501,17 @@ fn analyze_resolved_repository_compatibility(
         }
     };
     if info_attributes_safe && !paths.is_empty() {
-        // Both attribute passes query the same exact tree, so populate one
-        // temporary index once instead of running `git read-tree` twice; the
-        // isolated and effective environments still apply per `check-attr`
-        // query, which never writes the shared index.
-        let tree_index = git.tree_attribute_index(repository, &resolved.tree)?;
         // With no `.gitattributes` entry anywhere in the exact tree, the
         // isolated in-tree result is necessarily empty. Keep the effective
         // query below: global and system attributes must still be detected
         // and refused rather than becoming part of a supposedly immutable
         // checkout profile.
-        let (mut in_tree, mut effective) = git.attribute_pair_for_index(
+        let (mut in_tree, mut effective) = git.attribute_pair_for_tree(
             repository,
-            &tree_index,
+            &resolved.tree,
             &paths,
             has_in_tree_attribute_file,
+            &git_info,
         )?;
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
@@ -5385,8 +5537,11 @@ fn analyze_resolved_repository_compatibility(
     let mut profile = {
         let mut profile = Sha256::new();
         profile.update(b"riftri-checkout-profile-v4-sparse\0");
-        let git_version = git.detect()?.version;
-        hash_profile_input(&mut profile, b"git.version", Some(git_version.as_bytes()));
+        hash_profile_input(
+            &mut profile,
+            b"git.version",
+            Some(git_info.version.as_bytes()),
+        );
         // The canonical cone directory list is part of the checkout profile,
         // so two sparse selections at the same tree, or a sparse and a full
         // request, can never resolve to the same immutable-base key. Full
@@ -6158,7 +6313,7 @@ fn normalize_new_destination(
     // link is still refused, even to an empty directory.
     let accept_empty = rules == DestinationRules::WorktreeAdd;
     if exists && !(accept_empty && is_empty_real_directory(destination)?) {
-        return Err(WorktreeError::InvalidRequest(format!(
+        return Err(WorktreeError::DestinationExists(format!(
             "destination already exists: {}",
             destination.display()
         )));
@@ -6180,7 +6335,7 @@ fn normalize_new_destination(
         .map_err(|source| io("inspect normalized destination", &normalized, source))?
         && !(accept_empty && is_empty_real_directory(&normalized)?)
     {
-        return Err(WorktreeError::InvalidRequest(format!(
+        return Err(WorktreeError::DestinationExists(format!(
             "destination already exists: {}",
             normalized.display()
         )));
@@ -6750,7 +6905,7 @@ fn find_managed_add_journal(
         .map(|journal| journal.cloned())
 }
 
-/// One advisory discovery pass, shared only across aliases of the same path.
+/// One advisory discovery pass, shared across requested paths and their aliases.
 struct ManagedJournalSnapshot {
     adds: Vec<DecodedJournal>,
     completed: HashSet<String>,
@@ -7428,7 +7583,14 @@ fn unpublished_intent_add_journal(
     if symlink_metadata_if_present(&published)?.is_some() || !is_regular_file_if_present(path)? {
         return Ok(None);
     }
-    let Ok(bytes) = fs::read(path) else {
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::UnpublishedIntentOpen,
+        path,
+    );
+    // A temporary can change after inspection just like a published journal.
+    // Unknown/replaced inputs prove no cleanup ownership and remain preserved.
+    let Ok(bytes) = crate::journal::read_real_journal(path, "read unpublished intent") else {
         return Ok(None);
     };
     let intent = match name {
@@ -8076,6 +8238,16 @@ fn scheduled_tree_usages(
     measure: &(impl Fn(&TreeUsageRequest) -> Result<(u64, u64), WorktreeError> + Sync),
 ) -> Result<Vec<(u64, u64)>, WorktreeError> {
     use std::sync::atomic::{AtomicUsize, Ordering};
+    if worker_count == 1 {
+        // Keep measuring every request before returning the first error, just
+        // like the joined worker path, but avoid a thread, queue, and sorting.
+        return requests
+            .iter()
+            .map(measure)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect();
+    }
     let next = AtomicUsize::new(0);
     std::thread::scope(|scope| {
         let workers = (0..worker_count)
@@ -12593,11 +12765,13 @@ fn view_matches_base(base: &Path, view: &Path) -> Result<bool, WorktreeError> {
 fn compare_directories(base: &Path, view: &Path, root: bool) -> Result<bool, WorktreeError> {
     let mut base_entries = directory_entries(base, false)?;
     let mut view_entries = directory_entries(view, root)?;
-    base_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
-    view_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    // Both listings (including root .git filtering) must succeed, but a count
+    // mismatch already proves inequality without sorting either directory.
     if base_entries.len() != view_entries.len() {
         return Ok(false);
     }
+    base_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    view_entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
 
     for ((base_name, base_path), (view_name, view_path)) in
         base_entries.into_iter().zip(view_entries)
@@ -12658,14 +12832,14 @@ fn directory_entries(
 }
 
 fn files_equal(left: &Path, right: &Path) -> Result<bool, WorktreeError> {
-    use std::io::BufReader;
-
-    let mut left = BufReader::new(
-        File::open(left).map_err(|source| io("open immutable-base file", left, source))?,
-    );
-    let mut right = BufReader::new(
-        File::open(right).map_err(|source| io("open worktree file", right, source))?,
-    );
+    // The comparison owns its read buffers and handles short reads itself;
+    // BufReader would allocate two extra buffers per file pair.
+    // A path can change after the caller's metadata check. Reject symlinks and
+    // special files on the opened handle, without waiting for a FIFO writer.
+    let mut left = crate::base_integrity::open_regular(left)
+        .map_err(|source| io("open immutable-base file", left, source))?;
+    let mut right = crate::base_integrity::open_regular(right)
+        .map_err(|source| io("open worktree file", right, source))?;
     file_readers_equal(&mut left, &mut right)
 }
 
@@ -12828,6 +13002,212 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     )
 ))]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn unpublished_intent_rejects_replacement_before_read() {
+        use crate::test_hooks::{FilesystemRacePoint, install};
+        use std::os::unix::fs::symlink;
+        use std::time::{Duration, Instant};
+        const CHILD: &str = "RIFTRI_TEST_INTENT_REPLACEMENT";
+        const ROOT: &str = "RIFTRI_TEST_INTENT_ROOT";
+        if let Ok(kind) = std::env::var(CHILD) {
+            let root = PathBuf::from(std::env::var_os(ROOT).unwrap());
+            fs::create_dir(root.join("operations")).unwrap();
+            fs::create_dir(root.join("removals")).unwrap();
+            let add = root.join("operations/add-test.json");
+            fs::write(&add, b"unused").unwrap();
+            fs::write(add.with_extension("lock"), b"").unwrap();
+            let record = RemovalJournalRecord::new(
+                "remove-test".into(),
+                super::RemovalJournalPaths {
+                    repository: &root,
+                    destination: &root.join("view"),
+                    base_path: &root.join("base"),
+                },
+                "add-test".into(),
+            );
+            let bytes = serde_json::to_vec(&record).unwrap();
+            let temporary = root.join("removals/.remove-test.fixture.tmp");
+            let external = root.join("external.json");
+            fs::write(&temporary, &bytes).unwrap();
+            fs::write(&external, &bytes).unwrap();
+            assert_eq!(
+                super::unpublished_intent_add_journal(&root, "removals", "remove-test", &temporary)
+                    .unwrap(),
+                Some(add)
+            );
+            let target = external.clone();
+            let _hook = install(FilesystemRacePoint::UnpublishedIntentOpen, move |path| {
+                fs::remove_file(path).unwrap();
+                if kind == "fifo" {
+                    assert!(Command::new("mkfifo").arg(path).status().unwrap().success());
+                } else {
+                    symlink(target, path).unwrap();
+                }
+            });
+            assert!(
+                super::unpublished_intent_add_journal(&root, "removals", "remove-test", &temporary)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(fs::symlink_metadata(&temporary).is_ok());
+            assert_eq!(fs::read(external).unwrap(), bytes);
+            return;
+        }
+        for kind in ["fifo", "symlink"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "worktree::tests::unpublished_intent_rejects_replacement_before_read",
+                    "--nocapture",
+                ])
+                .env(CHILD, kind)
+                .env(ROOT, root.path())
+                .spawn()
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "intent child failed: {kind}");
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(10) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("intent read blocked on {kind}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_comparison_rejects_replaced_inputs_without_blocking() {
+        use std::os::unix::fs::symlink;
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        const CHILD: &str = "RIFTRI_TEST_COMPARISON_REPLACEMENT";
+        const ROOT: &str = "RIFTRI_TEST_COMPARISON_ROOT";
+        if let Ok(case) = std::env::var(CHILD) {
+            let directory = std::path::PathBuf::from(std::env::var_os(ROOT).unwrap());
+            let left = directory.join("left");
+            let right = directory.join("right");
+            std::fs::write(&left, b"same").unwrap();
+            std::fs::write(&right, b"same").unwrap();
+            // Reproduce replacement after the caller's regular-file check,
+            // without relying on a racing thread to hit the open window.
+            assert!(std::fs::symlink_metadata(&left).unwrap().is_file());
+            assert!(std::fs::symlink_metadata(&right).unwrap().is_file());
+            let (replaced, other) = if case.starts_with("left") {
+                (&left, &right)
+            } else {
+                (&right, &left)
+            };
+            std::fs::remove_file(replaced).unwrap();
+            if case.ends_with("fifo") {
+                assert!(
+                    Command::new("mkfifo")
+                        .arg(replaced)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            } else {
+                symlink(other, replaced).unwrap();
+            }
+            assert!(super::files_equal(&left, &right).is_err());
+            assert_eq!(std::fs::read(other).unwrap(), b"same");
+            assert!(std::fs::symlink_metadata(replaced).is_ok());
+            return;
+        }
+
+        // Keep a regression bounded: the old blocking FIFO open must fail the
+        // test instead of hanging the entire recovery test suite.
+        for case in ["left-fifo", "right-fifo", "left-symlink", "right-symlink"] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "worktree::tests::file_comparison_rejects_replaced_inputs_without_blocking",
+                    "--nocapture",
+                ])
+                .env(CHILD, case)
+                .env(ROOT, directory.path())
+                .spawn()
+                .unwrap();
+            let start = Instant::now();
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    assert!(status.success(), "comparison child failed: {case}");
+                    break;
+                }
+                if start.elapsed() > Duration::from_secs(10) {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("comparison blocked on replacement: {case}");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+
+    #[test]
+    fn directory_comparison_checks_counts_after_root_git_filtering() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path().join("base");
+        let view = directory.path().join("view");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&view).unwrap();
+        std::fs::write(view.join(".git"), b"gitdir: unused\n").unwrap();
+        assert!(super::compare_directories(&base, &view, true).unwrap());
+        assert!(!super::compare_directories(&base, &view, false).unwrap());
+
+        for name in ["z", "a", "m"] {
+            std::fs::write(base.join(name), b"same").unwrap();
+        }
+        for name in ["m", "z", "a"] {
+            std::fs::write(view.join(name), b"same").unwrap();
+        }
+        assert!(super::compare_directories(&base, &view, true).unwrap());
+        std::fs::write(view.join("extra"), b"private").unwrap();
+        assert!(!super::compare_directories(&base, &view, true).unwrap());
+        std::fs::remove_file(view.join("extra")).unwrap();
+        std::fs::rename(view.join("m"), view.join("different-name")).unwrap();
+        assert!(!super::compare_directories(&base, &view, true).unwrap());
+        std::fs::rename(view.join("different-name"), view.join("m")).unwrap();
+        std::fs::write(view.join("m"), b"diff").unwrap();
+        assert!(!super::compare_directories(&base, &view, true).unwrap());
+        assert!(super::compare_directories(&base, &view.join("missing"), true).is_err());
+    }
+
+    #[test]
+    fn file_comparison_checks_real_files_at_buffer_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let left = directory.path().join("left");
+        let right = directory.path().join("right");
+        for length in [0, 1, 8191, 8192, 8193, 65535, 65536, 65537, 131089] {
+            let bytes = vec![42; length];
+            std::fs::write(&left, &bytes).unwrap();
+            std::fs::write(&right, &bytes).unwrap();
+            assert!(super::files_equal(&left, &right).unwrap());
+            let mut longer = bytes.clone();
+            longer.push(42);
+            std::fs::write(&right, &longer).unwrap();
+            assert!(!super::files_equal(&left, &right).unwrap());
+            if length > 0 {
+                let mut changed = bytes;
+                changed[length - 1] = 43;
+                std::fs::write(&right, &changed).unwrap();
+                assert!(!super::files_equal(&left, &right).unwrap());
+            }
+        }
+        std::fs::remove_file(&right).unwrap();
+        assert!(super::files_equal(&left, &right).is_err());
+    }
+
     struct ChunkedReader<'a> {
         bytes: &'a [u8],
         chunk_size: usize,
@@ -13348,6 +13728,81 @@ mod tests {
                     elapsed.as_micros()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn single_accounting_worker_runs_inline_and_preserves_all_results() {
+        use std::sync::Mutex;
+        let requests = (0..4)
+            .map(|index| super::TreeUsageRequest {
+                path: std::path::PathBuf::from(index.to_string()),
+                allocated_path: None,
+            })
+            .collect::<Vec<_>>();
+        let caller = std::thread::current().id();
+        for fail in [false, true] {
+            let calls = Mutex::new(Vec::new());
+            let result = super::scheduled_tree_usages(&requests, 1, &|request| {
+                assert_eq!(std::thread::current().id(), caller);
+                let index = request.path.to_str().unwrap().parse::<u64>().unwrap();
+                calls.lock().unwrap().push(index);
+                if fail && (index == 1 || index == 3) {
+                    Err(super::WorktreeError::InvalidRequest(format!(
+                        "error-{index}"
+                    )))
+                } else {
+                    Ok((index, 100 + index))
+                }
+            });
+            assert_eq!(*calls.lock().unwrap(), vec![0, 1, 2, 3]);
+            if fail {
+                assert!(result.unwrap_err().to_string().contains("error-1"));
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    vec![(0, 100), (1, 101), (2, 102), (3, 103)]
+                );
+            }
+        }
+        assert!(
+            super::scheduled_tree_usages(&[], 1, &|_| panic!("empty request"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual single-worker accounting benchmark; no timing threshold"]
+    fn reports_single_worker_accounting_latency() {
+        let directory = tempfile::tempdir().unwrap();
+        let requests = (0..8)
+            .map(|index| {
+                let path = directory.path().join(index.to_string());
+                std::fs::create_dir(&path).unwrap();
+                std::fs::write(path.join("file"), b"small accounting fixture").unwrap();
+                super::TreeUsageRequest {
+                    path,
+                    allocated_path: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        let expected = requests
+            .iter()
+            .map(super::measure_tree_usage)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        for round in 0..5 {
+            let start = std::time::Instant::now();
+            for _ in 0..500 {
+                let actual =
+                    super::scheduled_tree_usages(&requests, 1, &super::measure_tree_usage).unwrap();
+                assert_eq!(std::hint::black_box(actual), expected);
+            }
+            println!(
+                "single-worker-accounting round={round} iterations=500 elapsed_us={}",
+                start.elapsed().as_micros()
+            );
         }
     }
 
@@ -16298,6 +16753,102 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn overlayfs_inspection_and_repair_preserve_private_data_after_a_boot_change() {
+        use riftri_storage::OverlayFsMounter;
+
+        let fixture = tempdir().expect("fixture");
+        if !require_overlayfs_test_namespace(fixture.path()) {
+            return;
+        }
+        let repository = fixture.path().join("repository");
+        let destination = fixture.path().join("worktree");
+        let state = fixture.path().join("state");
+        create_overlayfs_repository(&repository);
+        let added = add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create mounted view");
+        assert_eq!(added.backend, BackendKind::OverlayFs);
+        fs::write(destination.join("tracked.txt"), b"private edit\n").unwrap();
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .unwrap()
+            .pop()
+            .unwrap();
+        let overlay = journal.overlayfs.as_ref().unwrap();
+        let layout =
+            OverlayFsMounter::load(&overlay.layout_root, &journal.base_path, &destination).unwrap();
+        let inspect =
+            || super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination));
+        assert_eq!(
+            inspect().unwrap()[0].mount_status,
+            Some(super::WorktreeMountStatus::Active)
+        );
+        OverlayFsMounter::unmount(&layout, overlay.mount_identity.as_ref().unwrap()).unwrap();
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&journal.journal_path).unwrap()).unwrap();
+        for field in ["mount_context", "mount_identity"] {
+            record["overlayfs"][field]["boot_id"] = "00000000-0000-0000-0000-000000000000".into();
+        }
+        fs::write(&journal.journal_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let before = fs::read(&journal.journal_path).unwrap();
+        assert_eq!(
+            inspect().unwrap()[0].mount_status,
+            Some(super::WorktreeMountStatus::RecoveryRequired)
+        );
+        assert_eq!(fs::read(&journal.journal_path).unwrap(), before);
+        assert!(
+            !destination.join("tracked.txt").exists(),
+            "inspection must not mount"
+        );
+        assert_eq!(
+            fs::read(layout.upper().join("tracked.txt")).unwrap(),
+            b"private edit\n"
+        );
+
+        // A kill inside the remount reset can leave work missing and identity
+        // unset. Inspection still cannot create even a disposable directory.
+        record["overlayfs"]["mount_identity"] = serde_json::Value::Null;
+        fs::write(&journal.journal_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        fs::remove_dir_all(layout.work()).unwrap();
+        assert!(inspect().is_err());
+        assert!(
+            !layout.work().exists(),
+            "inspection recreated a recovery directory"
+        );
+        let repaired = recover_incomplete_operations(&state).unwrap();
+        assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
+        assert_eq!(
+            inspect().unwrap()[0].mount_status,
+            Some(super::WorktreeMountStatus::Active)
+        );
+        assert_eq!(
+            fs::read(destination.join("tracked.txt")).unwrap(),
+            b"private edit\n"
+        );
+        assert_eq!(
+            fs::read(journal.base_path.join("tracked.txt")).unwrap(),
+            b"tracked\n"
+        );
+        super::force_remove_worktree(super::RemoveWorktreeRequest {
+            repository,
+            destination,
+            state_dir: Some(state),
+        })
+        .unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn overlayfs_recovery_preserves_a_workdir_the_journaled_namespace_cannot_rule_out() {
         use riftri_storage::{OverlayFsMounter, OverlayFsRecoveryState};
 
@@ -16371,6 +16922,15 @@ mod tests {
         let sentinel = layout.work().join("live-mount-sentinel");
         fs::write(&sentinel, b"must survive").expect("plant work-directory sentinel");
 
+        let inspection =
+            super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination))
+                .expect("inspect a possibly live mount without recovery");
+        assert_eq!(
+            inspection[0].mount_status,
+            Some(super::WorktreeMountStatus::DifferentNamespace)
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must survive");
+
         let preserved =
             recover_incomplete_operations(&state).expect("repair with a possibly live mount");
         assert_eq!(preserved.recovered_mounts, 0);
@@ -16395,10 +16955,25 @@ mod tests {
             serde_json::to_vec_pretty(&record).expect("encode restored journal"),
         )
         .expect("persist restored journal");
+        let inspection =
+            super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination))
+                .expect("inspect an absent mount without recovery");
+        assert_eq!(
+            inspection[0].mount_status,
+            Some(super::WorktreeMountStatus::RecoveryRequired)
+        );
+        assert_eq!(fs::read(&sentinel).unwrap(), b"must survive");
         let repaired =
             recover_incomplete_operations(&state).expect("repair in the journaled namespace");
         assert!(repaired.errors.is_empty(), "{:?}", repaired.errors);
         assert_eq!(repaired.recovered_mounts, 1);
+        let inspection =
+            super::inspect_managed_worktrees(&repository, std::slice::from_ref(&destination))
+                .expect("inspect a recovered mount");
+        assert_eq!(
+            inspection[0].mount_status,
+            Some(super::WorktreeMountStatus::Active)
+        );
         assert!(
             Command::new("mountpoint")
                 .arg("--quiet")
@@ -20126,7 +20701,11 @@ mod tests {
             assert_eq!(winners, 1, "round {round}: {results:?}");
             for error in results.iter().filter_map(|result| result.as_ref().err()) {
                 assert!(
-                    matches!(error, super::WorktreeError::InvalidRequest(_)),
+                    matches!(
+                        error,
+                        super::WorktreeError::InvalidRequest(_)
+                            | super::WorktreeError::DestinationExists(_)
+                    ),
                     "round {round}: a loser must be refused, not rolled back: {error}"
                 );
             }

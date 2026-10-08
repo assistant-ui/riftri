@@ -5,8 +5,89 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.4] - 2026-10-08
+
+### Changed
+
+- Avoid creating a temporary Git index for exact trees without attributes on
+  supported Git versions. Attributed trees and older or unknown Git versions
+  retain the existing validation path (#685).
+- Batch add-target and HEAD resolution for ordinary named revisions, reducing
+  Git process startup while retaining branch-safety and final checkout checks
+  (#686).
+- Add cross-platform checkout timing probes and repeated cold-cache benchmark
+  rounds. Bounded parallel checkout remains a test-only candidate: its isolated
+  speedup did not translate into a reliable end-to-end improvement (#687).
+
+## [0.6.3] - 2026-10-07
+
+### Added
+
+- Lightweight worktree ownership discovery and batched mount-readiness
+  inspection through the Rust, CLI, and Node APIs, without content or disk
+  accounting walks (#678, #679).
+- Structured preflight conflict codes for existing branches, branches checked
+  out elsewhere, and occupied destinations. Human diagnostics and Git safety
+  checks are unchanged (#682).
+
 ### Fixed
 
+- The Node API preserves failed checkout-hook reports, exposes native binary
+  resolution, and identifies safe pre-mutation policy refusals for harness
+  integrations (#677).
+- Resolve native executables from Electron's unpacked archive directory;
+  ordinary Node resolution and explicit executable overrides are unchanged
+  (#681).
+- Isolate CLI shell-activation fixtures from inherited Riftri hooks (#674).
+- Restore website development hydration with Farm.js 0.1.1 and refresh the
+  website's storage illustrations (#675, #676).
+
+## [0.6.2] - 2026-10-06
+
+### Changed
+
+- Reduce allocations while extracting Node SDK error receipts and comparing
+  files; reject directory entry-count mismatches before sorting (#663, #665,
+  #668).
+- Run storage accounting inline when only one worker is available, preserving
+  result order and first-error selection without thread startup overhead (#670).
+
+### Fixed
+
+- Reject replacement symlinks and special files when opening comparison inputs,
+  avoiding a blocked FIFO open after an earlier regular-file check (#669).
+- Read unpublished lifecycle intent journals through the guarded journal reader;
+  raced FIFO/symlink replacements no longer block diagnostics or establish
+  cleanup ownership, and unknown temporary files remain preserved (#671).
+- The npm launcher rejects incompatible glibc before native startup and rejects
+  directory-valued executable paths while preserving executable symlinks (#664,
+  #666).
+- Retry only busy-executable startup failures in the Git blob-session test
+  fixture, without retrying protocol operations or changing production Git
+  behavior (#667).
+
+## [0.6.1] - 2026-10-06
+
+### Changed
+
+- Reduce temporary allocations and repeated Git work during attribute checks,
+  sparse selection, Git LFS reads, integrity hashing, and journal diagnostics.
+  Storage accounting balances work across bounded workers, and single-worker
+  native clones run inline without a worker thread.
+- The Node SDK drains stdout without retaining it for non-reporting commands.
+  JSON reports and stderr diagnostics retain their existing behavior (#659).
+
+### Fixed
+
+- The Node SDK preserves UTF-8 across output chunks, rejects missing JSON
+  reports, and rejects malformed error messages without crashing the calling
+  process. Type declarations now match status operation counters and all-state
+  inventory reports (#650, #651, #652, #657, #658).
+- Native directory traversal and storage accounting bound open directory
+  handles, allowing deep trees to work under low descriptor limits. Parallel
+  cloning preserves the caller's process umask (#645, #646, #647).
+- File comparisons handle short reads correctly instead of treating equal
+  content as different (#649).
 - A file rewritten while `riftri worktree compact` hashes it is reported as
   the worktree changing during compaction, not as an I/O failure (#624).
 - Committing or switching in a worktree before its `riftri worktree add`

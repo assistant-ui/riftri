@@ -1,63 +1,4 @@
-
-const stages = [
-  {
-    index: "01",
-    title: "Exact Git tree",
-    detail: "a4d2c19",
-  },
-  {
-    index: "02",
-    title: "Immutable base",
-    detail: "reuse or create",
-  },
-  {
-    index: "03",
-    title: "Native COW view",
-    detail: "platform backend",
-  },
-  {
-    index: "04",
-    title: "Linked worktree",
-    detail: "clean + writable",
-  },
-] as const;
-
-const platforms = [
-  {
-    name: "macOS",
-    backend: "APFS clone",
-    status: "current",
-  },
-  {
-    name: "Linux",
-    backend: "reflink / OverlayFS",
-    status: "experimental · current",
-  },
-  {
-    name: "Windows",
-    backend: "ReFS block clone",
-    status: "experimental · current",
-  },
-] as const;
-
-function BackendCycle() {
-  return (
-    <>
-      <span className="backend-cycle" aria-hidden="true">
-        {platforms.map((platform) => (
-          <span className="backend-cycle-item" key={platform.name}>
-            <strong>{platform.backend}</strong>
-            <small>{platform.name} · {platform.status}</small>
-          </span>
-        ))}
-      </span>
-      <span className="visually-hidden">
-        Native copy-on-write view. APFS clone on macOS, Linux reflinks and mount-capable OverlayFS,
-        and Windows ReFS block clones are current experimental backends.
-      </span>
-    </>
-  );
-}
+import { MaterializationTrack } from "./materialization-track";
 
 export function MaterializationMap() {
   return (
@@ -68,21 +9,7 @@ export function MaterializationMap() {
       <span className="corner corner-br" aria-hidden="true">+</span>
       <figcaption className="frame-title">[ FROM TREE TO WORKSPACE ]</figcaption>
 
-      <ol className="materialization-track" aria-label="Riftri worktree materialization path">
-        {stages.map((stage) => (
-          <li className={stage.index === "03" ? "is-backend-stage" : undefined} key={stage.index}>
-            <span>{stage.index}</span>
-            {stage.index === "03" ? (
-              <BackendCycle />
-            ) : (
-              <>
-                <strong>{stage.title}</strong>
-                <small>{stage.detail}</small>
-              </>
-            )}
-          </li>
-        ))}
-      </ol>
+      <MaterializationTrack />
 
       <div className="materialization-foot">
         <span>GIT OWNS THE WORKTREE</span>

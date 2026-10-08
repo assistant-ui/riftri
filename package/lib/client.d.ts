@@ -5,6 +5,9 @@ export const EXIT_OPERATIONAL: 1;
 export const EXIT_USAGE: 2;
 export const EXIT_POLICY: 3;
 
+/** Resolve and validate the installed native executable, honoring RIFTRI_BINARY. Does not spawn. */
+export function resolveBinary(): string;
+
 /** One versioned failure receipt, as emitted by `--json-errors`. */
 export interface FailureReceipt {
   schemaVersion: number;
@@ -37,7 +40,9 @@ export class RiftriError extends Error {
   /** The process was killed rather than exiting on its own. */
   readonly wasSignalled: boolean;
   readonly receipt: FailureReceipt | null;
-  /** Riftri declined before touching anything; falling back is safe. */
+  /** Parsed stdout on a nonzero exit (for example a failed post-checkout hook), or null. Validate before use. */
+  readonly report: unknown;
+  /** A native policy receipt confirms no mutation; an exit code alone is insufficient. */
   readonly isPolicyRefusal: boolean;
   /** The request was malformed; never retry it unchanged. */
   readonly isUsageError: boolean;
@@ -108,6 +113,28 @@ export interface WorktreeInventory {
   worktrees: ManagedWorktree[];
   diagnostic_issues: StateDiagnosticIssue[];
   native_path_encoding: string;
+}
+
+export interface WorktreeOwner {
+  schema_version: 1;
+  /** Null only when no registered state claims the path. Errors reject. */
+  state_directory: string | null;
+  state_directory_native_hex: string | null;
+  native_path_encoding: string;
+}
+
+export interface WorktreeInspectionReport {
+  schema_version: 1;
+  native_path_encoding: string;
+  worktrees: Array<{
+    path: string;
+    path_native_hex: string;
+    state_directory: string | null;
+    state_directory_native_hex: string | null;
+    backend: string | null;
+    /** Null unless the managed backend needs a mount. Inspection never repairs. */
+    mount_status: "active" | "recovery-required" | "different-namespace" | "foreign" | "unavailable" | null;
+  }>;
 }
 
 export interface StateDiagnosticIssue {
@@ -239,6 +266,10 @@ export class Riftri {
 
   readonly worktree: {
     add(destination: string, options?: AddOptions): Promise<AddReport>;
+    /** Advisory ownership lookup without disk accounting; mutations revalidate. */
+    owner(destination: string): Promise<WorktreeOwner>;
+    /** One read-only discovery pass; paths retain the requested order. */
+    inspect(destinations: readonly string[]): Promise<WorktreeInspectionReport>;
     list(options: { allStates: true }): Promise<AllStatesWorktreeInventory>;
     list(options?: { allStates?: false }): Promise<WorktreeInventory>;
     /** Narrow schema_version when allStates is a runtime boolean. */

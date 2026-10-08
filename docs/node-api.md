@@ -30,6 +30,8 @@ no separate download or path to configure. TypeScript types ship with it.
 | `enable()` / `disable()` | Per-repository opt-in |
 | `worktree.add(path, opts)` | Backend, base, `reused_base`, journal path |
 | `worktree.list()` | Managed worktrees with `allocated_bytes` |
+| `worktree.owner(path)` | Managing `state_directory`, or `null` for an unmanaged path; no disk-usage walk |
+| `worktree.inspect(paths)` | Ordered batch of ownership, backend, and mount readiness; no content or disk-usage walk |
 | `worktree.remove(path, { force })` | Refuses a dirty worktree unless forced |
 | `worktree.move` / `compact` / `prune` | Lifecycle operations |
 | `status()` | Bases, totals, pending operations, diagnostics |
@@ -37,6 +39,26 @@ no separate download or path to configure. TypeScript types ship with it.
 | `gc({ apply })` | Plan, or reclaim unreferenced bases |
 
 `run(args)` is the escape hatch for anything not wrapped.
+
+`worktree.owner(path)` always consults the default and every repository-registered
+state directory, even when the client has a `stateDir` configured. A missing or
+invalid registration, ambiguous ownership, or an incomplete operation rejects;
+never turn that error into ordinary-Git cleanup. The result is advisory: pass
+the returned state directory to the lifecycle command, which revalidates under
+its operation lock. The report includes `state_directory_native_hex` so a lossy
+display path need not be used as an identity.
+
+Before resuming persistent workspaces, `worktree.inspect(paths)` can inspect a
+batch with one repository/state discovery pass. It uses the same fail-closed
+ownership rules as `owner`. `mount_status` is `null` for ordinary directories
+and native-clone backends, `active` for a verified live OverlayFS mount, or
+`recovery-required` when repair must restore or adopt its journaled mount.
+`different-namespace`, `foreign`, and `unavailable` require attention; do not
+start a process against that view. Inspection never mounts, resets private
+layers, traverses worktree contents, or repairs state. Run `repair()` with the
+reported owning `stateDir` only when recovery is required, then inspect again:
+a successful repair may have skipped a busy operation and is not by itself a
+readiness receipt. Exact native path encodings accompany every path.
 
 ## Errors
 
@@ -66,6 +88,14 @@ try {
 `error.exitCode` is always a number. A process killed by a signal reports
 `128 +` the signal number, the same convention native `riftri exec` uses, and
 sets `error.signal` and `error.wasSignalled`.
+
+A failed `post-checkout` hook leaves the newly created worktree in place, as
+Git does. The API rejects with the hook's exit code and preserves the parsed
+creation report in `error.report` (typed `unknown`; validate it before use).
+Do not retry creation or fall back to Git in this case. In particular, a hook
+exiting `3` is **not** `isPolicyRefusal`: safe fallback requires a native policy
+receipt confirming that no cleanup is needed, not just an exit code. Plain
+`exec` child exits and malformed or missing receipts are not safe refusals either.
 
 ### When `isOptimizable()` returns false
 
@@ -102,6 +132,19 @@ new Riftri({
 ```
 
 ## How it relates to the CLI
+
+Runners that already supervise child processes can import `resolveBinary()`
+from `riftri` to get the verified native executable path without starting it.
+It uses the same platform/version checks and `RIFTRI_BINARY` override as the
+launcher. Spawn it directly (without a shell) and use the CLI's structured
+reports, receipts, and journal recovery contract. Keep the `riftri` package and
+its native optional dependency external when bundling: resolution depends on
+their installed files. A missing or unusable executable throws before spawning.
+
+Electron distributions must unpack `**/node_modules/riftri-*/bin/*` from ASAR
+archives. In Electron, the package resolves and validates the native executable
+in the archive's `.asar.unpacked` sibling, because the OS cannot spawn a virtual
+ASAR path. Explicit binary overrides are not rewritten.
 
 The binary is the implementation. This client spawns it, adds `--json` where
 the command supports it and `--json-errors` everywhere, parses the single

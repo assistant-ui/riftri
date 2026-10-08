@@ -12,7 +12,9 @@ cargo test --release --locked -p riftri-cli \
   --test git_invocation_budget --test checkout_compatibility
 ```
 
-The many-file fixture retains the 19/14/17 Git-process budgets. LFS pointer
+The attribute-free many-file fixture enforces cold/cached/existing-branch
+Git-process budgets of 18/13/15 on Git versions supporting direct tree
+attribute queries, or 19/14/16 with the legacy private-index path. LFS pointer
 inspection reuses one Git process across chunks of at most 128 pointers. Each response header is
 validated against the requested object ID and the 1,024-byte pointer limit
 before its body is allocated or read. Malformed/oversized responses terminate
@@ -271,12 +273,37 @@ Use matching build profiles and a quiet volume with ample free space. The
 harness also runs ordinary Git as a control, alternating its position between
 rounds. It defaults to ten workers and writes nearest-rank p50/p95 summaries
 for serial adds, concurrent views, and batch wall times, retaining every sample.
-Cold samples and the warm-up anchor are excluded from cached summaries. Small
+Cold samples and the warm-up anchor are excluded from cached summaries.
+
+`RIFTRI_BENCH_COLD_ROUNDS=4` repeats empty-base-cache creation in alternating
+before/after order, with managed removal and garbage collection between each
+sample. `coldSummaries` reports these samples separately; this is a cold Riftri
+base cache, not a claim that the OS page cache was flushed. Small
 sample counts are exposed; a p95 from one or two samples is not a stable tail
 estimate. Summaries are written only after content/mode/symlink checks, private
 write isolation, removal, and final empty-state checks all succeed. Timings
 include process startup and Trace2 instrumentation; volume deltas include
 concurrent host activity and are not per-file physical allocation.
+
+The test-only `reports_bounded_checkout_worker_latency` benchmark compares
+sequential materialization with an explicitly supplied Git worker cap (at most
+four available CPUs, with a 1,024-file threshold):
+
+```sh
+cargo test --release -p riftri-git reports_bounded_checkout_worker_latency \
+  -- --ignored --nocapture
+```
+
+This candidate is **not enabled in production**. On October 8, 2026, a local
+APFS experiment reduced isolated 4,096-file materialization from approximately
+735 ms to 521 ms median. However, a separate 4,098-file, 33.6 MB full CLI fixture
+against release 0.6.3 was slower in three of four alternating cold pairs:
+nearest-rank p50 was 2.56 s sequential versus 3.07 s with the prototype enabled.
+The index-synchronization phase varied substantially, so these measurements do
+not establish the cause or predict every filesystem. Content, modes, symlinks,
+Git cleanliness, concurrent private-write isolation, shared-base reuse, removal,
+and final empty-state verification passed. Keep the benchmark and compatibility
+coverage, but require repeatable end-to-end gains before changing the default.
 
 The same-binary smoke test proves the harness works, not a speedup. macOS CI
 runs it against release builds on a 1,026-file fixture with ten concurrent

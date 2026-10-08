@@ -2,6 +2,7 @@ import type { Metadata } from "@farm.js/core";
 import { CopyCommand } from "../components/copy-command";
 import { CopyMarkdown } from "../components/copy-markdown";
 import { Faq } from "../components/faq";
+import { HeroHighlight } from "../components/hero-highlight";
 import { MaterializationMap } from "../components/materialization-map";
 import { SavingsMap } from "../components/savings-map";
 import { SectionLink } from "../components/section-link";
@@ -92,7 +93,7 @@ function Hero() {
         <GraphLabel index="00" icon={<GitHubIcon />}>
           OPEN SOURCE / NATIVE COPY-ON-WRITE
         </GraphLabel>
-        <h1 id="top-title">Git worktrees.<br /><span>Shared <mark className="hero-highlight">storage.</mark></span></h1>
+        <h1 id="top-title">Git worktrees.<br /><span>Shared <HeroHighlight>storage.</HeroHighlight></span></h1>
         <p className="hero-lede">
           Real, isolated Git worktrees that share the unchanged parts of your project.
           Keep using normal files, normal Git, and the tools you already have.
@@ -111,7 +112,6 @@ function Hero() {
         </div>
       </div>
       <div className="hero-graph">
-        <p className="hero-graph-label"><span>STORAGE LAYOUT</span><span aria-hidden="true">FIG. 01</span></p>
         <StorageMap />
         <p className="hero-graph-caption">One base. Independent worktrees. Only edits diverge.</p>
       </div>
@@ -231,10 +231,12 @@ function GetStarted() {
       <ol className="start-list">
         {startSteps.map((step) => (
           <li key={step.index}>
-            <span className="start-index">{step.index}</span>
-            <div className="start-copy">
-              <strong>{step.title}</strong>
-              <p>{step.description}</p>
+            <div className="start-step">
+              <span className="start-index">{step.index}</span>
+              <div className="start-copy">
+                <strong>{step.title}</strong>
+                <p>{step.description}</p>
+              </div>
             </div>
             {step.index === "01" ? (
               <div className="install-options">

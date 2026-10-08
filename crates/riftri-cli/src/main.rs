@@ -279,6 +279,8 @@ impl Command {
             | Self::Gc { json, .. } => *json,
             Self::Worktree { command } => match command {
                 WorktreeCommand::List { json, .. }
+                | WorktreeCommand::Inspect { json, .. }
+                | WorktreeCommand::Owner { json, .. }
                 | WorktreeCommand::Add { json, .. }
                 | WorktreeCommand::Remove { json, .. }
                 | WorktreeCommand::Move { json, .. }
@@ -309,6 +311,8 @@ impl Command {
             Self::State { .. } => "state",
             Self::Worktree { command } => match command {
                 WorktreeCommand::List { .. } => "worktree-list",
+                WorktreeCommand::Owner { .. } => "worktree-owner",
+                WorktreeCommand::Inspect { .. } => "worktree-inspect",
                 WorktreeCommand::Add { .. } => "worktree-add",
                 WorktreeCommand::Remove { .. } => "worktree-remove",
                 WorktreeCommand::Move { .. } => "worktree-move",
@@ -362,6 +366,10 @@ impl Command {
                 }
             },
             Self::Worktree { command } => match command {
+                WorktreeCommand::Owner { repository, .. }
+                | WorktreeCommand::Inspect { repository, .. } => {
+                    InvocationContext::for_repository(repository)
+                }
                 WorktreeCommand::List {
                     repository,
                     state_dir,
@@ -449,6 +457,35 @@ impl InvocationContext {
 
 #[derive(Debug, Subcommand)]
 enum WorktreeCommand {
+    /// Inspect ownership and mount readiness without traversing worktree files.
+    Inspect {
+        /// Exact worktree roots to inspect, in the requested order.
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<PathBuf>,
+
+        /// Repository whose registered state directories should be inspected.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Emit a versioned batch report, including exact native path encodings.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find a worktree's managing state directory without calculating disk usage.
+    Owner {
+        /// Worktree root to look up (existing, missing, or an alias).
+        path: PathBuf,
+
+        /// Repository whose registered state directories should be inspected.
+        #[arg(long, default_value = ".")]
+        repository: PathBuf,
+
+        /// Emit stable machine-readable JSON; an unmanaged path has a null owner.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List active Riftri-managed worktrees and their storage use.
     List {
         /// Repository whose default Riftri state should be inspected.
@@ -989,6 +1026,68 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Command::Worktree { command } => match command {
+            WorktreeCommand::Inspect {
+                paths,
+                repository,
+                json,
+            } => {
+                let views = riftri_core::inspect_managed_worktrees(&repository, &paths)?;
+                if json {
+                    let worktrees: Vec<_> = views.iter().map(|view| serde_json::json!({
+                        "path": view.path.to_string_lossy(),
+                        "path_native_hex": native_path_hex(&view.path),
+                        "state_directory": view.state_directory.as_deref().map(|path| path.to_string_lossy()),
+                        "state_directory_native_hex": view.state_directory.as_deref().map(native_path_hex),
+                        "backend": view.backend,
+                        "mount_status": view.mount_status,
+                    })).collect();
+                    machineln!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "schema_version": 1,
+                            "native_path_encoding": native_path_encoding(),
+                            "worktrees": worktrees,
+                        }))
+                        .context("serialize worktree inspection")?
+                    );
+                } else {
+                    for view in views {
+                        outputln!("Worktree: {}", view.path.display());
+                        if let Some(state) = view.state_directory {
+                            outputln!("State: {}", state.display());
+                        } else {
+                            outputln!("Unmanaged by Riftri");
+                        }
+                        if let Some(mount) = view.mount_status {
+                            outputln!("Mount: {}", serde_json::to_string(&mount)?);
+                        }
+                    }
+                }
+            }
+            WorktreeCommand::Owner {
+                path,
+                repository,
+                json,
+            } => {
+                let state = riftri_core::managed_worktree_state_directory(&repository, &path)?;
+                if json {
+                    let output = serde_json::json!({
+                        "schema_version": 1,
+                        "state_directory": state.as_deref().map(|path| path.to_string_lossy()),
+                        "state_directory_native_hex": state.as_deref().map(native_path_hex),
+                        "native_path_encoding": native_path_encoding(),
+                    });
+                    machineln!(
+                        "{}",
+                        serde_json::to_string_pretty(&output)
+                            .context("serialize worktree owner")?
+                    );
+                } else if let Some(state) = state {
+                    outputln!("State: {}", state.display());
+                } else {
+                    outputln!("No Riftri state claims this worktree.");
+                }
+            }
             WorktreeCommand::List {
                 repository,
                 state_dir,
@@ -1369,6 +1468,27 @@ fn worktree_failure_fields(
         ),
         WorktreeError::InvalidRequest(_) | WorktreeError::UnbornHead(_) => (
             "invalid-request",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
+        WorktreeError::BranchAlreadyExists(_) => (
+            "branch-already-exists",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
+        WorktreeError::BranchCheckedOut(_) => (
+            "branch-checked-out",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
+        WorktreeError::DestinationExists(_) => (
+            "destination-exists",
             "policy",
             None,
             "not-needed",
@@ -3176,6 +3296,8 @@ mod tests {
                 | WorktreeCommand::Move { json, .. }
                 | WorktreeCommand::Compact { json, .. }
                 | WorktreeCommand::Prune { json, .. }
+                | WorktreeCommand::Owner { json, .. }
+                | WorktreeCommand::Inspect { json, .. }
                 | WorktreeCommand::List { json, .. } => json,
             };
             assert!(json, "JSON flag not parsed for {arguments:?}");
