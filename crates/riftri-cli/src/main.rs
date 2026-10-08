@@ -1473,6 +1473,27 @@ fn worktree_failure_fields(
             "not-needed",
             "not-required",
         ),
+        WorktreeError::BranchAlreadyExists(_) => (
+            "branch-already-exists",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
+        WorktreeError::BranchCheckedOut(_) => (
+            "branch-checked-out",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
+        WorktreeError::DestinationExists(_) => (
+            "destination-exists",
+            "policy",
+            None,
+            "not-needed",
+            "not-required",
+        ),
         // The safety stop that refuses to follow a symbolic link inside
         // Riftri's own base storage. Nothing was attempted, so it stays a
         // policy refusal with no cleanup — but unlike other invalid requests
