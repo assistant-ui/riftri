@@ -5,6 +5,20 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.4] - 2026-10-08
+
+### Changed
+
+- Avoid creating a temporary Git index for exact trees without attributes on
+  supported Git versions. Attributed trees and older or unknown Git versions
+  retain the existing validation path (#685).
+- Batch add-target and HEAD resolution for ordinary named revisions, reducing
+  Git process startup while retaining branch-safety and final checkout checks
+  (#686).
+- Add cross-platform checkout timing probes and repeated cold-cache benchmark
+  rounds. Bounded parallel checkout remains a test-only candidate: its isolated
+  speedup did not translate into a reliable end-to-end improvement (#687).
+
 ## [0.6.3] - 2026-10-07
 
 ### Added

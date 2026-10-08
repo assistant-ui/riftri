@@ -12,7 +12,9 @@ cargo test --release --locked -p riftri-cli \
   --test git_invocation_budget --test checkout_compatibility
 ```
 
-The many-file fixture retains the 19/14/17 Git-process budgets. LFS pointer
+The attribute-free many-file fixture enforces cold/cached/existing-branch
+Git-process budgets of 18/13/15 on Git versions supporting direct tree
+attribute queries, or 19/14/16 with the legacy private-index path. LFS pointer
 inspection reuses one Git process across chunks of at most 128 pointers. Each response header is
 validated against the requested object ID and the 1,024-byte pointer limit
 before its body is allocated or read. Malformed/oversized responses terminate
