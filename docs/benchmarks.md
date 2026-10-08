@@ -283,6 +283,26 @@ write isolation, removal, and final empty-state checks all succeed. Timings
 include process startup and Trace2 instrumentation; volume deltas include
 concurrent host activity and are not per-file physical allocation.
 
+The test-only `reports_bounded_checkout_worker_latency` benchmark compares
+sequential materialization with an explicitly supplied Git worker cap (at most
+four available CPUs, with a 1,024-file threshold):
+
+```sh
+cargo test --release -p riftri-git reports_bounded_checkout_worker_latency \
+  -- --ignored --nocapture
+```
+
+This candidate is **not enabled in production**. On October 8, 2026, a local
+APFS experiment reduced isolated 4,096-file materialization from approximately
+735 ms to 521 ms median. However, a separate 4,098-file, 33.6 MB full CLI fixture
+against release 0.6.3 was slower in three of four alternating cold pairs:
+nearest-rank p50 was 2.56 s sequential versus 3.07 s with the prototype enabled.
+The index-synchronization phase varied substantially, so these measurements do
+not establish the cause or predict every filesystem. Content, modes, symlinks,
+Git cleanliness, concurrent private-write isolation, shared-base reuse, removal,
+and final empty-state verification passed. Keep the benchmark and compatibility
+coverage, but require repeatable end-to-end gains before changing the default.
+
 The same-binary smoke test proves the harness works, not a speedup. macOS CI
 runs it against release builds on a 1,026-file fixture with ten concurrent
 views. Run it locally with:

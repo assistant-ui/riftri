@@ -1708,19 +1708,6 @@ impl Git {
         ] {
             prefix.extend([OsString::from("-c"), OsString::from(setting)]);
         }
-        // Git still owns checkout semantics. Bound its native worker pool
-        // only inside this private materialization environment; never inherit
-        // mutable global/repository worker settings or change the user's Git.
-        // Small selections stay sequential to avoid worker startup overhead.
-        let workers = bounded_checkout_workers(
-            std::thread::available_parallelism().map_or(1, |count| count.get()),
-        );
-        prefix.extend([
-            OsString::from("-c"),
-            OsString::from(format!("checkout.workers={workers}")),
-            OsString::from("-c"),
-            OsString::from("checkout.thresholdForParallelism=1024"),
-        ]);
         for (key, value) in configuration {
             let mut setting = OsString::from(format!("{key}="));
             setting.push(os_string_from_git(
@@ -2899,10 +2886,6 @@ fn parse_object_output(bytes: &[u8]) -> Result<ObjectId, GitError> {
 /// are resolved to an object first and peeled after. No refname contains `:`.
 fn must_resolve_before_peeling(revision: &OsStr) -> bool {
     revision.as_encoded_bytes().contains(&b':')
-}
-
-fn bounded_checkout_workers(available: usize) -> usize {
-    available.clamp(1, 4)
 }
 
 /// Whether `git show` would parse `revision` as a range or a negation. No
@@ -4542,16 +4525,38 @@ mod tests {
         );
     }
 
+    // Test-only candidate: the query-level win did not translate to a reliable
+    // full lifecycle win. Keep production materialization sequential until a
+    // paired end-to-end comparison supports changing the default.
+    fn bounded_checkout_workers(available: usize) -> usize {
+        available.clamp(1, 4)
+    }
+
+    fn bounded_checkout_configuration() -> Vec<(String, Vec<u8>)> {
+        let workers =
+            bounded_checkout_workers(std::thread::available_parallelism().map_or(1, |n| n.get()));
+        vec![
+            (
+                "checkout.workers".to_owned(),
+                workers.to_string().into_bytes(),
+            ),
+            (
+                "checkout.thresholdForParallelism".to_owned(),
+                b"1024".to_vec(),
+            ),
+        ]
+    }
+
     #[test]
     fn checkout_worker_limit_is_bounded_and_never_means_all_cpus() {
         for (available, expected) in [(0, 1), (1, 1), (2, 2), (4, 4), (64, 4)] {
-            assert_eq!(super::bounded_checkout_workers(available), expected);
+            assert_eq!(bounded_checkout_workers(available), expected);
         }
     }
 
     #[cfg(unix)]
     #[test]
-    fn materialization_sets_bounded_workers_without_using_repository_settings() {
+    fn materialization_applies_explicit_worker_settings_without_using_repository_settings() {
         use std::os::unix::fs::PermissionsExt;
         let fixture = RepositoryFixture::committed();
         git(fixture.path(), &["config", "checkout.workers", "99"]);
@@ -4575,11 +4580,12 @@ mod tests {
             .tree;
         let output = tempdir().unwrap();
         client
-            .materialize_tree(
+            .materialize_tree_with_config(
                 fixture.path(),
                 &tree,
                 output.path(),
                 &scratch.path().join("index"),
+                &bounded_checkout_configuration(),
             )
             .unwrap();
         let log = fs::read_to_string(scratch.path().join("git-wrapper.log")).unwrap();
@@ -4587,9 +4593,8 @@ mod tests {
             .lines()
             .find(|line| line.contains(" checkout-index "))
             .unwrap();
-        let workers = super::bounded_checkout_workers(
-            std::thread::available_parallelism().map_or(1, |n| n.get()),
-        );
+        let workers =
+            bounded_checkout_workers(std::thread::available_parallelism().map_or(1, |n| n.get()));
         assert!(
             checkout.contains(&format!("-c checkout.workers={workers} ")),
             "{checkout}"
@@ -4650,13 +4655,17 @@ mod tests {
         fs::write(fixture.path().join(".gitattributes"), "*.txt -text\n").unwrap();
         fs::write(fixture.path().join(".git/info/attributes"), "*.txt -text\n").unwrap();
         for (name, configuration, sparse) in [
-            ("default", vec![], vec![]),
+            ("parallel", bounded_checkout_configuration(), vec![]),
             (
                 "sequential",
                 vec![("checkout.workers".to_owned(), b"1".to_vec())],
                 vec![],
             ),
-            ("sparse", vec![], vec!["selected".to_owned()]),
+            (
+                "sparse",
+                bounded_checkout_configuration(),
+                vec!["selected".to_owned()],
+            ),
         ] {
             let output = tempdir().unwrap();
             let index = tempdir().unwrap();
@@ -4730,11 +4739,12 @@ mod tests {
         let output = tempdir().unwrap();
         let index = tempdir().unwrap();
         client
-            .materialize_tree(
+            .materialize_tree_with_config(
                 fixture.path(),
                 &damaged,
                 output.path(),
                 &index.path().join("index"),
+                &bounded_checkout_configuration(),
             )
             .expect_err("a worker missing an object must fail the entire checkout");
     }
@@ -4772,7 +4782,7 @@ mod tests {
                 let output = tempdir().unwrap();
                 let index = tempdir().unwrap();
                 let configuration = if parallel {
-                    vec![]
+                    bounded_checkout_configuration()
                 } else {
                     vec![("checkout.workers".to_owned(), b"1".to_vec())]
                 };
