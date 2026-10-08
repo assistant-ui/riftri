@@ -5,6 +5,29 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.3] - 2026-10-07
+
+### Added
+
+- Lightweight worktree ownership discovery and batched mount-readiness
+  inspection through the Rust, CLI, and Node APIs, without content or disk
+  accounting walks (#678, #679).
+- Structured preflight conflict codes for existing branches, branches checked
+  out elsewhere, and occupied destinations. Human diagnostics and Git safety
+  checks are unchanged (#682).
+
+### Fixed
+
+- The Node API preserves failed checkout-hook reports, exposes native binary
+  resolution, and identifies safe pre-mutation policy refusals for harness
+  integrations (#677).
+- Resolve native executables from Electron's unpacked archive directory;
+  ordinary Node resolution and explicit executable overrides are unchanged
+  (#681).
+- Isolate CLI shell-activation fixtures from inherited Riftri hooks (#674).
+- Restore website development hydration with Farm.js 0.1.1 and refresh the
+  website's storage illustrations (#675, #676).
+
 ## [0.6.2] - 2026-10-06
 
 ### Changed
