@@ -131,9 +131,18 @@ a repository reports `"code": "not-a-repository"` with `category` `policy` and
 exit code `3`, so a runner in the wrong working directory is told to fix the
 call rather than to retry or inspect.
 
-Three more carry their own codes, also `policy` with exit `3`, `cleanup`
-`not-needed`, and no `nextCommand`, because no Riftri command can fix them:
+These preflight refusals also carry their own codes, with `category` `policy`,
+exit `3`, `cleanup` `not-needed`, and no `nextCommand`, because no Riftri command
+can fix them:
 
+- `branch-already-exists` — a new branch was requested with a name that already
+  exists. Choose another name or use an existing-branch add.
+- `branch-checked-out` — an existing branch is already checked out in a
+  registered worktree. Use that worktree or another branch. If the holder was
+  deleted, inspect Git's registrations before pruning them.
+- `destination-exists` — the destination is occupied. Existing empty real
+  directories remain accepted for adds; files, nonempty directories, and
+  symbolic links are not overwritten.
 - `bare-repository` — enabling Git interception (`riftri enable`) ran in a
   bare repository. Worktree lifecycle commands, `status`, `gc`, and `repair`
   all work in one;
@@ -152,7 +161,7 @@ With `--json-errors`, the failure arrives as one receipt on stderr:
   "schemaVersion": 1,
   "outcome": "failed",
   "operation": "worktree-add",
-  "code": "invalid-request",
+  "code": "destination-exists",
   "category": "policy",
   "message": "invalid worktree request: destination already exists: ../t1",
   "phase": null,

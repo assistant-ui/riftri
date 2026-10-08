@@ -479,6 +479,16 @@ pub enum WorktreeError {
 
     #[error("invalid worktree request: {0}")]
     InvalidRequest(String),
+
+    /// Preflight conflicts remain policy refusals, but harnesses can identify
+    /// them without parsing Git's or Riftri's human-readable diagnostics.
+    #[error("invalid worktree request: {0}")]
+    BranchAlreadyExists(String),
+    #[error("invalid worktree request: {0}")]
+    BranchCheckedOut(String),
+    #[error("invalid worktree request: {0}")]
+    DestinationExists(String),
+
     /// The requested start point is `HEAD`, and `HEAD` names no commit: the
     /// repository or its current branch has no commits yet. A policy refusal
     /// like `InvalidRequest`; it is typed separately so the Git shim can hand
@@ -3683,7 +3693,7 @@ fn add_worktree_inner(
     if let WorktreeMode::NewBranch(branch) = &request.mode
         && git.local_branch_target(&repository_root, branch)?.is_some()
     {
-        return Err(WorktreeError::InvalidRequest(format!(
+        return Err(WorktreeError::BranchAlreadyExists(format!(
             "a branch named {} already exists; choose another name or check it out with an existing-branch add",
             branch.to_string_lossy()
         )));
@@ -3738,7 +3748,7 @@ fn add_worktree_inner(
             } else {
                 ""
             };
-            return Err(WorktreeError::InvalidRequest(format!(
+            return Err(WorktreeError::BranchCheckedOut(format!(
                 "branch {} is already checked out at {}{clear}",
                 branch.to_string_lossy(),
                 holder.path.display()
@@ -6300,7 +6310,7 @@ fn normalize_new_destination(
     // link is still refused, even to an empty directory.
     let accept_empty = rules == DestinationRules::WorktreeAdd;
     if exists && !(accept_empty && is_empty_real_directory(destination)?) {
-        return Err(WorktreeError::InvalidRequest(format!(
+        return Err(WorktreeError::DestinationExists(format!(
             "destination already exists: {}",
             destination.display()
         )));
@@ -6322,7 +6332,7 @@ fn normalize_new_destination(
         .map_err(|source| io("inspect normalized destination", &normalized, source))?
         && !(accept_empty && is_empty_real_directory(&normalized)?)
     {
-        return Err(WorktreeError::InvalidRequest(format!(
+        return Err(WorktreeError::DestinationExists(format!(
             "destination already exists: {}",
             normalized.display()
         )));
@@ -20688,7 +20698,11 @@ mod tests {
             assert_eq!(winners, 1, "round {round}: {results:?}");
             for error in results.iter().filter_map(|result| result.as_ref().err()) {
                 assert!(
-                    matches!(error, super::WorktreeError::InvalidRequest(_)),
+                    matches!(
+                        error,
+                        super::WorktreeError::InvalidRequest(_)
+                            | super::WorktreeError::DestinationExists(_)
+                    ),
                     "round {round}: a loser must be refused, not rolled back: {error}"
                 );
             }

@@ -972,9 +972,17 @@ fn requests_git_would_reject_are_refused_as_policy_before_anything_is_written() 
         assert_eq!(output.status.code(), Some(3), "{name}");
         let receipt: serde_json::Value = serde_json::from_slice(&output.stderr)
             .unwrap_or_else(|error| panic!("{name} receipt is not JSON: {error}"));
-        assert_eq!(receipt["code"], "invalid-request", "{name}");
+        let expected_code = match name {
+            "branch-exists" => "branch-already-exists",
+            "branch-checked-out" => "branch-checked-out",
+            _ => "invalid-request",
+        };
+        assert!(output.stdout.is_empty(), "{name}");
+        assert_eq!(receipt["code"], expected_code, "{name}");
         assert_eq!(receipt["category"], "policy", "{name}");
         assert_eq!(receipt["cleanup"], "not-needed", "{name}");
+        assert_eq!(receipt["recovery"], "not-required", "{name}");
+        assert!(receipt["nextCommand"].is_null(), "{name}");
         let message = receipt["message"].as_str().expect("message");
         assert!(message.contains(expected_message), "{name}: {message}");
         assert!(!destination.exists(), "{name} created its destination");
@@ -989,6 +997,50 @@ fn requests_git_would_reject_are_refused_as_policy_before_anything_is_written() 
         registrations.stdout.is_empty(),
         "a refused add must not register a state directory"
     );
+}
+
+#[test]
+fn occupied_destinations_have_a_distinct_policy_receipt_and_are_preserved() {
+    let fixture = tempfile::tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    repository_fixture(&repository, true);
+    for is_directory in [false, true] {
+        let destination = fixture.path().join(format!("occupied-{is_directory}"));
+        let state = fixture.path().join(format!("state-{is_directory}"));
+        let existing_file = if is_directory {
+            std::fs::create_dir(&destination).expect("create occupied directory");
+            destination.join("keep.txt")
+        } else {
+            destination.clone()
+        };
+        std::fs::write(&existing_file, "keep this content").expect("create existing file");
+        let (receipt, exit_code) = riftri_json_error(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                destination.to_str().unwrap(),
+                "--detach",
+                "HEAD",
+                "--state-dir",
+                state.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(exit_code, Some(3));
+        assert_eq!(receipt["code"], "destination-exists");
+        assert_eq!(receipt["category"], "policy");
+        assert_eq!(receipt["cleanup"], "not-needed");
+        assert_eq!(receipt["recovery"], "not-required");
+        assert!(receipt["nextCommand"].is_null());
+        assert_eq!(
+            std::fs::read_to_string(existing_file).unwrap(),
+            "keep this content"
+        );
+        assert!(
+            !state.exists(),
+            "a refused add must not create storage state"
+        );
+    }
 }
 
 /// The guard on the change above: a branch whose ref exists but whose commit
@@ -1211,7 +1263,7 @@ fn a_refused_add_into_missing_parents_creates_nothing() {
         ],
     );
     assert_eq!(exit_code, Some(3));
-    assert_eq!(receipt["code"], "invalid-request");
+    assert_eq!(receipt["code"], "branch-already-exists");
     assert!(
         !fixture.path().join("agents").exists(),
         "a refused add created parents"
