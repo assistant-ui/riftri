@@ -4612,12 +4612,13 @@ mod tests {
             "*.txt text eol=crlf\n*.bin binary\n",
         )
         .unwrap();
+        fs::write(fixture.path().join("tracked.txt"), b"tracked\r\n").unwrap();
         for folder in ["selected", "excluded"] {
             fs::create_dir(fixture.path().join(folder)).unwrap();
             for i in 0..600 {
                 fs::write(
                     fixture.path().join(format!("{folder}/{i}.txt")),
-                    format!("{folder}:{i}\n"),
+                    format!("{folder}:{i}\r\n"),
                 )
                 .unwrap();
             }
@@ -4704,18 +4705,34 @@ mod tests {
                 );
             }
         }
-        let entries = client.list_tree(fixture.path(), &tree).unwrap();
-        let missing = entries
-            .iter()
-            .find(|entry| entry.path == Path::new("selected/599.txt"))
+        // Inject a missing blob through Git, without assuming add stored its
+        // objects loose (newer Git can pack bulk inserts immediately).
+        let missing = "a".repeat(tree.as_str().len());
+        assert!(
+            client
+                .run(Some(fixture.path()), &["cat-file", "-e", &missing])
+                .is_err()
+        );
+        git(
+            fixture.path(),
+            &[
+                "update-index",
+                "--cacheinfo",
+                "100644",
+                &missing,
+                "selected/599.txt",
+            ],
+        );
+        let damaged = client
+            .run(Some(fixture.path()), &["write-tree", "--missing-ok"])
             .unwrap();
-        delete_loose_object(fixture.path(), missing.object_id.as_str());
+        let damaged = super::parse_object_output(&damaged.stdout).unwrap();
         let output = tempdir().unwrap();
         let index = tempdir().unwrap();
         client
             .materialize_tree(
                 fixture.path(),
-                &tree,
+                &damaged,
                 output.path(),
                 &index.path().join("index"),
             )
