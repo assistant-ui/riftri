@@ -20,6 +20,96 @@ concurrency:
 # (#399). The slowest job here runs about five minutes, so 30 surfaces a
 # stall while leaving ample room for a slow runner.
 jobs:
+  # Investigation-only job for #693. Remove after retaining the paired evidence;
+  # it must not become an unconditional cost for future unrelated pull requests.
+  apfs-read-ahead-evaluation:
+    name: APFS read-ahead paired evaluation (temporary)
+    runs-on: macos-15
+    timeout-minutes: 30
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out fixed baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: a58006d7c7b4989a055a967e65d5654281b77ea4
+          path: benchmark-baseline
+          persist-credentials: false
+
+      - name: Check out public T3 Code fork as data only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: farming-labs/t3code
+          ref: c12f91bfaf2e315d1dc074409760cf77c2f45acb
+          path: benchmark-t3code
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Build both release binaries before measuring
+        env:
+          CARGO_BUILD_JOBS: "3"
+        run: |
+          cargo build --release --locked -p riftri-cli
+          cargo build --release --locked -p riftri-cli --manifest-path benchmark-baseline/Cargo.toml
+
+      - name: Create isolated APFS comparison volume
+        run: |
+          hdiutil create -size 4g -fs APFS -volname RiftriReadAhead \
+            -type SPARSEBUNDLE "$RUNNER_TEMP/riftri-read-ahead"
+          mkdir "$RUNNER_TEMP/riftri-read-ahead-volume"
+          hdiutil attach "$RUNNER_TEMP/riftri-read-ahead.sparsebundle" \
+            -mountpoint "$RUNNER_TEMP/riftri-read-ahead-volume" -nobrowse
+          touch "$RUNNER_TEMP/riftri-read-ahead-volume/.metadata_never_index"
+
+      - name: Compare synthetic and real-source serial and concurrent adds
+        run: |
+          baseline="$GITHUB_WORKSPACE/benchmark-baseline/target/release/riftri"
+          candidate="$GITHUB_WORKSPACE/target/release/riftri"
+          output="$RUNNER_TEMP/riftri-read-ahead-volume"
+          harness=docs/benchmarks/apfs-read-ahead.mjs
+          node "$harness" "$baseline" "$output/serial-many" 4096 8 "$candidate"
+          node "$harness" "$baseline" "$output/concurrent-four" 4096 4 "$candidate" 8192 - 4
+          node "$harness" "$baseline" "$output/concurrent-ten" 4096 4 "$candidate" 8192 - 10
+          node "$harness" "$baseline" "$output/t3-serial" 4096 8 "$candidate" 8192 "$GITHUB_WORKSPACE/benchmark-t3code"
+          node "$harness" "$baseline" "$output/t3-four" 4096 4 "$candidate" 8192 "$GITHUB_WORKSPACE/benchmark-t3code" 4
+
+      - name: Retain raw measurements and failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apfs-read-ahead-paired-evaluation
+          path: |
+            ${{ runner.temp }}/riftri-read-ahead-volume/*/results.json
+            ${{ runner.temp }}/riftri-read-ahead-volume/*/git-*.jsonl
+            ${{ runner.temp }}/riftri-read-ahead-volume/*/add-*.log
+          if-no-files-found: error
+
+      - name: Detach comparison volume without forcing
+        if: always()
+        run: |
+          image="$RUNNER_TEMP/riftri-read-ahead.sparsebundle"
+          attached_device() {
+            hdiutil info | awk -v img="$image" '
+              $1 == "image-path" { found = ($3 == img) }
+              found && $1 ~ /^\/dev\/disk[0-9]+$/ { print $1; exit }'
+          }
+          for attempt in 1 2 3 4 5; do
+            device=$(attached_device)
+            if [ -z "$device" ]; then exit 0; fi
+            if hdiutil detach "$device"; then exit 0; fi
+            sleep "$attempt"
+          done
+          hdiutil info
+          exit 1
+
   quality:
     name: Quality (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

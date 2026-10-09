@@ -26,12 +26,21 @@ impl ReadAhead {
         if count == 0 {
             return None;
         }
-        self.remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(count)
-            })
-            .ok()
-            .map(|_| count as i32)
+        // Keep the MSRV-compatible CAS loop: newer Rust deprecates
+        // fetch_update, but its renamed replacement is newer than Rust 1.88.
+        let mut remaining = self.remaining.load(Ordering::Relaxed);
+        loop {
+            let reduced = remaining.checked_sub(count)?;
+            match self.remaining.compare_exchange_weak(
+                remaining,
+                reduced,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(count as i32),
+                Err(observed) => remaining = observed,
+            }
+        }
     }
 
     pub(super) fn advise(&self, path: &Path, length: u64) {
