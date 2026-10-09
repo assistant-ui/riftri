@@ -57,7 +57,7 @@ add it to that overview's documentation index — CI enforces the link.
 ## Measurements
 
 - [Deferred APFS read-ahead, October 9](benchmarks/apfs-deferred-read-ahead-2026-10-09.md)
-  — local serial and four-way gains with full checks; independent evaluation pending.
+  — local gains, but hosted concurrent regression and candidate timeouts keep the PR in draft.
 - [APFS read-ahead, October 9](benchmarks/apfs-read-ahead-2026-10-09.md)
   — historical inline-hint gains and concurrent regressions; rejected budget prototypes retained.
 - [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)

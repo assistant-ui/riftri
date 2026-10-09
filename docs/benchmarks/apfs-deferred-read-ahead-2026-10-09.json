@@ -26,7 +26,7 @@
   "baselineCommit": "a58006d7c7b4989a055a967e65d5654281b77ea4",
   "candidateCommit": "f6b32a4fca40136d4548c60e2180d6b12dd42d9b",
   "build": "cargo build --release --locked -p riftri-cli",
-  "decision": "Promising local deferred scheduling result, including a separate cold/shim comparison. Do not adopt before analyzing the independent CI failure and remaining stress evidence.",
+  "decision": "Do not adopt: local gains do not outweigh the independent CI four-way regression and real-source candidate timeouts. See the retained CI report.",
   "caveats": [
     "Local APFS host with changing background load, swap and limited free disk space; not a quiet-host guarantee.",
     "Baseline cold anchor samples are retained but are not a cold before/after comparison.",

@@ -132,3 +132,85 @@ test("cold, shim and plain-Git comparisons retain every verified case and the sl
   assert.match(markdown, /Plain Git remained faster/);
   assert.match(markdown, /4\.555 s versus 4\.327 s/);
 });
+
+const ci = JSON.parse(fs.readFileSync(path.join(directory, "apfs-deferred-read-ahead-ci-2026-10-09.json"), "utf8"));
+
+test("hosted deferred evaluation retains complete workloads and recalculates cold and cached summaries", () => {
+  assert.equal(ci.candidateCommit, report.candidateCommit);
+  assert.match(ci.artifactSha256, /^[a-f0-9]{64}$/);
+  assert.equal(ci.runs.length, 21);
+  assert.equal(ci.runs.reduce((n, run) => n + run.samples.length, 0), 225);
+  assert.equal(ci.runs.reduce((n, run) => n + run.batches.length, 0), 74);
+  for (const run of ci.runs.filter(run => run.complete)) {
+    const cold = run.name.startsWith("cold-");
+    assert.equal(run.samples.length, cold ? 2 : 1 + 2 * run.rounds * run.concurrency);
+    assert.equal(run.finalActiveViews, 0);
+    assert.equal(run.finalBases, 0);
+    assert.equal(run.finalDiagnosticIssues, 0);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(sample.indexScanned, run.trackedEntries);
+      assert.equal(sample.indexEntries, run.trackedEntries);
+    }
+    if (cold) {
+      assert.equal(run.summary, null);
+      continue;
+    }
+    for (const label of ["baseline", "advice"]) {
+      const samples = run.samples.filter(sample => sample.round > 0 && sample.label === label);
+      assert.equal(run.summary[label].medianMilliseconds, median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+      assert.equal(run.summary[label].medianCloneAndHintMilliseconds, median(samples.map(sample => sample.cloneAndHintMilliseconds)));
+      assert.equal(run.summary[label].medianIndexRefreshMilliseconds, median(samples.map(sample => sample.indexRefreshSeconds * 1000)));
+      assert.equal(run.summary[label].medianCpuSecondsPerAdd, median(samples.map(sample => sample.cpuSeconds)));
+    }
+    assert.equal(run.summary.wallReductionPercent, 100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+    assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" && batch.milliseconds < run.batches.find(other => other.label === "baseline" && other.round === batch.round).milliseconds).length);
+  }
+  const cold = ci.runs.filter(run => run.name.startsWith("cold-"));
+  assert.equal(cold.length, 16);
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(ci.coldSummary[label].medianMilliseconds, median(cold.filter(run => run.name.endsWith(`-${label}`)).map(run => run.samples[0].milliseconds)));
+  }
+  assert.equal(ci.coldSummary.wallReductionPercent, 100 * (1 - ci.coldSummary.advice.medianMilliseconds / ci.coldSummary.baseline.medianMilliseconds));
+  assert.equal(ci.coldSummary.fasterPairs, cold.filter(run => run.name.endsWith("-advice") && run.samples[0].milliseconds < cold.find(other => other.name === run.name.replace(/advice$/, "baseline")).samples[0].milliseconds).length);
+});
+
+test("candidate timeouts and unstable concurrent results cannot become a merge recommendation", () => {
+  const failed = ci.runs.find(run => run.name === "reference-four");
+  assert.equal(failed.complete, false);
+  assert.equal(failed.summary, null);
+  assert.equal(failed.finalActiveViews, undefined);
+  assert.equal(failed.samples.length, 13);
+  for (const timing of ci.failedRoundGitTiming.workers) {
+    assert.equal(timing.gitExitCode, 0);
+    assert.match(timing.traceSha256, /^[a-f0-9]{64}$/);
+    const sample = failed.samples.find(sample => sample.round === 2 && sample.worker === timing.worker);
+    assert.equal(timing.metadataReceiptMilliseconds, sample.phases.find(phase => phase.line.endsWith(": git-metadata-created")).milliseconds);
+  }
+  assert.equal(failed.batches.length, 2);
+  assert.ok(failed.batches.every(batch => batch.round === 1));
+  const timedOut = failed.samples.filter(sample => !sample.success);
+  assert.deepEqual(timedOut.map(sample => sample.worker), [0, 1, 2, 3]);
+  for (const sample of timedOut) {
+    assert.equal(sample.round, 2);
+    assert.equal(sample.label, "advice");
+    assert.equal(sample.timedOut, true);
+    assert.equal(sample.signal, "SIGTERM");
+    assert.ok(sample.milliseconds >= 120000);
+    assert.equal(sample.indexScanned, null);
+  }
+  const four = ci.runs.find(run => run.name === "concurrent-four");
+  assert.ok(four.summary.wallReductionPercent < 0);
+  assert.equal(four.summary.fasterPairs, 4);
+  assert.equal(four.batches.filter(batch => batch.label === "baseline" && batch.milliseconds > 50000).length, 2);
+  const ten = ci.runs.find(run => run.name === "concurrent-ten");
+  assert.equal(ten.summary.fasterPairs, 2);
+  assert.equal(ten.batches.filter(batch => batch.label === "baseline" && batch.milliseconds > 80000).length, 2);
+  assert.match(markdown, /Do not merge\s+this candidate/);
+  assert.match(markdown, /6\.55% higher/);
+  assert.match(markdown, /all four\s+candidate workers in round two/);
+  assert.match(markdown, /not proof that a particular hint syscall caused/);
+  assert.match(markdown, /not present\s+this as an established ten-way speedup/);
+});

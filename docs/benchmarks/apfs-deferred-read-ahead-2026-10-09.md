@@ -1,9 +1,9 @@
 # APFS deferred read-ahead evaluation, 2026-10-09
 
 Separating read-ahead from file cloning improved cached creation in local
-serial and four-way tests, without removing Git content checks. **This is
-not yet a merge recommendation:** independent CI and higher-concurrency
-evidence are still pending.
+serial and four-way tests, without removing Git content checks. **Do not merge
+this candidate:** independent CI found a 6.55% slower four-way synthetic median
+and timed out all four candidate workers in a real-source round.
 
 This follows the [original inline experiment](apfs-read-ahead-2026-10-09.md),
 which regressed four-way creation on a hosted runner. Those negative results
@@ -63,6 +63,11 @@ tree `c4de7922b24126e860cb77652f5d080e04c8c396`: 5,864 tracked entries,
 the reproduced tree ID. No dependencies or build output are included.
 The source repository is read only; all views belong to disposable fixtures.
 This is not a T3 Code compatibility or performance result.
+
+Phase intervals below come from progress receipts emitted **after** the next
+journal transition is persisted. The `cloneAndHintMilliseconds` field therefore
+includes native cloning, hint issuance, directory permissions and the durable
+`ViewCreated` transition; it is not an isolated syscall timer.
 
 On the four-way reference, median initial Git refresh per view fell from
 2,884.34 ms to 1,077.52 ms. The combined clone-and-hint phase grew from
@@ -142,14 +147,70 @@ The final runtime passed formatting, all-target/all-feature Clippy and the
 workspace test suite: 699 passed, zero failed, 23 ignored. All ordinary jobs in
 [CI run 37983257049](https://github.com/assistant-ui/riftri/actions/runs/37983257049)
 passed, including cross-platform quality and real-filesystem integration.
-Its separate performance job has a failed assistant-ui four-way case; the
-logs and remaining workloads are still pending. Do not merge on green quality
-checks alone.
+Its separate performance job failed as detailed below. Do not merge on green
+quality checks alone. Local package tests passed 277 tests with four skipped.
 
 The same run's `native-cow-benchmark-macos-apfs` artifact reports a dedicated
 APFS volume growing by only **49,152 bytes** for a cached 32 MiB payload view;
 a 4 MiB private write grew it by 4,194,304 bytes. This debug-build storage check
 supports continued physical sharing, not a release-build latency claim.
+
+## Independent CI: reject default adoption for now
+
+The same [CI run](https://github.com/assistant-ui/riftri/actions/runs/37983257049)
+compared exact candidate `f6b32a4` with the fixed baseline on a `macos-15`
+hosted runner using one isolated 4 GiB APFS sparsebundle and independent fixture
+states. Workloads were separate steps, so a failed case did not suppress later
+cold and stress results. The temporary job was removed after retaining its
+evidence, not because its failure became a pass. The PR remains draft.
+
+| Fixture | Baseline median | Candidate median | Difference | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Cached synthetic serial | 1,961.01 ms | 1,855.61 ms | 5.37% lower | 5/8 |
+| Cached synthetic four-way | 5,569.43 ms | 5,934.44 ms | **6.55% higher** | 4/8 |
+| Cached assistant-ui serial | 2,537.00 ms | 2,258.30 ms | 10.99% lower | 6/8 |
+| Cached assistant-ui four-way | Incomplete | Four candidate timeouts | No valid summary | None |
+| Cold-base synthetic serial | 2,164.40 ms | 1,744.54 ms | 19.40% lower | 8/8 |
+| Cached synthetic ten-way | 48,949.48 ms | 14,225.75 ms | 70.94% lower; unstable | 2/4 |
+
+The ten-way median is dominated by two baseline batches of 112.532 and
+86.190 seconds; the other baseline batches were 11.709 and 10.716 seconds.
+Candidates were 13.889, 14.788, 12.845 and 14.563 seconds. **Do not present
+this as an established ten-way speedup:** it loses both later pairs. All
+outliers remain in the data, including the four-way baseline's 54.390- and
+52.334-second batches.
+
+For the synthetic four-way case, median combined cloning/hints grew from
+1,087.64 ms to 4,228.90 ms per view, while Git refresh fell from 2,811.94 ms
+to 229.92 ms. Median CPU per add rose from 1.485 s to 1.555 s. Deferring hints
+therefore did not solve the extra pre-Git cost on this runner.
+
+The real-source four-way case completed its first pair, then **all four
+candidate workers in round two** reached the 120-second deadline. Their process
+groups were stopped, and failure records retain roughly 121-second elapsed
+times including termination grace, `SIGTERM`, and `timedOut: true`. No round-two
+batch median or successful cleanup is claimed. The first winning pair is not
+used as a performance summary of the failed run.
+
+Three workers reached `base-ready` but not `view-created`; the fourth was still
+verifying/reusing its base. One took about 97 seconds to reach the persisted
+`GitMetadataCreated` receipt, although its Git worktree-add process itself
+reported only 3.290 seconds. The other three Git adds reported 0.109, 0.265 and
+0.175 seconds, all exiting successfully. Trace2 does not include launch overhead,
+and the receipt also follows a durable journal write. These observations do not
+attribute that entire delay to Git. They show broader delays before Git's final
+content validation, **not proof that a particular hint syscall caused the
+timeout**. No thread stacks or system I/O trace were captured. Separating native
+cloning, hint issuance and journal persistence in diagnostics, and capturing
+stacks during a slow round, is the next useful experiment; do not remove integrity checks or increase
+timeouts merely to turn this result green.
+
+The [retained CI JSON](apfs-deferred-read-ahead-ci-2026-10-09.json) includes all
+225 samples, 74 completed batches and 21 fixture records, including every cold
+sample and all four failed attempts. Failed fixtures have no successful final
+GC claim. The run's `deferred-apfs-read-ahead-evaluation` artifact contains full
+Git traces and worker logs; its ID and checksum are recorded in the JSON.
+The disposable volume detached without force after evidence upload.
 
 ## Reproduce
 
