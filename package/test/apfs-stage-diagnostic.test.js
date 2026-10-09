@@ -537,6 +537,43 @@ test("Git-child diagnosis retains every read-heavy stack and failed observer wit
   assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  apfs-git-child-diagnostics:/m);
 });
 
+test("bounded prefix-read evidence retains its latency and CPU regression", () => {
+  const run = JSON.parse(fs.readFileSync(path.join(directory, "apfs-prefix-warming-2026-10-09.json")));
+  const patch = fs.readFileSync(path.join(directory, run.candidatePatch));
+  assert.equal(createHash("sha256").update(patch).digest("hex"), run.candidatePatchSha256);
+  assert.equal(run.candidatePatchSha256, "17b4c7e294d4f6994407814da63f0187276b88c4b64a0689785d4d934d1fab45");
+  assert.match(patch.toString(), /prefix_warming_never_reads_past_the_per_file_cap/);
+  assert.match(patch.toString(), /prefix_warming_handles_short_reads_interruptions_and_real_errors/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs/read_ahead.rs"), "utf8"), /warm_prefix/);
+  assert.equal(run.complete, true);
+  assert.equal(run.failure, null);
+  assert.equal(run.stageDiagnostics, false);
+  assert.equal(run.samples.length, 65);
+  assert.equal(run.batches.length, 16);
+  assert.deepEqual([run.finalActiveViews, run.finalBases, run.finalDiagnosticIssues], [0, 0, 0]);
+  assert.equal(run.baselineSha256, "d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1");
+  assert.equal(run.candidateSha256, "10b2ba689dc0225039f6edf3a4a9a6e0c163faef844cb56ece9cd7f882fa62c9");
+  for (const sample of run.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(Number(sample.indexScanned), 5864);
+    assert.equal(Number(sample.indexEntries), 5864);
+    const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+    assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+  }
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(run.summary[label].medianMilliseconds, median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+    assert.equal(run.summary[label].medianCpuSecondsPerView, median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+  }
+  assert.equal(run.summary.completeComparison, true);
+  assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" && batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(run.summary.fasterPairs, 4);
+  assert.equal(run.summary.wallReductionPercent, 100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+  assert.ok(run.summary.wallReductionPercent < 0);
+  assert.ok(run.summary.advice.medianCpuSecondsPerView > run.summary.baseline.medianCpuSecondsPerView);
+});
+
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
   const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
   assert.equal(bulk.measurement.production_eligible, false);

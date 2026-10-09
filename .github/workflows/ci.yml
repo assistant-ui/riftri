@@ -20,6 +20,128 @@ concurrency:
 # (#399). The slowest job here runs about five minutes, so 30 surfaces a
 # stall while leaving ample room for a slow runner.
 jobs:
+  # Temporary replication of the unmodified deferred-read candidate in #693. Remove once
+  # results are retained; unrelated pull requests must not pay this cost.
+  deferred-read-ahead-replication:
+    name: Deferred APFS replication (${{ matrix.replica }})
+    runs-on: macos-15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        replica: [1, 2, 3]
+    env:
+      RIFTRI_BENCH_STAGE_DIAGNOSTICS: "0"
+    if: github.event_name == 'pull_request' && github.head_ref == 'perf/native-tree-startup'
+    steps:
+      - name: Check out exact candidate head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Check out fixed baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: a58006d7c7b4989a055a967e65d5654281b77ea4
+          path: benchmark-baseline
+          persist-credentials: false
+
+      - name: Check out pinned assistant-ui source as data only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: assistant-ui/assistant-ui
+          ref: 038cd9f82b418afe9e6d0080648738f78586fbca
+          path: benchmark-reference
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Build both release binaries before timing
+        env:
+          CARGO_BUILD_JOBS: "3"
+        run: |
+          cargo build --release --locked -p riftri-cli
+          cargo build --release --locked -p riftri-cli --manifest-path benchmark-baseline/Cargo.toml
+
+      - name: Create isolated APFS comparison volume
+        id: volume
+        run: |
+          hdiutil create -size 4g -fs APFS -volname RiftriDeferredReads \
+            -type SPARSEBUNDLE "$RUNNER_TEMP/riftri-deferred"
+          mkdir "$RUNNER_TEMP/riftri-deferred-volume"
+          hdiutil attach "$RUNNER_TEMP/riftri-deferred.sparsebundle" \
+            -mountpoint "$RUNNER_TEMP/riftri-deferred-volume" -nobrowse
+          touch "$RUNNER_TEMP/riftri-deferred-volume/.metadata_never_index"
+
+      - name: Synthetic serial
+        if: ${{ !cancelled() && steps.volume.outcome == 'success' }}
+        run: >-
+          node docs/benchmarks/apfs-read-ahead.mjs
+          "$GITHUB_WORKSPACE/benchmark-baseline/target/release/riftri"
+          "$RUNNER_TEMP/riftri-deferred-volume/serial-many"
+          4096 8 "$GITHUB_WORKSPACE/target/release/riftri"
+          8192 - 1
+
+      - name: Synthetic four-way
+        if: ${{ !cancelled() && steps.volume.outcome == 'success' }}
+        run: >-
+          node docs/benchmarks/apfs-read-ahead.mjs
+          "$GITHUB_WORKSPACE/benchmark-baseline/target/release/riftri"
+          "$RUNNER_TEMP/riftri-deferred-volume/concurrent-four"
+          4096 8 "$GITHUB_WORKSPACE/target/release/riftri"
+          8192 - 4
+
+      - name: Assistant-ui serial
+        if: ${{ !cancelled() && steps.volume.outcome == 'success' }}
+        run: >-
+          node docs/benchmarks/apfs-read-ahead.mjs
+          "$GITHUB_WORKSPACE/benchmark-baseline/target/release/riftri"
+          "$RUNNER_TEMP/riftri-deferred-volume/reference-serial"
+          4096 8 "$GITHUB_WORKSPACE/target/release/riftri"
+          8192 "$GITHUB_WORKSPACE/benchmark-reference" 1
+
+      - name: Assistant-ui four-way
+        if: ${{ !cancelled() && steps.volume.outcome == 'success' }}
+        run: >-
+          node docs/benchmarks/apfs-read-ahead.mjs
+          "$GITHUB_WORKSPACE/benchmark-baseline/target/release/riftri"
+          "$RUNNER_TEMP/riftri-deferred-volume/reference-four"
+          4096 8 "$GITHUB_WORKSPACE/target/release/riftri"
+          8192 "$GITHUB_WORKSPACE/benchmark-reference" 4
+
+      - name: Retain every result and failed-worker log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deferred-apfs-replication-${{ matrix.replica }}
+          path: |
+            ${{ runner.temp }}/riftri-deferred-volume/*/results.json
+            ${{ runner.temp }}/riftri-deferred-volume/*/git-*.jsonl
+            ${{ runner.temp }}/riftri-deferred-volume/*/add-*.log
+          if-no-files-found: error
+
+      - name: Detach comparison volume without forcing
+        if: always()
+        run: |
+          image="$RUNNER_TEMP/riftri-deferred.sparsebundle"
+          attached_device() {
+            hdiutil info | awk -v img="$image" '
+              $1 == "image-path" { found = ($3 == img) }
+              found && $1 ~ /^\/dev\/disk[0-9]+$/ { print $1; exit }'
+          }
+          for attempt in 1 2 3 4 5; do
+            device=$(attached_device)
+            if [ -z "$device" ]; then exit 0; fi
+            if hdiutil detach "$device"; then exit 0; fi
+            sleep "$attempt"
+          done
+          hdiutil info
+          exit 1
+
   quality:
     name: Quality (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

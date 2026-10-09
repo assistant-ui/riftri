@@ -548,15 +548,68 @@ hints took 195.95 ms and refresh medians were 728.01 versus 270.86 ms.
 These are separate phase distributions, not paired end-to-end gains; their
 medians must not be added into a new startup-speed claim.
 
-The next candidate should test **bounded parallel prefix reads** as a different
+The next candidate tested **bounded parallel prefix reads** as a different
 way to warm the view's cache before Git's unchanged full check. Unlike the
 current advisory requests, this would copy a capped prefix into disposable
 userspace buffers; it must retain regular-file/no-follow safeguards, byte and
 worker limits, private-write isolation, and every durability/verification
-step. It is an unmeasured hypothesis, not an adopted implementation. It needs
-serial and concurrent uninstrumented comparisons against both the existing
-deferred candidate and main before promotion. The original hint-enabled
+step. This began as an unmeasured hypothesis, not an adopted implementation;
+the completed evaluation below rejects it. The original hint-enabled
 120-second failure was not reproduced or explained by this no-hint observation.
+
+## Bounded prefix reads: not adopted
+
+The [prototype patch](apfs-prefix-warming.patch) replaced advisory requests with
+ordinary reads into a disposable 64 KiB stack buffer. It retained the 64 KiB
+per-file and 64 MiB per-operation caps, existing bounded workers, no-follow
+regular-file handles, and the mandatory Git check after workers joined. It
+never wrote copied bytes or used a successful read as proof of integrity.
+Three new tests failed before implementation, then covered byte limits, early
+EOF, short reads, interruption retry and genuine errors. Existing unsafe-path,
+native isolation and recovery tests remained intact.
+
+Before timing, formatting, all-target/all-feature Clippy, the full Rust suite
+(698 top-level tests; 705 passing executions including helpers; 24 ignored)
+and the package suite (291 passed, four skipped) passed. The measured release
+binary was `10b2ba689dc0225039f6edf3a4a9a6e0c163faef844cb56ece9cd7f882fa62c9`.
+
+Eight alternating real-project four-way pairs against the existing deferred
+candidate, **not main**, measured **4,359.97 → 5,188.83 ms (19.01% slower)**,
+with **4/8** faster pairs. CPU per view also rose, **2.415 → 2.600 seconds**.
+All 65 views passed complete bytes/modes/symlinks, 5,864-entry initial Git
+scans, private-write, clean-removal and final-GC checks. The
+[complete record](apfs-prefix-warming-2026-10-09.json) retains all 16 batches,
+workers, resources and outliers. No build, other benchmark, stage probes or
+stack sampling overlapped timing. Host activity was not controlled.
+
+The prototype and its implementation-specific tests were removed from normal
+Rust. No serial, main-baseline or hosted evaluation was launched after this
+completed losing result; no claim about those unmeasured comparisons follows.
+
+After removal, formatting, all-target/all-feature Clippy and the full Rust
+suite passed again (695 top-level tests, 24 ignored; 702 passing executions
+including helpers). All 292 package tests passed, with four skipped. Rebuilding
+the restored release reproduced
+`d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`.
+
+The remaining lead is the original deferred native-advice path, not a new
+cache-warming mechanism. A temporary three-job hosted replication compares it
+with the verified current main (`a58006d7`) without probes or stack sampling.
+Each fresh runner performs eight alternating pairs of synthetic and real
+project cached creation, both serially and four-way, retaining every result
+and the unchanged 120-second worker deadline. The jobs do not cancel each other on
+failure. This tests reproducibility across runner instances; it does not assume
+physically independent hosts or erase the first failed evaluation. No merge
+readiness is inferred before these results are inspected.
+
+Before seeing the replication results, the evaluation gate is: all correctness
+checks and complete fixtures must pass; no candidate deadline failure; and
+each fixture on each runner must show a lower candidate median with at least
+six of eight faster pairs. Pooled medians cannot hide a losing runner or
+fixture. Passing this repeatability gate would still need reconciliation with
+the original failed run and the existing cold, tiny, large-file and allocation
+evidence before a merge recommendation; this narrower replication alone does
+not certify those cases or erase unexplained tail behavior.
 
 ## Reproduce safely
 
