@@ -293,6 +293,56 @@ test("size-selective hint evidence retains all outcomes without shipping the cut
   assert.match(markdown, /not a universal slowdown estimate/);
 });
 
+test("overlap evidence retains both full comparisons without shipping the scheduling prototype", () => {
+  const patch = fs.readFileSync(path.join(directory, "apfs-overlap-hints.patch"));
+  const patchSha = createHash("sha256").update(patch).digest("hex");
+  assert.match(patch.toString(), /overlaps_the_operation_and_joins_admitted_hints_on_error/);
+  assert.match(patch.toString(), /panic_stops_admission_and_joins_workers_before_unwinding/);
+  for (const file of ["crates/riftri-storage/src/apfs/read_ahead.rs", "crates/riftri-core/src/worktree.rs"]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /ReadAheadPlan|clone_tree_for_index_sync|read_ahead\.during/);
+  }
+  for (const [name, entries, wins] of [["reference", 5864, 6], ["synthetic", 4097, 3]]) {
+    const run = JSON.parse(fs.readFileSync(path.join(directory, `apfs-overlap-${name}-2026-10-09.json`)));
+    assert.equal(run.candidatePatchSha256, patchSha);
+    assert.equal(run.decision, "not adopted; overlap removed from normal source");
+    assert.match(run.baselineDescription, /not main/);
+    assert.equal(run.complete, true);
+    assert.equal(run.failure, null);
+    assert.equal(run.stageDiagnostics, false);
+    assert.equal(run.samples.length, 65);
+    assert.equal(run.batches.length, 16);
+    assert.equal(run.finalActiveViews, 0);
+    assert.equal(run.finalBases, 0);
+    assert.equal(run.finalDiagnosticIssues, 0);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(Number(sample.indexScanned), entries);
+      assert.equal(Number(sample.indexEntries), entries);
+      const reset = sample.gitCommands.find(command => command.argv[1] === "reset");
+      assert.equal(Number(reset.counters.find(counter => counter.key === "refresh/sum_scan").value), entries);
+      const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+      assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+    }
+    for (const label of ["baseline", "advice"]) {
+      assert.equal(run.summary[label].medianMilliseconds,
+        median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+      assert.equal(run.summary[label].medianCpuSecondsPerView,
+        median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+    }
+    assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" &&
+      batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+    assert.equal(run.summary.fasterPairs, wins);
+    assert.equal(run.summary.wallReductionPercent,
+      100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+    assert.ok(Math.abs(run.summary.wallReductionPercent) < 1);
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /small, mixed changes do not justify/);
+  assert.match(markdown, /not proof\s+that overlap can never help/);
+});
+
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
   const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
   assert.equal(bulk.measurement.production_eligible, false);

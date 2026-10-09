@@ -312,6 +312,72 @@ full Rust workspace passed (702 tests, 24 ignored). The package suite passed
 `d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`, confirming
 that this follow-up retains evidence without changing the candidate's runtime.
 
+## Overlapping hints with Git: not adopted
+
+The scheduling lead above was implemented after the size-selective experiment.
+The [exact build-only patch](apfs-overlap-hints.patch) captures relative file
+names and lengths during cloning, finishes all clones and permissions, then
+issues optional hints alongside the initial real-Git index synchronization.
+Returning or unwinding from Git stops new hint admission; scoped workers join
+before journal advancement, rollback or hooks. Already admitted kernel calls
+cannot be cancelled. The byte caps, no-follow/nonblocking regular-file handles,
+full Git checks and all durable transitions stay intact. Compaction retains its
+existing scheduling, and Linux/Windows behavior is unchanged.
+
+The overlap/error regression first failed against sequential scheduling.
+Five new tests cover overlap and error preservation, panic cleanup, empty plans,
+finishing hints during a longer operation, and relative paths after activation's
+rename with private-write isolation. Formatting, all-target/all-feature Clippy
+and the complete workspace passed on the prototype (707 tests, 24 ignored),
+including sparse selection, same-size/restored-mtime mutation detection and
+recovery. Its release executable has SHA-256
+`8eedf3ccbf714d70ebecf568a822c4fb028e101e7ad95c9db2da617ffc684e25`.
+
+Both completed comparisons use the prior deferred candidate, **not main**, and
+eight alternating four-way pairs. Neither run used stage probes or stack
+sampling, and no local build or other benchmark overlapped either run.
+
+| Fixture | Deferred batch median | Overlap batch median | Change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Pinned real project | 3,805.93 ms | 3,778.73 ms | 0.71% lower | 6/8 |
+| 4,096 × 8 KiB files plus symlink | 1,693.86 ms | 1,701.70 ms | 0.46% higher | 3/8 |
+
+The [real-project record](apfs-overlap-reference-2026-10-09.json) and
+[synthetic record](apfs-overlap-synthetic-2026-10-09.json) retain all 130 samples,
+32 batches, Git command timings/counters and resource observations. All full
+content/mode/symlink checks, initial Git scans of 5,864 or 4,097 entries,
+private-write checks, clean removals and final garbage collections passed.
+Both ended with zero active views, bases and diagnostic issues. No observations
+were discarded: the real project's last two pairs lost, including a
+6.15-second candidate batch after six earlier wins. Median CPU per cached view
+was 2.325 → 2.335 seconds on the real project and 1.200 → 1.210 seconds on the
+synthetic fixture. There was no CPU saving either.
+
+These small, mixed changes do not justify the scheduling complexity. The
+prototype and its implementation-specific tests are removed from normal Rust
+source; only the reproducible patch and evidence are retained. No hosted
+performance run was launched for this variant. The local result is not proof
+that overlap can never help, nor does it resolve the earlier hosted timeout or
+make the PR ready to merge.
+
+The next scan will check native-clone concurrency separately from optional
+hint scheduling. Four simultaneous adds can each create four native-clone
+workers; a lower per-add clone limit might reduce metadata contention. That is
+an unmeasured hypothesis, not a selected optimization. A useful comparison must
+retain the existing hint count/caps and check both serial and concurrent
+end-to-end creation, not just a clone microbenchmark. No validation, filesystem
+fallback, journal flush or recovery step can be dropped to obtain a win.
+The original four-worker change (`e295b87`, PR #562) reduced the median clone
+phase of a 2,049-file fixture from 172.16 to 60.53 ms in three pairs; this is a
+reason to check serial regressions carefully, not evidence for reducing workers.
+
+Ordinary CI at `f014fba` passed every job before this evidence-only follow-up.
+After removing the overlap prototype, formatting, all-target/all-feature Clippy
+and the full workspace passed again (702 tests, 24 ignored). The final package
+suite passed 288 tests with four skips. The rebuilt ordinary executable again
+matched `d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`.
+Thus neither rejected experiment in this follow-up changes production runtime.
+
 ## Reproduce safely
 
 Use a disposable checkout at the report's source revision. Apply the diagnostic
