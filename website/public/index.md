@@ -384,6 +384,7 @@ maps every document in one place.
 
 ### Measurements and optimization work
 
+- [Clone-worker reuse evaluation, October 9](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/clone-worker-reuse-2026-10-09.md): test-only scheduling experiment with mixed timing results; not a startup-speed claim.
 - [Optional Git FSMonitor, October 8](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/fsmonitor-2026-10-08.md): large-worktree status gains, not a creation speedup; raw samples and a reproducible harness.
 - [Assistant-ui diagnostic, October 1](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-diagnostic-2026-10-01.md): serial process counts and follow-up priorities; no latency claim.
 - [Benchmark guide](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks.md): running and interpreting native-COW benchmarks.
