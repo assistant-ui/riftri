@@ -253,6 +253,65 @@ again matched `d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`
 The final package suite passed 286 tests with four skips, including both new
 evidence checks. The retained evidence is not a new production optimization.
 
+## Size-selective hints: not adopted
+
+The next experiment removes optional requests for regular files smaller than
+4 KiB, while retaining the existing 64 KiB per-file and 64 MiB per-operation
+caps. The pinned reference tree has 5,863 regular files, one empty. Based on
+its sizes, the cutoff reduces eligible requests from 5,862 to 2,046 (65.10%)
+and requested bytes from 35,139,308 to 29,790,921 (84.78% retained). These are
+eligibility calculations, **not traced syscall counts or a measured speedup**.
+The 8 KiB synthetic fixture remains eligible, so this does not simply disable
+the feature on the workload that previously benefited.
+
+The [build-only patch](apfs-large-file-hints.patch) retains the exact prototype
+and its tests. The minimum-size regression failed before the change; the
+patched storage suite and release build then passed locally. The measured
+executable is `07909e07801f1e28690092bc5c5c4c53bc23874c854e3ceb978477d5ebc2ae09`.
+Ordinary Rust source is restored to the existing deferred candidate. The patch
+is applied only in disposable evaluation checkouts, never by the CLI.
+
+The [complete local record](apfs-large-file-hints-2026-10-09.json) retains every
+one of the 65 samples and all 16 batches. Eight alternating four-way pairs
+against the prior deferred candidate, **not main**, produced a batch median of
+**7,189.77 → 7,916.22 ms (10.10% slower)**, with **4/8** faster pairs. Median CPU
+per cached view was **2.720 → 2.745 seconds**, not a CPU saving either. All
+full content/mode/symlink, 5,864-entry Git-scan, private-write, clean-removal and
+final-GC checks passed. No samples were excluded, including the 23.70-second
+baseline batch and 22.70-second candidate batch. Fewer eligible syscalls did
+not establish a whole-startup improvement.
+
+Both variants had long delays before hints started; progress receipts include
+journal persistence and do not isolate the cause. Both binaries were built
+before timing, and no local build or other benchmark overlapped. Shortly before
+building the candidate, disk pressure required Cargo to remove 4.4 GiB of this
+task's rebuildable development artifacts; source, release binaries and prior
+evidence were preserved. Host activity was not controlled. These are loaded-host
+observations, not a universal slowdown estimate.
+
+A CI comparison against main was prepared but not launched after this completed
+result. The cutoff is removed from normal source; only the reproducible patch
+and evidence are retained. It also leaves hints unchanged for 8 KiB files, so
+it cannot be claimed to fix the older synthetic four-way regression. No merge
+readiness or resolution of the earlier timeout follows from these checks.
+
+The next scheduling lead is to overlap optional hints with Git's initial full
+check after all native cloning and permission updates finish, then stop issuing
+new hints when Git finishes. That could avoid making Git wait for the entire
+hint pass. It has not been implemented or measured; a valid experiment must
+join every admitted hint worker before cleanup, preserve error handling and
+full checks, and account for an in-flight kernel call that cannot be cancelled.
+
+The preceding ordinary CI at `39560b0` passed every job, including the dependency
+check that previously hit Docker Hub's rate limit. That does not resolve the
+older performance regression or timeout.
+
+After reverting the cutoff, formatting, all-target/all-feature Clippy and the
+full Rust workspace passed (702 tests, 24 ignored). The package suite passed
+287 tests with four skips. The rebuilt release executable again matched
+`d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`, confirming
+that this follow-up retains evidence without changing the candidate's runtime.
+
 ## Reproduce safely
 
 Use a disposable checkout at the report's source revision. Apply the diagnostic

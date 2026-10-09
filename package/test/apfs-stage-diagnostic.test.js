@@ -250,6 +250,49 @@ test("refresh-handoff evidence retains the optional-locks repeated-scan regressi
   assert.match(markdown, /No Git behavior is changed/);
 });
 
+test("size-selective hint evidence retains all outcomes without shipping the cutoff", () => {
+  const experiment = JSON.parse(fs.readFileSync(path.join(directory, "apfs-large-file-hints-2026-10-09.json")));
+  const patch = fs.readFileSync(path.join(directory, "apfs-large-file-hints.patch"));
+  assert.equal(createHash("sha256").update(patch).digest("hex"), experiment.candidatePatchSha256);
+  assert.match(patch.toString(), /MIN_FILE_BYTES: u64 = 4 \* 1024/);
+  assert.match(patch.toString(), /small_files_do_not_consume_prefetch_budget/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs/read_ahead.rs"), "utf8"), /MIN_FILE_BYTES/);
+  assert.equal(experiment.decision, "not adopted; cutoff removed from normal source");
+  assert.equal(experiment.complete, true);
+  assert.equal(experiment.stageDiagnostics, false);
+  assert.match(experiment.baselineDescription, /not main/);
+  assert.equal(experiment.samples.length, 65);
+  assert.equal(experiment.batches.length, 16);
+  assert.equal(experiment.finalActiveViews, 0);
+  assert.equal(experiment.finalBases, 0);
+  assert.equal(experiment.finalDiagnosticIssues, 0);
+  for (const sample of experiment.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.indexScanned, 5864);
+    assert.equal(sample.indexEntries, 5864);
+    const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+    assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+  }
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(experiment.summary[label].medianMilliseconds,
+      median(experiment.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+    assert.equal(experiment.summary[label].medianCpuSecondsPerView,
+      median(experiment.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+  }
+  assert.equal(experiment.summary.fasterPairs, experiment.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < experiment.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(experiment.summary.wallReductionPercent,
+    100 * (1 - experiment.summary.advice.medianMilliseconds / experiment.summary.baseline.medianMilliseconds));
+  assert.equal(experiment.summary.fasterPairs, 4);
+  assert.ok(experiment.summary.wallReductionPercent < 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  apfs-size-selective-evaluation:/m);
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /not traced syscall counts or a measured speedup/);
+  assert.match(markdown, /not a universal slowdown estimate/);
+});
+
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
   const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
   assert.equal(bulk.measurement.production_eligible, false);

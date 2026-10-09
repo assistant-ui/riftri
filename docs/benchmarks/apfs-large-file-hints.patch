@@ -1,0 +1,80 @@
+diff --git a/crates/riftri-storage/src/apfs/read_ahead.rs b/crates/riftri-storage/src/apfs/read_ahead.rs
+index 2f6e79c..cd11860 100644
+--- a/crates/riftri-storage/src/apfs/read_ahead.rs
++++ b/crates/riftri-storage/src/apfs/read_ahead.rs
+@@ -7,6 +7,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ // This is a kernel-cache hint, not a validation shortcut. Limit both the amount
+ // requested for a large file and the total requested by one clone operation.
++// Avoid a separate open/stat/advice/close sequence for a sub-4-KiB file.
++// Git still reads and validates these files during its initial refresh.
++const MIN_FILE_BYTES: u64 = 4 * 1024;
+ const MAX_FILE_BYTES: u64 = 64 * 1024;
+ const MAX_TREE_BYTES: u64 = 64 * 1024 * 1024;
+ 
+@@ -22,10 +25,10 @@ impl ReadAhead {
+     }
+ 
+     fn reserve(&self, length: u64) -> Option<i32> {
+-        let count = length.min(MAX_FILE_BYTES);
+-        if count == 0 {
++        if length < MIN_FILE_BYTES {
+             return None;
+         }
++        let count = length.min(MAX_FILE_BYTES);
+         // Keep the MSRV-compatible CAS loop: newer Rust deprecates
+         // fetch_update, but its renamed replacement is newer than Rust 1.88.
+         let mut remaining = self.remaining.load(Ordering::Relaxed);
+@@ -83,16 +86,26 @@ mod tests {
+     use std::os::unix::ffi::OsStrExt;
+     use std::os::unix::fs::{MetadataExt, symlink};
+ 
++    #[test]
++    fn small_files_do_not_consume_prefetch_budget() {
++        let hint = ReadAhead::new();
++        for length in [0, 1, 1024, 4096 - 1] {
++            assert_eq!(hint.reserve(length), None);
++        }
++        assert_eq!(hint.remaining.load(Ordering::Relaxed), MAX_TREE_BYTES);
++        assert_eq!(hint.reserve(4096), Some(4096));
++    }
++
+     #[test]
+     fn reserves_only_nonempty_bounded_ranges() {
+         let hint = ReadAhead::new();
+         assert_eq!(hint.reserve(0), None);
+         assert_eq!(hint.remaining.load(Ordering::Relaxed), MAX_TREE_BYTES);
+         assert_eq!(hint.reserve(u64::MAX), Some(MAX_FILE_BYTES as i32));
+-        assert_eq!(hint.reserve(7), Some(7));
++        assert_eq!(hint.reserve(MIN_FILE_BYTES), Some(MIN_FILE_BYTES as i32));
+         assert_eq!(
+             hint.remaining.load(Ordering::Relaxed),
+-            MAX_TREE_BYTES - MAX_FILE_BYTES - 7
++            MAX_TREE_BYTES - MAX_FILE_BYTES - MIN_FILE_BYTES
+         );
+     }
+ 
+@@ -153,13 +166,19 @@ mod tests {
+         let missing = fixture.path().join("missing");
+         let hint = ReadAhead::new();
+         assert!(advise_read(&missing, 10).is_err());
+-        hint.advise(&missing, 10);
++        hint.advise(&missing, MIN_FILE_BYTES);
+         assert!(!missing.exists());
+-        assert_eq!(hint.remaining.load(Ordering::Relaxed), MAX_TREE_BYTES - 10);
++        assert_eq!(
++            hint.remaining.load(Ordering::Relaxed),
++            MAX_TREE_BYTES - MIN_FILE_BYTES
++        );
+         // APFS rejects invalid UTF-8 names itself. Keep the native path intact
+         // and ignore that failed hint too, without a conversion or a panic.
+         let native = fixture.path().join(OsStr::from_bytes(b"read-\xff"));
+-        hint.advise(&native, 1);
+-        assert_eq!(hint.remaining.load(Ordering::Relaxed), MAX_TREE_BYTES - 11);
++        hint.advise(&native, MIN_FILE_BYTES);
++        assert_eq!(
++            hint.remaining.load(Ordering::Relaxed),
++            MAX_TREE_BYTES - 2 * MIN_FILE_BYTES
++        );
+     }
+ }
