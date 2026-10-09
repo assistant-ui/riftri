@@ -343,6 +343,112 @@ test("overlap evidence retains both full comparisons without shipping the schedu
   assert.match(markdown, /not proof\s+that overlap can never help/);
 });
 
+test("fixed clone-worker cap evidence retains the serial latency tradeoff", () => {
+  const patch = fs.readFileSync(path.join(directory, "apfs-two-clone-workers.patch"));
+  const patchSha = createHash("sha256").update(patch).digest("hex");
+  assert.match(patch.toString(), /worker_limit\.clamp\(1, 2\)/);
+  assert.match(patch.toString(), /two_clone_workers_still_allow_four_deferred_hint_workers/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8"), /native_clone_workers/);
+  for (const [mode, count, wins] of [["four", 65, 6], ["serial", 17, 4]]) {
+    const run = JSON.parse(fs.readFileSync(path.join(directory, `apfs-two-clone-workers-${mode}-2026-10-09.json`)));
+    assert.equal(run.candidatePatchSha256, patchSha);
+    assert.equal(run.decision, "not adopted; fixed clone-worker cap removed from normal source");
+    assert.match(run.baselineDescription, /not main/);
+    assert.equal(run.complete, true);
+    assert.equal(run.failure, null);
+    assert.equal(run.stageDiagnostics, false);
+    assert.equal(run.samples.length, count);
+    assert.equal(run.batches.length, 16);
+    assert.equal(run.finalActiveViews, 0);
+    assert.equal(run.finalBases, 0);
+    assert.equal(run.finalDiagnosticIssues, 0);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(Number(sample.indexScanned), 5864);
+      assert.equal(Number(sample.indexEntries), 5864);
+      const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+      assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+    }
+    for (const label of ["baseline", "advice"]) {
+      assert.equal(run.summary[label].medianMilliseconds,
+        median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+      assert.equal(run.summary[label].medianCpuSecondsPerView,
+        median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+    }
+    assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" &&
+      batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+    assert.equal(run.summary.fasterPairs, wins);
+    assert.equal(run.summary.wallReductionPercent,
+      100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+    assert.ok(run.summary.advice.medianCpuSecondsPerView < run.summary.baseline.medianCpuSecondsPerView);
+    assert.equal(run.summary.wallReductionPercent > 0, mode === "four");
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /resource\/latency tradeoff, not a\s+consistent startup win/);
+});
+
+test("per-base hint admission evidence keeps its release failure and slow Git refreshes", () => {
+  const patch = fs.readFileSync(path.join(directory, "apfs-hint-admission.patch"));
+  const run = JSON.parse(fs.readFileSync(path.join(directory, "apfs-hint-admission-2026-10-09.json")));
+  assert.equal(run.candidatePatchSha256, createHash("sha256").update(patch).digest("hex"));
+  assert.match(patch.toString(), /libc::LOCK_EX \| libc::LOCK_NB/);
+  assert.match(patch.toString(), /impl Drop for HintAdmission/);
+  assert.match(patch.toString(), /hint_admission_release_does_not_wait_for_a_duplicated_descriptor/);
+  assert.match(patch.toString(), /terminating_another_process_releases_its_hint_admission/);
+  for (const file of ["crates/riftri-storage/src/apfs.rs", "crates/riftri-storage/src/apfs/read_ahead.rs"]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /HintAdmission/);
+  }
+  assert.equal(run.decision, "not adopted; hint admission guard removed from normal source");
+  assert.match(run.baselineDescription, /not main/);
+  assert.equal(run.preBenchmarkFailure.reproducedErrorKind, "WouldBlock");
+  assert.equal(run.preBenchmarkFailure.reproducedErrorCode, 35);
+  assert.match(run.preBenchmarkFailure.attributionLimit, /did not trace/);
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.workspacePassed, 707);
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.topLevelPassed, 700);
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.counting, "passing executions including subprocess helpers");
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.ignoredChildHelperInvokedByActiveParentTest, true);
+  assert.equal(run.complete, true);
+  assert.equal(run.failure, null);
+  assert.equal(run.stageDiagnostics, false);
+  assert.equal(run.samples.length, 65);
+  assert.equal(run.batches.length, 16);
+  assert.equal(run.finalActiveViews, 0);
+  assert.equal(run.finalBases, 0);
+  assert.equal(run.finalDiagnosticIssues, 0);
+  for (const sample of run.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(Number(sample.indexScanned), 5864);
+    assert.equal(Number(sample.indexEntries), 5864);
+    const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+    assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+  }
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(run.summary[label].medianMilliseconds,
+      median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+    assert.equal(run.summary[label].medianCpuSecondsPerView,
+      median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+  }
+  assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(run.summary.fasterPairs, 4);
+  assert.equal(run.summary.wallReductionPercent,
+    100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+  assert.ok(run.summary.wallReductionPercent < 0);
+  const slow = run.samples.filter(sample => sample.round === 6 && sample.label === "advice" && sample.indexRefreshSeconds > 18);
+  assert.equal(slow.length, 3);
+  for (const sample of slow) {
+    const reset = sample.gitCommands.find(command => command.argv[1] === "reset");
+    assert.equal(sample.indexRefreshSeconds, reset.regions.find(region => region.category === "index" && region.label === "refresh").seconds);
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /prototype-only issue/);
+  assert.match(markdown, /no per-worker hint-admission trace/);
+});
+
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
   const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
   assert.equal(bulk.measurement.production_eligible, false);

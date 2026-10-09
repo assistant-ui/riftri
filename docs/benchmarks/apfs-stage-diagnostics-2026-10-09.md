@@ -5,6 +5,10 @@ remains unready: hosted concurrent regressions and candidate timeouts are not
 resolved. This follow-up separates costs that ordinary progress receipts group
 together. It is a diagnostic experiment, **not another speedup claim**.
 
+Historical Rust test totals below count passing executions, including child
+process helpers. The latest verification also separates top-level test counts
+so repeated helper runs are not mistaken for distinct test cases.
+
 ## Instrumentation, not shipped behavior
 
 The [diagnostic patch](apfs-stage-diagnostic.patch), based on `0463503`, prints
@@ -20,6 +24,12 @@ applies the patches only in its disposable checkout, builds both executables
 before observing either, and never installs them. Normal quality jobs test the
 unmodified product source. The temporary job was removed after preserving its
 completed observations below.
+
+A later temporary `apfs-git-child-diagnostics` job repeats the diagnosis with
+direct-child sampling after the concurrency-admission experiments below. It
+uses a fresh 4 GiB APFS volume, eight alternating pairs per fixture and the
+same fail-closed verification and timeout. Its results are pending; the earlier
+completed job and original performance failure are not reclassified.
 
 `RIFTRI_BENCH_STAGE_DIAGNOSTICS=1` enables an observer in the manual benchmark,
 not in Riftri. The temporary build emits its own PID. After 15 seconds, the
@@ -377,6 +387,122 @@ and the full workspace passed again (702 tests, 24 ignored). The final package
 suite passed 288 tests with four skips. The rebuilt ordinary executable again
 matched `d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`.
 Thus neither rejected experiment in this follow-up changes production runtime.
+
+## Two native-clone workers: not adopted
+
+The worker-count experiment limited only native file clones and mode updates to
+two workers per APFS operation. The subsequent hint pass retained the existing
+limit (up to four) and unchanged byte caps. The limiter test initially failed;
+the patched storage suite, an explicit four-hint-worker rendezvous test, and
+16 native-COW concurrency, integrity and lifecycle integration tests then
+passed. The [exact prototype patch](apfs-two-clone-workers.patch) is retained;
+its measured release executable was
+`313ec346f9a2306e820c98a78b862eb3cd676e7bc4ffc7406a51045f5b542111`.
+
+Eight alternating pairs against the prior deferred candidate, **not main**,
+showed a latency tradeoff on the pinned real project:
+
+| Creation mode | Existing median | Two-worker median | Change | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Four simultaneous adds | 4,653.63 ms | 4,535.37 ms | 2.54% lower | 6/8 |
+| One add at a time | 2,281.36 ms | 2,345.86 ms | 2.83% higher | 4/8 |
+
+CPU medians per view were lower: 2.390 → 2.345 seconds concurrently and
+2.280 → 2.145 seconds serially. That is a resource/latency tradeoff, not a
+consistent startup win. The [concurrent record](apfs-two-clone-workers-four-2026-10-09.json)
+and [serial record](apfs-two-clone-workers-serial-2026-10-09.json) retain all
+82 views, 32 batches, outliers, resources and Git command observations.
+Every initial Git refresh scanned all 5,864 entries. Full bytes/modes/symlinks,
+private-write isolation, clean removal and final garbage collection passed;
+both runs ended with zero views, bases and diagnostic issues. No build or
+other benchmark overlapped timing. Host activity was not controlled.
+
+The cap and its implementation-specific tests were removed from normal source.
+No hosted evaluation was launched. This loaded-host result does not prove a
+universal serial slowdown or a universal concurrency benefit, and does not
+resolve the original failed CI performance evaluation.
+
+## Nonblocking per-base hint admission: not adopted
+
+This prototype retained all four possible clone and hint workers. After native
+cloning finished, it attempted one advisory exclusive lock on the existing base
+directory inode. A busy or unavailable guard skipped only that operation's
+optional hints; it did not wait, add a lock file, change durable state, or
+replace any lifecycle or integrity lock. Other bases remained independent.
+Apple documents the nonblocking mode and shared lock references across `dup`
+and `fork` in its [flock contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/flock.2.html).
+This coordinates hint issuance, not the lifetime of reads already accepted by
+the kernel; no global I/O bound or cancellation is claimed.
+
+The first full workspace run caught a release failure in the prototype: a
+subsequent attempt remained unavailable after the guard's descriptor closed.
+A deterministic duplicate-descriptor test reproduced `WouldBlock` (35), since
+another reference can retain the same lock. The prototype was corrected to
+explicitly unlock before closing, and retained tests cover ordinary release,
+duplicated descriptors, process termination, renamed inodes, symlink/file
+refusal, close-on-exec and successful private native cloning while admission
+is busy. The original failure was not traced to a specific inheriting process;
+the deterministic reproduction establishes the release mechanism, not that
+missing attribution. This was a prototype-only issue, not a new finding in
+the released runtime, which has no such guard.
+
+The corrected prototype passed formatting, all-target/all-feature Clippy and
+the complete Rust workspace (700 top-level tests, 25 ignored; 707 passing
+executions including subprocess helpers). The ignored child helper is invoked
+by its active parent test. Its measured executable was
+`c1fd6cf12478fe8edc1e8aca328cea24762af5026af0a4038fbddf62ba6c3fbc`.
+The [exact build-only patch](apfs-hint-admission.patch) and
+[complete record](apfs-hint-admission-2026-10-09.json) retain the implementation,
+tests, failure explanation and all outcomes.
+
+Eight alternating real-project four-way pairs against the existing deferred
+candidate, **not main**, were **4,606.53 → 5,122.30 ms (11.20% slower)**, with
+**4/8** faster pairs. Median CPU per view fell slightly, 2.470 → 2.410 seconds,
+but startup did not improve. All 65 views passed full byte/mode/symlink,
+5,864-entry initial Git-scan, private-write and clean-removal checks; final
+garbage collection left zero views, bases and diagnostic issues. No build or
+other benchmark overlapped. Read-only process listings checked slow live
+workers; no stack sampling, stage probes, restarts or discarded samples were
+used. Host load and outliers limit generalization.
+
+The 22.21-second candidate batch in round six is retained. Three of its four
+workers spent **18.69–18.96 seconds inside Git's index-refresh region**, after
+native cloning and hint issuance had returned; the other spent 2.39 seconds.
+Unlike a journal phase receipt, those are Git's own Trace2 measurements. They
+localize this delay to the initial full check but do not explain what Git was
+waiting for, prove which workers skipped hints, or establish the cause of the
+older hosted timeout. The run has no per-worker hint-admission trace.
+
+The admission guard and its implementation-specific tests are removed from
+normal Rust. No serial or hosted performance run was launched after the
+completed concurrent result lost. Neither the lower CPU median nor green
+correctness checks justify merging this scheduling variant.
+
+After reverting both prototypes, formatting, all-target/all-feature Clippy and
+the complete Rust workspace passed (695 top-level tests, 24 ignored; 702
+passing executions including subprocess helpers). The package suite
+passed 290 tests with four skipped. The ordinary release rebuild reproduced
+`d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`;
+neither rejected experiment changed the final executable.
+
+The next diagnostic samples the **actual Git child** during a slow refresh.
+The previous sampler captured only the Riftri parent; its `poll` stack cannot
+identify the child's wait. The extension resolves the selected system Git via
+its exec path, selects only a direct child with that exact executable, then
+rechecks both parent identity and child parentage/executable before sampling.
+It skips ambiguous or changed identities and falls back to the verified parent
+only when there is no matching child. These checks are best-effort process
+snapshots, not an atomic PID handle. Observers remain bounded, non-overlapping
+and joined before results settle. Sampled timings are diagnostic, never
+headline performance data. No ordinary Rust behavior changes.
+
+The new selection and fallback tests failed before the extension. All eight
+sampler tests then passed with native sampling enabled, including an owned
+Git process blocked on an open stdin pipe. The complete benchmark-harness
+unit suite passed 14 tests (nine environment-gated tests skipped); this does
+not claim a reproduced slow worktree refresh. Local free disk space later
+fell below 2 GiB, so the next worktree diagnosis uses a fresh hosted APFS
+volume instead of presenting more near-full local timings as a speedup.
 
 ## Reproduce safely
 

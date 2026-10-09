@@ -1,0 +1,81 @@
+diff --git a/crates/riftri-storage/src/apfs.rs b/crates/riftri-storage/src/apfs.rs
+index f22a998..a6da4e6 100644
+--- a/crates/riftri-storage/src/apfs.rs
++++ b/crates/riftri-storage/src/apfs.rs
+@@ -168,9 +168,11 @@ fn clone_files(
+     // same worker pass. All admitted clones join, and any error is returned,
+     // before optional hints begin. File jobs already live for the whole clone;
+     // this temporary vector retains only references during the first pass.
+-    try_for_each_bounded(files.iter().collect(), worker_limit, |file| {
+-        clone_file(&file.source, &file.destination, writable_bits, &file.length)
+-    })?;
++    try_for_each_bounded(
++        files.iter().collect(),
++        native_clone_workers(worker_limit),
++        |file| clone_file(&file.source, &file.destination, writable_bits, &file.length),
++    )?;
+     if writable_bits.is_some() {
+         try_for_each_bounded(files, worker_limit, |file| {
+             advise(&file.destination, file.length.load(Ordering::Relaxed));
+@@ -180,6 +182,12 @@ fn clone_files(
+     Ok(())
+ }
+ 
++fn native_clone_workers(worker_limit: usize) -> usize {
++    // Limit only native clone/mode mutations; the later optional read-ahead
++    // pass retains the caller's existing worker limit and byte budgets.
++    worker_limit.clamp(1, 2)
++}
++
+ fn clone_file(
+     source: &Path,
+     destination: &Path,
+@@ -335,6 +343,48 @@ mod tests {
+ 
+     use super::{clone_tree, clone_tree_bulk_for_evaluation};
+ 
++    #[test]
++    fn native_clone_worker_cap_is_independent_of_hint_parallelism() {
++        for (available, expected) in [(0, 1), (1, 1), (2, 2), (3, 2), (4, 2), (64, 2)] {
++            assert_eq!(super::native_clone_workers(available), expected);
++        }
++    }
++
++    #[test]
++    fn two_clone_workers_still_allow_four_deferred_hint_workers() {
++        use std::sync::{Condvar, Mutex};
++
++        let fixture = tempdir().unwrap();
++        let source = fixture.path().join("source");
++        fs::write(&source, b"payload").unwrap();
++        let files = (0..4)
++            .map(|index| super::FileClone {
++                source: source.clone(),
++                destination: fixture.path().join(format!("clone-{index}")),
++                length: std::sync::atomic::AtomicU64::new(0),
++            })
++            .collect();
++        let arrivals = Mutex::new(0);
++        let ready = Condvar::new();
++        super::clone_files(files, Some(0o200), 4, &|path, length| {
++            assert_eq!(length, 7);
++            assert_eq!(fs::read(path).unwrap(), b"payload");
++            let mut arrived = arrivals.lock().unwrap();
++            *arrived += 1;
++            ready.notify_all();
++            let (arrived, timeout) = ready
++                .wait_timeout_while(arrived, Duration::from_secs(5), |count| *count < 4)
++                .unwrap();
++            assert!(
++                !timeout.timed_out(),
++                "clone cap must not limit hint concurrency"
++            );
++            assert_eq!(*arrived, 4);
++        })
++        .unwrap();
++        assert_eq!(*arrivals.lock().unwrap(), 4);
++    }
++
+     #[test]
+     fn writable_clone_matches_the_two_pass_path_and_preserves_the_base() {
+         let fixture = tempdir().expect("writable clone fixture");

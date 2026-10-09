@@ -88,6 +88,10 @@ report.commit = git(['rev-parse', 'HEAD']).toString().trim();
 report.tree = git(['rev-parse', 'HEAD^{tree}']).toString().trim();
 if (report.sourceTree) assert.equal(report.tree, report.sourceTree, 'archive attributes must not change the measured source tree');
 report.git = git(['--version']).toString().trim();
+// /usr/bin/git can be a developer-tools launcher. Resolve the selected Git
+// executable explicitly; never guess a child by its process name alone.
+report.sampleGitBinary = stageDiagnostics
+  ? fs.realpathSync(path.join(git(['--exec-path']).toString().trim(), 'git')) : null;
 report.version = run(binary, ['--version']).toString().trim();
 const live = new Set();
 function verify(directory) {
@@ -122,7 +126,7 @@ async function create(round, label = 'baseline', executable = binary, worker = 0
   const sample = { round, label, worker, view, load: os.loadavg(), freeMemory: os.freemem(), phases: [] };
   const start = performance.now();
   let partial = '';
-  const stageSampler = stageDiagnostics ? createStageSampler({ binary:executable, output, key }) : null;
+  const stageSampler = stageDiagnostics ? createStageSampler({ binary:executable, gitBinary:report.sampleGitBinary, output, key }) : null;
   const result = await timedProcess('/usr/bin/time', ['-l', executable, 'worktree', 'add', view, 'HEAD', '--detach', '--state-dir', state, '--json'], {
     cwd: repo, env: { ...env, GIT_TRACE2_EVENT: trace }, timeoutMs: 120000,
     onStderr(chunk) {
