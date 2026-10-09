@@ -463,10 +463,22 @@ mod tests {
     fn reports_batched_clone_comparison() {
         let fixture = tempdir().unwrap();
         let source = fixture.path().join("source");
-        write_fixture(&source, 32, 64, 4096);
+        let setting = |key: &str, default: usize, maximum: usize| {
+            let value = std::env::var(key)
+                .map(|value| value.parse::<usize>().expect("positive benchmark count"))
+                .unwrap_or(default);
+            assert!((1..=maximum).contains(&value), "invalid {key}");
+            value
+        };
+        let directories = setting("RIFTRI_CLONE_BENCH_DIRS", 32, 128);
+        let files = setting("RIFTRI_CLONE_BENCH_FILES", 64, 128);
+        let rounds = setting("RIFTRI_CLONE_BENCH_ROUNDS", 8, 20);
+        write_fixture(&source, directories, files, 4096);
+        super::make_tree_read_only(&source).unwrap();
+        let writable_bits = Some(crate::umask_writable_bits().unwrap());
         let mut unbounded_us = Vec::new();
         let mut batched_us = Vec::new();
-        for round in 0..4 {
+        for round in 0..rounds {
             // Alternate order to avoid consistently giving either variant a
             // warmer cache. Reproduce the previous whole-tree queue only in
             // this ignored benchmark, not in the production backend.
@@ -474,15 +486,22 @@ mod tests {
                 let destination = fixture.path().join(format!("view-{round}-{batched}"));
                 let start = Instant::now();
                 if batched {
-                    clone_tree(&source, &destination).unwrap();
+                    super::clone_tree_owner_writable(&source, &destination).unwrap();
                 } else {
+                    // Match the old public entry point's timed validation and
+                    // umask lookup too; caching only this side's permissions
+                    // would bias small-tree comparisons against batching.
+                    let metadata = fs::symlink_metadata(&source).unwrap();
+                    assert!(metadata.is_dir());
+                    assert!(!destination.try_exists().unwrap());
+                    let writable_bits = Some(crate::umask_writable_bits().unwrap());
                     let mut files = Vec::new();
                     let mut directories = Vec::new();
                     super::prepare_clone_directory(
                         &source,
                         &destination,
-                        fs::metadata(&source).unwrap().permissions().mode(),
-                        None,
+                        metadata.permissions().mode(),
+                        writable_bits,
                         &mut |file| {
                             files.push(file);
                             Ok(())
@@ -493,7 +512,7 @@ mod tests {
                     crate::parallel::try_for_each_bounded(
                         files,
                         crate::parallel::file_clone_parallelism(),
-                        |file| super::clone_file(&file.source, &file.destination, None),
+                        |file| super::clone_file(&file.source, &file.destination, writable_bits),
                     )
                     .unwrap();
                     for (path, mode) in directories.into_iter().rev() {
@@ -506,19 +525,23 @@ mod tests {
                 } else {
                     unbounded_us.push(elapsed);
                 }
-                assert_tree_matches(&source, &destination);
+                assert_tree_matches_with_permissions(&source, &destination, writable_bits);
                 fs::remove_dir_all(&destination).unwrap();
             }
         }
         println!(
             "RIFTRI_APFS_BATCH_EVALUATION {}",
             serde_json::json!({
-                "file_count": 2049,
+                "file_count": directories * files + 1,
+                "bytes_per_file": 4096,
+                "owner_writable": true,
+                "rounds": rounds,
                 "batch_size": crate::parallel::FILE_CLONE_BATCH_SIZE,
                 "unbounded_microseconds": unbounded_us,
                 "batched_microseconds": batched_us,
             })
         );
+        super::make_tree_owner_writable(&source).unwrap();
     }
 
     fn write_fixture(
@@ -551,6 +574,14 @@ mod tests {
     }
 
     fn assert_tree_matches(source: &Path, destination: &Path) {
+        assert_tree_matches_with_permissions(source, destination, None);
+    }
+
+    fn assert_tree_matches_with_permissions(
+        source: &Path,
+        destination: &Path,
+        writable_bits: Option<u32>,
+    ) {
         let source_metadata = fs::symlink_metadata(source).expect("source metadata");
         let destination_metadata = fs::symlink_metadata(destination).expect("destination metadata");
         assert_eq!(
@@ -558,7 +589,8 @@ mod tests {
             destination_metadata.file_type().is_dir()
         );
         assert_eq!(
-            source_metadata.permissions().mode() & 0o777,
+            (source_metadata.permissions().mode() | writable_bits.map_or(0, |bits| bits | 0o700))
+                & 0o777,
             destination_metadata.permissions().mode() & 0o777
         );
 
@@ -579,13 +611,17 @@ mod tests {
             let destination_path = destination.join(name);
             let metadata = fs::symlink_metadata(&source_path).expect("source entry metadata");
             if metadata.is_dir() {
-                assert_tree_matches(&source_path, &destination_path);
+                assert_tree_matches_with_permissions(
+                    &source_path,
+                    &destination_path,
+                    writable_bits,
+                );
             } else if metadata.is_file() {
                 let cloned =
                     fs::symlink_metadata(&destination_path).expect("destination file metadata");
                 assert!(cloned.is_file());
                 assert_eq!(
-                    metadata.permissions().mode() & 0o777,
+                    (metadata.permissions().mode() | writable_bits.unwrap_or(0)) & 0o777,
                     cloned.permissions().mode() & 0o777
                 );
                 assert_eq!(

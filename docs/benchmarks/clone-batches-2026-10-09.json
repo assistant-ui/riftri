@@ -1,0 +1,116 @@
+{
+  "date": "2026-10-09",
+  "platform": "Apple M1, macOS/APFS, local release build",
+  "candidate_parent_commit": "786b09427f8eb853cec0c5b6252d0a556d3e9b50",
+  "baseline": "Whole-tree queue reproduced in the same release test binary; no cross-version CLI comparison.",
+  "reproduce": "RIFTRI_CLONE_BENCH_DIRS=<1|32|128> RIFTRI_CLONE_BENCH_FILES=<8|64|128> cargo test --release -p riftri-storage --lib reports_batched_clone_comparison -- --ignored --nocapture",
+  "method": "Eight alternating paired rounds per size, 4 KiB regular files plus readme and symlink. Read-only source; owner-writable views. Both paths pay input validation and umask lookup. Full contents, modes, symlink targets, entry names and distinct file inodes checked after timing. No outliers removed. Clone-stage only, not end-to-end creation or process RSS.",
+  "assessment": "Retained file jobs are bounded to 1024 by deterministic tests. Large fixture p50 improves, medium fixture regresses; variable local timings do not establish general throughput improvement. Keep PR draft pending representative end-to-end and cross-platform throughput evidence.",
+  "cases": {
+    "small": {
+      "batch_size": 1024,
+      "batched_microseconds": [
+        3525,
+        3580,
+        3464,
+        3776,
+        3563,
+        3777,
+        3677,
+        3883
+      ],
+      "bytes_per_file": 4096,
+      "file_count": 9,
+      "owner_writable": true,
+      "rounds": 8,
+      "unbounded_microseconds": [
+        3577,
+        3617,
+        4136,
+        3602,
+        3698,
+        5643,
+        3593,
+        3468
+      ],
+      "unbounded": {
+        "p50_us": 3602,
+        "p95_us": 5643
+      },
+      "batched": {
+        "p50_us": 3580,
+        "p95_us": 3883
+      }
+    },
+    "medium": {
+      "batch_size": 1024,
+      "batched_microseconds": [
+        98792,
+        148768,
+        90915,
+        73251,
+        78252,
+        89407,
+        151207,
+        85481
+      ],
+      "bytes_per_file": 4096,
+      "file_count": 2049,
+      "owner_writable": true,
+      "rounds": 8,
+      "unbounded_microseconds": [
+        78491,
+        123268,
+        80626,
+        73468,
+        217208,
+        200301,
+        122910,
+        80987
+      ],
+      "unbounded": {
+        "p50_us": 80987,
+        "p95_us": 217208
+      },
+      "batched": {
+        "p50_us": 89407,
+        "p95_us": 151207
+      }
+    },
+    "large": {
+      "batch_size": 1024,
+      "batched_microseconds": [
+        813993,
+        859337,
+        1159881,
+        1051338,
+        1169068,
+        1053627,
+        798590,
+        794525
+      ],
+      "bytes_per_file": 4096,
+      "file_count": 16385,
+      "owner_writable": true,
+      "rounds": 8,
+      "unbounded_microseconds": [
+        1221764,
+        1065297,
+        1066809,
+        1059557,
+        1068188,
+        824291,
+        1097680,
+        1103521
+      ],
+      "unbounded": {
+        "p50_us": 1066809,
+        "p95_us": 1221764
+      },
+      "batched": {
+        "p50_us": 859337,
+        "p95_us": 1169068
+      }
+    }
+  }
+}

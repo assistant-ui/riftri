@@ -56,6 +56,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Measurements
 
+- [Writable clone batches, October 9 (raw data)](benchmarks/clone-batches-2026-10-09.json)
+  — bounded file-job memory with mixed APFS clone-stage timing results.
 - [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)
   — repeated status gains on a large synthetic worktree, not a startup speedup.
 - [Assistant-ui diagnostic, October 1](benchmarks/assistant-ui-diagnostic-2026-10-01.md)
