@@ -38,7 +38,7 @@ git -C ../task-1 config --local core.fsmonitor true
 This normally affects **all linked worktrees in the repository**, including
 future ones. It is separate from `riftri enable`; ending `riftri exec` does not
 stop Git's watcher. Do not use `--global` or assume `--worktree` is isolated
-without Git's worktree-config extension. The [full guide](/docs/fsmonitor.md)
+without Git's worktree-config extension. The [full guide](https://github.com/assistant-ui/riftri/blob/main/docs/fsmonitor.md)
 covers compatibility and narrower configuration.
 
 ## Turn it off
