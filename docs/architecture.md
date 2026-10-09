@@ -564,6 +564,18 @@ avoiding a separate permission traversal. Immutable-base integrity verification,
 journal transitions, Git index initialization, and final clean-state checks are
 unchanged.
 
+Writable APFS clone workers also issue best-effort native read-ahead hints for
+the new regular files, so the kernel can prepare reads before Git's initial
+content check. Requests are capped at 64 KiB per file and 64 MiB per clone
+operation across all workers; these are requested-byte limits, not a reservation
+or an upper bound on the kernel's page cache. Only read-only, no-follow,
+nonblocking handles are opened, and each is closed before the worker takes its
+next file. Failed or unsupported hints are ignored. No result is treated as
+proof of contents: complete base verification, Git index synchronization, clean
+verification, and all durability/recovery boundaries remain mandatory. Linux
+and Windows are unchanged. Measurements and workload limitations are recorded
+in [the APFS read-ahead evaluation](benchmarks/apfs-read-ahead-2026-10-09.md).
+
 On Linux, Riftri accepts Btrfs and reflink-enabled XFS only after an active
 `FICLONE` check succeeds on two unnamed files in the destination volume. The
 unnamed probe cannot leave a path behind after interruption. Every regular file

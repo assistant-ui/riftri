@@ -4,6 +4,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
+mod read_ahead;
+
 use crate::StorageError;
 use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
 
@@ -55,8 +57,9 @@ fn clone_tree_with_permissions(
             &mut files,
             &mut directories,
         )?;
+        let read_ahead = read_ahead::ReadAhead::new();
         try_for_each_bounded(files, file_clone_parallelism(), |file| {
-            clone_file(&file.source, &file.destination, writable_bits)
+            clone_file(&file.source, &file.destination, writable_bits, &read_ahead)
         })?;
         for (path, mode) in directories.into_iter().rev() {
             set_mode(&path, mode)?;
@@ -151,6 +154,7 @@ fn clone_file(
     source: &Path,
     destination: &Path,
     writable_bits: Option<u32>,
+    read_ahead: &read_ahead::ReadAhead,
 ) -> Result<(), StorageError> {
     clone_path(source, destination)?;
     if let Some(writable_bits) = writable_bits {
@@ -159,6 +163,7 @@ fn clone_file(
         let cloned = fs::symlink_metadata(destination)
             .map_err(|error| io("inspect cloned permissions", destination, error))?;
         set_mode(destination, cloned.permissions().mode() | writable_bits)?;
+        read_ahead.advise(destination, cloned.len());
     }
     Ok(())
 }
