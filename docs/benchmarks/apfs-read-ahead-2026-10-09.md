@@ -139,8 +139,9 @@ These fixes do not retroactively repair the incomplete CI measurements.
 
 The [retained CI measurements](apfs-read-ahead-ci-2026-10-09.json) include every
 recorded sample, paired batch, failure and source-file checksum. The linked
-[original artifact](https://github.com/assistant-ui/riftri/actions/runs/37975831382/artifacts/11639651391)
-contains the original receipts, full Git traces and all worker logs. The
+[original run's artifact](https://github.com/assistant-ui/riftri/actions/runs/37975831382)
+named `apfs-read-ahead-paired-evaluation` contains the original receipts, full
+Git traces and all worker logs (artifact downloads require GitHub sign-in). The
 temporary evaluation job was removed after retaining its evidence; it must not
 add benchmark cost to unrelated pull requests.
 
@@ -148,12 +149,44 @@ Follow-ups, in order:
 
 1. Repeat with the corrected timeout handling. Run real-source and eligibility
    cases independently so one failed stress case cannot hide them.
-2. Experiment with a smaller read-ahead budget and fewer simultaneous hints;
-   compare the complete clone-plus-Git path, CPU and concurrency before changing
-   the product default. The current 64 MiB budget is not established as optimal.
+2. Investigate separating hint issuance from cloning. Smaller budgets and
+   fewer simultaneous issuing workers were evaluated below; neither established
+   a concurrent improvement. No tested setting is ready for default adoption.
 3. Add paired cold-creation cases and a plain-Git reference. Do not advertise
    current T3 support: its pinned tree contains gitlinks that Riftri refuses;
    removing those entries would measure a different repository.
+
+## Follow-up budget experiments: still no concurrent winner
+
+Two release-built prototypes based on `3a2e2e2` were compared with `a58006d`
+on the local Apple M1 host. Both use the corrected process-group harness and
+the same 4,097-entry synthetic fixture. Eight alternating pairs cover serial
+creation; four pairs cover four simultaneous creates. The runtime source was
+restored after building each prototype; **neither is enabled in this PR**.
+
+- **8 MiB budget:** reduce only the per-operation request cap from 64 MiB to
+  8 MiB; leave the 64 KiB per-file cap unchanged.
+- **Single issuing worker:** keep the 64 MiB cap, but use a nonblocking atomic
+  admission flag around `advise`. If another worker is issuing a hint, skip the
+  optional hint and keep cloning. This limits issuing calls, not outstanding
+  asynchronous kernel reads, and coordinates only workers in one process.
+
+| Prototype / workload | Baseline median | Candidate median | Difference | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| 8 MiB / serial | 1,247.08 ms | 1,120.01 ms | 10.19% lower | 7/8 |
+| 8 MiB / four simultaneous | 2,000.63 ms | 1,988.49 ms | 0.61% lower; inconclusive | 2/4 |
+| Single issuing worker / serial | 1,723.37 ms | 1,093.10 ms | 36.57% lower | 8/8 |
+| Single issuing worker / four simultaneous | 2,236.95 ms | 2,332.66 ms | 4.28% higher | 2/4 |
+
+Every view passed byte/mode/symlink, Git cleanliness, private-write isolation,
+removal and final-GC checks. Every initial Git refresh still scanned all 4,097
+entries. All 100 samples, including cold baseline warm-ups, and all 48 timed
+batches are retained in the [budget experiment JSON](apfs-read-ahead-budgets-2026-10-09.json),
+with binary checksums, exact prototype descriptions and source receipt hashes.
+The changing baseline times demonstrate why these are paired local experiments,
+not comparisons between separate runs or proof of a quiet-host speedup. Neither
+the near-zero budget-only median change nor the single-worker serial win proves
+that either prototype should be adopted for concurrent agent creation.
 
 ## Verification and follow-ups
 

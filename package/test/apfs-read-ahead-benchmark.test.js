@@ -123,3 +123,38 @@ test("failed ten-way baseline never becomes a partial timing comparison", () => 
   assert.deepEqual(ci.notRun, ["reference-serial", "reference-four", "t3-eligibility"]);
   assert.match(markdown, /not a ten-way baseline median/);
 });
+
+test("budget prototypes retain all 100 samples without claiming a concurrent winner", () => {
+  const budgets = JSON.parse(fs.readFileSync(path.join(root, "docs/benchmarks/apfs-read-ahead-budgets-2026-10-09.json"), "utf8"));
+  assert.equal(budgets.runs.length, 4);
+  assert.equal(budgets.runs.reduce((sum, run) => sum + run.samples.length, 0), 100);
+  assert.equal(budgets.runs.reduce((sum, run) => sum + run.batches.length, 0), 48);
+  for (const run of budgets.runs) {
+    assert.equal(run.complete, true);
+    assert.equal(run.samples.length, 1 + 2 * run.rounds * run.concurrency);
+    assert.equal(run.finalActiveViews, 0);
+    assert.equal(run.finalBases, 0);
+    assert.equal(run.finalDiagnosticIssues, 0);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.signal, null);
+      assert.equal(sample.timedOut, false);
+      assert.equal(sample.indexScanned, run.trackedEntries);
+      assert.equal(sample.indexEntries, run.trackedEntries);
+    }
+    for (const label of ["baseline", "advice"]) {
+      const samples = run.samples.filter((sample) => sample.round > 0 && sample.label === label);
+      const batches = run.batches.filter((batch) => batch.label === label);
+      assert.equal(run.summary[label].medianMilliseconds, median(batches.map((batch) => batch.milliseconds)));
+      assert.equal(run.summary[label].medianCloneMilliseconds, median(samples.map((sample) => sample.clonePhaseMilliseconds)));
+      assert.equal(run.summary[label].medianIndexRefreshMilliseconds, median(samples.map((sample) => sample.indexRefreshSeconds * 1000)));
+      assert.equal(run.summary[label].medianCpuSecondsPerAdd, median(samples.map((sample) => sample.cpuSeconds)));
+    }
+    assert.equal(run.summary.wallReductionPercent, 100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+    assert.equal(run.summary.fasterPairs, run.batches.filter((batch) => batch.label === "advice" && batch.milliseconds < run.batches.find((baseline) => baseline.label === "baseline" && baseline.round === batch.round).milliseconds).length);
+    if (run.concurrency > 1) assert.equal(run.summary.fasterPairs, 2);
+  }
+  assert.match(markdown, /neither is enabled in this PR/);
+  assert.match(markdown, /4\.28% higher/);
+});
