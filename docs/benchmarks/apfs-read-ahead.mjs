@@ -5,6 +5,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { timedProcess } from './timed-process.mjs';
+import { createStageSampler } from './stage-sampler.mjs';
 
 // Manual macOS/APFS comparison. Never install the candidate or change the
 // source repository; archive its committed HEAD into a new disposable fixture.
@@ -19,6 +20,7 @@ const candidate = candidateArgument ? fs.realpathSync(candidateArgument) : null;
 const files = Number(fileCountArgument), rounds = Number(roundArgument);
 const fileSize = Number(fileSizeArgument);
 const concurrency = Number(concurrencyArgument);
+const stageDiagnostics = process.env.RIFTRI_BENCH_STAGE_DIAGNOSTICS === '1';
 assert.ok(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 10);
 assert.ok(Number.isInteger(fileSize) && fileSize >= 1 && fileSize <= 1024 * 1024);
 assert.ok(Number.isInteger(files) && files >= 32 && files <= 20000);
@@ -34,6 +36,7 @@ for (const key of Object.keys(env)) if (key.startsWith('GIT_') || key.startsWith
 Object.assign(env, { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' });
 const checksum = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const report = { schemaVersion: 2, timeoutPolicy: 'POSIX process group, TERM then KILL after one second',
+  stageDiagnostics,
   binary, candidate, binarySha256: checksum(binary), candidateSha256: candidate ? checksum(candidate) : null,
   files, fileSize, rounds, concurrency, batches: [], platform: process.platform, release: os.release(), cpu: os.cpus()[0].model,
   totalMemory: os.totalmem(), startedAt: new Date().toISOString(),
@@ -119,15 +122,20 @@ async function create(round, label = 'baseline', executable = binary, worker = 0
   const sample = { round, label, worker, view, load: os.loadavg(), freeMemory: os.freemem(), phases: [] };
   const start = performance.now();
   let partial = '';
+  const stageSampler = stageDiagnostics ? createStageSampler({ binary:executable, output, key }) : null;
   const result = await timedProcess('/usr/bin/time', ['-l', executable, 'worktree', 'add', view, 'HEAD', '--detach', '--state-dir', state, '--json'], {
     cwd: repo, env: { ...env, GIT_TRACE2_EVENT: trace }, timeoutMs: 120000,
     onStderr(chunk) {
       partial += chunk;
       const lines = partial.split('\n'); partial = lines.pop();
-      for (const line of lines) if (line.startsWith('riftri: ')) sample.phases.push({ milliseconds: performance.now() - start, line });
+      for (const line of lines) {
+        if (line.startsWith('riftri: ')) sample.phases.push({ milliseconds: performance.now() - start, line });
+        stageSampler?.observe(line);
+      }
     },
   });
   const { stdout, stderr, code, signal, timedOut, error } = result;
+  if (stageSampler) sample.stackSamples = await stageSampler.stop();
   sample.milliseconds = performance.now() - start;
   sample.completedAt = performance.now();
   Object.assign(sample, { code, signal, timedOut, error, success: false });

@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-test('failed APFS workers retain explicit outcomes and do not produce a successful batch', {
+for (const stageDiagnostics of [false, true]) test(`failed APFS workers retain outcomes with diagnostics=${stageDiagnostics}`, {
   skip: process.platform !== 'darwin' || !process.env.RIFTRI_BENCH_TEST_BINARY,
   timeout: 180000,
 }, () => {
@@ -18,11 +18,12 @@ test('failed APFS workers retain explicit outcomes and do not produce a successf
   const result = spawnSync(process.execPath, [
     fileURLToPath(new URL('./apfs-read-ahead.mjs', import.meta.url)),
     binary, output, '32', '1', candidate, '128', '-', '2',
-  ], { encoding: 'utf8', timeout: 150000, maxBuffer: 10e6 });
+  ], { env:{ ...process.env, RIFTRI_BENCH_STAGE_DIAGNOSTICS:stageDiagnostics ? '1' : '' }, encoding: 'utf8', timeout: 150000, maxBuffer: 10e6 });
   assert.ifError(result.error);
   assert.equal(result.status, 1, `${result.stderr}\nPreserved fixture: ${fixture}`);
   const report = JSON.parse(fs.readFileSync(path.join(output, 'results.json')));
   assert.equal(report.schemaVersion, 2);
+  assert.equal(report.stageDiagnostics, stageDiagnostics);
   assert.equal(report.complete, undefined);
   assert.match(report.failure, /injected-failure/);
   assert.equal(report.samples.length, 5); // Anchor, two baseline and two failed candidate workers.
@@ -39,6 +40,8 @@ test('failed APFS workers retain explicit outcomes and do not produce a successf
     assert.equal(failure.error, null);
     assert.ok(failure.milliseconds > 0);
     assert.equal(failure.gitCommands, undefined);
+    if (stageDiagnostics) assert.deepEqual(failure.stackSamples, []);
+    else assert.equal(failure.stackSamples, undefined);
     assert.ok(report.retained.includes(failure.view));
   }
   const env = { ...process.env, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' };

@@ -1,0 +1,12 @@
+diff --git a/crates/riftri-storage/src/apfs.rs b/crates/riftri-storage/src/apfs.rs
+--- a/crates/riftri-storage/src/apfs.rs
++++ b/crates/riftri-storage/src/apfs.rs
+@@ -8,7 +8,7 @@
+ mod read_ahead;
+ 
+ // Temporary diagnostic build only; not part of the shipped runtime.
+-const DIAGNOSTIC_HINTS: bool = true;
++const DIAGNOSTIC_HINTS: bool = false;
+ 
+ struct DiagnosticStage(&'static str, std::time::Instant);
+ 

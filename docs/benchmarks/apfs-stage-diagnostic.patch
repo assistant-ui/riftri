@@ -1,0 +1,109 @@
+diff --git a/crates/riftri-core/src/worktree.rs b/crates/riftri-core/src/worktree.rs
+index 6e6b7ff..4047979 100644
+--- a/crates/riftri-core/src/worktree.rs
++++ b/crates/riftri-core/src/worktree.rs
+@@ -4293,8 +4293,18 @@ fn advance(
+     phase: AddWorktreePhase,
+     fail_after: Option<AddWorktreePhase>,
+ ) -> Result<(), WorktreeError> {
++    eprintln!(
++        "riftri: journal-stage: start {phase:?} pid={}",
++        std::process::id()
++    );
++    let stage_started = std::time::Instant::now();
+     journal.transition(phase)?;
+     store.persist(journal)?;
++    eprintln!(
++        "riftri: journal-stage: finish {phase:?} pid={} microseconds={}",
++        std::process::id(),
++        stage_started.elapsed().as_micros()
++    );
+     progress::emit(ProgressEvent::AddPhase { phase });
+     fail_add_if_requested(phase, fail_after)
+ }
+diff --git a/crates/riftri-storage/src/apfs.rs b/crates/riftri-storage/src/apfs.rs
+index 6fa63c2..4c0377d 100644
+--- a/crates/riftri-storage/src/apfs.rs
++++ b/crates/riftri-storage/src/apfs.rs
+@@ -7,6 +7,32 @@ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ mod read_ahead;
+ 
++// Temporary diagnostic build only; not part of the shipped runtime.
++const DIAGNOSTIC_HINTS: bool = true;
++
++struct DiagnosticStage(&'static str, std::time::Instant);
++
++impl DiagnosticStage {
++    fn start(name: &'static str) -> Self {
++        eprintln!(
++            "riftri: apfs-stage: start {name} pid={}",
++            std::process::id()
++        );
++        Self(name, std::time::Instant::now())
++    }
++}
++
++impl Drop for DiagnosticStage {
++    fn drop(&mut self) {
++        eprintln!(
++            "riftri: apfs-stage: finish {} pid={} microseconds={}",
++            self.0,
++            std::process::id(),
++            self.1.elapsed().as_micros()
++        );
++    }
++}
++
+ use crate::StorageError;
+ use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
+ 
+@@ -53,6 +79,7 @@ fn clone_tree_with_permissions(
+     let result = (|| {
+         let mut files = Vec::new();
+         let mut directories = Vec::new();
++        let layout_stage = DiagnosticStage::start("directory-layout");
+         prepare_clone_directory(
+             source,
+             destination,
+@@ -61,13 +88,25 @@ fn clone_tree_with_permissions(
+             &mut files,
+             &mut directories,
+         )?;
++        drop(layout_stage);
++        eprintln!(
++            "riftri: apfs-stage: jobs files={} directories={} workers={} hints={DIAGNOSTIC_HINTS}",
++            files.len(),
++            directories.len(),
++            file_clone_parallelism()
++        );
+         let read_ahead = read_ahead::ReadAhead::new();
+         clone_files(
+             files,
+             writable_bits,
+             file_clone_parallelism(),
+-            &|path, length| read_ahead.advise(path, length),
++            &|path, length| {
++                if DIAGNOSTIC_HINTS {
++                    read_ahead.advise(path, length);
++                }
++            },
+         )?;
++        let _permissions_stage = DiagnosticStage::start("directory-permissions");
+         for (path, mode) in directories.into_iter().rev() {
+             set_mode(&path, mode)?;
+         }
+@@ -168,10 +207,13 @@ fn clone_files(
+     // same worker pass. All admitted clones join, and any error is returned,
+     // before optional hints begin. File jobs already live for the whole clone;
+     // this temporary vector retains only references during the first pass.
++    let clone_stage = DiagnosticStage::start("native-file-clones-and-modes");
+     try_for_each_bounded(files.iter().collect(), worker_limit, |file| {
+         clone_file(&file.source, &file.destination, writable_bits, &file.length)
+     })?;
++    drop(clone_stage);
+     if writable_bits.is_some() {
++        let _hint_stage = DiagnosticStage::start("read-ahead-pass");
+         try_for_each_bounded(files, worker_limit, |file| {
+             advise(&file.destination, file.length.load(Ordering::Relaxed));
+             Ok::<(), StorageError>(())

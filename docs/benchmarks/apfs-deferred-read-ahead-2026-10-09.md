@@ -212,6 +212,10 @@ GC claim. The run's `deferred-apfs-read-ahead-evaluation` artifact contains full
 Git traces and worker logs; its ID and checksum are recorded in the JSON.
 The disposable volume detached without force after evidence upload.
 
+The next [stage-diagnostic experiment](apfs-stage-diagnostics-2026-10-09.md)
+adds temporary build-only timing and bounded stack capture, not a default
+behavior change or a new performance claim.
+
 ## Reproduce
 
 Use [apfs-read-ahead.mjs](apfs-read-ahead.mjs), with separately built binaries
