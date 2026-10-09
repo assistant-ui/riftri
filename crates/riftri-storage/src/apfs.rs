@@ -3,6 +3,7 @@ use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 mod read_ahead;
 
@@ -12,6 +13,9 @@ use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
 struct FileClone {
     source: PathBuf,
     destination: PathBuf,
+    // Captured with the existing permissions stat. Clone workers join before
+    // hint workers read this, so no extra metadata traversal is needed.
+    length: AtomicU64,
 }
 
 pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
@@ -58,9 +62,12 @@ fn clone_tree_with_permissions(
             &mut directories,
         )?;
         let read_ahead = read_ahead::ReadAhead::new();
-        try_for_each_bounded(files, file_clone_parallelism(), |file| {
-            clone_file(&file.source, &file.destination, writable_bits, &read_ahead)
-        })?;
+        clone_files(
+            files,
+            writable_bits,
+            file_clone_parallelism(),
+            &|path, length| read_ahead.advise(path, length),
+        )?;
         for (path, mode) in directories.into_iter().rev() {
             set_mode(&path, mode)?;
         }
@@ -136,6 +143,7 @@ fn prepare_clone_directory(
             files.push(FileClone {
                 source: source_path,
                 destination: destination_path,
+                length: AtomicU64::new(0),
             });
         } else if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
@@ -150,11 +158,33 @@ fn prepare_clone_directory(
     Ok(())
 }
 
+fn clone_files(
+    files: Vec<FileClone>,
+    writable_bits: Option<u32>,
+    worker_limit: usize,
+    advise: &(impl Fn(&Path, u64) + Sync),
+) -> Result<(), StorageError> {
+    // Do not mix read requests with native clone/permission mutations in the
+    // same worker pass. All admitted clones join, and any error is returned,
+    // before optional hints begin. File jobs already live for the whole clone;
+    // this temporary vector retains only references during the first pass.
+    try_for_each_bounded(files.iter().collect(), worker_limit, |file| {
+        clone_file(&file.source, &file.destination, writable_bits, &file.length)
+    })?;
+    if writable_bits.is_some() {
+        try_for_each_bounded(files, worker_limit, |file| {
+            advise(&file.destination, file.length.load(Ordering::Relaxed));
+            Ok::<(), StorageError>(())
+        })?;
+    }
+    Ok(())
+}
+
 fn clone_file(
     source: &Path,
     destination: &Path,
     writable_bits: Option<u32>,
-    read_ahead: &read_ahead::ReadAhead,
+    length: &AtomicU64,
 ) -> Result<(), StorageError> {
     clone_path(source, destination)?;
     if let Some(writable_bits) = writable_bits {
@@ -163,7 +193,7 @@ fn clone_file(
         let cloned = fs::symlink_metadata(destination)
             .map_err(|error| io("inspect cloned permissions", destination, error))?;
         set_mode(destination, cloned.permissions().mode() | writable_bits)?;
-        read_ahead.advise(destination, cloned.len());
+        length.store(cloned.len(), Ordering::Relaxed);
     }
     Ok(())
 }
@@ -367,6 +397,100 @@ mod tests {
         assert!(!destination.exists());
         assert!(source.join("socket").exists());
         drop(socket);
+    }
+
+    #[test]
+    fn read_ahead_starts_only_after_every_file_is_cloned_and_writable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        for workers in [1, 4] {
+            let fixture = tempdir().unwrap();
+            let source = fixture.path().join("source");
+            fs::write(&source, b"payload").unwrap();
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o444)).unwrap();
+            let destinations = (0..32)
+                .map(|i| fixture.path().join(format!("clone-{i}")))
+                .collect::<Vec<_>>();
+            let files = destinations
+                .iter()
+                .map(|destination| super::FileClone {
+                    source: source.clone(),
+                    destination: destination.clone(),
+                    length: std::sync::atomic::AtomicU64::new(0),
+                })
+                .collect();
+            let advised = AtomicUsize::new(0);
+            super::clone_files(files, Some(0o200), workers, &|path, length| {
+                for destination in &destinations {
+                    let metadata = fs::metadata(destination)
+                        .expect("read-ahead must wait for the entire clone phase");
+                    assert_eq!(metadata.permissions().mode() & 0o200, 0o200);
+                }
+                assert!(destinations.iter().any(|destination| destination == path));
+                assert_eq!(length, 7);
+                advised.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
+            assert_eq!(advised.load(Ordering::Relaxed), destinations.len());
+            assert_eq!(fs::read(&source).unwrap(), b"payload");
+            assert_eq!(
+                fs::metadata(&source).unwrap().permissions().mode() & 0o222,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_clone_phase_issues_no_read_ahead() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        fs::write(&source, b"payload").unwrap();
+        let occupied = fixture.path().join("occupied");
+        fs::write(&occupied, b"preserved").unwrap();
+        let files = [fixture.path().join("first"), occupied.clone()]
+            .into_iter()
+            .map(|destination| super::FileClone {
+                source: source.clone(),
+                destination,
+                length: std::sync::atomic::AtomicU64::new(0),
+            })
+            .collect();
+        let advised = AtomicUsize::new(0);
+        assert!(
+            super::clone_files(files, Some(0o200), 1, &|_, _| {
+                advised.fetch_add(1, Ordering::Relaxed);
+            })
+            .is_err()
+        );
+        assert_eq!(advised.load(Ordering::Relaxed), 0);
+        assert_eq!(fs::read(occupied).unwrap(), b"preserved");
+    }
+
+    #[test]
+    fn a_nonwritable_clone_does_not_issue_read_ahead() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("destination");
+        fs::write(&source, b"payload").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o444)).unwrap();
+        super::clone_files(
+            vec![super::FileClone {
+                source,
+                destination: destination.clone(),
+                length: std::sync::atomic::AtomicU64::new(0),
+            }],
+            None,
+            4,
+            &|_, _| panic!("only writable worktree clones need read-ahead"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"payload");
+        assert_eq!(
+            fs::metadata(destination).unwrap().permissions().mode() & 0o222,
+            0
+        );
     }
 
     #[derive(Serialize)]
