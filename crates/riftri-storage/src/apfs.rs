@@ -541,6 +541,216 @@ mod tests {
         assert_eq!(get_xattr(&iterative, "com.riftri.bulk-evaluation"), None);
     }
 
+    // Evaluation only: recursive cloning still has a different directory-
+    // metadata policy. This helper is not available to the production backend.
+    fn bulk_writable_for_evaluation(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), crate::StorageError> {
+        use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        fn inspect(
+            source: &Path,
+            destination: &Path,
+            writable_bits: u32,
+            files: &mut Vec<super::FileClone>,
+            directories: &mut Vec<(std::path::PathBuf, u32)>,
+        ) -> Result<(), crate::StorageError> {
+            let metadata = fs::symlink_metadata(source)
+                .map_err(|error| super::io("inspect bulk evaluation source", source, error))?;
+            if metadata.is_dir() {
+                directories.push((
+                    destination.to_path_buf(),
+                    metadata.mode() | 0o700 | writable_bits,
+                ));
+                for entry in fs::read_dir(source)
+                    .map_err(|error| super::io("read bulk evaluation directory", source, error))?
+                {
+                    let entry = entry
+                        .map_err(|error| super::io("read bulk evaluation entry", source, error))?;
+                    inspect(
+                        &entry.path(),
+                        &destination.join(entry.file_name()),
+                        writable_bits,
+                        files,
+                        directories,
+                    )?;
+                }
+            } else if metadata.is_file() {
+                files.push(super::FileClone {
+                    source: source.to_path_buf(),
+                    destination: destination.to_path_buf(),
+                    length: AtomicU64::new(0),
+                });
+            } else if !metadata.file_type().is_symlink() {
+                return Err(crate::StorageError::UnsupportedEntry(source.to_path_buf()));
+            }
+            Ok(())
+        }
+
+        // Entry-type preflight is included in the measurement. It is not a
+        // complete metadata eligibility policy: xattrs/ACLs/flags remain open.
+        let root = fs::symlink_metadata(source)
+            .map_err(|error| super::io("inspect bulk evaluation root", source, error))?;
+        if !root.is_dir() {
+            return Err(crate::StorageError::InvalidSource(source.to_path_buf()));
+        }
+        if destination
+            .try_exists()
+            .map_err(|error| super::io("inspect bulk evaluation destination", destination, error))?
+        {
+            return Err(crate::StorageError::DestinationExists(
+                destination.to_path_buf(),
+            ));
+        }
+        let writable_bits = crate::umask_writable_bits()
+            .map_err(|error| super::io("read evaluation umask", destination, error))?;
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        inspect(
+            source,
+            destination,
+            writable_bits,
+            &mut files,
+            &mut directories,
+        )?;
+        let result = (|| {
+            super::clone_path(source, destination)?;
+            try_for_each_bounded(files.iter().collect(), file_clone_parallelism(), |file| {
+                let metadata = fs::symlink_metadata(&file.destination).map_err(|error| {
+                    super::io("inspect bulk cloned permissions", &file.destination, error)
+                })?;
+                super::set_mode(&file.destination, metadata.mode() | writable_bits)?;
+                file.length.store(metadata.len(), Ordering::Relaxed);
+                Ok::<(), crate::StorageError>(())
+            })?;
+            let read_ahead = super::read_ahead::ReadAhead::new();
+            try_for_each_bounded(files, file_clone_parallelism(), |file| {
+                read_ahead.advise(&file.destination, file.length.load(Ordering::Relaxed));
+                Ok::<(), crate::StorageError>(())
+            })?;
+            for (path, mode) in directories.into_iter().rev() {
+                super::set_mode(&path, mode)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() && destination.exists() {
+            let _ = super::make_tree_owner_writable(destination);
+            let _ = fs::remove_dir_all(destination);
+        }
+        result
+    }
+
+    #[test]
+    fn writable_bulk_candidate_preserves_supported_files_and_private_writes() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let iterative = fixture.path().join("iterative");
+        let bulk = fixture.path().join("bulk");
+        write_fixture(&source, 2, 3, 1024);
+        super::make_tree_read_only(&source).unwrap();
+        super::clone_tree_owner_writable(&source, &iterative).unwrap();
+        bulk_writable_for_evaluation(&source, &bulk).unwrap();
+        assert_tree_matches(&iterative, &bulk);
+        let file = "directory-00/file-0000.bin";
+        fs::write(bulk.join(file), b"private").unwrap();
+        assert_eq!(
+            fs::read(source.join(file)).unwrap(),
+            fs::read(iterative.join(file)).unwrap()
+        );
+        assert_ne!(
+            fs::read(bulk.join(file)).unwrap(),
+            fs::read(source.join(file)).unwrap()
+        );
+        super::make_tree_owner_writable(&source).unwrap();
+    }
+
+    #[test]
+    fn writable_bulk_candidate_preflights_unsupported_entries_before_cloning() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let destination = fixture.path().join("bulk");
+        write_fixture(&source, 1, 1, 128);
+        let _socket = std::os::unix::net::UnixListener::bind(source.join("socket")).unwrap();
+        assert!(matches!(
+            bulk_writable_for_evaluation(&source, &destination),
+            Err(crate::StorageError::UnsupportedEntry(_))
+        ));
+        assert!(!destination.exists());
+        assert!(source.join("socket").exists());
+    }
+
+    #[test]
+    fn writable_bulk_candidate_still_has_the_directory_metadata_gap() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        let iterative = fixture.path().join("iterative");
+        let bulk = fixture.path().join("bulk");
+        write_fixture(&source, 1, 1, 128);
+        set_xattr(&source, "com.riftri.bulk-evaluation", b"source-only");
+        super::clone_tree_owner_writable(&source, &iterative).unwrap();
+        bulk_writable_for_evaluation(&source, &bulk).unwrap();
+        assert_eq!(get_xattr(&iterative, "com.riftri.bulk-evaluation"), None);
+        assert_eq!(
+            get_xattr(&bulk, "com.riftri.bulk-evaluation"),
+            Some(b"source-only".to_vec())
+        );
+        assert_tree_matches(&iterative, &bulk);
+    }
+
+    #[test]
+    #[ignore = "manual writable APFS bulk comparison; metadata policy is not production-ready"]
+    fn reports_writable_bulk_directory_clone_comparison() {
+        let fixture = tempdir().unwrap();
+        let source = fixture.path().join("source");
+        write_fixture(&source, 32, 128, 8192);
+        super::make_tree_read_only(&source).unwrap();
+        let mut samples = Vec::new();
+        for round in 1..=8 {
+            let iterative = fixture.path().join(format!("iterative-{round}"));
+            let bulk = fixture.path().join(format!("bulk-{round}"));
+            let order = if round % 2 == 1 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for candidate in order {
+                let started = Instant::now();
+                if candidate {
+                    bulk_writable_for_evaluation(&source, &bulk).unwrap();
+                } else {
+                    super::clone_tree_owner_writable(&source, &iterative).unwrap();
+                }
+                samples.push(serde_json::json!({"round":round, "candidate":candidate,
+                    "microseconds":elapsed_microseconds(started.elapsed())}));
+            }
+            assert_tree_matches(&iterative, &bulk);
+            let file = "directory-00/file-0000.bin";
+            fs::write(bulk.join(file), b"private").unwrap();
+            assert_eq!(
+                fs::read(source.join(file)).unwrap(),
+                fs::read(iterative.join(file)).unwrap()
+            );
+            assert_ne!(
+                fs::read(source.join(file)).unwrap(),
+                fs::read(bulk.join(file)).unwrap()
+            );
+            fs::remove_dir_all(&iterative).unwrap();
+            fs::remove_dir_all(&bulk).unwrap();
+        }
+        super::make_tree_owner_writable(&source).unwrap();
+        println!(
+            "RIFTRI_WRITABLE_BULK_EVALUATION {}",
+            serde_json::json!({
+                "schema_version":1, "regular_files":4097, "symlinks":1,
+                "logical_bytes":32 * 128 * 8192 + 18, "samples":samples,
+                "scope":"storage clone, permission restoration and same deferred hints; not end-to-end startup",
+                "production_eligible":false,
+            })
+        );
+    }
+
     #[test]
     #[ignore = "manual APFS bulk-directory comparison; reports measurements without a timing threshold"]
     fn reports_bulk_directory_clone_comparison() {

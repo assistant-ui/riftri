@@ -163,3 +163,58 @@ test("the losing single-issuer experiment stays recorded rather than adopted", (
   assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8"),
     /deferred_read_ahead_uses_one_issuer/);
 });
+
+test("the losing hint time budget retains all successful checks without shipping", () => {
+  const experiment = JSON.parse(fs.readFileSync(path.join(directory, "apfs-time-admission-2026-10-09.json")));
+  assert.equal(experiment.decision, "rejected; runtime experiment reverted");
+  assert.equal(experiment.complete, true);
+  assert.equal(experiment.stageDiagnostics, false);
+  assert.equal(experiment.samples.length, 65);
+  assert.equal(experiment.batches.length, 16);
+  assert.equal(experiment.finalActiveViews, 0);
+  assert.equal(experiment.finalBases, 0);
+  assert.equal(experiment.finalDiagnosticIssues, 0);
+  assert.match(experiment.candidatePatch, /MAX_ISSUANCE_TIME: Duration = Duration::from_millis\(50\)/);
+  assert.match(experiment.baselineDescription, /not main/);
+  for (const sample of experiment.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.indexScanned, 5864);
+    assert.equal(sample.indexEntries, 5864);
+  }
+  for (const label of ["baseline", "advice"]) assert.equal(experiment.summary[label].medianMilliseconds,
+    median(experiment.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+  assert.equal(experiment.summary.fasterPairs, experiment.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < experiment.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(experiment.summary.wallReductionPercent,
+    100 * (1 - experiment.summary.advice.medianMilliseconds / experiment.summary.baseline.medianMilliseconds));
+  assert.equal(experiment.summary.fasterPairs, 2);
+  assert.ok(experiment.summary.wallReductionPercent < 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs/read_ahead.rs"), "utf8"), /MAX_ISSUANCE_TIME/);
+});
+
+test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
+  const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
+  assert.equal(bulk.measurement.production_eligible, false);
+  assert.equal(bulk.measurement.samples.length, 16);
+  assert.equal(bulk.correctness.directoryXattrParity, false);
+  assert.equal(bulk.correctness.aclParity, "not established");
+  assert.equal(bulk.correctness.fileFlagParity, "not established");
+  assert.equal(bulk.correctness.endToEndGitLifecycle, "not measured");
+  assert.equal(bulk.correctness.physicalVolumeAllocation, "not measured");
+  assert.equal(bulk.platformContract.directDirectoryClone, "discouraged by Apple");
+  assert.equal(bulk.platformContract.recursiveForceClone, "not supported by copyfile");
+  assert.equal(bulk.summary.iterativeMedianMicroseconds, median(bulk.measurement.samples.filter(s => !s.candidate).map(s => s.microseconds)));
+  assert.equal(bulk.summary.bulkMedianMicroseconds, median(bulk.measurement.samples.filter(s => s.candidate).map(s => s.microseconds)));
+  assert.equal(bulk.summary.reductionPercent, 100 * (1 - bulk.summary.bulkMedianMicroseconds / bulk.summary.iterativeMedianMicroseconds));
+  assert.equal(bulk.summary.fasterPairs, bulk.measurement.samples.filter(s => s.candidate &&
+    s.microseconds < bulk.measurement.samples.find(other => other.round === s.round && !other.candidate).microseconds).length);
+  const source = fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8");
+  assert.doesNotMatch(source.split("#[cfg(test)]\nmod tests {")[0], /bulk_writable_for_evaluation/);
+  const markdown = fs.readFileSync(path.join(directory, "apfs-bulk-directory-clone-2026-09-13.md"), "utf8");
+  assert.match(markdown, /the CLI cannot select it/);
+  assert.match(markdown, /not.*measure Git initialization/);
+  assert.match(markdown, /35\.99%/);
+  assert.match(markdown, /Metadata parity tests alone therefore would not justify/);
+});

@@ -118,7 +118,12 @@ recreating that conversion reproduced the exact failing hash. `.gitattributes`
 now pins patch files to LF, preserving the original artifact checksums rather
 than weakening their checks. A real `core.autocrlf=true` checkout fixture now
 reproduces the old hash and preserves the exact original bytes with the fix.
-This correction still requires fresh Windows CI.
+Fresh Windows quality and ReFS jobs passed at `1dedd89`. That overall run
+remained red because Docker Hub returned HTTP 429 while the unchanged
+dependency-check action tried to obtain its pinned image. The dependency check
+did not run; one targeted retry hit the same rate limit. It was not disabled or
+counted as a pass. A separate local `cargo-deny 0.20.2` run passed advisories,
+bans, licenses and sources; that does not replace the failed hosted job.
 
 ## Single-issuer follow-up: rejected
 
@@ -138,17 +143,46 @@ The prototype was **reverted**, including its implementation-specific test;
 it does not justify changing shipped scheduling. No extra hosted evaluation
 was spent on this locally losing variant.
 
-The remaining question is whether optional prefetch issuance can stop early
-under slow I/O, instead of relying only on a byte budget. That needs a separate
-bounded experiment: a wall-time admission limit cannot interrupt an already
-running kernel call and must not be represented as a hard operation deadline.
-No such runtime limit is implemented here. The existing PR remains draft.
+## Time-budget follow-up: rejected
+
+A second prototype limited admission of optional hints to 50 ms, shared across
+workers and starting lazily with the hint pass rather than during cloning.
+It preserved the existing byte limits and did not cancel an already running
+kernel call. This was not a hard operation deadline. A regression failed before
+deadline enforcement; the deadline, shared-worker and lazy-clock tests passed
+on the prototype, along with the same-size/restored-timestamp mutation test.
+
+The [complete time-budget record](apfs-time-admission-2026-10-09.json) retains
+its exact patch, hashes, all 65 samples and 16 batches. Against the existing
+deferred candidate (not main), the parallel batch median was
+**4,160.60 → 4,501.99 ms (8.21% slower)** and only **2/8** pairs were faster.
+All correctness, complete initial scans, private-write, removal and final-GC
+checks passed. The 6,888.55 ms candidate batch remains in the data. The prototype
+was reverted; no time-budget policy is shipped.
+
+Both scheduling reductions lost locally. The next lead is removing repeated
+clone operations, not tuning another hint constant. A
+[test-only writable bulk-clone evaluation](apfs-bulk-directory-clone-2026-09-13.md#writable-follow-up-october-9)
+includes entry-type preflight, permission restoration and the same hints, and
+measures the storage phase only. Its directory-metadata parity gate remains
+open, and the follow-up platform-contract review finds that Apple discourages
+direct directory cloning while recursive force-cloning is not supported by
+the recommended copy API. It remains a diagnostic comparison, not the next
+production implementation. Bounded directory-relative per-file cloning is the
+next candidate to measure. The existing PR remains draft.
 
 After reverting the prototype, formatting, all-target/all-feature Clippy and
 the full system-Git-first Rust workspace passed (699 tests, 23 ignored).
 Package verification passed 282 tests with four skips, including recomputation
 of the retained summaries and byte-exact stack checksums. These correctness
 results do not turn the losing prototype into a performance improvement.
+
+After the time-budget experiment was reverted and the bulk helper remained
+test-only, all local gates passed again: formatting, all-target/all-feature
+Clippy, 702 Rust tests (24 ignored), and 284 package tests (four skipped).
+A fresh ordinary release build reproduced the existing deferred candidate's
+SHA-256 (`d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`),
+confirming these follow-ups did not change the CLI executable.
 
 ## Reproduce safely
 
