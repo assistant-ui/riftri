@@ -21,6 +21,9 @@ pub(crate) fn file_clone_parallelism() -> usize {
 // bound; permissions must still be restored after all descendant files finish.
 pub(crate) const FILE_CLONE_BATCH_SIZE: usize = 1024;
 
+#[cfg(test)]
+pub(crate) mod reuse_evaluation;
+
 pub(crate) fn try_for_each_batched<T, E, F, P>(
     worker_limit: usize,
     operation: F,

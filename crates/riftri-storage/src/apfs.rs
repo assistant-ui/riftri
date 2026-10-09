@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual paired APFS batch comparison; no timing threshold"]
+    #[ignore = "manual balanced APFS batch comparison; no timing threshold"]
     fn reports_batched_clone_comparison() {
         let fixture = tempdir().unwrap();
         let source = fixture.path().join("source");
@@ -472,20 +472,28 @@ mod tests {
         };
         let directories = setting("RIFTRI_CLONE_BENCH_DIRS", 32, 128);
         let files = setting("RIFTRI_CLONE_BENCH_FILES", 64, 128);
-        let rounds = setting("RIFTRI_CLONE_BENCH_ROUNDS", 8, 20);
+        let rounds = setting("RIFTRI_CLONE_BENCH_ROUNDS", 12, 20);
         write_fixture(&source, directories, files, 4096);
         super::make_tree_read_only(&source).unwrap();
         let writable_bits = Some(crate::umask_writable_bits().unwrap());
         let mut unbounded_us = Vec::new();
-        let mut batched_us = Vec::new();
+        let mut restarting_us = Vec::new();
+        let mut reused_us = Vec::new();
         for round in 0..rounds {
-            // Alternate order to avoid consistently giving either variant a
-            // warmer cache. Reproduce the previous whole-tree queue only in
-            // this ignored benchmark, not in the production backend.
-            for batched in [round % 2 == 0, round % 2 != 0] {
-                let destination = fixture.path().join(format!("view-{round}-{batched}"));
+            // Balance all six permutations so each implementation runs in
+            // every position. Baselines exist only in this ignored benchmark.
+            let order = [
+                [0, 1, 2],
+                [1, 2, 0],
+                [2, 0, 1],
+                [2, 1, 0],
+                [0, 2, 1],
+                [1, 0, 2],
+            ][round % 6];
+            for variant in order {
+                let destination = fixture.path().join(format!("view-{round}-{variant}"));
                 let start = Instant::now();
-                if batched {
+                if variant == 1 {
                     super::clone_tree_owner_writable(&source, &destination).unwrap();
                 } else {
                     // Match the old public entry point's timed validation and
@@ -495,35 +503,54 @@ mod tests {
                     assert!(metadata.is_dir());
                     assert!(!destination.try_exists().unwrap());
                     let writable_bits = Some(crate::umask_writable_bits().unwrap());
-                    let mut files = Vec::new();
                     let mut directories = Vec::new();
-                    super::prepare_clone_directory(
-                        &source,
-                        &destination,
-                        metadata.permissions().mode(),
-                        writable_bits,
-                        &mut |file| {
+                    let mut produce =
+                        |submit: &mut dyn FnMut(
+                            super::FileClone,
+                        )
+                            -> Result<(), crate::StorageError>| {
+                            super::prepare_clone_directory(
+                                &source,
+                                &destination,
+                                metadata.permissions().mode(),
+                                writable_bits,
+                                submit,
+                                &mut directories,
+                            )
+                        };
+                    let operation = |file: super::FileClone| {
+                        super::clone_file(&file.source, &file.destination, writable_bits)
+                    };
+                    if variant == 0 {
+                        let mut files = Vec::new();
+                        produce(&mut |file| {
                             files.push(file);
                             Ok(())
-                        },
-                        &mut directories,
-                    )
-                    .unwrap();
-                    crate::parallel::try_for_each_bounded(
-                        files,
-                        crate::parallel::file_clone_parallelism(),
-                        |file| super::clone_file(&file.source, &file.destination, writable_bits),
-                    )
-                    .unwrap();
+                        })
+                        .unwrap();
+                        crate::parallel::try_for_each_bounded(
+                            files,
+                            crate::parallel::file_clone_parallelism(),
+                            operation,
+                        )
+                        .unwrap();
+                    } else {
+                        crate::parallel::reuse_evaluation::try_for_each_batched_reusing(
+                            crate::parallel::file_clone_parallelism(),
+                            operation,
+                            produce,
+                        )
+                        .unwrap();
+                    }
                     for (path, mode) in directories.into_iter().rev() {
                         super::set_mode(&path, mode).unwrap();
                     }
                 }
                 let elapsed = elapsed_microseconds(start.elapsed());
-                if batched {
-                    batched_us.push(elapsed);
-                } else {
-                    unbounded_us.push(elapsed);
+                match variant {
+                    0 => unbounded_us.push(elapsed),
+                    1 => restarting_us.push(elapsed),
+                    _ => reused_us.push(elapsed),
                 }
                 assert_tree_matches_with_permissions(&source, &destination, writable_bits);
                 fs::remove_dir_all(&destination).unwrap();
@@ -537,8 +564,10 @@ mod tests {
                 "owner_writable": true,
                 "rounds": rounds,
                 "batch_size": crate::parallel::FILE_CLONE_BATCH_SIZE,
+                "reuses_workers": true,
                 "unbounded_microseconds": unbounded_us,
-                "batched_microseconds": batched_us,
+                "restarting_microseconds": restarting_us,
+                "reused_microseconds": reused_us,
             })
         );
         super::make_tree_owner_writable(&source).unwrap();

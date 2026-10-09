@@ -1,0 +1,375 @@
+{
+  "date": "2026-10-09",
+  "platform": "Apple M1, macOS/APFS, local release build",
+  "status": "experimental_only",
+  "parent_commit": "5a03bbb",
+  "candidate": "Scoped worker reuse across 1024-file batches; retained under cfg(test) in crates/riftri-storage/src/parallel/reuse_evaluation.rs, not used by release builds.",
+  "baseline": "Whole-tree queue and previous draft's restarted-per-batch queue compared with the reusable-worker prototype in one release test binary.",
+  "reproduce": "RIFTRI_CLONE_BENCH_DIRS=<1|32|128> RIFTRI_CLONE_BENCH_FILES=<8|64|128> RIFTRI_CLONE_BENCH_ROUNDS=12 cargo test --release -p riftri-storage --lib reports_batched_clone_comparison -- --ignored --nocapture",
+  "method": "Twelve rounds per case, rotating all six execution-order permutations twice. 4 KiB files plus a readme and symlink; read-only source and owner-writable clones. Validation and per-call umask lookup timed equally. Contents, modes, names, symlinks and distinct file inodes verified after timing. No outliers removed. Medium repeated after large. Exploratory clone-stage measurements, not end-to-end creation, total RSS, or a cross-platform claim. A separate six-round medium verification run after isolating the prototype behind cfg(test) is also retained, not pooled with the twelve-round comparisons.",
+  "assessment": "Reuse deterministically avoids worker recreation and keeps at most 1024 retained file jobs, but does not establish a consistent latency improvement. Medium results shift substantially between runs and the large reusable queue is slower than the unbounded baseline. Keep the prototype test-only and PR #660 draft.",
+  "cases": {
+    "small": {
+      "batch_size": 1024,
+      "bytes_per_file": 4096,
+      "file_count": 9,
+      "owner_writable": true,
+      "restarting_microseconds": [
+        3970,
+        4133,
+        4576,
+        4063,
+        3641,
+        3897,
+        4301,
+        4615,
+        3818,
+        4372,
+        3698,
+        3832
+      ],
+      "reuses_workers": true,
+      "rounds": 12,
+      "unbounded_microseconds": [
+        3888,
+        5429,
+        3979,
+        5435,
+        4014,
+        3980,
+        3853,
+        5635,
+        4333,
+        3719,
+        4454,
+        3890
+      ],
+      "reused_microseconds": [
+        4874,
+        3964,
+        4007,
+        4043,
+        3880,
+        3738,
+        4223,
+        3993,
+        4118,
+        5921,
+        3891,
+        3689
+      ],
+      "unbounded": {
+        "p50_us": 3980,
+        "p95_us": 5635
+      },
+      "restarting": {
+        "p50_us": 3970,
+        "p95_us": 4615
+      },
+      "reused": {
+        "p50_us": 3993,
+        "p95_us": 5921
+      },
+      "paired_reused_over_unbounded": {
+        "samples": 12,
+        "min": 0.7086069210292812,
+        "p50": 0.9483290488431877,
+        "p95": 1.5920946490992203,
+        "max": 1.5920946490992203
+      },
+      "paired_reused_over_restarting": {
+        "samples": 12,
+        "min": 0.8652221018418201,
+        "p50": 0.981864682631946,
+        "p95": 1.3543000914913084,
+        "max": 1.3543000914913084
+      }
+    },
+    "medium": {
+      "batch_size": 1024,
+      "bytes_per_file": 4096,
+      "file_count": 2049,
+      "owner_writable": true,
+      "restarting_microseconds": [
+        83744,
+        80724,
+        111368,
+        81259,
+        84502,
+        79841,
+        130461,
+        93996,
+        88526,
+        128543,
+        135976,
+        78922
+      ],
+      "reuses_workers": true,
+      "rounds": 12,
+      "unbounded_microseconds": [
+        81870,
+        149433,
+        77732,
+        86589,
+        79037,
+        79975,
+        81893,
+        81110,
+        91463,
+        130235,
+        85619,
+        86704
+      ],
+      "reused_microseconds": [
+        176856,
+        149839,
+        81718,
+        127507,
+        80739,
+        80146,
+        122811,
+        83324,
+        81418,
+        81708,
+        115186,
+        124117
+      ],
+      "unbounded": {
+        "p50_us": 81893,
+        "p95_us": 149433
+      },
+      "restarting": {
+        "p50_us": 84502,
+        "p95_us": 135976
+      },
+      "reused": {
+        "p50_us": 83324,
+        "p95_us": 176856
+      },
+      "paired_reused_over_unbounded": {
+        "samples": 12,
+        "min": 0.6273889507428878,
+        "p50": 1.0272962643323882,
+        "p95": 2.160205203371198,
+        "max": 2.160205203371198
+      },
+      "paired_reused_over_restarting": {
+        "samples": 12,
+        "min": 0.6356472153287227,
+        "p50": 0.9413617862809576,
+        "p95": 2.1118647306075657,
+        "max": 2.1118647306075657
+      }
+    },
+    "large": {
+      "batch_size": 1024,
+      "bytes_per_file": 4096,
+      "file_count": 16385,
+      "owner_writable": true,
+      "restarting_microseconds": [
+        1191574,
+        3592152,
+        1062468,
+        1725619,
+        1118132,
+        1005146,
+        1300165,
+        3242907,
+        1178174,
+        827001,
+        1029917,
+        763148
+      ],
+      "reuses_workers": true,
+      "rounds": 12,
+      "unbounded_microseconds": [
+        728290,
+        969732,
+        1068291,
+        979781,
+        908480,
+        947618,
+        6269139,
+        1800591,
+        2330795,
+        1039219,
+        1252087,
+        854291
+      ],
+      "reused_microseconds": [
+        884660,
+        1011502,
+        1066462,
+        807172,
+        1079551,
+        1232593,
+        1174483,
+        4849227,
+        2659655,
+        1570389,
+        927506,
+        1448367
+      ],
+      "unbounded": {
+        "p50_us": 979781,
+        "p95_us": 6269139
+      },
+      "restarting": {
+        "p50_us": 1118132,
+        "p95_us": 3592152
+      },
+      "reused": {
+        "p50_us": 1079551,
+        "p95_us": 4849227
+      },
+      "paired_reused_over_unbounded": {
+        "samples": 12,
+        "min": 0.18734358896811826,
+        "p50": 1.141093489560429,
+        "p95": 2.6931307554019766,
+        "max": 2.6931307554019766
+      },
+      "paired_reused_over_restarting": {
+        "samples": 12,
+        "min": 0.28158663664566536,
+        "p50": 0.9654951293764958,
+        "p95": 2.257438205222658,
+        "max": 2.257438205222658
+      }
+    },
+    "medium_repeat": {
+      "batch_size": 1024,
+      "bytes_per_file": 4096,
+      "file_count": 2049,
+      "owner_writable": true,
+      "restarting_microseconds": [
+        118471,
+        134637,
+        226346,
+        105436,
+        175270,
+        80190,
+        92597,
+        148236,
+        94809,
+        165573,
+        88493,
+        91895
+      ],
+      "reuses_workers": true,
+      "rounds": 12,
+      "unbounded_microseconds": [
+        81200,
+        146791,
+        128238,
+        97299,
+        100560,
+        151375,
+        145436,
+        328047,
+        134264,
+        100739,
+        120599,
+        149261
+      ],
+      "reused_microseconds": [
+        86336,
+        88209,
+        110915,
+        87034,
+        128884,
+        89536,
+        87163,
+        92723,
+        93471,
+        140739,
+        142472,
+        149430
+      ],
+      "unbounded": {
+        "p50_us": 128238,
+        "p95_us": 328047
+      },
+      "restarting": {
+        "p50_us": 105436,
+        "p95_us": 226346
+      },
+      "reused": {
+        "p50_us": 92723,
+        "p95_us": 149430
+      },
+      "paired_reused_over_unbounded": {
+        "samples": 12,
+        "min": 0.2826515712687511,
+        "p50": 0.8649152357335579,
+        "p95": 1.3970656845908735,
+        "max": 1.3970656845908735
+      },
+      "paired_reused_over_restarting": {
+        "samples": 12,
+        "min": 0.4900241223613406,
+        "p50": 0.8254675822299784,
+        "p95": 1.6260949997279504,
+        "max": 1.6260949997279504
+      }
+    },
+    "medium_verification": {
+      "batch_size": 1024,
+      "bytes_per_file": 4096,
+      "file_count": 2049,
+      "owner_writable": true,
+      "restarting_microseconds": [
+        237914,
+        92016,
+        100916,
+        149824,
+        102991,
+        167831
+      ],
+      "reused_microseconds": [
+        175374,
+        93128,
+        264616,
+        99298,
+        122216,
+        90630
+      ],
+      "reuses_workers": true,
+      "rounds": 6,
+      "unbounded_microseconds": [
+        85839,
+        78279,
+        106231,
+        125480,
+        219718,
+        137740
+      ],
+      "unbounded": {
+        "p50_us": 106231,
+        "p95_us": 219718
+      },
+      "restarting": {
+        "p50_us": 102991,
+        "p95_us": 237914
+      },
+      "reused": {
+        "p50_us": 99298,
+        "p95_us": 264616
+      },
+      "paired_reused_over_unbounded": {
+        "samples": 6,
+        "min": 0.5562402716208958,
+        "p50": 0.7913452343002869,
+        "p95": 2.4909489696981106,
+        "max": 2.4909489696981106
+      },
+      "paired_reused_over_restarting": {
+        "samples": 6,
+        "min": 0.54000750755224,
+        "p50": 0.7371319048059383,
+        "p95": 2.622141186729557,
+        "max": 2.622141186729557
+      }
+    }
+  }
+}
