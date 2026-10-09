@@ -194,6 +194,62 @@ test("the losing hint time budget retains all successful checks without shipping
   assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs/read_ahead.rs"), "utf8"), /MAX_ISSUANCE_TIME/);
 });
 
+test("the losing directory-handle prototype retains all observations without shipping", () => {
+  const experiment = JSON.parse(fs.readFileSync(path.join(directory, "apfs-directory-handles-2026-10-09.json")));
+  assert.equal(experiment.decision, "rejected; runtime experiment reverted");
+  assert.equal(experiment.complete, true);
+  assert.equal(experiment.stageDiagnostics, false);
+  assert.equal(experiment.samples.length, 65);
+  assert.equal(experiment.batches.length, 16);
+  assert.equal(experiment.finalActiveViews, 0);
+  assert.equal(experiment.finalBases, 0);
+  assert.equal(experiment.finalDiagnosticIssues, 0);
+  assert.match(experiment.candidatePatch, /libc::clonefileat/);
+  assert.match(experiment.candidatePatch, /bounded_workers_drop_every_private_state_before_returning_an_error/);
+  assert.match(experiment.baselineDescription, /not main/);
+  for (const sample of experiment.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.indexScanned, 5864);
+    assert.equal(sample.indexEntries, 5864);
+  }
+  for (const label of ["baseline", "advice"]) assert.equal(experiment.summary[label].medianMilliseconds,
+    median(experiment.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+  assert.equal(experiment.summary.fasterPairs, experiment.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < experiment.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(experiment.summary.wallReductionPercent,
+    100 * (1 - experiment.summary.advice.medianMilliseconds / experiment.summary.baseline.medianMilliseconds));
+  assert.equal(experiment.summary.fasterPairs, 2);
+  assert.ok(experiment.summary.wallReductionPercent < 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8"), /struct CloneWorker/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/parallel.rs"), "utf8"), /try_for_each_bounded_with_state/);
+});
+
+test("refresh-handoff evidence retains the optional-locks repeated-scan regression", () => {
+  const report = JSON.parse(fs.readFileSync(path.join(directory, "git-refresh-handoff-2026-10-09.json")));
+  assert.equal(report.complete, true);
+  assert.match(report.scope, /not a Riftri startup benchmark/);
+  assert.equal(report.trackedEntries, 257);
+  assert.equal(report.cases.length, 4);
+  assert.equal(new Set(report.cases.map(c => `${c.optionalLocks}-${c.noRefresh}`)).size, 4);
+  const source = fs.readFileSync(path.join(directory, report.sourceScript));
+  assert.equal(createHash("sha256").update(source).digest("hex"), report.sourceScriptSha256);
+  for (const entry of report.cases) {
+    assert.ok(["0", "1"].includes(entry.optionalLocks));
+    assert.equal(entry.observations.length, 3);
+    const [reset, first, second] = entry.observations;
+    assert.deepEqual(reset.refreshScans, entry.noRefresh ? [] : [257]);
+    assert.deepEqual(first.refreshScans, entry.noRefresh ? [257] : [0]);
+    assert.deepEqual(second.refreshScans, entry.noRefresh && entry.optionalLocks === "0" ? [257] : [0]);
+    assert.equal(first.indexSha256 === reset.indexSha256, !(entry.noRefresh && entry.optionalLocks === "1"));
+    assert.equal(first.indexSha256, second.indexSha256);
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /not a startup benchmark or a native/);
+  assert.match(markdown, /No Git behavior is changed/);
+});
+
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
   const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
   assert.equal(bulk.measurement.production_eligible, false);

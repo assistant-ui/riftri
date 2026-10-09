@@ -168,8 +168,8 @@ measures the storage phase only. Its directory-metadata parity gate remains
 open, and the follow-up platform-contract review finds that Apple discourages
 direct directory cloning while recursive force-cloning is not supported by
 the recommended copy API. It remains a diagnostic comparison, not the next
-production implementation. Bounded directory-relative per-file cloning is the
-next candidate to measure. The existing PR remains draft.
+production implementation. Bounded directory-relative per-file cloning was
+the next candidate measured below. The existing PR remains draft.
 
 After reverting the prototype, formatting, all-target/all-feature Clippy and
 the full system-Git-first Rust workspace passed (699 tests, 23 ignored).
@@ -183,6 +183,75 @@ Clippy, 702 Rust tests (24 ignored), and 284 package tests (four skipped).
 A fresh ordinary release build reproduced the existing deferred candidate's
 SHA-256 (`d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`),
 confirming these follow-ups did not change the CLI executable.
+
+## Directory-handle reuse: rejected
+
+This prototype kept strict per-file native cloning, but used `clonefileat`
+with one reusable source/destination directory pair per worker. It dropped the
+old pair before opening another, bounding retained handles independently of
+tree depth or file count. Explicit directory creation, actual cloned-file
+mode restoration, deferred hints, full base checks and Git checks were unchanged.
+
+The [complete record](apfs-directory-handles-2026-10-09.json) retains its source
+patch, executable hashes, all 65 observations and all 16 batches. Against the
+existing deferred candidate, **not main**, eight alternating real-project
+four-way pairs produced **3,503.14 → 4,075.73 ms (16.34% slower)**, with only
+**2/8** faster pairs. No samples were excluded. Full content/mode/symlink
+comparisons, 5,864-entry initial Git scans, private writes, clean removals and
+final GC passed. These results do not identify the source of the slowdown or
+resolve the earlier hosted timeout.
+
+A worker-lifetime regression first failed with per-item state initialization.
+Prototype checks cover state reuse, error-path joins and resource release,
+directory-pair replacement, occupied destinations, Unicode names, preserved
+native error paths, symlink-parent refusal, xattrs and private writes. An initial
+invalid-UTF-8 creation fixture failed at setup because APFS rejected its name;
+it was corrected to check Unicode success and byte-preserving error reporting.
+The low-file-descriptor deep-tree regression also passed. The runtime prototype
+and its implementation-specific tests were reverted: the additional lifetime
+complexity is not justified by this losing comparison.
+
+## Git refresh handoff: unconditional shortcut rejected
+
+The next scan checked deferring the refresh inside `reset --mixed` to the
+mandatory clean-status check, **not removing the content check**. Git documents
+[`--no-refresh`](https://git-scm.com/docs/git-reset) and explains that
+[`GIT_OPTIONAL_LOCKS=0`](https://git-scm.com/docs/git/2.50.0#Documentation/git.txt-GIT_OPTIONAL_LOCKS)
+prevents status from persisting optional index updates. This suggested a risk
+of shifting cost onto repeated status commands rather than eliminating it.
+
+A [reproducible mechanism fixture](git-refresh-handoff.mjs) and its
+[complete results](git-refresh-handoff-2026-10-09.json) confirm that risk on
+installed Git 2.50.1. Each case starts with its own missing temporary index in
+a disposable 257-file repository; old file modification times avoid a racy
+timestamp fixture. The source repository's regular index is left alone.
+Git Trace2 reports these content-scan counts:
+
+| Reset mode | Optional index writes | Reset | First status | Repeated status |
+| --- | --- | ---: | ---: | ---: |
+| Current mixed reset | Disabled | 257 | 0 | 0 |
+| Mixed reset, no refresh | Disabled | — | 257 | 257 |
+| Current mixed reset | Enabled | 257 | 0 | 0 |
+| Mixed reset, no refresh | Enabled | — | 257 | 0 |
+
+The dash means reset emitted no refresh counter. Index checksums confirm that
+status only persisted the initially missing stat data in the enabled-write
+case; every status was clean. This is **not a startup benchmark or a native
+COW lifecycle test**, and no latency gain is claimed. Unconditionally adding
+the flag would make repeated status more expensive for a valid environment.
+A future guarded experiment would still need version support, inherited
+optional-lock handling, sparse behavior, FSMonitor, corruption detection and
+recovery tests. No Git behavior is changed by this follow-up.
+
+The latest ordinary CI at `de17971` again passed all jobs except the dependency
+action, which hit Docker Hub HTTP 429 before its check ran. This does not change
+the PR's failed performance evidence or its draft status.
+
+After reverting directory handles, formatting, all-target/all-feature Clippy
+and the full Rust workspace passed (702 tests, 24 ignored). The release binary
+again matched `d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`.
+The final package suite passed 286 tests with four skips, including both new
+evidence checks. The retained evidence is not a new production optimization.
 
 ## Reproduce safely
 
@@ -199,3 +268,12 @@ RIFTRI_BENCH_STAGE_DIAGNOSTICS=1 node docs/benchmarks/apfs-read-ahead.mjs CONTRO
 Use a new output directory. Inspect `complete`, `failure`, per-worker outcomes
 and `stackSamples` before drawing any conclusion. Failed fixtures remain for
 inspection; this diagnostic never force-cleans a changed or unfinished view.
+
+The refresh-handoff mechanism fixture is independent of the patched builds.
+On macOS with Git supporting `--no-refresh`, give it a new absolute output path:
+
+```sh
+node docs/benchmarks/git-refresh-handoff.mjs /absolute/path/to/new-refresh-fixture
+```
+
+It creates its own repository and temporary indexes, not a user worktree.
