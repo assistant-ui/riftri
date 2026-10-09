@@ -444,9 +444,97 @@ test("per-base hint admission evidence keeps its release failure and slow Git re
     const reset = sample.gitCommands.find(command => command.argv[1] === "reset");
     assert.equal(sample.indexRefreshSeconds, reset.regions.find(region => region.category === "index" && region.label === "refresh").seconds);
   }
+  for (const sample of run.samples.filter(sample => sample.round === 6 && sample.label === "advice")) {
+    const reset = sample.gitCommands.find(command => command.argv.includes("reset"));
+    const preload = reset.regions.findIndex(region => region.category === "index" && region.label === "preload");
+    const refresh = reset.regions.findIndex(region => region.category === "index" && region.label === "refresh");
+    assert.ok(preload >= 0 && preload < refresh);
+    assert.ok(reset.regions[preload].seconds < 0.025);
+  }
   const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
   assert.match(markdown, /prototype-only issue/);
   assert.match(markdown, /no per-worker hint-admission trace/);
+});
+
+test("Git-child diagnosis retains every read-heavy stack and failed observer without claiming a speedup", () => {
+  const hosted = JSON.parse(fs.readFileSync(path.join(directory, "apfs-git-child-ci-2026-10-09.json")));
+  assert.equal(hosted.kind, "diagnostic, not a performance claim");
+  assert.equal(hosted.fixtures.length, 2);
+  assert.equal(hosted.jobId, 114066628129);
+  assert.equal(hosted.artifact.digest, "sha256:842bc9f8523f4b6b69fc10229feb7747bffbc9b33758171e9125968b24b91aff");
+  assert.equal(hosted.patchSha256, report.patchSha256);
+  assert.equal(hosted.controlPatchSha256, report.controlPatchSha256);
+  let observations = 0, captured = 0, observerTimeouts = 0, unavailable = 0;
+  let mainThreadSamples = 0, readSamples = 0, conversionSamples = 0;
+  for (const run of hosted.fixtures) {
+    assert.equal(run.stageDiagnostics, true);
+    assert.equal(run.complete, true);
+    assert.equal(run.failure, null);
+    assert.equal(run.rounds, 8);
+    assert.equal(run.concurrency, 4);
+    assert.equal(run.samples.length, 65);
+    assert.equal(run.batches.length, 16);
+    assert.deepEqual([run.finalActiveViews, run.finalBases, run.finalDiagnosticIssues], [0, 0, 0]);
+    assert.notEqual(run.controlSha256, run.hintsSha256);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(sample.indexScanned, run.trackedEntries);
+      assert.equal(sample.indexEntries, run.trackedEntries);
+      const reset = sample.gitCommands.find(command => command.argv.includes("reset"));
+      assert.equal(sample.indexRefreshSeconds, reset.regions.find(region => region.category === "index" && region.label === "refresh").seconds);
+      for (const stack of sample.stackSamples) {
+        observations++;
+        assert.equal(run.name, "reference-four");
+        assert.equal(sample.label, "baseline");
+        assert.ok([4, 6].includes(sample.round));
+        assert.ok(sample.indexRefreshSeconds > 78 && sample.indexRefreshSeconds < 83);
+        if (stack.skipped) { unavailable++; assert.equal(stack.skipped, "worker no longer identifiable"); continue; }
+        assert.equal(stack.role, "git-child");
+        assert.equal(stack.binary, run.sampleGitBinary);
+        assert.notEqual(stack.pid, stack.parentPid);
+        if (stack.timedOut) {
+          observerTimeouts++;
+          assert.equal(stack.code, null);
+          assert.equal(stack.signal, "SIGTERM");
+          assert.equal(stack.text, null);
+          continue;
+        }
+        captured++;
+        assert.equal(stack.code, 0);
+        assert.equal(createHash("sha256").update(stack.text).digest("hex"), stack.sha256);
+        assert.ok(stack.text.includes(`git [${stack.pid}]`));
+        assert.ok(stack.text.includes(`riftri-stage-control [${stack.parentPid}]`));
+        const graph = stack.text.split("Binary Images:")[0];
+        assert.match(graph, /refresh_index/);
+        mainThreadSamples += Number(graph.match(/Call graph:\s*\n\s*(\d+) Thread_/)[1]);
+        for (const line of graph.split("Sort by top of stack")[1].split("\n")) {
+          const top = line.match(/^\s*(.+?)\s+\(in .+?\)\s+(\d+)\s*$/);
+          if (top?.[1] === "read") readSamples += Number(top[2]);
+          if (top?.[1] === "gather_stats") conversionSamples += Number(top[2]);
+        }
+      }
+    }
+    for (const label of ["baseline", "advice"]) {
+      const stages = {};
+      for (const sample of run.samples.filter(sample => sample.round > 0 && sample.label === label)) {
+        for (const phase of sample.phases) {
+          const match = /^riftri: (apfs|journal)-stage: finish (\S+) pid=\d+ microseconds=(\d+)$/.exec(phase.line);
+          if (match) (stages[`${match[1]}:${match[2]}`] ??= []).push(Number(match[3]) / 1000);
+        }
+      }
+      for (const [stage, values] of Object.entries(stages)) {
+        assert.deepEqual(run.summaries[label][stage], { samples:values.length, medianMilliseconds:median(values), maximumMilliseconds:Math.max(...values) });
+      }
+    }
+  }
+  assert.deepEqual([observations, captured, observerTimeouts, unavailable], [33, 24, 8, 1]);
+  assert.deepEqual([mainThreadSamples, readSamples, conversionSamples], [3345, 2656, 612]);
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /does not identify the kernel-level reason/);
+  assert.match(markdown, /unmeasured hypothesis/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  apfs-git-child-diagnostics:/m);
 });
 
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {

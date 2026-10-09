@@ -25,11 +25,12 @@ before observing either, and never installs them. Normal quality jobs test the
 unmodified product source. The temporary job was removed after preserving its
 completed observations below.
 
-A later temporary `apfs-git-child-diagnostics` job repeats the diagnosis with
+A later temporary `apfs-git-child-diagnostics` job repeated the diagnosis with
 direct-child sampling after the concurrency-admission experiments below. It
-uses a fresh 4 GiB APFS volume, eight alternating pairs per fixture and the
-same fail-closed verification and timeout. Its results are pending; the earlier
-completed job and original performance failure are not reclassified.
+used a fresh 4 GiB APFS volume, eight alternating pairs per fixture and the
+same fail-closed verification and timeout. Its completed results are retained
+below and the temporary job is removed. The original failed performance
+evaluation is not reclassified.
 
 `RIFTRI_BENCH_STAGE_DIAGNOSTICS=1` enables an observer in the manual benchmark,
 not in Riftri. The temporary build emits its own PID. After 15 seconds, the
@@ -473,6 +474,15 @@ localize this delay to the initial full check but do not explain what Git was
 waiting for, prove which workers skipped hints, or establish the cause of the
 older hosted timeout. The run has no per-worker hint-admission trace.
 
+The same four reset traces separate `index:preload` from `index:refresh`.
+Preloading took only 10.27–24.81 ms; the three slow refreshes took more than
+18 seconds each. [Upstream Git 2.50.1's refresh implementation](https://github.com/git/git/blob/v2.50.1/read-cache.c#L1376-L1499)
+places the parallel metadata preload before the timed refresh loop, consistent
+with the Apple Git 2.50.1 trace boundaries observed here. Tuning preload
+threads is therefore not supported as the explanation or direct fix for this
+delay. A refresh includes metadata and content work; its region alone still
+cannot distinguish hashing from filesystem waits.
+
 The admission guard and its implementation-specific tests are removed from
 normal Rust. No serial or hosted performance run was launched after the
 completed concurrent result lost. Neither the lower CPU median nor green
@@ -501,8 +511,52 @@ sampler tests then passed with native sampling enabled, including an owned
 Git process blocked on an open stdin pipe. The complete benchmark-harness
 unit suite passed 14 tests (nine environment-gated tests skipped); this does
 not claim a reproduced slow worktree refresh. Local free disk space later
-fell below 2 GiB, so the next worktree diagnosis uses a fresh hosted APFS
+fell below 2 GiB, so the next worktree diagnosis used a fresh hosted APFS
 volume instead of presenting more near-full local timings as a speedup.
+
+## Hosted Git-child diagnosis: reads dominate the captured slow stacks
+
+[Run 38003424826](https://github.com/assistant-ui/riftri/actions/runs/38003424826)
+passed every job. The diagnostic used Apple Git 2.39.5 on an M1 virtual runner
+with 7 GiB memory. All 130 views across 32 batches completed, passed full
+content/mode/symlink checks and complete initial Git scans, preserved private
+writes, and removed cleanly; both fixtures ended with zero views, bases and
+diagnostic issues. The [complete record](apfs-git-child-ci-2026-10-09.json)
+retains every worker, Git command, phase, failed observer and captured stack.
+
+Two real-project **no-hint control** batches took 86.66 and 81.76 seconds.
+Their eight workers spent 78.05–82.50 seconds in Git's initial refresh.
+There were 33 observer results: 24 successful Git-child stacks, eight bounded
+sampler timeouts and one unavailable parent identity. All come from those two
+control batches; there are no hint-enabled or synthetic stacks. The observer
+timeouts are not worktree timeouts and are retained as failures, not passes.
+
+The 24 successful stacks contain 3,345 main-thread sample observations. Of
+these, 2,656 (79.40%) have `read` at the top of the stack; another 612 (18.30%)
+are in Git's line-ending `gather_stats` routine. The read stacks pass through
+`cmd_reset → refresh_index → ce_modified_check_fs → index_fd → read_in_full`.
+This is direct evidence of filesystem reads during content checking in the
+captured intervals, rather than a parent `poll` stack or a guess from a
+journal receipt. It does not identify the kernel-level reason for the wait,
+the total proportion of elapsed time spent there, or whether sampling itself
+extended the stalls. The first sample attempt for each worker timed out.
+
+For the real-project diagnostic, hints took 2,758.36 ms median while Git
+refresh fell from 4,949.89 to 1,180.21 ms median. Native cloning/modes were
+1,779.38 ms in the control and 1,558.03 ms with hints. In the synthetic fixture,
+hints took 195.95 ms and refresh medians were 728.01 versus 270.86 ms.
+These are separate phase distributions, not paired end-to-end gains; their
+medians must not be added into a new startup-speed claim.
+
+The next candidate should test **bounded parallel prefix reads** as a different
+way to warm the view's cache before Git's unchanged full check. Unlike the
+current advisory requests, this would copy a capped prefix into disposable
+userspace buffers; it must retain regular-file/no-follow safeguards, byte and
+worker limits, private-write isolation, and every durability/verification
+step. It is an unmeasured hypothesis, not an adopted implementation. It needs
+serial and concurrent uninstrumented comparisons against both the existing
+deferred candidate and main before promotion. The original hint-enabled
+120-second failure was not reproduced or explained by this no-hint observation.
 
 ## Reproduce safely
 
