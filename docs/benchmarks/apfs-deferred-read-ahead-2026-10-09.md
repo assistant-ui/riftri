@@ -212,9 +212,12 @@ GC claim. The run's `deferred-apfs-read-ahead-evaluation` artifact contains full
 Git traces and worker logs; its ID and checksum are recorded in the JSON.
 The disposable volume detached without force after evidence upload.
 
-The next [stage-diagnostic experiment](apfs-stage-diagnostics-2026-10-09.md)
-adds temporary build-only timing and bounded stack capture, not a default
-behavior change or a new performance claim.
+The [stage-diagnostic follow-up](apfs-stage-diagnostics-2026-10-09.md)
+retains 82 completed hosted observations and three no-hint-control stacks. It
+isolates a substantial real-project hint-pass cost but does not reproduce or
+resolve the earlier timeout. A subsequent single-issuer prototype passed all
+65 local creation checks but was 8.52% slower, winning only 2/8 pairs, so its
+scheduling change was reverted. Neither experiment makes this PR ready to merge.
 
 ## Reproduce
 

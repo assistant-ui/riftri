@@ -7,4 +7,5 @@
 *.yml text eol=lf
 *.js text eol=lf
 *.mjs text eol=lf
+*.patch text eol=lf
 *.exe binary
