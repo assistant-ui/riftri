@@ -1,5 +1,9 @@
 # APFS bounded read-ahead evaluation, 2026-10-09
 
+Historical inline-hint candidate and budget experiments. The current follow-up
+uses [deferred scheduling](apfs-deferred-read-ahead-2026-10-09.md); the results
+below remain evidence about the earlier variants, not the revised runtime.
+
 Best-effort read-ahead improved **serial cached creation** on the measured
 many-file fixtures while retaining full Git validation. **Keep this candidate
 in draft:** a separate hosted-runner repeat found an approximately 11% slower

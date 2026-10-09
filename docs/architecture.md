@@ -570,8 +570,9 @@ the new regular files, so the kernel can prepare reads before Git's initial
 content check. Failed clone phases issue no hints. Keeping hint issuance out of
 the mutation pass avoids mixing the two kinds of I/O within each worker team.
 The existing clone jobs retain each file's length from its permissions stat;
-no second metadata traversal is needed. Their storage still scales with file
-count, including an extra atomic length and temporary references during cloning.
+no second metadata traversal is needed to obtain lengths. Their storage still
+scales with file count, including an extra atomic length and temporary references
+during cloning.
 Requests are capped at 64 KiB per file and 64 MiB per clone
 operation across all workers; these are requested-byte limits, not a reservation
 or an upper bound on the kernel's page cache. Only read-only, no-follow,
@@ -580,7 +581,7 @@ next file. Failed or unsupported hints are ignored. No result is treated as
 proof of contents: complete base verification, Git index synchronization, clean
 verification, and all durability/recovery boundaries remain mandatory. Linux
 and Windows are unchanged. Measurements and workload limitations are recorded
-in [the APFS read-ahead evaluation](benchmarks/apfs-read-ahead-2026-10-09.md);
+in [the deferred APFS evaluation](benchmarks/apfs-deferred-read-ahead-2026-10-09.md);
 the original mixed-pass candidate and budget prototypes remain recorded as
 experiments, not evidence of a concurrent speedup.
 

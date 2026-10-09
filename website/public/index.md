@@ -384,7 +384,8 @@ maps every document in one place.
 
 ### Measurements and optimization work
 
-- [APFS read-ahead, October 9](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/apfs-read-ahead-2026-10-09.md): experimental serial gains with full Git validation; a CI concurrent regression keeps the candidate in draft.
+- [Deferred APFS read-ahead, October 9](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/apfs-deferred-read-ahead-2026-10-09.md): local serial and four-way gains with full checks; independent evaluation pending.
+- [APFS read-ahead, October 9](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/apfs-read-ahead-2026-10-09.md): historical inline-hint gains, concurrent regressions and rejected budget prototypes.
 - [Optional Git FSMonitor, October 8](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/fsmonitor-2026-10-08.md): large-worktree status gains, not a creation speedup; raw samples and a reproducible harness.
 - [Assistant-ui diagnostic, October 1](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-diagnostic-2026-10-01.md): serial process counts and follow-up priorities; no latency claim.
 - [Benchmark guide](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks.md): running and interpreting native-COW benchmarks.

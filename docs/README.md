@@ -56,8 +56,10 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Measurements
 
+- [Deferred APFS read-ahead, October 9](benchmarks/apfs-deferred-read-ahead-2026-10-09.md)
+  — local serial and four-way gains with full checks; independent evaluation pending.
 - [APFS read-ahead, October 9](benchmarks/apfs-read-ahead-2026-10-09.md)
-  — experimental serial gains with full Git validation; a CI concurrent regression keeps the candidate in draft.
+  — historical inline-hint gains and concurrent regressions; rejected budget prototypes retained.
 - [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)
   — repeated status gains on a large synthetic worktree, not a startup speedup.
 - [Assistant-ui diagnostic, October 1](benchmarks/assistant-ui-diagnostic-2026-10-01.md)
