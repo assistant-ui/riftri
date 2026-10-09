@@ -97,7 +97,10 @@ mod unix {
             let output = Command::new(shell)
                 .args([
                     "-ec",
-                    r#"original_path=$PATH
+                    // Establish a deactivated baseline in this child only;
+                    // deactivation intentionally removes an outer shim too.
+                    r#"eval "$("$RIFTRI_TEST_BIN" shell deactivate sh)"
+original_path=$PATH
 original_git=$(command -v git)
 original_version=$(git --version)
 eval "$("$RIFTRI_TEST_BIN" shell hook sh)"

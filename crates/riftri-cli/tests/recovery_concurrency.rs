@@ -5,6 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "support/real_git.rs"]
+mod real_git;
 mod support;
 
 #[test]
@@ -61,7 +63,7 @@ fn repair_does_not_roll_back_a_live_add() {
             .success()
     );
     let wrapper = fixture.path().join("paused-git");
-    fs::write(&wrapper, "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then\n  touch \"$RIFTRI_TEST_READY\"\n  paused_from=$PWD\n  cd / || exit 1\n  attempt=0\n  while [ ! -e \"$RIFTRI_TEST_RELEASE\" ] && [ \"$attempt\" -lt 600 ]; do sleep 0.05; attempt=$((attempt + 1)); done\n  cd \"$paused_from\" || exit 1\n fi\ndone\nexec git \"$@\"\n").unwrap();
+    fs::write(&wrapper, "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then\n  touch \"$RIFTRI_TEST_READY\"\n  paused_from=$PWD\n  cd / || exit 1\n  attempt=0\n  while [ ! -e \"$RIFTRI_TEST_RELEASE\" ] && [ \"$attempt\" -lt 600 ]; do sleep 0.05; attempt=$((attempt + 1)); done\n  cd \"$paused_from\" || exit 1\n fi\ndone\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n").unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
     // Armed before the wrapper can pause anything: every early return and
     // panic below must still release it, or `paused-git` outlives the test.
@@ -74,6 +76,7 @@ fn repair_does_not_roll_back_a_live_add() {
         .current_dir(&repository)
         .env("RIFTRI_SHIM_ACTIVE", "1")
         .env("RIFTRI_REAL_GIT", &wrapper)
+        .env("RIFTRI_TEST_REAL_GIT", real_git::real_git())
         .env("RIFTRI_TEST_READY", &ready)
         .env("RIFTRI_TEST_RELEASE", &release)
         .stdout(Stdio::piped())

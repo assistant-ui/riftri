@@ -1,6 +1,9 @@
 use std::process::Command;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "support/real_git.rs"]
+mod real_git;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod support;
 
 #[test]
@@ -671,7 +674,7 @@ fn git_failing_then_inventory(directory: &std::path::Path, subcommand: &str) -> 
     std::fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = {subcommand} ]; then\n    : > '{marker}'\n    echo 'fatal: injected worktree {subcommand} failure' >&2\n    exit 128\n  fi\n  if [ -n \"$seen\" ] && [ \"$arg\" = list ] && [ -e '{marker}' ]; then\n    echo 'fatal: injected worktree list failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec git \"$@\"\n",
+            "#!/bin/sh\nseen=\nfor arg in \"$@\"; do\n  if [ -n \"$seen\" ] && [ \"$arg\" = {subcommand} ]; then\n    : > '{marker}'\n    echo 'fatal: injected worktree {subcommand} failure' >&2\n    exit 128\n  fi\n  if [ -n \"$seen\" ] && [ \"$arg\" = list ] && [ -e '{marker}' ]; then\n    echo 'fatal: injected worktree list failure' >&2\n    exit 128\n  fi\n  [ \"$arg\" = worktree ] && seen=1\ndone\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
             marker = marker.display()
         ),
     )
@@ -701,7 +704,8 @@ fn riftri_json_error_with_git(
     let mut command = Command::new(env!("CARGO_BIN_EXE_riftri"));
     command
         .env("RIFTRI_SHIM_ACTIVE", "1")
-        .env("RIFTRI_REAL_GIT", git);
+        .env("RIFTRI_REAL_GIT", git)
+        .env("RIFTRI_TEST_REAL_GIT", real_git::real_git());
     run_riftri_json_error(command, current_directory, arguments)
 }
 
