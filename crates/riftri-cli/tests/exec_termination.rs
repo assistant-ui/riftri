@@ -473,6 +473,11 @@ mod unix {
             let mut command = Command::new(env!("CARGO_BIN_EXE_riftri"));
             command
                 .args(["exec", "--", "/bin/sh", "-c", script])
+                // This fixture supplies its own PATH (including a Git stand-in
+                // for the shim test). Outer activation must not bypass it.
+                .env_remove("RIFTRI_SHIM_ACTIVE")
+                .env_remove("RIFTRI_REAL_GIT")
+                .env_remove("RIFTRI_BYPASS")
                 .env("TMPDIR", shim_root.path())
                 .envs(environment.iter().copied())
                 .stdin(Stdio::from(slave.try_clone().expect("duplicate pty slave")))
@@ -700,6 +705,29 @@ mod unix {
             )
             .expect("build a PATH with the real-Git stand-in first")
         }
+    }
+
+    /// An already-activated parent must not bypass the fixture's fake Git.
+    #[test]
+    fn interactive_git_fixture_ignores_parent_activation() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "unix::interactive_sigterm_reaches_the_real_git_behind_the_shim",
+                "--nocapture",
+            ])
+            .env("RIFTRI_SHIM_ACTIVE", "1")
+            .env("RIFTRI_REAL_GIT", "/usr/bin/git")
+            .env_remove("RIFTRI_BYPASS")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
     }
 
     /// Terminating riftri while the scoped command is `git` must reach the

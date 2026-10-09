@@ -15,6 +15,9 @@ use std::process::{Command, Output};
 
 mod support;
 use support::writable_tempdir as tempdir;
+#[path = "support/real_git.rs"]
+mod real_git;
+use real_git::real_git;
 
 /// Git invocations for an add that must build the immutable base first.
 const COLD_ADD_BUDGET: usize = 18;
@@ -37,19 +40,6 @@ fn git(path: &Path, arguments: &[&str]) -> Output {
         String::from_utf8_lossy(&output.stderr)
     );
     output
-}
-
-fn real_git() -> PathBuf {
-    let output = Command::new("sh")
-        .args(["-c", "command -v git"])
-        .output()
-        .expect("locate the real git executable");
-    assert!(output.status.success(), "no git executable on PATH");
-    PathBuf::from(
-        String::from_utf8(output.stdout)
-            .expect("UTF-8 git path")
-            .trim(),
-    )
 }
 
 fn install_counting_shim(directory: &Path) -> PathBuf {
@@ -84,6 +74,10 @@ fn add_worktree_with_counted_git(
         .arg(state)
         .current_dir(repository)
         .env("PATH", shim_path)
+        // An inherited real-Git override would bypass this counting wrapper.
+        .env("RIFTRI_SHIM_ACTIVE", "1")
+        .env("RIFTRI_REAL_GIT", shim_directory.join("git"))
+        .env_remove("RIFTRI_BYPASS")
         .env("RIFTRI_TEST_REAL_GIT", real_git)
         .env("RIFTRI_TEST_GIT_LOG", log)
         .output()
@@ -315,6 +309,9 @@ fn run_with_counted_git(
         .args(arguments)
         .current_dir(repository)
         .env("PATH", shim_path)
+        .env("RIFTRI_SHIM_ACTIVE", "1")
+        .env("RIFTRI_REAL_GIT", shim_directory.join("git"))
+        .env_remove("RIFTRI_BYPASS")
         .env("RIFTRI_TEST_REAL_GIT", real_git)
         .env("RIFTRI_TEST_GIT_LOG", log)
         .output()
@@ -325,7 +322,7 @@ fn run_with_counted_git(
         String::from_utf8_lossy(&output.stderr)
     );
     fs::read_to_string(log)
-        .unwrap_or_default()
+        .expect("counting wrapper must have run")
         .lines()
         .map(str::to_owned)
         .collect()
@@ -387,7 +384,7 @@ fn inspection_lists_git_worktrees_a_constant_number_of_times() {
             .filter(|call| call.contains("worktree list"))
             .count();
         assert!(
-            listings <= 2,
+            (1..=2).contains(&listings),
             "{name} listed Git worktrees {listings} times for 6 worktrees:\n{}",
             calls.join("\n")
         );

@@ -11,6 +11,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "support/real_git.rs"]
+mod real_git;
 mod support;
 use support::writable_tempdir as tempdir;
 
@@ -230,7 +232,7 @@ fn json_errors_receives_one_receipt_with_no_progress_lines() {
     let wrapper = fixture.path().join("failing-git");
     fs::write(
         &wrapper,
-        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then exit 65; fi\ndone\nexec git \"$@\"\n",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then exit 65; fi\ndone\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
     )
     .expect("write failing git wrapper");
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("mark executable");
@@ -244,6 +246,7 @@ fn json_errors_receives_one_receipt_with_no_progress_lines() {
         .current_dir(&repository)
         .env("RIFTRI_SHIM_ACTIVE", "1")
         .env("RIFTRI_REAL_GIT", &wrapper)
+        .env("RIFTRI_TEST_REAL_GIT", real_git::real_git())
         .output()
         .expect("run failing add with --json-errors");
     assert_eq!(output.status.code(), Some(1));
@@ -287,7 +290,7 @@ fn failed_add_reports_rollback_progress() {
     let wrapper = fixture.path().join("failing-git");
     fs::write(
         &wrapper,
-        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then exit 65; fi\ndone\nexec git \"$@\"\n",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then exit 65; fi\ndone\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
     )
     .expect("write failing git wrapper");
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("mark executable");
@@ -300,6 +303,7 @@ fn failed_add_reports_rollback_progress() {
         .current_dir(&repository)
         .env("RIFTRI_SHIM_ACTIVE", "1")
         .env("RIFTRI_REAL_GIT", &wrapper)
+        .env("RIFTRI_TEST_REAL_GIT", real_git::real_git())
         .output()
         .expect("run failing add");
     assert_eq!(output.status.code(), Some(1));
@@ -335,7 +339,7 @@ fn repair_reports_scanning_and_recovery_of_an_interrupted_add() {
     let wrapper = fixture.path().join("paused-git");
     fs::write(
         &wrapper,
-        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then\n  touch \"$RIFTRI_TEST_READY\"\n  cd / || exit 1\n  attempt=0\n  while [ ! -e \"$RIFTRI_TEST_RELEASE\" ] && [ \"$attempt\" -lt 600 ]; do sleep 0.05; attempt=$((attempt + 1)); done\n  exit 70\n fi\ndone\nexec git \"$@\"\n",
+        "#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = checkout-index ]; then\n  touch \"$RIFTRI_TEST_READY\"\n  cd / || exit 1\n  attempt=0\n  while [ ! -e \"$RIFTRI_TEST_RELEASE\" ] && [ \"$attempt\" -lt 600 ]; do sleep 0.05; attempt=$((attempt + 1)); done\n  exit 70\n fi\ndone\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
     )
     .expect("write paused git wrapper");
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("mark executable");
@@ -351,6 +355,7 @@ fn repair_reports_scanning_and_recovery_of_an_interrupted_add() {
         .current_dir(&repository)
         .env("RIFTRI_SHIM_ACTIVE", "1")
         .env("RIFTRI_REAL_GIT", &wrapper)
+        .env("RIFTRI_TEST_REAL_GIT", real_git::real_git())
         .env("RIFTRI_TEST_READY", &ready)
         .env("RIFTRI_TEST_RELEASE", &release)
         .stdout(Stdio::null())

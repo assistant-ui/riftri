@@ -7,6 +7,8 @@ use std::process::{Command, Output};
 
 mod support;
 use support::writable_tempdir as tempdir;
+#[path = "support/real_git.rs"]
+mod real_git;
 
 fn command(program: &Path, path: &Path, arguments: &[&str]) -> Output {
     Command::new(program)
@@ -143,16 +145,7 @@ fn worktree_add_uses_the_revision_resolved_before_mutation() {
             .success()
     );
 
-    let real_git = String::from_utf8(
-        Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .expect("locate real Git")
-            .stdout,
-    )
-    .expect("Git path is UTF-8")
-    .trim()
-    .to_owned();
+    let real_git = real_git::real_git();
     let wrapper = fixture.path().join("moving-git");
     fs::write(
         &wrapper,
@@ -246,16 +239,7 @@ fn existing_branch_move_fails_and_rolls_back_without_deleting_the_branch() {
         .trim()
         .to_owned();
 
-    let real_git = String::from_utf8(
-        Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .expect("locate real Git")
-            .stdout,
-    )
-    .expect("Git path is UTF-8")
-    .trim()
-    .to_owned();
+    let real_git = real_git::real_git();
     let wrapper = fixture.path().join("moving-existing-git");
     fs::write(
         &wrapper,
@@ -865,16 +849,7 @@ fn a_moving_remote_tracking_start_point_is_pinned_and_keeps_its_upstream() {
             .success()
     );
 
-    let real_git = String::from_utf8(
-        Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .unwrap()
-            .stdout,
-    )
-    .unwrap()
-    .trim()
-    .to_owned();
+    let real_git = real_git::real_git();
     let wrapper = fixture.path().join("moving-git");
     fs::write(
         &wrapper,
