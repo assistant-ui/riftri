@@ -40,12 +40,12 @@ jobs:
           path: benchmark-baseline
           persist-credentials: false
 
-      - name: Check out public T3 Code fork as data only
+      - name: Check out previously validated assistant-ui fixture as data only
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: farming-labs/t3code
-          ref: c12f91bfaf2e315d1dc074409760cf77c2f45acb
-          path: benchmark-t3code
+          repository: assistant-ui/assistant-ui
+          ref: 038cd9f82b418afe9e6d0080648738f78586fbca
+          path: benchmark-reference
           persist-credentials: false
 
       - name: Set up Node.js
@@ -78,8 +78,35 @@ jobs:
           node "$harness" "$baseline" "$output/serial-many" 4096 8 "$candidate"
           node "$harness" "$baseline" "$output/concurrent-four" 4096 4 "$candidate" 8192 - 4
           node "$harness" "$baseline" "$output/concurrent-ten" 4096 4 "$candidate" 8192 - 10
-          node "$harness" "$baseline" "$output/t3-serial" 4096 8 "$candidate" 8192 "$GITHUB_WORKSPACE/benchmark-t3code"
-          node "$harness" "$baseline" "$output/t3-four" 4096 4 "$candidate" 8192 "$GITHUB_WORKSPACE/benchmark-t3code" 4
+          node "$harness" "$baseline" "$output/reference-serial" 4096 8 "$candidate" 8192 "$GITHUB_WORKSPACE/benchmark-reference"
+          node "$harness" "$baseline" "$output/reference-four" 4096 4 "$candidate" 8192 "$GITHUB_WORKSPACE/benchmark-reference" 4
+
+      - name: Record current T3 fork eligibility without changing its tree
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_CONFIG_NOSYSTEM: "1"
+        run: |
+          # The fork has nested gitlinks without root .gitmodules mappings.
+          # Checkout's credential cleanup runs submodule foreach and refuses
+          # it. Plain Git can fetch the exact public tree without initializing
+          # submodules; doctor then reports Riftri's actual compatibility.
+          repository="$RUNNER_TEMP/t3-eligibility"
+          git init --quiet "$repository"
+          git -C "$repository" -c gc.auto=0 fetch --quiet --no-tags --depth=1 \
+            https://github.com/farming-labs/t3code.git c12f91bfaf2e315d1dc074409760cf77c2f45acb
+          git -C "$repository" checkout --quiet --detach FETCH_HEAD
+          target/release/riftri doctor "$repository" --json \
+            --destination "$RUNNER_TEMP/riftri-read-ahead-volume/t3-proposed-view" \
+            > "$RUNNER_TEMP/t3-read-ahead-eligibility.json"
+          node --input-type=module - <<'NODE'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          const report = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/t3-read-ahead-eligibility.json`));
+          assert.equal(report.repository_compatibility.value.compatible, false,
+            'the pinned tree has unsupported gitlinks; do not treat it as a timing fixture');
+          console.log(JSON.stringify(report.repository_compatibility, null, 2));
+          NODE
 
       - name: Retain raw measurements and failures
         if: always()
@@ -90,6 +117,7 @@ jobs:
             ${{ runner.temp }}/riftri-read-ahead-volume/*/results.json
             ${{ runner.temp }}/riftri-read-ahead-volume/*/git-*.jsonl
             ${{ runner.temp }}/riftri-read-ahead-volume/*/add-*.log
+            ${{ runner.temp }}/t3-read-ahead-eligibility.json
           if-no-files-found: error
 
       - name: Detach comparison volume without forcing
