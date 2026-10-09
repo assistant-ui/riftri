@@ -3,9 +3,10 @@
 #![cfg(target_os = "macos")]
 
 use std::fs::{self, File, FileTimes};
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[allow(dead_code)]
 mod support;
@@ -152,10 +153,11 @@ impl Drop for Fixture {
     }
 }
 
-fn status(view: &Path, full_scan: bool) -> Vec<u8> {
+fn status(view: &Path, without_monitor: bool) -> Vec<u8> {
     let mut command = isolated("git", view);
-    if full_scan {
+    if without_monitor {
         // The oracle must not rewrite the watched index and invalidate its cache.
+        // Git's ordinary stat cache still applies; this is not a byte audit.
         command.args([
             "--no-optional-locks",
             "-c",
@@ -177,6 +179,27 @@ fn status(view: &Path, full_scan: bool) -> Vec<u8> {
             .output()
             .unwrap(),
     )
+}
+
+fn wait_for_distinct_stat_second(path: &Path) {
+    // Some Git builds compare ctime only to whole seconds. With an old mtime,
+    // a same-size write followed by restoring mtime can fool ordinary Git too
+    // if ctime stays in the same second. Test watcher invalidation, not that
+    // unrelated stat-cache limitation; never add a delay to the product path.
+    let previous_ctime: u64 = fs::metadata(path).unwrap().ctime().try_into().unwrap();
+    let started = Instant::now();
+    while SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        <= previous_ctime
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "fixture clock did not advance beyond file ctime"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[test]
@@ -254,6 +277,7 @@ fn opt_in_fsmonitor_preserves_changes_isolation_restart_and_dirty_removal() {
             let modified = fs::metadata(&target).unwrap().modified().unwrap();
             match case {
                 "same-size-mtime" => {
+                    wait_for_distinct_stat_second(&target);
                     fs::write(&target, "modified\n").unwrap();
                     File::options()
                         .write(true)
@@ -399,4 +423,158 @@ fn opt_in_fsmonitor_preserves_changes_isolation_restart_and_dirty_removal() {
     assert_eq!(receipt["operations"]["active_views"], 0);
     assert_eq!(receipt["bases"], serde_json::json!([]));
     assert_eq!(receipt["diagnostic_issues"], serde_json::json!([]));
+}
+
+#[test]
+fn fsmonitor_tracks_private_edits_after_managed_move_and_compaction() {
+    for untracked_cache in [false, true] {
+        let mut fixture = Fixture::new();
+        git(&fixture.repository, &["config", "core.fsmonitor", "true"]);
+        git(
+            &fixture.repository,
+            &[
+                "config",
+                "core.untrackedCache",
+                if untracked_cache { "true" } else { "false" },
+            ],
+        );
+        success(fixture.riftri().arg("enable").output().unwrap());
+        let first = fixture.add("moving", false);
+        let second = fixture.add("peer", false);
+        assert_eq!(first["base_path"], second["base_path"]);
+        let base = PathBuf::from(first["base_path"].as_str().unwrap());
+        let peer = fixture.views[1].clone();
+        let mut view = fixture.views[0].clone();
+        let head = git(&view, &["rev-parse", "HEAD"]);
+
+        for compact in [false, true] {
+            // Prime the watched index before changing the root path or inode.
+            assert!(status(&view, false).is_empty());
+            assert!(status(&view, false).is_empty());
+            assert!(monitor_status(&view).status.success());
+            if compact {
+                let old_inode = fs::metadata(&view).unwrap().ino();
+                success(
+                    fixture
+                        .riftri()
+                        .args(["worktree", "compact"])
+                        .arg(&view)
+                        .output()
+                        .unwrap(),
+                );
+                assert_ne!(fs::metadata(&view).unwrap().ino(), old_inode);
+            } else {
+                let moved = fixture.root.path().join("moved");
+                fixture.views.push(moved.clone()); // Also clean up after an assertion failure.
+                let mut command = fixture.riftri();
+                if untracked_cache {
+                    command.args(["exec", "--", "git"]);
+                }
+                success(
+                    command
+                        .args(["worktree", "move"])
+                        .arg(&view)
+                        .arg(&moved)
+                        .output()
+                        .unwrap(),
+                );
+                assert!(!view.exists());
+                view = moved;
+            }
+            assert_eq!(git(&view, &["rev-parse", "HEAD"]), head);
+            assert!(status(&view, false).is_empty());
+            assert!(status(&view, true).is_empty());
+            assert!(monitor_status(&view).status.success());
+
+            let target = view.join("tracked.txt");
+            let modified = fs::metadata(&target).unwrap().modified().unwrap();
+            wait_for_distinct_stat_second(&target);
+            fs::write(&target, b"modified\n").unwrap();
+            File::options()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_times(FileTimes::new().set_modified(modified))
+                .unwrap();
+            let watched = status(&view, false);
+            assert_eq!(
+                watched,
+                status(&view, true),
+                "compact={compact}, cache={untracked_cache}"
+            );
+            assert!(
+                !watched.is_empty(),
+                "missed post-lifecycle edit: compact={compact}, cache={untracked_cache}"
+            );
+            for verb in ["remove", "compact"] {
+                assert!(
+                    !fixture
+                        .riftri()
+                        .args(["worktree", verb])
+                        .arg(&view)
+                        .output()
+                        .unwrap()
+                        .status
+                        .success()
+                );
+                assert_eq!(fs::read(&target).unwrap(), b"modified\n");
+            }
+            assert_eq!(fs::read(peer.join("tracked.txt")).unwrap(), b"original\n");
+            assert_eq!(fs::read(base.join("tracked.txt")).unwrap(), b"original\n");
+            assert!(status(&peer, true).is_empty());
+
+            fs::write(&target, b"original\n").unwrap();
+            fs::create_dir(view.join("nested")).unwrap();
+            fs::write(view.join("nested/private"), b"untracked").unwrap();
+            let watched = status(&view, false);
+            assert!(!watched.is_empty(), "missed post-lifecycle untracked file");
+            assert_eq!(watched, status(&view, true));
+            fs::remove_file(view.join("nested/private")).unwrap();
+            fs::remove_dir(view.join("nested")).unwrap();
+            assert!(status(&view, false).is_empty());
+            assert!(status(&view, true).is_empty());
+        }
+
+        git(&fixture.repository, &["config", "core.fsmonitor", "false"]);
+        for directory in fixture
+            .views
+            .iter()
+            .chain(std::iter::once(&fixture.repository))
+        {
+            if directory.exists() {
+                stop_monitor(directory);
+                assert!(status(directory, false).is_empty());
+                assert_eq!(monitor_status(directory).status.code(), Some(1));
+            }
+        }
+        for directory in [&view, &peer] {
+            success(
+                fixture
+                    .riftri()
+                    .args(["worktree", "remove"])
+                    .arg(directory)
+                    .output()
+                    .unwrap(),
+            );
+            assert!(!directory.exists());
+        }
+        success(
+            fixture
+                .riftri()
+                .args(["gc", "--apply", "--yes"])
+                .output()
+                .unwrap(),
+        );
+        let receipt: serde_json::Value = serde_json::from_slice(&success(
+            fixture
+                .riftri()
+                .args(["status", "--json"])
+                .output()
+                .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(receipt["operations"]["active_views"], 0);
+        assert_eq!(receipt["bases"], serde_json::json!([]));
+        assert_eq!(receipt["diagnostic_issues"], serde_json::json!([]));
+    }
 }

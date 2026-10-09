@@ -92,14 +92,27 @@ opt-in or stop Git-owned watchers. Before retiring a watched worktree, opt it
 out and stop its watcher, then use normal Riftri removal. Dirty-worktree
 protection remains unchanged.
 
-For a one-command comparison or troubleshooting without the cache:
+For a one-command comparison or troubleshooting without FSMonitor and the
+untracked cache:
 
 ```sh
 git -C ../task-1 --no-optional-locks -c core.fsmonitor=false -c core.untrackedCache=false status --porcelain=v1 -z --untracked-files=all
 ```
 
+This still uses Git's ordinary index stat cache; it does not hash every tracked
+file and is not a byte-integrity audit. In particular, some Git builds can miss
+a same-size edit made within the same ctime second when the file's older mtime
+is deliberately restored, with or without FSMonitor. The same-size edit tests
+separate ctime seconds so they exercise watcher invalidation rather than this
+unrelated Git stat-cache limitation.
+
 The macOS integration test covers explicit/intercepted creation, edits,
 deletions, renames, modes, symlinks, untracked files, watcher restart, isolation,
-dirty-removal refusal, and opt-out. It does not certify every Git version or
-platform. [Git's FSMonitor manual](https://git-scm.com/docs/git-fsmonitor--daemon)
-describes the daemon and filesystem limitations.
+dirty-removal refusal, and opt-out. It also warms the watcher before explicit
+and intercepted managed moves and before native-COW compaction replaces the
+root inode, then checks tracked and nested untracked edits with the untracked
+cache both off and on. Dirty removal/compaction must refuse, peers and bases
+must remain unchanged, and final removal/GC must leave no managed state.
+This coverage does not certify every Git version or platform.
+[Git's FSMonitor manual](https://git-scm.com/docs/git-fsmonitor--daemon) describes
+the daemon and filesystem limitations.
