@@ -60,6 +60,12 @@ compatibility matrix and reversal steps.
 
 ## Harness recipes
 
+For large worktrees checked frequently, Git's own [optional FSMonitor](fsmonitor.md)
+can reduce repeated status cost. This is a separate, explicit Git setting, not
+part of `riftri enable` or process-scoped interception. It can be slower on
+smaller trees and does not eliminate initial creation checks. The guide covers
+repository-versus-worktree scope and stopping Git-owned watchers.
+
 **Claude Code.** Claude Code creates task worktrees with plain `git worktree`
 commands, so either launch it as `riftri exec -- claude` in an enabled
 repository, or add the shell hook to your profile and run `riftri enable` once

@@ -371,6 +371,7 @@ maps every document in one place.
 - [Troubleshooting and FAQ](https://github.com/assistant-ui/riftri/blob/main/docs/troubleshooting.md): symptom-first answers for refused operations, activation gaps, recovery, and disk usage.
 - [Backing out](https://github.com/assistant-ui/riftri/blob/main/docs/backing-out.md): what survives if you stop using Riftri, and how to remove it cleanly.
 - [Dependencies and build caches](https://github.com/assistant-ui/riftri/blob/main/docs/build-caches.md): which dependency stores are safe to share across parallel worktrees, and which directories never are.
+- [Optional Git FSMonitor](https://github.com/assistant-ui/riftri/blob/main/docs/fsmonitor.md): measured status-check tradeoffs, explicit Git opt-in, and reversal.
 
 ### Architecture and guarantees
 
@@ -383,6 +384,7 @@ maps every document in one place.
 
 ### Measurements and optimization work
 
+- [Optional Git FSMonitor, October 8](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/fsmonitor-2026-10-08.md): large-worktree status gains, not a creation speedup; raw samples and a reproducible harness.
 - [Assistant-ui diagnostic, October 1](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-diagnostic-2026-10-01.md): serial process counts and follow-up priorities; no latency claim.
 - [Benchmark guide](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks.md): running and interpreting native-COW benchmarks.
 - [APFS allocation evidence](https://github.com/assistant-ui/riftri/blob/main/docs/allocation-evidence.md): physical-sharing measurements.

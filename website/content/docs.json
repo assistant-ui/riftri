@@ -16,7 +16,8 @@
     { "source": "docs/windows-refs.md", "content": "website/content/guides/windows-refs.md", "slug": "windows-refs", "title": "Windows ReFS", "icon": "HardDrive" },
     { "source": "docs/git-lfs.md", "content": "website/content/guides/git-lfs.md", "slug": "git-lfs", "title": "Git LFS", "icon": "FileArchive" },
     { "source": "docs/sparse-checkout.md", "content": "website/content/guides/sparse-checkout.md", "slug": "sparse-checkout", "title": "Sparse checkout", "icon": "FolderSearch" },
-    { "source": "docs/build-caches.md", "content": "website/content/guides/build-caches.md", "slug": "build-caches", "title": "Build & dependency caches", "icon": "Package" }
+    { "source": "docs/build-caches.md", "content": "website/content/guides/build-caches.md", "slug": "build-caches", "title": "Build & dependency caches", "icon": "Package" },
+    { "source": "docs/fsmonitor.md", "content": "website/content/guides/fsmonitor.md", "slug": "fsmonitor", "title": "Optional Git FSMonitor", "icon": "FolderSearch" }
   ] },
   { "label": "03 / Under the hood", "pages": [
     { "source": "docs/architecture.md", "content": "website/content/guides/architecture.md", "slug": "architecture", "title": "Architecture", "icon": "Network" },

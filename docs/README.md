@@ -36,6 +36,8 @@ add it to that overview's documentation index — CI enforces the link.
   Riftri, and how to remove it cleanly.
 - [build-caches.md](build-caches.md) — which dependency stores are safe to
   share across parallel worktrees, and which directories never are.
+- [fsmonitor.md](fsmonitor.md) — optional Git-owned change monitoring for
+  large worktrees, measured tradeoffs, configuration scope, and opt-out.
 
 ## Concepts and guarantees
 
@@ -54,6 +56,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Measurements
 
+- [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)
+  — repeated status gains on a large synthetic worktree, not a startup speedup.
 - [Assistant-ui diagnostic, October 1](benchmarks/assistant-ui-diagnostic-2026-10-01.md)
   — serial process counts and follow-up priorities; no latency claim.
 - [benchmarks.md](benchmarks.md) — running and interpreting the native-COW
