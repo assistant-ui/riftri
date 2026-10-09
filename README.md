@@ -206,6 +206,7 @@ listing is not a separate package publication or a guarantee of inclusion.
 - [Architecture](docs/architecture.md) — immutable bases, transactions, journals
 - [How Riftri stays safe](docs/safety.md) — fail-closed rules and real-filesystem CI
 - [Troubleshooting](docs/troubleshooting.md) — symptom-first fixes
+- [Optional Git FSMonitor](docs/fsmonitor.md) — faster repeated checks on some large worktrees
 - [CLI reference](docs/cli.md) · [Installation](docs/install.md) · [Benchmarks](docs/benchmarks.md)
 - [Project definition](PROJECT.md) · [Roadmap](ROADMAP.md) · [Releasing](RELEASING.md)
 
