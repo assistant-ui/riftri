@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { timedProcess } from './timed-process.mjs';
 
 // Manual macOS/APFS comparison. Never install the candidate or change the
 // source repository; archive its committed HEAD into a new disposable fixture.
@@ -32,7 +33,8 @@ const env = { ...process.env, PATH: '/usr/bin:/bin:/usr/sbin:/sbin' };
 for (const key of Object.keys(env)) if (key.startsWith('GIT_') || key.startsWith('RIFTRI_')) delete env[key];
 Object.assign(env, { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' });
 const checksum = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-const report = { binary, candidate, binarySha256: checksum(binary), candidateSha256: candidate ? checksum(candidate) : null,
+const report = { schemaVersion: 2, timeoutPolicy: 'POSIX process group, TERM then KILL after one second',
+  binary, candidate, binarySha256: checksum(binary), candidateSha256: candidate ? checksum(candidate) : null,
   files, fileSize, rounds, concurrency, batches: [], platform: process.platform, release: os.release(), cpu: os.cpus()[0].model,
   totalMemory: os.totalmem(), startedAt: new Date().toISOString(),
   note: 'Diagnostic phase attribution and paired evaluation on a loaded host. No timing threshold and no excluded samples.', samples: [] };
@@ -116,25 +118,27 @@ async function create(round, label = 'baseline', executable = binary, worker = 0
   live.add(view);
   const sample = { round, label, worker, view, load: os.loadavg(), freeMemory: os.freemem(), phases: [] };
   const start = performance.now();
-  const child = spawn('/usr/bin/time', ['-l', executable, 'worktree', 'add', view, 'HEAD', '--detach', '--state-dir', state, '--json'],
-    { cwd: repo, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: 120000 });
-  let stdout = '', stderr = '', partial = '';
-  child.stdout.on('data', chunk => { stdout += chunk; });
-  child.stderr.on('data', chunk => {
-    stderr += chunk; partial += chunk;
-    const lines = partial.split('\n'); partial = lines.pop();
-    for (const line of lines) if (line.startsWith('riftri: ')) sample.phases.push({ milliseconds: performance.now() - start, line });
+  let partial = '';
+  const result = await timedProcess('/usr/bin/time', ['-l', executable, 'worktree', 'add', view, 'HEAD', '--detach', '--state-dir', state, '--json'], {
+    cwd: repo, env: { ...env, GIT_TRACE2_EVENT: trace }, timeoutMs: 120000,
+    onStderr(chunk) {
+      partial += chunk;
+      const lines = partial.split('\n'); partial = lines.pop();
+      for (const line of lines) if (line.startsWith('riftri: ')) sample.phases.push({ milliseconds: performance.now() - start, line });
+    },
   });
-  let error;
-  const code = await new Promise(resolve => {
-    child.on('error', value => { error = value; });
-    child.on('close', resolve);
-  });
+  const { stdout, stderr, code, signal, timedOut, error } = result;
   sample.milliseconds = performance.now() - start;
   sample.completedAt = performance.now();
+  Object.assign(sample, { code, signal, timedOut, error, success: false });
   fs.writeFileSync(path.join(output, `add-${key}.log`), stderr + stdout);
   sample.resources = stderr.split('\n').filter(line => line && !line.startsWith('riftri: '));
-  assert.ifError(error); assert.equal(code, 0, stderr);
+  // Retain every attempt before asserting: a failed worker is evidence, not
+  // a sample to discard or silently retry. Failed batches never get medians.
+  report.samples.push(sample); save();
+  assert.equal(error, null, JSON.stringify(error));
+  assert.equal(timedOut, false, `worker ${key} timed out after 120 seconds; process group stopped`);
+  assert.equal(code, 0, `worker ${key} exited with ${code}, signal ${signal}\n${stderr}`);
   const receipt = JSON.parse(stdout);
   sample.reused = receipt.reused_base; sample.base = receipt.base_path;
   const events = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse);
@@ -148,7 +152,7 @@ async function create(round, label = 'baseline', executable = binary, worker = 0
     if (event.event === 'data' && ['index', 'status'].includes(event.category)) command.counters.push({ category: event.category, key: event.key, value: event.value });
   }
   sample.gitCommands = [...commands.values()];
-  report.samples.push(sample); save();
+  sample.success = true; save();
   console.log(JSON.stringify(sample));
   return sample;
 }

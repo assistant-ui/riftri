@@ -57,7 +57,7 @@ add it to that overview's documentation index — CI enforces the link.
 ## Measurements
 
 - [APFS read-ahead, October 9](benchmarks/apfs-read-ahead-2026-10-09.md)
-  — serial cached-creation improvements with full Git validation; concurrent results remain mixed.
+  — experimental serial gains with full Git validation; a CI concurrent regression keeps the candidate in draft.
 - [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)
   — repeated status gains on a large synthetic worktree, not a startup speedup.
 - [Assistant-ui diagnostic, October 1](benchmarks/assistant-ui-diagnostic-2026-10-01.md)

@@ -1,9 +1,10 @@
 # APFS bounded read-ahead evaluation, 2026-10-09
 
 Best-effort read-ahead improved **serial cached creation** on the measured
-many-file fixtures while retaining full Git validation. This is not a universal
-creation-speed claim: the host was busy and memory-pressured, tiny-worktree
-differences were small, and concurrent paired results were mixed.
+many-file fixtures while retaining full Git validation. **Keep this candidate
+in draft:** a separate hosted-runner repeat found an approximately 11% slower
+four-way concurrent median. The serial result is not a universal creation-speed
+claim, and the current request budget is not ready for default adoption.
 
 ## Approach and safety boundary
 
@@ -92,6 +93,67 @@ Concurrent candidate batches were 2.241, 1.763, 4.374, and 2.029 seconds versus
 are material. **Do not present the lower concurrent median as an established
 concurrent speedup.** Likewise, the tiny-tree difference is too small to support
 an adoption claim on this host.
+
+## Independent CI repeat: do not merge yet
+
+[CI run 37975831382](https://github.com/assistant-ui/riftri/actions/runs/37975831382)
+compared the same baseline with candidate `ce68f1a`, using release binaries on
+a `macos-15` Apple M1 virtual runner with 7 GiB RAM and Apple Git 2.39.5. Each
+fixture used a dedicated 4 GiB APFS sparsebundle. This separates fixture state,
+not the hosted runner's underlying I/O. All ordinary platform quality and
+filesystem integration checks passed; the separate evaluation job failed.
+
+| Cached fixture | Baseline median | Read-ahead median | Difference | Faster paired rounds |
+| --- | ---: | ---: | ---: | ---: |
+| 4,096 × 8 KiB files + symlink | 1,604.30 ms | 1,399.92 ms | 12.74% lower | 6/8 |
+| Four simultaneous views of that tree | 5,480.65 ms | 6,070.56 ms | 10.76% higher | 2/4 |
+| Ten simultaneous views | Incomplete | Not run | No valid comparison | None |
+
+Read-ahead reduced the four-way median Git refresh from 2,717.43 ms to
+300.84 ms per view, but increased the clone phase from 1,212.47 ms to
+4,508.85 ms. Median CPU per add also rose from 1.595 s to 1.765 s.
+This is evidence that the added read requests can cost more during cloning
+than they save later. It does not justify skipping either integrity check.
+
+The complete four-way baseline includes a 44.68-second batch outlier; it has
+not been discarded. In the first ten-way **baseline** batch, five time wrappers
+reached the harness's 120-second timeout. Five other workers produced complete
+samples, including an 89.61-second sample. This is an incomplete failed batch,
+not a ten-way baseline median. Candidate ten-way timing, both assistant-ui
+reference runs, and the T3 eligibility diagnostic never ran.
+
+Failed-worker logs contain later successful Riftri receipts, but no time-wrapper
+resource receipt. The harness timed out the wrapper without explicitly stopping
+its child process group, and did not store the failed samples' signal or elapsed
+time. Preserve this limitation; neither success receipts nor the surviving
+samples turn the failed batch into a valid result. No successful cleanup is
+claimed for that fixture. The disposable volume was detached without forcing.
+
+The harness now uses a separate POSIX process group, sends TERM on timeout and
+then KILL after a bounded grace period, including when the wrapper has already
+closed its pipes. A regression that failed with the old timeout proves that a
+signal-ignoring child stops before the result is returned. A real APFS test
+also verifies that both failed concurrent workers keep their elapsed time,
+exit status, signal and failure flag without creating a successful batch.
+These fixes do not retroactively repair the incomplete CI measurements.
+
+The [retained CI measurements](apfs-read-ahead-ci-2026-10-09.json) include every
+recorded sample, paired batch, failure and source-file checksum. The linked
+[original artifact](https://github.com/assistant-ui/riftri/actions/runs/37975831382/artifacts/11639651391)
+contains the original receipts, full Git traces and all worker logs. The
+temporary evaluation job was removed after retaining its evidence; it must not
+add benchmark cost to unrelated pull requests.
+
+Follow-ups, in order:
+
+1. Repeat with the corrected timeout handling. Run real-source and eligibility
+   cases independently so one failed stress case cannot hide them.
+2. Experiment with a smaller read-ahead budget and fewer simultaneous hints;
+   compare the complete clone-plus-Git path, CPU and concurrency before changing
+   the product default. The current 64 MiB budget is not established as optimal.
+3. Add paired cold-creation cases and a plain-Git reference. Do not advertise
+   current T3 support: its pinned tree contains gitlinks that Riftri refuses;
+   removing those entries would measure a different repository.
 
 ## Verification and follow-ups
 
