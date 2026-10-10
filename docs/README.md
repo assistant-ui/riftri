@@ -56,6 +56,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Measurements
 
+- [Adaptive APFS clone workers, October 9](benchmarks/apfs-adaptive-clones-2026-10-09.md)
+  — rejected prototype; mixed timings, deadline failures, and retained evidence.
 - [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)
   — repeated status gains on a large synthetic worktree, not a startup speedup.
 - [Assistant-ui diagnostic, October 1](benchmarks/assistant-ui-diagnostic-2026-10-01.md)
