@@ -1,0 +1,130 @@
+diff --git a/crates/riftri-storage/src/apfs/read_ahead.rs b/crates/riftri-storage/src/apfs/read_ahead.rs
+index 2f6e79c..379b0ca 100644
+--- a/crates/riftri-storage/src/apfs/read_ahead.rs
++++ b/crates/riftri-storage/src/apfs/read_ahead.rs
+@@ -1,12 +1,11 @@
+ use std::fs;
+ use std::io;
+-use std::os::fd::AsRawFd;
+ use std::os::unix::fs::OpenOptionsExt;
+ use std::path::Path;
+ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+-// This is a kernel-cache hint, not a validation shortcut. Limit both the amount
+-// requested for a large file and the total requested by one clone operation.
++// This warms the kernel cache, not an integrity result. Limit both the bytes
++// read for a large file and the total reserved by one clone operation.
+ const MAX_FILE_BYTES: u64 = 64 * 1024;
+ const MAX_TREE_BYTES: u64 = 64 * 1024 * 1024;
+ 
+@@ -45,7 +44,7 @@ impl ReadAhead {
+ 
+     pub(super) fn advise(&self, path: &Path, length: u64) {
+         if let Some(count) = self.reserve(length) {
+-            // Unsupported or failed hints must not turn a successful native
++            // Unsupported or failed reads must not turn a successful native
+             // clone into an error. Git still performs its full content check.
+             let _ = advise_read(path, count);
+         }
+@@ -53,7 +52,7 @@ impl ReadAhead {
+ }
+ 
+ fn advise_read(path: &Path, count: i32) -> io::Result<()> {
+-    let file = fs::OpenOptions::new()
++    let mut file = fs::OpenOptions::new()
+         .read(true)
+         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+         .open(path)?;
+@@ -63,15 +62,21 @@ fn advise_read(path: &Path, count: i32) -> io::Result<()> {
+             "read-ahead input is not a regular file",
+         ));
+     }
+-    let advice = libc::radvisory {
+-        ra_offset: 0,
+-        ra_count: count,
+-    };
+-    // SAFETY: the descriptor and initialized, correctly aligned advice remain
+-    // live throughout fcntl. F_RDADVISE requests asynchronous reads without a
+-    // userspace copy; its outcome is never evidence of file contents or safety.
+-    if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_RDADVISE, &advice) } == -1 {
+-        return Err(io::Error::last_os_error());
++    // The buffer is discarded; no worktree data is written or trusted here.
++    // All workers still join before installed Git performs its full check.
++    warm_prefix(&mut file, count as usize)
++}
++
++fn warm_prefix(reader: &mut impl io::Read, count: usize) -> io::Result<()> {
++    let mut buffer = [0; MAX_FILE_BYTES as usize];
++    let mut remaining = count.min(buffer.len());
++    while remaining > 0 {
++        match reader.read(&mut buffer[..remaining]) {
++            Ok(0) => break,
++            Ok(read) => remaining -= read,
++            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
++            Err(error) => return Err(error),
++        }
+     }
+     Ok(())
+ }
+@@ -83,6 +88,61 @@ mod tests {
+     use std::os::unix::ffi::OsStrExt;
+     use std::os::unix::fs::{MetadataExt, symlink};
+ 
++    #[test]
++    fn prefix_warming_never_reads_past_the_per_file_cap() {
++        let mut reader = io::Cursor::new(vec![9; 2 * MAX_FILE_BYTES as usize]);
++        warm_prefix(&mut reader, 0).unwrap();
++        assert_eq!(reader.position(), 0);
++        warm_prefix(&mut reader, usize::MAX).unwrap();
++        assert_eq!(reader.position(), MAX_FILE_BYTES);
++        assert!(reader.get_ref().iter().all(|byte| *byte == 9));
++    }
++
++    #[test]
++    fn prefix_warming_accepts_early_eof_without_reading_again() {
++        let mut reader = io::Cursor::new(b"short".to_vec());
++        warm_prefix(&mut reader, 64).unwrap();
++        assert_eq!(reader.position(), 5);
++    }
++
++    #[test]
++    fn prefix_warming_handles_short_reads_interruptions_and_real_errors() {
++        struct Reader {
++            calls: usize,
++            read: usize,
++            fail: bool,
++        }
++        impl io::Read for Reader {
++            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
++                self.calls += 1;
++                if self.calls == 1 {
++                    return Err(io::Error::from(io::ErrorKind::Interrupted));
++                }
++                if self.fail {
++                    return Err(io::Error::from(io::ErrorKind::PermissionDenied));
++                }
++                let length = buffer.len().min(3);
++                buffer[..length].fill(7);
++                self.read += length;
++                Ok(length)
++            }
++        }
++        let mut reader = Reader {
++            calls: 0,
++            read: 0,
++            fail: false,
++        };
++        warm_prefix(&mut reader, 7).unwrap();
++        assert_eq!(reader.read, 7);
++        assert_eq!(reader.calls, 4);
++        reader.fail = true;
++        assert_eq!(
++            warm_prefix(&mut reader, 1).unwrap_err().kind(),
++            io::ErrorKind::PermissionDenied
++        );
++        assert_eq!(reader.read, 7);
++    }
++
+     #[test]
+     fn reserves_only_nonempty_bounded_ranges() {
+         let hint = ReadAhead::new();

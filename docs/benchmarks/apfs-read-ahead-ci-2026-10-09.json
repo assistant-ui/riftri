@@ -1,0 +1,4008 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-09",
+  "runUrl": "https://github.com/assistant-ui/riftri/actions/runs/37975831382",
+  "artifactUrl": "https://github.com/assistant-ui/riftri/actions/runs/37975831382/artifacts/11639651391",
+  "artifactSha256": "1b21096f342b977342b8b833483c0b8840854167b5a44365373d7d15452cc871",
+  "baselineCommit": "a58006d7c7b4989a055a967e65d5654281b77ea4",
+  "candidateCommit": "ce68f1ac4e482e9a7d62213e5bb7f8dfeea748f4",
+  "runner": "macos-15",
+  "volume": "Dedicated 4 GiB APFS sparsebundle; underlying hosted-runner I/O remains shared.",
+  "decision": "Keep draft: no established concurrent improvement; ten-way comparison incomplete.",
+  "notRun": [
+    "reference-serial",
+    "reference-four",
+    "t3-eligibility"
+  ],
+  "runs": [
+    {
+      "name": "serial-many",
+      "rawResultsSha256": "8cb843ce9431d88772edb6056e93c5ced33afd77c316e448e1b0be2d73e0e9cc",
+      "binarySha256": "7b72f63d3b23655d5120fda6824457a56c11192d174ca3ec702a90d2a81b7493",
+      "candidateSha256": "716fbf79484e4c51ab9df295d31fb8771aa104698c593329771f78a0b280225a",
+      "startedAt": "2026-10-09T18:50:28.633Z",
+      "machine": {
+        "cpu": "Apple M1 (Virtual)",
+        "release": "24.6.0",
+        "totalMemory": 7516192768
+      },
+      "git": "git version 2.39.5 (Apple Git-154)",
+      "trackedEntries": 4097,
+      "logicalBytes": 33554432,
+      "rounds": 8,
+      "concurrency": 1,
+      "complete": true,
+      "batches": [
+        {
+          "round": 1,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 1558.1361670000006
+        },
+        {
+          "round": 1,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 1617.3841670000002
+        },
+        {
+          "round": 2,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 1318.6052919999984
+        },
+        {
+          "round": 2,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 1650.4635830000007
+        },
+        {
+          "round": 3,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 1201.914417
+        },
+        {
+          "round": 3,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 959.3999999999978
+        },
+        {
+          "round": 4,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 1030.7312500000007
+        },
+        {
+          "round": 4,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 1413.5570829999997
+        },
+        {
+          "round": 5,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 1500.882875000003
+        },
+        {
+          "round": 5,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 1147.510875
+        },
+        {
+          "round": 6,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 1481.2364159999997
+        },
+        {
+          "round": 6,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 2252.6896659999984
+        },
+        {
+          "round": 7,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 5429.546374999998
+        },
+        {
+          "round": 7,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 1541.0874579999945
+        },
+        {
+          "round": 8,
+          "label": "advice",
+          "concurrency": 1,
+          "milliseconds": 1750.5829159999994
+        },
+        {
+          "round": 8,
+          "label": "baseline",
+          "concurrency": 1,
+          "milliseconds": 1722.4789999999994
+        }
+      ],
+      "samples": [
+        {
+          "round": 0,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 2674.1684580000006,
+          "load": [
+            30.35693359375,
+            25.8818359375,
+            12.4619140625
+          ],
+          "freeMemory": 155058176,
+          "clonePhaseMilliseconds": 498.96241699999973,
+          "indexPhaseMilliseconds": 451.3214160000007,
+          "indexRefreshSeconds": 0.405527,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.41,
+          "systemSeconds": 2.04,
+          "cpuSeconds": 2.45,
+          "phases": [
+            {
+              "milliseconds": 320.1465000000003,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 361.5138750000001,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 361.68329200000016,
+              "line": "riftri: worktree-add: materializing new immutable base"
+            },
+            {
+              "milliseconds": 1645.1374580000006,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2144.0998750000003,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2157.224417,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 2608.5458330000006,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 2658.977292,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 2669.8853330000006,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 1557.7034590000003,
+          "load": [
+            28.166015625,
+            25.501953125,
+            12.40625
+          ],
+          "freeMemory": 147554304,
+          "clonePhaseMilliseconds": 499.01941700000043,
+          "indexPhaseMilliseconds": 418.2086249999993,
+          "indexRefreshSeconds": 0.377983,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.3,
+          "systemSeconds": 1.19,
+          "cpuSeconds": 1.49,
+          "phases": [
+            {
+              "milliseconds": 339.63729200000034,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 377.989834,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 535.9399590000003,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 564.5912920000001,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1063.6107090000005,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1079.1095000000005,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1497.3181249999998,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1549.6657089999999,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1556.6104999999998,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 1617.2790829999994,
+          "load": [
+            27.751953125,
+            25.4599609375,
+            12.46826171875
+          ],
+          "freeMemory": 179077120,
+          "clonePhaseMilliseconds": 844.453042000001,
+          "indexPhaseMilliseconds": 177.2043330000015,
+          "indexRefreshSeconds": 0.127989,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.26,
+          "systemSeconds": 1.25,
+          "cpuSeconds": 1.51,
+          "phases": [
+            {
+              "milliseconds": 303.84841699999924,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 340.23912500000006,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 503.6472079999985,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 519.4209999999985,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1363.8740419999995,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1377.1129169999986,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1554.31725,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1607.3737919999985,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1616.3667079999996,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 1318.537209,
+          "load": [
+            27.751953125,
+            25.4599609375,
+            12.46826171875
+          ],
+          "freeMemory": 208404480,
+          "clonePhaseMilliseconds": 643.4750000000004,
+          "indexPhaseMilliseconds": 160.0529579999984,
+          "indexRefreshSeconds": 0.121646,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.26,
+          "systemSeconds": 1.07,
+          "cpuSeconds": 1.33,
+          "phases": [
+            {
+              "milliseconds": 275.14237499999945,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 309.7212499999987,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 445.14074999999866,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 451.7434999999987,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1095.218499999999,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1105.939542,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1265.9924999999985,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1307.539084,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1317.5381249999991,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 1650.2591670000002,
+          "load": [
+            25.609375,
+            25.0537109375,
+            12.40087890625
+          ],
+          "freeMemory": 195280896,
+          "clonePhaseMilliseconds": 472.2152909999986,
+          "indexPhaseMilliseconds": 667.4200830000009,
+          "indexRefreshSeconds": 0.607591,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.26,
+          "systemSeconds": 1.12,
+          "cpuSeconds": 1.3800000000000001,
+          "phases": [
+            {
+              "milliseconds": 247.47983300000124,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 283.8675000000003,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 438.8267080000005,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 446.1491670000014,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 918.364458,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 929.6123750000006,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1597.0324580000015,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1641.1377920000014,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1648.963917000001,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 1201.8509580000027,
+          "load": [
+            25.609375,
+            25.0537109375,
+            12.40087890625
+          ],
+          "freeMemory": 192217088,
+          "clonePhaseMilliseconds": 388.9197079999976,
+          "indexPhaseMilliseconds": 417.09037499999977,
+          "indexRefreshSeconds": 0.383682,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.22,
+          "systemSeconds": 0.9,
+          "cpuSeconds": 1.12,
+          "phases": [
+            {
+              "milliseconds": 208.57204099999944,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 236.66083300000173,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 346.10870799999975,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 351.9597500000018,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 740.8794579999994,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 747.4286250000005,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1164.5190000000002,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1195.3061660000021,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1200.811958000002,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 959.3548750000009,
+          "load": [
+            23.638671875,
+            24.654296875,
+            12.333984375
+          ],
+          "freeMemory": 191660032,
+          "clonePhaseMilliseconds": 459.8524580000012,
+          "indexPhaseMilliseconds": 122.97145899999668,
+          "indexRefreshSeconds": 0.095758,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.2,
+          "systemSeconds": 0.84,
+          "cpuSeconds": 1.04,
+          "phases": [
+            {
+              "milliseconds": 183.85237499999857,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 210.5319159999999,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 328.4814579999984,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 333.8367079999989,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 793.6891660000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 799.5837910000009,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 922.5552499999976,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 952.6162079999995,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 958.5510829999985,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 1030.6733330000025,
+          "load": [
+            23.638671875,
+            24.654296875,
+            12.333984375
+          ],
+          "freeMemory": 189661184,
+          "clonePhaseMilliseconds": 459.04258299999856,
+          "indexPhaseMilliseconds": 121.34408299999996,
+          "indexRefreshSeconds": 0.091002,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.22,
+          "systemSeconds": 0.87,
+          "cpuSeconds": 1.09,
+          "phases": [
+            {
+              "milliseconds": 237.65079100000003,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 268.73654100000203,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 399.07737500000076,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 404.55625000000146,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 863.598833,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 869.9267080000027,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 991.2707910000026,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1024.327833000003,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1029.9684159999997,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 1413.4857909999992,
+          "load": [
+            23.638671875,
+            24.654296875,
+            12.333984375
+          ],
+          "freeMemory": 199229440,
+          "clonePhaseMilliseconds": 477.20987500000047,
+          "indexPhaseMilliseconds": 490.63645899999756,
+          "indexRefreshSeconds": 0.454007,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.23,
+          "systemSeconds": 1.08,
+          "cpuSeconds": 1.31,
+          "phases": [
+            {
+              "milliseconds": 220.60529099999985,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 258.2271660000006,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 391.83858300000065,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 399.63854100000026,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 876.8484160000007,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 887.9125410000015,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1378.548999999999,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1408.531833000001,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1412.3050000000003,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 5,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 1500.2273339999992,
+          "load": [
+            21.82568359375,
+            24.26123046875,
+            12.26708984375
+          ],
+          "freeMemory": 195280896,
+          "clonePhaseMilliseconds": 428.11112499999945,
+          "indexPhaseMilliseconds": 601.101499999997,
+          "indexRefreshSeconds": 0.561744,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.25,
+          "systemSeconds": 1.03,
+          "cpuSeconds": 1.28,
+          "phases": [
+            {
+              "milliseconds": 241.60199999999895,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 286.6692919999987,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 402.50695899999846,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 411.61533399999826,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 839.7264589999977,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 853.9942919999994,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1455.0957919999964,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1490.8104999999996,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1499.429291999997,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 5,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 1147.4745000000003,
+          "load": [
+            21.82568359375,
+            24.26123046875,
+            12.26708984375
+          ],
+          "freeMemory": 193970176,
+          "clonePhaseMilliseconds": 596.7148329999982,
+          "indexPhaseMilliseconds": 135.8503329999985,
+          "indexRefreshSeconds": 0.099217,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.21,
+          "systemSeconds": 1.05,
+          "cpuSeconds": 1.26,
+          "phases": [
+            {
+              "milliseconds": 209.73454199999833,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 241.17354200000045,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 345.54104200000074,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 353.94429200000013,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 950.6591249999983,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 963.7625420000004,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1099.612874999999,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1139.4254999999976,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1146.6640829999997,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 6,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 1481.2016249999979,
+          "load": [
+            20.15771484375,
+            23.875,
+            12.20068359375
+          ],
+          "freeMemory": 193478656,
+          "clonePhaseMilliseconds": 836.6501659999994,
+          "indexPhaseMilliseconds": 178.55370799999946,
+          "indexRefreshSeconds": 0.12072,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.24,
+          "systemSeconds": 1.21,
+          "cpuSeconds": 1.45,
+          "phases": [
+            {
+              "milliseconds": 236.7375409999986,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 272.07837500000096,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 393.5222079999985,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 402.1820000000007,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1238.8321660000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1254.0499999999993,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1432.6037079999987,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1472.8605829999979,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1480.215415999999,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 6,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 2252.641582999997,
+          "load": [
+            20.15771484375,
+            23.875,
+            12.20068359375
+          ],
+          "freeMemory": 176635904,
+          "clonePhaseMilliseconds": 490.97212500000023,
+          "indexPhaseMilliseconds": 1254.6615410000013,
+          "indexRefreshSeconds": 1.211319,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.26,
+          "systemSeconds": 1.16,
+          "cpuSeconds": 1.42,
+          "phases": [
+            {
+              "milliseconds": 257.5577919999996,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 301.440499999997,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 422.3297919999968,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 431.1956250000003,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 922.1677500000005,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 935.6861669999998,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 2190.347708000001,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 2240.7420829999974,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 2251.675833000001,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 7,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 5429.382708999998,
+          "load": [
+            18.78369140625,
+            23.5283203125,
+            12.146484375
+          ],
+          "freeMemory": 173686784,
+          "clonePhaseMilliseconds": 510.69866699999693,
+          "indexPhaseMilliseconds": 3190.264624999996,
+          "indexRefreshSeconds": 3.142498,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.3,
+          "systemSeconds": 1.09,
+          "cpuSeconds": 1.3900000000000001,
+          "phases": [
+            {
+              "milliseconds": 803.6051669999943,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 1241.6299169999984,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1380.734749999996,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1618.2037920000002,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2128.902458999997,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2188.807249999998,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5379.071874999994,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5419.076958999998,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5428.331584,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 7,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 1541.0161670000016,
+          "load": [
+            16.12939453125,
+            22.802734375,
+            12.02197265625
+          ],
+          "freeMemory": 192561152,
+          "clonePhaseMilliseconds": 925.6990420000002,
+          "indexPhaseMilliseconds": 138.81991600000038,
+          "indexRefreshSeconds": 0.099338,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.23,
+          "systemSeconds": 1.28,
+          "cpuSeconds": 1.51,
+          "phases": [
+            {
+              "milliseconds": 235.53062499999942,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 270.44687500000146,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 405.039082999996,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 414.23020800000086,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1339.929250000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1352.947291999997,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1491.7672079999975,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1530.6923749999987,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1540.1680419999975,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 8,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 1750.518375000007,
+          "load": [
+            16.12939453125,
+            22.802734375,
+            12.02197265625
+          ],
+          "freeMemory": 195035136,
+          "clonePhaseMilliseconds": 1067.7235,
+          "indexPhaseMilliseconds": 133.2118330000012,
+          "indexRefreshSeconds": 0.094197,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.24,
+          "systemSeconds": 1.31,
+          "cpuSeconds": 1.55,
+          "phases": [
+            {
+              "milliseconds": 226.4583330000023,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 263.0079160000023,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 445.5870000000068,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 485.0950410000005,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1552.8185410000006,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1566.5294580000045,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1699.7412910000057,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1739.8536250000034,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1749.2143750000032,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 8,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 1722.3487499999974,
+          "load": [
+            14.99755859375,
+            22.45703125,
+            11.962890625
+          ],
+          "freeMemory": 174211072,
+          "clonePhaseMilliseconds": 461.48487499999464,
+          "indexPhaseMilliseconds": 803.880084000004,
+          "indexRefreshSeconds": 0.766304,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.24,
+          "systemSeconds": 1.04,
+          "cpuSeconds": 1.28,
+          "phases": [
+            {
+              "milliseconds": 236.93208400000003,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 270.60883399999875,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 384.60316699999385,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 393.6529999999984,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 855.1378749999931,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 867.4931249999936,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 1671.3732089999976,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 1712.0006249999933,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 1721.1841669999994,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "baseline": {
+          "medianMilliseconds": 1604.2998750000006,
+          "medianCloneMilliseconds": 474.71258299999954,
+          "medianIndexRefreshMilliseconds": 584.6675,
+          "medianCpuSecondsPerAdd": 1.3450000000000002
+        },
+        "advice": {
+          "medianMilliseconds": 1399.920853999999,
+          "medianCloneMilliseconds": 740.0625829999999,
+          "medianIndexRefreshMilliseconds": 99.2775,
+          "medianCpuSecondsPerAdd": 1.3900000000000001
+        },
+        "wallReductionPercent": 12.739452529097871,
+        "fasterPairs": 6
+      },
+      "finalActiveViews": 0,
+      "finalBases": 0,
+      "finalDiagnosticIssues": 0
+    },
+    {
+      "name": "concurrent-four",
+      "rawResultsSha256": "3b2f443e9eca73c85fdc52d94c994b21b2e755223e41f519e1d5e3d90dfd3f15",
+      "binarySha256": "7b72f63d3b23655d5120fda6824457a56c11192d174ca3ec702a90d2a81b7493",
+      "candidateSha256": "716fbf79484e4c51ab9df295d31fb8771aa104698c593329771f78a0b280225a",
+      "startedAt": "2026-10-09T18:51:23.849Z",
+      "machine": {
+        "cpu": "Apple M1 (Virtual)",
+        "release": "24.6.0",
+        "totalMemory": 7516192768
+      },
+      "git": "git version 2.39.5 (Apple Git-154)",
+      "trackedEntries": 4097,
+      "logicalBytes": 33554432,
+      "rounds": 4,
+      "concurrency": 4,
+      "complete": true,
+      "batches": [
+        {
+          "round": 1,
+          "label": "baseline",
+          "concurrency": 4,
+          "milliseconds": 4381.3006669999995
+        },
+        {
+          "round": 1,
+          "label": "advice",
+          "concurrency": 4,
+          "milliseconds": 5280.744624999999
+        },
+        {
+          "round": 2,
+          "label": "advice",
+          "concurrency": 4,
+          "milliseconds": 9081.636334000003
+        },
+        {
+          "round": 2,
+          "label": "baseline",
+          "concurrency": 4,
+          "milliseconds": 5620.706791000004
+        },
+        {
+          "round": 3,
+          "label": "baseline",
+          "concurrency": 4,
+          "milliseconds": 44682.458083
+        },
+        {
+          "round": 3,
+          "label": "advice",
+          "concurrency": 4,
+          "milliseconds": 6860.376415999999
+        },
+        {
+          "round": 4,
+          "label": "advice",
+          "concurrency": 4,
+          "milliseconds": 5136.452750000011
+        },
+        {
+          "round": 4,
+          "label": "baseline",
+          "concurrency": 4,
+          "milliseconds": 5340.589584000001
+        }
+      ],
+      "samples": [
+        {
+          "round": 0,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 2505.280833,
+          "load": [
+            14.27685546875,
+            22.18359375,
+            11.927734375
+          ],
+          "freeMemory": 351158272,
+          "clonePhaseMilliseconds": 518.1227089999998,
+          "indexPhaseMilliseconds": 500.4677079999999,
+          "indexRefreshSeconds": 0.444552,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.37,
+          "systemSeconds": 1.9,
+          "cpuSeconds": 2.27,
+          "phases": [
+            {
+              "milliseconds": 268.935833,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 310.63075000000003,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 310.6394580000001,
+              "line": "riftri: worktree-add: materializing new immutable base"
+            },
+            {
+              "milliseconds": 1406.2982910000003,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1924.421,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1937.992125,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 2438.459833,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 2490.4602080000004,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 2502.0063330000003,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 1,
+          "milliseconds": 4174.773084,
+          "load": [
+            13.21337890625,
+            21.83154296875,
+            11.86328125
+          ],
+          "freeMemory": 312573952,
+          "clonePhaseMilliseconds": 1079.9312089999994,
+          "indexPhaseMilliseconds": 2177.1337920000005,
+          "indexRefreshSeconds": 2.062147,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.28,
+          "systemSeconds": 1.21,
+          "cpuSeconds": 1.49,
+          "phases": [
+            {
+              "milliseconds": 325.4573339999997,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 346.5241249999999,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 366.1359590000002,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 431.97462499999983,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 466.14529200000015,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 530.6531669999995,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 706.8294169999999,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 749.8066250000002,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1829.7378339999996,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1907.3791249999995,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4084.512917,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 4148.098958999999,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 4172.649917000001,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 3,
+          "milliseconds": 4240.5595,
+          "load": [
+            13.21337890625,
+            21.83154296875,
+            11.86328125
+          ],
+          "freeMemory": 312573952,
+          "clonePhaseMilliseconds": 1211.2711250000002,
+          "indexPhaseMilliseconds": 2251.132124999999,
+          "indexRefreshSeconds": 2.120121,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.28,
+          "systemSeconds": 1.3,
+          "cpuSeconds": 1.58,
+          "phases": [
+            {
+              "milliseconds": 381.1332080000002,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 429.58508299999994,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 593.7252079999998,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 608.8400000000001,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1820.1111250000004,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1880.5230410000004,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4131.655166,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 4225.251291,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 4238.673750000001,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 2,
+          "milliseconds": 4360.567542,
+          "load": [
+            13.21337890625,
+            21.83154296875,
+            11.86328125
+          ],
+          "freeMemory": 312573952,
+          "clonePhaseMilliseconds": 886.1963329999999,
+          "indexPhaseMilliseconds": 1412.4257089999992,
+          "indexRefreshSeconds": 1.366943,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.31,
+          "cpuSeconds": 1.62,
+          "phases": [
+            {
+              "milliseconds": 351.5085830000007,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 378.70629200000076,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 414.0020000000004,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 619.7392500000005,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 746.3131670000002,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 1048.2685000000001,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1916.4662080000007,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1984.9272500000006,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2871.1235830000005,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2892.5290830000004,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4304.9547919999995,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 4350.646292,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 4358.989208,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 4381.128333000001,
+          "load": [
+            13.21337890625,
+            21.83154296875,
+            11.86328125
+          ],
+          "freeMemory": 312197120,
+          "clonePhaseMilliseconds": 1206.4912079999995,
+          "indexPhaseMilliseconds": 1460.3964999999998,
+          "indexRefreshSeconds": 1.414935,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.3,
+          "cpuSeconds": 1.59,
+          "phases": [
+            {
+              "milliseconds": 345.4967909999996,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 365.4186659999996,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 392.0179159999998,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 535.7275829999999,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 572.6004579999999,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 619.5804579999995,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1268.1797909999996,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1476.5304999999998,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2683.0217079999993,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2861.5687499999995,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4321.965249999999,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 4372.517707999999,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 4379.987874999999,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "advice",
+          "worker": 3,
+          "milliseconds": 5012.228834000001,
+          "load": [
+            11.64306640625,
+            21.2109375,
+            11.75927734375
+          ],
+          "freeMemory": 339394560,
+          "clonePhaseMilliseconds": 3889.968917000002,
+          "indexPhaseMilliseconds": 307.06558399999994,
+          "indexRefreshSeconds": 0.179313,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.28,
+          "systemSeconds": 1.46,
+          "cpuSeconds": 1.74,
+          "phases": [
+            {
+              "milliseconds": 350.113209000001,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 390.6386670000011,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 591.6957090000014,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 611.2537499999999,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4501.222667000002,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4635.23775,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4942.303334,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 4993.686874999999,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5010.604834000002,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "advice",
+          "worker": 1,
+          "milliseconds": 5173.781459,
+          "load": [
+            11.64306640625,
+            21.2109375,
+            11.75927734375
+          ],
+          "freeMemory": 339394560,
+          "clonePhaseMilliseconds": 4001.2754170000007,
+          "indexPhaseMilliseconds": 284.3204590000023,
+          "indexRefreshSeconds": 0.206067,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.26,
+          "systemSeconds": 1.42,
+          "cpuSeconds": 1.68,
+          "phases": [
+            {
+              "milliseconds": 303.5602920000001,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 319.54312500000015,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 339.6280420000003,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 392.55445900000086,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 414.99445900000137,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 452.82537500000035,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 638.1944590000003,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 689.4189999999999,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4690.694417000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4836.400374999999,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5120.720834000002,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5164.269209,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5172.631459000002,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "advice",
+          "worker": 2,
+          "milliseconds": 5263.53125,
+          "load": [
+            11.64306640625,
+            21.2109375,
+            11.75927734375
+          ],
+          "freeMemory": 339394560,
+          "clonePhaseMilliseconds": 3977.4722090000014,
+          "indexPhaseMilliseconds": 248.74120799999946,
+          "indexRefreshSeconds": 0.19327,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.28,
+          "systemSeconds": 1.44,
+          "cpuSeconds": 1.72,
+          "phases": [
+            {
+              "milliseconds": 302.97533400000066,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 334.29099999999926,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 361.7898750000004,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 452.630459,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 482.498834,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 528.4642920000006,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 752.2172499999997,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 933.9672499999997,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4911.439459000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4960.401709000002,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5209.142917000001,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5253.821749999999,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5262.057249999998,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 5280.543834,
+          "load": [
+            11.64306640625,
+            21.2109375,
+            11.75927734375
+          ],
+          "freeMemory": 339312640,
+          "clonePhaseMilliseconds": 3867.2002920000014,
+          "indexPhaseMilliseconds": 238.8458329999994,
+          "indexRefreshSeconds": 0.178133,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.28,
+          "systemSeconds": 1.41,
+          "cpuSeconds": 1.69,
+          "phases": [
+            {
+              "milliseconds": 317.3784170000017,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 358.198042,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 382.91395900000134,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 532.2341250000009,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 596.4602090000008,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 718.670959000001,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 974.1115000000009,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1100.9840000000004,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4968.184292000002,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4982.694542000001,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5221.5403750000005,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5271.773834,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5279.345417,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "advice",
+          "worker": 3,
+          "milliseconds": 8857.512958,
+          "load": [
+            10.4609375,
+            20.64306640625,
+            11.66796875
+          ],
+          "freeMemory": 382844928,
+          "clonePhaseMilliseconds": 7143.5454580000005,
+          "indexPhaseMilliseconds": 496.4057499999981,
+          "indexRefreshSeconds": 0.436376,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.46,
+          "cpuSeconds": 1.75,
+          "phases": [
+            {
+              "milliseconds": 305.33200000000215,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 338.06995800000004,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 367.57337499999994,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 513.8235420000019,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 592.2562500000022,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 760.7664580000019,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 943.093208000002,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1129.5050420000007,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 8273.050500000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 8295.786500000002,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 8792.19225,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 8842.995042000002,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 8854.879833000003,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 8962.169499999996,
+          "load": [
+            10.4609375,
+            20.64306640625,
+            11.66796875
+          ],
+          "freeMemory": 382533632,
+          "clonePhaseMilliseconds": 7223.962750000002,
+          "indexPhaseMilliseconds": 622.437041000001,
+          "indexRefreshSeconds": 0.558996,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.49,
+          "cpuSeconds": 1.78,
+          "phases": [
+            {
+              "milliseconds": 300.67529099999956,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 321.8199999999997,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 344.0662909999992,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 441.22612500000105,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 469.59466600000087,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 512.2892079999983,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 743.4889579999981,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 896.4389579999988,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 8120.401708000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 8264.377,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 8886.814041000001,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 8942.730333,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 8961.434332999997,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "advice",
+          "worker": 1,
+          "milliseconds": 8971.42525,
+          "load": [
+            10.4609375,
+            20.64306640625,
+            11.66796875
+          ],
+          "freeMemory": 382550016,
+          "clonePhaseMilliseconds": 7242.781332999999,
+          "indexPhaseMilliseconds": 766.9884999999958,
+          "indexRefreshSeconds": 0.657121,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.28,
+          "systemSeconds": 1.51,
+          "cpuSeconds": 1.79,
+          "phases": [
+            {
+              "milliseconds": 283.2250000000022,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 301.30516700000226,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 324.8680420000019,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 376.9458340000019,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 402.60804199999984,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 439.95650000000023,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 635.9561670000003,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 719.3604169999999,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 7962.141749999999,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 8130.887417000002,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 8897.875916999998,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 8955.473167000004,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 8970.015791999998,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "advice",
+          "worker": 2,
+          "milliseconds": 9080.414417,
+          "load": [
+            10.4609375,
+            20.64306640625,
+            11.66796875
+          ],
+          "freeMemory": 382844928,
+          "clonePhaseMilliseconds": 6853.4724160000005,
+          "indexPhaseMilliseconds": 1150.0987499999974,
+          "indexRefreshSeconds": 1.040139,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.55,
+          "cpuSeconds": 1.84,
+          "phases": [
+            {
+              "milliseconds": 335.7651249999981,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 376.5337499999987,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 581.7658749999973,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 595.3745839999974,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 7448.846999999998,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 7880.279416999998,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 9030.378166999995,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 9071.198875000002,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 9079.017916999997,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 5371.870540999997,
+          "load": [
+            10.07275390625,
+            20.056640625,
+            11.61474609375
+          ],
+          "freeMemory": 419905536,
+          "clonePhaseMilliseconds": 1320.7279170000038,
+          "indexPhaseMilliseconds": 3225.7838330000013,
+          "indexRefreshSeconds": 3.154378,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.33,
+          "cpuSeconds": 1.6400000000000001,
+          "phases": [
+            {
+              "milliseconds": 392.54216599999927,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 456.2365409999984,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 683.0798329999961,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 696.2143329999963,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2016.94225,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2049.209999999999,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5274.993833,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5357.223624999999,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5370.763124999998,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "baseline",
+          "worker": 1,
+          "milliseconds": 5396.6444580000025,
+          "load": [
+            10.07275390625,
+            20.056640625,
+            11.61474609375
+          ],
+          "freeMemory": 420052992,
+          "clonePhaseMilliseconds": 1227.9979590000003,
+          "indexPhaseMilliseconds": 3218.5414999999994,
+          "indexRefreshSeconds": 3.147364,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.27,
+          "cpuSeconds": 1.58,
+          "phases": [
+            {
+              "milliseconds": 316.78929100000096,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 338.2904580000031,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 376.08583299999736,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 454.9119159999973,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 504.4106249999968,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 570.6186250000028,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 754.9049159999995,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 801.7172910000008,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2029.715250000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2079.4374580000003,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5297.978958,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5384.425582999997,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5395.629249999998,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "baseline",
+          "worker": 3,
+          "milliseconds": 5528.463041000003,
+          "load": [
+            10.07275390625,
+            20.056640625,
+            11.61474609375
+          ],
+          "freeMemory": 420642816,
+          "clonePhaseMilliseconds": 1139.2775829999955,
+          "indexPhaseMilliseconds": 2776.108207999998,
+          "indexRefreshSeconds": 2.665319,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.29,
+          "cpuSeconds": 1.6,
+          "phases": [
+            {
+              "milliseconds": 332.2692909999969,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 365.7402910000019,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 402.59500000000116,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 569.5915410000016,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 604.0621660000033,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 651.8371249999982,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1266.5691250000018,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1451.283083000002,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2590.5606659999976,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2645.828625000002,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5421.936833,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5518.129500000003,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5527.540999999997,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 2,
+          "label": "baseline",
+          "worker": 2,
+          "milliseconds": 5618.727249999996,
+          "load": [
+            10.07275390625,
+            20.056640625,
+            11.61474609375
+          ],
+          "freeMemory": 420265984,
+          "clonePhaseMilliseconds": 834.242459000001,
+          "indexPhaseMilliseconds": 2639.612500000003,
+          "indexRefreshSeconds": 2.597096,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.31,
+          "cpuSeconds": 1.62,
+          "phases": [
+            {
+              "milliseconds": 364.03641599999537,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 396.86699999999837,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 444.9430829999983,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 656.1779160000006,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 725.0660409999982,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 889.2016660000008,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 2035.5528750000012,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 2063.9666660000003,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2898.209125000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2917.3615409999984,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5556.974041000001,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5601.905707999998,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5617.619790999997,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "baseline",
+          "worker": 1,
+          "milliseconds": 44594.108458,
+          "load": [
+            8.8984375,
+            19.47802734375,
+            11.5078125
+          ],
+          "freeMemory": 377716736,
+          "clonePhaseMilliseconds": 2579.512499999997,
+          "indexPhaseMilliseconds": 39089.416332999994,
+          "indexRefreshSeconds": 39.019899,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.33,
+          "systemSeconds": 1.4,
+          "cpuSeconds": 1.73,
+          "phases": [
+            {
+              "milliseconds": 731.9470829999991,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 777.0358750000014,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 825.1234160000022,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 871.3443330000009,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1447.2704999999987,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1485.165915999998,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4064.678415999995,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 5375.337749999999,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 44464.75408299999,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 44550.977125000005,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 44585.802790999995,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 44604.53875,
+          "load": [
+            8.8984375,
+            19.47802734375,
+            11.5078125
+          ],
+          "freeMemory": 377520128,
+          "clonePhaseMilliseconds": 2060.018833000002,
+          "indexPhaseMilliseconds": 40246.426083000006,
+          "indexRefreshSeconds": 40.06354,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.32,
+          "systemSeconds": 1.42,
+          "cpuSeconds": 1.74,
+          "phases": [
+            {
+              "milliseconds": 686.8026670000036,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 775.9563340000022,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1028.929667000004,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1073.9015839999993,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 3133.920417000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4215.7118340000015,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 44462.13791700001,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 44573.487625,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 44604.403042,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "baseline",
+          "worker": 2,
+          "milliseconds": 44651.097291,
+          "load": [
+            8.8984375,
+            19.47802734375,
+            11.5078125
+          ],
+          "freeMemory": 378339328,
+          "clonePhaseMilliseconds": 4598.580374999998,
+          "indexPhaseMilliseconds": 37228.386667000006,
+          "indexRefreshSeconds": 37.155077,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.32,
+          "systemSeconds": 1.4,
+          "cpuSeconds": 1.72,
+          "phases": [
+            {
+              "milliseconds": 565.0461250000008,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 727.6552080000038,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 761.4575000000041,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 986.476333000006,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 1124.7317500000063,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 1246.994875000004,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 2017.8380830000024,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 2633.297666000006,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 7231.878041000004,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 7264.054666000004,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 44492.44133300001,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 44625.938500000004,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 44650.577875,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "baseline",
+          "worker": 3,
+          "milliseconds": 44675.200083,
+          "load": [
+            8.8984375,
+            19.47802734375,
+            11.5078125
+          ],
+          "freeMemory": 379109376,
+          "clonePhaseMilliseconds": 5096.068500000001,
+          "indexPhaseMilliseconds": 37272.596249999995,
+          "indexRefreshSeconds": 37.205188,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.32,
+          "systemSeconds": 1.39,
+          "cpuSeconds": 1.71,
+          "phases": [
+            {
+              "milliseconds": 560.7304169999989,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 615.950208000002,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 733.9129580000008,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 867.8788330000025,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 927.556958000001,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 980.2465000000011,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1873.8037079999995,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 2127.1151669999963,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 7223.1836669999975,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 7253.900833,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 44526.497082999995,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 44659.445416999995,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 44673.203250000006,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 6596.346917000003,
+          "load": [
+            4.9580078125,
+            16.7548828125,
+            10.9521484375
+          ],
+          "freeMemory": 254377984,
+          "clonePhaseMilliseconds": 5016.426667000007,
+          "indexPhaseMilliseconds": 300.83212499998626,
+          "indexRefreshSeconds": 0.23719,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.3,
+          "systemSeconds": 1.47,
+          "cpuSeconds": 1.77,
+          "phases": [
+            {
+              "milliseconds": 322.44087500000023,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 359.23216699999466,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 387.221000000005,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 575.4177920000075,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 664.7953330000018,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 784.3032499999972,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 949.6857920000039,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1124.1539579999953,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 6140.580625000002,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 6223.7899580000085,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 6524.622082999995,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 6581.738458000007,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 6593.924167000005,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "advice",
+          "worker": 3,
+          "milliseconds": 6813.690583000003,
+          "load": [
+            4.9580078125,
+            16.7548828125,
+            10.9521484375
+          ],
+          "freeMemory": 250527744,
+          "clonePhaseMilliseconds": 5089.466499999995,
+          "indexPhaseMilliseconds": 800.5989170000103,
+          "indexRefreshSeconds": 0.674081,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.6,
+          "cpuSeconds": 1.9100000000000001,
+          "phases": [
+            {
+              "milliseconds": 374.76750000000175,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 412.8920829999988,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 663.2037500000006,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 686.3116250000021,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 5775.778124999997,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 5922.796749999994,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 6723.395667000004,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 6805.601832999993,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 6812.046583000003,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "advice",
+          "worker": 2,
+          "milliseconds": 6853.0685000000085,
+          "load": [
+            4.9580078125,
+            16.7548828125,
+            10.9521484375
+          ],
+          "freeMemory": 254476288,
+          "clonePhaseMilliseconds": 5094.506708000001,
+          "indexPhaseMilliseconds": 884.8611249999958,
+          "indexRefreshSeconds": 0.773792,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.3,
+          "systemSeconds": 1.54,
+          "cpuSeconds": 1.84,
+          "phases": [
+            {
+              "milliseconds": 308.1429579999967,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 322.38462500000605,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 346.93866600000183,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 413.2442080000037,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 441.23399999999674,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 484.9423749999987,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 662.10366600001,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 674.3282500000059,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 5768.834958000007,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 5861.099791000001,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 6745.960915999996,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 6833.048500000004,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 6851.656291000007,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 3,
+          "label": "advice",
+          "worker": 1,
+          "milliseconds": 6859.349875,
+          "load": [
+            4.9580078125,
+            16.7548828125,
+            10.9521484375
+          ],
+          "freeMemory": 254394368,
+          "clonePhaseMilliseconds": 5279.395292000001,
+          "indexPhaseMilliseconds": 577.0711659999943,
+          "indexRefreshSeconds": 0.515004,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.51,
+          "cpuSeconds": 1.8,
+          "phases": [
+            {
+              "milliseconds": 321.4067090000026,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 341.5589590000018,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 364.5770840000041,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 487.8626249999943,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 526.7652499999967,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 571.7850000000035,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 753.3961249999993,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 829.1236669999926,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 6108.518958999994,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 6193.987584000002,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 6771.0587499999965,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 6839.377041999993,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 6858.984750000003,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "advice",
+          "worker": 0,
+          "milliseconds": 4835.2094170000055,
+          "load": [
+            4.576171875,
+            16.28515625,
+            10.85302734375
+          ],
+          "freeMemory": 391643136,
+          "clonePhaseMilliseconds": 3512.380124999996,
+          "indexPhaseMilliseconds": 500.3644579999964,
+          "indexRefreshSeconds": 0.302956,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.28,
+          "systemSeconds": 1.45,
+          "cpuSeconds": 1.73,
+          "phases": [
+            {
+              "milliseconds": 362.33654200000456,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 411.4101249999949,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 577.4552919999987,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 585.4375839999993,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4097.817708999995,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4261.857334,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4762.221791999997,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 4824.609083999996,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 4833.974333999999,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "advice",
+          "worker": 1,
+          "milliseconds": 4967.010834000001,
+          "load": [
+            4.576171875,
+            16.28515625,
+            10.85302734375
+          ],
+          "freeMemory": 391741440,
+          "clonePhaseMilliseconds": 3708.1572079999896,
+          "indexPhaseMilliseconds": 376.4813749999885,
+          "indexRefreshSeconds": 0.298725,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.47,
+          "cpuSeconds": 1.76,
+          "phases": [
+            {
+              "milliseconds": 307.31520899999305,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 320.63550000000396,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 361.2862920000043,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 410.49637500000244,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 450.19079199999396,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 499.62133399999584,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 685.5805839999957,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 740.4995840000047,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4448.656791999994,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4523.179000000004,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4899.660374999992,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 4953.156959,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 4965.360124999992,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "advice",
+          "worker": 2,
+          "milliseconds": 5115.942500000005,
+          "load": [
+            4.576171875,
+            16.28515625,
+            10.85302734375
+          ],
+          "freeMemory": 391987200,
+          "clonePhaseMilliseconds": 3588.6297080000077,
+          "indexPhaseMilliseconds": 336.0386249999865,
+          "indexRefreshSeconds": 0.235152,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.45,
+          "cpuSeconds": 1.74,
+          "phases": [
+            {
+              "milliseconds": 324.3965420000022,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 350.1180420000019,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 379.3297089999978,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 502.66774999999325,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 559.0842089999933,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 607.2563749999972,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 825.3441670000029,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 911.266208999994,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4499.895917000002,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4717.2324170000065,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5053.271041999993,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5102.4128340000025,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5114.3841669999965,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "advice",
+          "worker": 3,
+          "milliseconds": 5134.275916999992,
+          "load": [
+            4.576171875,
+            16.28515625,
+            10.85302734375
+          ],
+          "freeMemory": 391987200,
+          "clonePhaseMilliseconds": 3418.054833999995,
+          "indexPhaseMilliseconds": 281.52195799999754,
+          "indexRefreshSeconds": 0.207214,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.49,
+          "cpuSeconds": 1.78,
+          "phases": [
+            {
+              "milliseconds": 323.7368750000023,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 372.64158399999724,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 402.1615840000013,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 606.6699999999983,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 734.3695000000007,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 959.2462919999962,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1216.6559169999964,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1348.0377500000031,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4766.092583999998,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4784.340167000002,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5065.862125,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5125.248833999998,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5133.069166999994,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "baseline",
+          "worker": 1,
+          "milliseconds": 5046.08583299999,
+          "load": [
+            4.41064453125,
+            15.68115234375,
+            10.732421875
+          ],
+          "freeMemory": 371605504,
+          "clonePhaseMilliseconds": 1238.1743330000027,
+          "indexPhaseMilliseconds": 3006.983333000011,
+          "indexRefreshSeconds": 2.865211,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.3,
+          "systemSeconds": 1.29,
+          "cpuSeconds": 1.59,
+          "phases": [
+            {
+              "milliseconds": 374.76774999999907,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 423.2549169999984,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 607.0471249999973,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 634.3441249999887,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 1872.5184579999914,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 1932.9024169999902,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 4939.885750000001,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5030.094499999992,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5044.884707999998,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "baseline",
+          "worker": 2,
+          "milliseconds": 5143.224791000001,
+          "load": [
+            4.41064453125,
+            15.68115234375,
+            10.732421875
+          ],
+          "freeMemory": 371605504,
+          "clonePhaseMilliseconds": 1213.6632499999978,
+          "indexPhaseMilliseconds": 2932.962667,
+          "indexRefreshSeconds": 2.76954,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.26,
+          "cpuSeconds": 1.57,
+          "phases": [
+            {
+              "milliseconds": 327.35591600000043,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 332.4564160000009,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 362.41608299998916,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 422.83679099999426,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 463.95170799999323,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 504.0459159999882,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 782.9494579999882,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 841.959124999994,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2055.6223749999917,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2143.640957999989,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5076.603624999989,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5130.391624999989,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5142.745041000002,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "baseline",
+          "worker": 3,
+          "milliseconds": 5255.998458999995,
+          "load": [
+            4.41064453125,
+            15.68115234375,
+            10.732421875
+          ],
+          "freeMemory": 371605504,
+          "clonePhaseMilliseconds": 1070.2014159999962,
+          "indexPhaseMilliseconds": 2632.0139580000105,
+          "indexRefreshSeconds": 2.509333,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.22,
+          "cpuSeconds": 1.51,
+          "phases": [
+            {
+              "milliseconds": 327.30333399999654,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 357.0138750000042,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 386.56812500000524,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 505.4250420000026,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 533.4773750000022,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 579.6136669999978,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1391.0709999999963,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1422.541459,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2492.7428749999963,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2561.329583999992,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5193.343542000002,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5243.426166999998,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5255.2255000000005,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 4,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 5340.488666000005,
+          "load": [
+            4.41064453125,
+            15.68115234375,
+            10.732421875
+          ],
+          "freeMemory": 371556352,
+          "clonePhaseMilliseconds": 835.1953749999957,
+          "indexPhaseMilliseconds": 2504.404250000007,
+          "indexRefreshSeconds": 2.455763,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.3,
+          "systemSeconds": 1.28,
+          "cpuSeconds": 1.58,
+          "phases": [
+            {
+              "milliseconds": 338.99091600000975,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 383.18012499999895,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 408.5906249999971,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 584.8602499999979,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 653.2680000000109,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 796.0323330000101,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1896.8797080000077,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1921.1312080000062,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2756.326583000002,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2778.830249999999,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 5283.234500000006,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 5328.4565830000065,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 5339.544166000007,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "baseline": {
+          "medianMilliseconds": 5480.648187500003,
+          "medianCloneMilliseconds": 1212.467187499999,
+          "medianIndexRefreshMilliseconds": 2717.4295,
+          "medianCpuSecondsPerAdd": 1.5950000000000002
+        },
+        "advice": {
+          "medianMilliseconds": 6070.560520499999,
+          "medianCloneMilliseconds": 4508.851042000004,
+          "medianIndexRefreshMilliseconds": 300.8405,
+          "medianCpuSecondsPerAdd": 1.7650000000000001
+        },
+        "wallReductionPercent": -10.763550456412062,
+        "fasterPairs": 2
+      },
+      "finalActiveViews": 0,
+      "finalBases": 0,
+      "finalDiagnosticIssues": 0
+    },
+    {
+      "name": "concurrent-ten",
+      "rawResultsSha256": "86b485714e70eb3c4dee1de3ff6fa7d58c3e47038b6810e9628e5785680cb689",
+      "binarySha256": "7b72f63d3b23655d5120fda6824457a56c11192d174ca3ec702a90d2a81b7493",
+      "candidateSha256": "716fbf79484e4c51ab9df295d31fb8771aa104698c593329771f78a0b280225a",
+      "startedAt": "2026-10-09T18:53:42.448Z",
+      "machine": {
+        "cpu": "Apple M1 (Virtual)",
+        "release": "24.6.0",
+        "totalMemory": 7516192768
+      },
+      "git": "git version 2.39.5 (Apple Git-154)",
+      "trackedEntries": 4097,
+      "logicalBytes": 33554432,
+      "rounds": 4,
+      "concurrency": 10,
+      "complete": false,
+      "batches": [],
+      "samples": [
+        {
+          "round": 0,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 2658.948292,
+          "load": [
+            4.029296875,
+            15.04345703125,
+            10.5908203125
+          ],
+          "freeMemory": 445595648,
+          "clonePhaseMilliseconds": 547.3042090000001,
+          "indexPhaseMilliseconds": 406.2482090000003,
+          "indexRefreshSeconds": 0.365857,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.39,
+          "systemSeconds": 2.07,
+          "cpuSeconds": 2.46,
+          "phases": [
+            {
+              "milliseconds": 295.5646669999999,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 339.157375,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 339.32849999999985,
+              "line": "riftri: worktree-add: materializing new immutable base"
+            },
+            {
+              "milliseconds": 1634.7361250000001,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 2182.0403340000003,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 2200.28525,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 2606.533459,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 2649.2680419999997,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 2657.108209,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 0,
+          "milliseconds": 11261.964208,
+          "load": [
+            4.029296875,
+            15.04345703125,
+            10.5908203125
+          ],
+          "freeMemory": 267632640,
+          "clonePhaseMilliseconds": 2133.13875,
+          "indexPhaseMilliseconds": 7709.822292000001,
+          "indexRefreshSeconds": 7.587121,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.31,
+          "systemSeconds": 1.3,
+          "cpuSeconds": 1.61,
+          "phases": [
+            {
+              "milliseconds": 803.1741250000005,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 868.644875,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1162.243625,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1198.280291,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 3331.419041,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 3453.601208,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 11163.4235,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 11232.407041,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 11259.336833,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 5,
+          "milliseconds": 11444.18,
+          "load": [
+            4.029296875,
+            15.04345703125,
+            10.5908203125
+          ],
+          "freeMemory": 267567104,
+          "clonePhaseMilliseconds": 2189.006792,
+          "indexPhaseMilliseconds": 7670.363541999999,
+          "indexRefreshSeconds": 7.563833,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.25,
+          "cpuSeconds": 1.54,
+          "phases": [
+            {
+              "milliseconds": 818.2047089999996,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 965.9952089999997,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 1034.6301249999997,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 1072.307667,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1261.1568749999997,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1281.2462500000001,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 3470.2530420000003,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 3664.889292,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 11335.252833999999,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 11404.97525,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 11442.842209,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 1,
+          "milliseconds": 11530.947583000001,
+          "load": [
+            4.029296875,
+            15.04345703125,
+            10.5908203125
+          ],
+          "freeMemory": 267714560,
+          "clonePhaseMilliseconds": 2242.211958,
+          "indexPhaseMilliseconds": 7735.604958,
+          "indexRefreshSeconds": 7.618557,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.27,
+          "cpuSeconds": 1.56,
+          "phases": [
+            {
+              "milliseconds": 659.5704169999999,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 702.3912920000002,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 759.3369579999999,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 868.1356669999996,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 922.5997500000003,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 973.234625,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 1221.6386249999996,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 1244.453625,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 3486.665583,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 3705.204125,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 11440.809083,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 11511.838042,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 11529.203375000001,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 8,
+          "milliseconds": 15461.079250000003,
+          "load": [
+            4.029296875,
+            15.04345703125,
+            10.5908203125
+          ],
+          "freeMemory": 261505024,
+          "clonePhaseMilliseconds": 1975.8012080000008,
+          "indexPhaseMilliseconds": 7767.086833,
+          "indexRefreshSeconds": 7.567674,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.29,
+          "systemSeconds": 1.24,
+          "cpuSeconds": 1.53,
+          "phases": [
+            {
+              "milliseconds": 674.6972919999998,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 797.8817079999999,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 829.712125,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 1057.0011670000004,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 1086.115917,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 1158.809875,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 2076.7166669999997,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 2163.009792,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 4138.811000000001,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 4326.639375,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 12093.726208,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 13293.547625,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 15458.448792,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 4,
+          "milliseconds": 89608.22224999999,
+          "load": [
+            4.029296875,
+            15.04345703125,
+            10.5908203125
+          ],
+          "freeMemory": 269467648,
+          "clonePhaseMilliseconds": 2115.778333000001,
+          "indexPhaseMilliseconds": 78208.58712499999,
+          "indexRefreshSeconds": 75.470186,
+          "indexScanned": 4097,
+          "indexEntries": 4097,
+          "userSeconds": 0.32,
+          "systemSeconds": 1.34,
+          "cpuSeconds": 1.6600000000000001,
+          "phases": [
+            {
+              "milliseconds": 778.9319999999998,
+              "line": "riftri: waiting: lock state-directory locators (held by another process)"
+            },
+            {
+              "milliseconds": 843.3211659999997,
+              "line": "riftri: resumed: lock state-directory locators"
+            },
+            {
+              "milliseconds": 872.8862079999999,
+              "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+            },
+            {
+              "milliseconds": 1178.3608329999997,
+              "line": "riftri: resumed: lock Git worktree metadata"
+            },
+            {
+              "milliseconds": 1251.7024159999992,
+              "line": "riftri: worktree-add: intent-recorded"
+            },
+            {
+              "milliseconds": 1402.539041,
+              "line": "riftri: worktree-add: git-metadata-created"
+            },
+            {
+              "milliseconds": 3304.6911249999994,
+              "line": "riftri: worktree-add: immutable base cached; reusing it"
+            },
+            {
+              "milliseconds": 3320.786832999999,
+              "line": "riftri: worktree-add: base-ready"
+            },
+            {
+              "milliseconds": 5436.565166,
+              "line": "riftri: worktree-add: view-created"
+            },
+            {
+              "milliseconds": 5879.109082999999,
+              "line": "riftri: worktree-add: git-pointer-restored"
+            },
+            {
+              "milliseconds": 84087.696208,
+              "line": "riftri: worktree-add: index-synchronized"
+            },
+            {
+              "milliseconds": 88240.46820799999,
+              "line": "riftri: worktree-add: clean-verified"
+            },
+            {
+              "milliseconds": 89603.6615,
+              "line": "riftri: worktree-add: active"
+            }
+          ]
+        }
+      ],
+      "summary": null,
+      "failure": "AssertionError [ERR_ASSERTION]: AssertionError [ERR_ASSERTION]: riftri: waiting: lock state-directory locators (held by another process)\nriftri: resumed: lock state-directory locators\nriftri: waiting: lock Git worktree metadata (held by another process)\nriftri: resumed: lock Git worktree metadata\nriftri: worktree-add: intent-recorded\nriftri: worktree-add: git-metadata-created\nriftri: worktree-add: immutable base cached; reusing it\nriftri: worktree-add: base-ready\nriftri: worktree-add: view-created\nriftri: worktree-add: git-pointer-restored\nriftri: worktree-add: index-synchronized\nriftri: worktree-add: clean-verified\nriftri: worktree-add: active\n\n\nnull !== 0\n\nAssertionError [ERR_ASSERTION]: riftri: waiting: lock state-directory locators (held by another process)\nriftri: resumed: lock state-directory locators\nriftri: waiting: lock Git worktree metadata (held by another process)\nriftri: resumed: lock Git worktree metadata\nriftri: worktree-add: intent-recorded\nriftri: worktree-add: git-metadata-created\nriftri: worktree-add: immutable base cached; reusing it\nriftri: worktree-add: base-ready\nriftri: worktree-add: view-created\nriftri: worktree-add: git-pointer-restored\nriftri: worktree-add: index-synchronized\nriftri: worktree-add: clean-verified\nriftri: worktree-add: active\n\n\nnull !== 0\n\nAssertionError [ERR_ASSERTION]: riftri: waiting: lock state-directory locators (held by another process)\nriftri: resumed: lock state-directory locators\nriftri: waiting: lock Git worktree metadata (held by another process)\nriftri: resumed: lock Git worktree metadata\nriftri: worktree-add: intent-recorded\nriftri: worktree-add: git-metadata-created\nriftri: worktree-add: immutable base cached; reusing it\nriftri: worktree-add: base-ready\nriftri: worktree-add: view-created\nriftri: worktree-add: git-pointer-restored\nriftri: worktree-add: index-synchronized\nriftri: worktree-add: clean-verified\nriftri: worktree-add: active\n\n\nnull !== 0\n\nAssertionError [ERR_ASSERTION]: riftri: waiting: lock state-directory locators (held by another process)\nriftri: resumed: lock state-directory locators\nriftri: waiting: lock Git worktree metadata (held by another process)\nriftri: resumed: lock Git worktree metadata\nriftri: worktree-add: intent-recorded\nriftri: worktree-add: git-metadata-created\nriftri: worktree-add: immutable base cached; reusing it\nriftri: worktree-add: base-ready\nriftri: worktree-add: view-created\nriftri: worktree-add: git-pointer-restored\nriftri: worktree-add: index-synchronized\nriftri: worktree-add: clean-verified\nriftri: worktree-add: active\n\n\nnull !== 0\n\nAssertionError [ERR_ASSERTION]: riftri: waiting: lock state-directory locators (held by another process)\nriftri: resumed: lock state-directory locators\nriftri: waiting: lock Git worktree metadata (held by another process)\nriftri: resumed: lock Git worktree metadata\nriftri: worktree-add: intent-recorded\nriftri: worktree-add: git-metadata-created\nriftri: worktree-add: immutable base cached; reusing it\nriftri: worktree-add: base-ready\nriftri: worktree-add: view-created\nriftri: worktree-add: git-pointer-restored\nriftri: worktree-add: index-synchronized\nriftri: worktree-add: clean-verified\nriftri: worktree-add: active\n\n\nnull !== 0\n\n\n5 !== 0\n\n    at file:///Users/runner/work/riftri/riftri/docs/benchmarks/apfs-read-ahead.mjs:167:14",
+      "retainedViews": [
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-0-baseline-0",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-0",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-1",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-2",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-3",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-4",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-5",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-6",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-7",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-8",
+        "/Users/runner/work/_temp/riftri-read-ahead-volume/concurrent-ten/view-1-baseline-9"
+      ],
+      "failedWorkers": [
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 2,
+          "log": "add-1-baseline-2.log",
+          "sha256": "15d2e534c176823163083d862afd6caf487d1922b626d51b153efd7b68328d54",
+          "receiptPresent": true,
+          "note": "The time wrapper closed with null exit status after its 120-second timeout. The harness did not record a signal or duration for this failed sample; logs include a later Riftri receipt, so no timing or cleanup success is inferred."
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 3,
+          "log": "add-1-baseline-3.log",
+          "sha256": "e5d3dc0feea3ad09d404fcad2015923c4818d73b6b2fa794989f6b27c9159218",
+          "receiptPresent": true,
+          "note": "The time wrapper closed with null exit status after its 120-second timeout. The harness did not record a signal or duration for this failed sample; logs include a later Riftri receipt, so no timing or cleanup success is inferred."
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 6,
+          "log": "add-1-baseline-6.log",
+          "sha256": "a17c685567e8ca3e433d546e88a73115f0cdd7b5e39d162c145bc1f4ca298ca6",
+          "receiptPresent": true,
+          "note": "The time wrapper closed with null exit status after its 120-second timeout. The harness did not record a signal or duration for this failed sample; logs include a later Riftri receipt, so no timing or cleanup success is inferred."
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 7,
+          "log": "add-1-baseline-7.log",
+          "sha256": "16bcbc9a5d83ceb6066c8f3ad0055fb84cff6cb52a4cf18abb450d5a0647f407",
+          "receiptPresent": true,
+          "note": "The time wrapper closed with null exit status after its 120-second timeout. The harness did not record a signal or duration for this failed sample; logs include a later Riftri receipt, so no timing or cleanup success is inferred."
+        },
+        {
+          "round": 1,
+          "label": "baseline",
+          "worker": 9,
+          "log": "add-1-baseline-9.log",
+          "sha256": "b635ca8ebfc8a11ceac9644a0f4b18516e12f20b8409533b8285bda47e1fbba9",
+          "receiptPresent": true,
+          "note": "The time wrapper closed with null exit status after its 120-second timeout. The harness did not record a signal or duration for this failed sample; logs include a later Riftri receipt, so no timing or cleanup success is inferred."
+        }
+      ]
+    }
+  ]
+}

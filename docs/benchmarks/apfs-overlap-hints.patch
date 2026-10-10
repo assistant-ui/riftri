@@ -1,0 +1,461 @@
+diff --git a/crates/riftri-core/src/worktree.rs b/crates/riftri-core/src/worktree.rs
+index 6e6b7ff..0228d9d 100644
+--- a/crates/riftri-core/src/worktree.rs
++++ b/crates/riftri-core/src/worktree.rs
+@@ -4141,6 +4141,8 @@ fn perform_add(
+     )?;
+     advance(store, journal, AddWorktreePhase::BaseReady, fail_after)?;
+ 
++    #[cfg(target_os = "macos")]
++    let read_ahead;
+     if journal.backend == BackendKind::OverlayFs {
+         #[cfg(target_os = "linux")]
+         perform_overlayfs_view(store, journal, destination, scratch, base_path, fail_after)?;
+@@ -4149,6 +4151,11 @@ fn perform_add(
+             "OverlayFS worktree execution requires Linux".to_owned(),
+         ));
+     } else {
++        #[cfg(target_os = "macos")]
++        {
++            read_ahead = NativeCowCloner::clone_tree_for_index_sync(base_path, scratch)?;
++        }
++        #[cfg(not(target_os = "macos"))]
+         NativeCowCloner::clone_tree_owner_writable(base_path, scratch)?;
+         advance(store, journal, AddWorktreePhase::ViewCreated, fail_after)?;
+ 
+@@ -4174,11 +4181,17 @@ fn perform_add(
+         )?;
+     }
+ 
+-    if sparse_directories.is_empty() {
+-        git.synchronize_worktree_index(destination)?;
+-    } else {
+-        git.synchronize_sparse_worktree_index(destination, sparse_directories)?;
+-    }
++    let synchronize_index = || {
++        if sparse_directories.is_empty() {
++            git.synchronize_worktree_index(destination)
++        } else {
++            git.synchronize_sparse_worktree_index(destination, sparse_directories)
++        }
++    };
++    #[cfg(target_os = "macos")]
++    read_ahead.during(destination, synchronize_index)?;
++    #[cfg(not(target_os = "macos"))]
++    synchronize_index()?;
+     advance(
+         store,
+         journal,
+diff --git a/crates/riftri-core/tests/native_cow_read_ahead.rs b/crates/riftri-core/tests/native_cow_read_ahead.rs
+index 65396ea..edb5a94 100644
+--- a/crates/riftri-core/tests/native_cow_read_ahead.rs
++++ b/crates/riftri-core/tests/native_cow_read_ahead.rs
+@@ -14,7 +14,7 @@ use riftri_core::{
+ mod support;
+ 
+ #[test]
+-fn a_same_size_edit_after_clone_read_ahead_is_not_trusted_as_clean() {
++fn a_same_size_edit_before_git_validation_is_not_trusted_as_clean() {
+     let fixture = support::writable_tempdir().unwrap();
+     let repository = fixture.path().join("repository");
+     let state = fixture.path().join("state");
+@@ -60,8 +60,8 @@ fn a_same_size_edit_after_clone_read_ahead_is_not_trusted_as_clean() {
+                 phase: AddWorktreePhase::GitPointerRestored,
+             })
+         {
+-            // Native clone workers have finished advising reads, but Git has
+-            // not initialized its index. Keep length and mtime unchanged to
++            // Native clone workers have finished, but optional hints have not
++            // started and Git has not initialized its index. Keep length and mtime unchanged to
+             // demonstrate that a hint never substitutes for Git reading bytes.
+             let modified = fs::metadata(&target).unwrap().modified().unwrap();
+             fs::write(&target, &callback_bytes).unwrap();
+diff --git a/crates/riftri-storage/src/apfs.rs b/crates/riftri-storage/src/apfs.rs
+index f22a998..88b80ef 100644
+--- a/crates/riftri-storage/src/apfs.rs
++++ b/crates/riftri-storage/src/apfs.rs
+@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
+ use std::sync::atomic::{AtomicU64, Ordering};
+ 
+ mod read_ahead;
++pub use read_ahead::ReadAheadPlan;
+ 
+ use crate::StorageError;
+ use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
+@@ -19,21 +20,29 @@ struct FileClone {
+ }
+ 
+ pub(crate) fn clone_tree(source: &Path, destination: &Path) -> Result<(), StorageError> {
+-    clone_tree_with_permissions(source, destination, false)
++    clone_tree_with_permissions(source, destination, false, false).map(|_| ())
+ }
+ 
+ pub(crate) fn clone_tree_owner_writable(
+     source: &Path,
+     destination: &Path,
+ ) -> Result<(), StorageError> {
+-    clone_tree_with_permissions(source, destination, true)
++    clone_tree_with_permissions(source, destination, true, false).map(|_| ())
++}
++
++pub(crate) fn clone_tree_for_index_sync(
++    source: &Path,
++    destination: &Path,
++) -> Result<ReadAheadPlan, StorageError> {
++    clone_tree_with_permissions(source, destination, true, true)
+ }
+ 
+ fn clone_tree_with_permissions(
+     source: &Path,
+     destination: &Path,
+     owner_writable: bool,
+-) -> Result<(), StorageError> {
++    defer_read_ahead: bool,
++) -> Result<ReadAheadPlan, StorageError> {
+     let metadata = fs::symlink_metadata(source)
+         .map_err(|source_error| io("inspect clone source", source, source_error))?;
+     if !metadata.is_dir() {
+@@ -61,17 +70,35 @@ fn clone_tree_with_permissions(
+             &mut files,
+             &mut directories,
+         )?;
+-        let read_ahead = read_ahead::ReadAhead::new();
+-        clone_files(
+-            files,
+-            writable_bits,
+-            file_clone_parallelism(),
+-            &|path, length| read_ahead.advise(path, length),
+-        )?;
++        let plan = if defer_read_ahead {
++            clone_file_contents(&files, writable_bits, file_clone_parallelism())?;
++            ReadAheadPlan::new(
++                files
++                    .into_iter()
++                    .map(|file| {
++                        let relative = file
++                            .destination
++                            .strip_prefix(destination)
++                            .expect("clone job is inside its destination")
++                            .to_path_buf();
++                        (relative, file.length.into_inner())
++                    })
++                    .collect(),
++            )
++        } else {
++            let read_ahead = read_ahead::ReadAhead::new();
++            clone_files(
++                files,
++                writable_bits,
++                file_clone_parallelism(),
++                &|path, length| read_ahead.advise(path, length),
++            )?;
++            ReadAheadPlan::default()
++        };
+         for (path, mode) in directories.into_iter().rev() {
+             set_mode(&path, mode)?;
+         }
+-        Ok(())
++        Ok(plan)
+     })();
+     if result.is_err() && destination.exists() {
+         let _ = make_tree_owner_writable(destination);
+@@ -164,13 +191,7 @@ fn clone_files(
+     worker_limit: usize,
+     advise: &(impl Fn(&Path, u64) + Sync),
+ ) -> Result<(), StorageError> {
+-    // Do not mix read requests with native clone/permission mutations in the
+-    // same worker pass. All admitted clones join, and any error is returned,
+-    // before optional hints begin. File jobs already live for the whole clone;
+-    // this temporary vector retains only references during the first pass.
+-    try_for_each_bounded(files.iter().collect(), worker_limit, |file| {
+-        clone_file(&file.source, &file.destination, writable_bits, &file.length)
+-    })?;
++    clone_file_contents(&files, writable_bits, worker_limit)?;
+     if writable_bits.is_some() {
+         try_for_each_bounded(files, worker_limit, |file| {
+             advise(&file.destination, file.length.load(Ordering::Relaxed));
+@@ -180,6 +201,20 @@ fn clone_files(
+     Ok(())
+ }
+ 
++fn clone_file_contents(
++    files: &[FileClone],
++    writable_bits: Option<u32>,
++    worker_limit: usize,
++) -> Result<(), StorageError> {
++    // Do not mix read requests with native clone/permission mutations in the
++    // same worker pass. All admitted clones join, and any error is returned,
++    // before optional hints begin. File jobs already live for the whole clone;
++    // this temporary vector retains only references during the first pass.
++    try_for_each_bounded(files.iter().collect(), worker_limit, |file| {
++        clone_file(&file.source, &file.destination, writable_bits, &file.length)
++    })
++}
++
+ fn clone_file(
+     source: &Path,
+     destination: &Path,
+diff --git a/crates/riftri-storage/src/apfs/read_ahead.rs b/crates/riftri-storage/src/apfs/read_ahead.rs
+index 2f6e79c..c478797 100644
+--- a/crates/riftri-storage/src/apfs/read_ahead.rs
++++ b/crates/riftri-storage/src/apfs/read_ahead.rs
+@@ -2,14 +2,80 @@ use std::fs;
+ use std::io;
+ use std::os::fd::AsRawFd;
+ use std::os::unix::fs::OpenOptionsExt;
+-use std::path::Path;
+-use std::sync::atomic::{AtomicU64, Ordering};
++use std::path::{Path, PathBuf};
++use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+ 
+ // This is a kernel-cache hint, not a validation shortcut. Limit both the amount
+ // requested for a large file and the total requested by one clone operation.
+ const MAX_FILE_BYTES: u64 = 64 * 1024;
+ const MAX_TREE_BYTES: u64 = 64 * 1024 * 1024;
+ 
++/// Optional hints captured while cloning. Paths are relative to the completed
++/// view, so activation can rename that view before its initial Git check.
++#[derive(Default)]
++pub struct ReadAheadPlan {
++    files: Vec<(PathBuf, u64)>,
++}
++
++impl ReadAheadPlan {
++    pub(super) fn new(files: Vec<(PathBuf, u64)>) -> Self {
++        Self { files }
++    }
++
++    /// Run an operation on the caller while issuing bounded optional hints.
++    /// Stop admitting hints when it returns or unwinds, and join every worker
++    /// before returning. An already admitted kernel call cannot be cancelled.
++    pub fn during<R>(self, destination: &Path, operation: impl FnOnce() -> R) -> R {
++        let hints = ReadAhead::new();
++        during(
++            &self.files,
++            crate::parallel::file_clone_parallelism(),
++            |(relative, length), _| hints.advise(&destination.join(relative), *length),
++            operation,
++        )
++    }
++}
++
++struct StopOnDrop<'a>(&'a AtomicBool);
++
++impl Drop for StopOnDrop<'_> {
++    fn drop(&mut self) {
++        self.0.store(true, Ordering::Release);
++    }
++}
++
++fn during<T: Sync, R>(
++    items: &[T],
++    worker_limit: usize,
++    advise: impl Fn(&T, &AtomicBool) + Sync,
++    operation: impl FnOnce() -> R,
++) -> R {
++    if items.is_empty() {
++        return operation();
++    }
++    let stopped = AtomicBool::new(false);
++    let next = AtomicUsize::new(0);
++    std::thread::scope(|scope| {
++        // This guard drops inside the scope, including during unwinding,
++        // before scope joins workers. No worker outlives the Git operation's
++        // result and reaches a later journal, cleanup or hook phase.
++        let _stop = StopOnDrop(&stopped);
++        for _ in 0..worker_limit.max(1).min(items.len()) {
++            // Thread resource exhaustion may omit optional hints, never fail
++            // creation or create an unscoped background worker.
++            let _ = std::thread::Builder::new().spawn_scoped(scope, || {
++                while !stopped.load(Ordering::Acquire) {
++                    let Some(item) = items.get(next.fetch_add(1, Ordering::Relaxed)) else {
++                        break;
++                    };
++                    advise(item, &stopped);
++                }
++            });
++        }
++        operation()
++    })
++}
++
+ pub(super) struct ReadAhead {
+     remaining: AtomicU64,
+ }
+@@ -83,6 +149,151 @@ mod tests {
+     use std::os::unix::ffi::OsStrExt;
+     use std::os::unix::fs::{MetadataExt, symlink};
+ 
++    #[test]
++    fn overlaps_the_operation_and_joins_admitted_hints_on_error() {
++        use std::sync::atomic::AtomicUsize;
++        use std::time::{Duration, Instant};
++
++        let (started, receiver) = std::sync::mpsc::channel();
++        let joined = AtomicUsize::new(0);
++        let result = during(
++            &[0, 1, 2, 3],
++            1,
++            |item, stopped| {
++                assert_eq!(*item, 0, "no further admission after the operation ends");
++                started.send(()).unwrap();
++                let deadline = Instant::now() + Duration::from_secs(5);
++                while !stopped.load(Ordering::Acquire) {
++                    assert!(Instant::now() < deadline, "operation did not stop hints");
++                    std::thread::yield_now();
++                }
++                joined.fetch_add(1, Ordering::Relaxed);
++            },
++            || {
++                receiver
++                    .recv_timeout(Duration::from_secs(5))
++                    .expect("hint must overlap operation");
++                Err::<(), _>("original Git failure")
++            },
++        );
++        assert_eq!(result, Err("original Git failure"));
++        assert_eq!(joined.load(Ordering::Relaxed), 1);
++    }
++
++    #[test]
++    fn panic_stops_admission_and_joins_workers_before_unwinding() {
++        use std::time::{Duration, Instant};
++
++        let (started, receiver) = std::sync::mpsc::channel();
++        let joined = AtomicUsize::new(0);
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            during(
++                &[0; 64],
++                4,
++                |_, stopped| {
++                    started.send(()).unwrap();
++                    let deadline = Instant::now() + Duration::from_secs(5);
++                    while !stopped.load(Ordering::Acquire) {
++                        assert!(Instant::now() < deadline, "panic did not stop hints");
++                        std::thread::yield_now();
++                    }
++                    joined.fetch_add(1, Ordering::Relaxed);
++                },
++                || {
++                    for _ in 0..4 {
++                        receiver.recv_timeout(Duration::from_secs(5)).unwrap();
++                    }
++                    panic!("original operation panic");
++                },
++            );
++        }));
++        assert_eq!(
++            result.unwrap_err().downcast_ref::<&str>(),
++            Some(&"original operation panic")
++        );
++        assert_eq!(joined.load(Ordering::Relaxed), 4);
++    }
++
++    #[test]
++    fn empty_plan_runs_on_the_caller_and_keeps_its_result() {
++        let caller = std::thread::current().id();
++        let result = ReadAheadPlan::default().during(Path::new("does-not-exist"), || {
++            assert_eq!(std::thread::current().id(), caller);
++            42
++        });
++        assert_eq!(result, 42);
++    }
++
++    #[test]
++    fn captured_plan_follows_the_completed_clone_after_activation_rename() {
++        use std::os::unix::fs::PermissionsExt;
++
++        let fixture = tempfile::tempdir().unwrap();
++        let source = fixture.path().join("base");
++        let scratch = fixture.path().join("scratch");
++        let destination = fixture.path().join("activated");
++        fs::create_dir_all(source.join("名前")).unwrap();
++        fs::write(source.join("名前/payload"), vec![b'a'; 8192]).unwrap();
++        fs::set_permissions(
++            source.join("名前/payload"),
++            fs::Permissions::from_mode(0o444),
++        )
++        .unwrap();
++        symlink("名前/payload", source.join("link")).unwrap();
++        let plan = crate::ApfsCloner::clone_tree_for_index_sync(&source, &scratch).unwrap();
++        assert_eq!(plan.files, [(PathBuf::from("名前/payload"), 8192)]);
++        assert_ne!(
++            fs::metadata(scratch.join("名前/payload")).unwrap().mode() & 0o200,
++            0
++        );
++        fs::rename(&scratch, &destination).unwrap();
++        let result = plan.during(&destination, || {
++            assert_eq!(
++                fs::read(destination.join("名前/payload")).unwrap(),
++                vec![b'a'; 8192]
++            );
++            assert_eq!(
++                fs::read_link(destination.join("link")).unwrap(),
++                Path::new("名前/payload")
++            );
++            fs::write(destination.join("名前/payload"), vec![b'b'; 8192]).unwrap();
++            Err::<(), _>("keep original result")
++        });
++        assert_eq!(result, Err("keep original result"));
++        assert_eq!(
++            fs::read(source.join("名前/payload")).unwrap(),
++            vec![b'a'; 8192]
++        );
++        assert_eq!(
++            fs::read(destination.join("名前/payload")).unwrap(),
++            vec![b'b'; 8192]
++        );
++        assert!(!scratch.exists());
++    }
++
++    #[test]
++    fn completes_all_hints_when_the_operation_is_still_running() {
++        use std::time::Duration;
++
++        let (completed, receiver) = std::sync::mpsc::channel();
++        let result = during(
++            &[0, 1, 2, 3, 4],
++            2,
++            |item, stopped| {
++                assert!(!stopped.load(Ordering::Acquire));
++                completed.send(*item).unwrap();
++            },
++            || {
++                let mut seen = (0..5)
++                    .map(|_| receiver.recv_timeout(Duration::from_secs(5)).unwrap())
++                    .collect::<Vec<_>>();
++                seen.sort();
++                seen
++            },
++        );
++        assert_eq!(result, [0, 1, 2, 3, 4]);
++    }
++
+     #[test]
+     fn reserves_only_nonempty_bounded_ranges() {
+         let hint = ReadAhead::new();
+diff --git a/crates/riftri-storage/src/lib.rs b/crates/riftri-storage/src/lib.rs
+index 2c67425..4df1326 100644
+--- a/crates/riftri-storage/src/lib.rs
++++ b/crates/riftri-storage/src/lib.rs
+@@ -123,7 +123,20 @@ fn parse_umask(bytes: &[u8]) -> std::io::Result<u32> {
+ /// Native APFS clone operations used by the explicit macOS prototype.
+ pub struct ApfsCloner;
+ 
++#[cfg(target_os = "macos")]
++pub use apfs::ReadAheadPlan as ApfsReadAheadPlan;
++
+ impl ApfsCloner {
++    /// Finish native cloning and permissions, but defer optional read-ahead
++    /// until the caller runs its initial Git index synchronization.
++    #[cfg(target_os = "macos")]
++    pub fn clone_tree_for_index_sync(
++        source: &Path,
++        destination: &Path,
++    ) -> Result<ApfsReadAheadPlan, StorageError> {
++        apfs::clone_tree_for_index_sync(source, destination)
++    }
++
+     /// Clone an immutable base and restore owner permissions in one traversal.
+     #[cfg(target_os = "macos")]
+     pub fn clone_tree_owner_writable(

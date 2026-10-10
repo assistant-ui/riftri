@@ -1,0 +1,137 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-09",
+  "sourceCommit": "1dedd8988722b030c094e5b84fb70d44e1ec3cf7",
+  "sourcePatch": "diff --git a/crates/riftri-storage/src/apfs.rs b/crates/riftri-storage/src/apfs.rs\nindex 6fa63c2..f22a998 100644\n--- a/crates/riftri-storage/src/apfs.rs\n+++ b/crates/riftri-storage/src/apfs.rs\n@@ -541,6 +541,216 @@ mod tests {\n         assert_eq!(get_xattr(&iterative, \"com.riftri.bulk-evaluation\"), None);\n     }\n \n+    // Evaluation only: recursive cloning still has a different directory-\n+    // metadata policy. This helper is not available to the production backend.\n+    fn bulk_writable_for_evaluation(\n+        source: &Path,\n+        destination: &Path,\n+    ) -> Result<(), crate::StorageError> {\n+        use crate::parallel::{file_clone_parallelism, try_for_each_bounded};\n+        use std::sync::atomic::{AtomicU64, Ordering};\n+\n+        fn inspect(\n+            source: &Path,\n+            destination: &Path,\n+            writable_bits: u32,\n+            files: &mut Vec<super::FileClone>,\n+            directories: &mut Vec<(std::path::PathBuf, u32)>,\n+        ) -> Result<(), crate::StorageError> {\n+            let metadata = fs::symlink_metadata(source)\n+                .map_err(|error| super::io(\"inspect bulk evaluation source\", source, error))?;\n+            if metadata.is_dir() {\n+                directories.push((\n+                    destination.to_path_buf(),\n+                    metadata.mode() | 0o700 | writable_bits,\n+                ));\n+                for entry in fs::read_dir(source)\n+                    .map_err(|error| super::io(\"read bulk evaluation directory\", source, error))?\n+                {\n+                    let entry = entry\n+                        .map_err(|error| super::io(\"read bulk evaluation entry\", source, error))?;\n+                    inspect(\n+                        &entry.path(),\n+                        &destination.join(entry.file_name()),\n+                        writable_bits,\n+                        files,\n+                        directories,\n+                    )?;\n+                }\n+            } else if metadata.is_file() {\n+                files.push(super::FileClone {\n+                    source: source.to_path_buf(),\n+                    destination: destination.to_path_buf(),\n+                    length: AtomicU64::new(0),\n+                });\n+            } else if !metadata.file_type().is_symlink() {\n+                return Err(crate::StorageError::UnsupportedEntry(source.to_path_buf()));\n+            }\n+            Ok(())\n+        }\n+\n+        // Entry-type preflight is included in the measurement. It is not a\n+        // complete metadata eligibility policy: xattrs/ACLs/flags remain open.\n+        let root = fs::symlink_metadata(source)\n+            .map_err(|error| super::io(\"inspect bulk evaluation root\", source, error))?;\n+        if !root.is_dir() {\n+            return Err(crate::StorageError::InvalidSource(source.to_path_buf()));\n+        }\n+        if destination\n+            .try_exists()\n+            .map_err(|error| super::io(\"inspect bulk evaluation destination\", destination, error))?\n+        {\n+            return Err(crate::StorageError::DestinationExists(\n+                destination.to_path_buf(),\n+            ));\n+        }\n+        let writable_bits = crate::umask_writable_bits()\n+            .map_err(|error| super::io(\"read evaluation umask\", destination, error))?;\n+        let mut files = Vec::new();\n+        let mut directories = Vec::new();\n+        inspect(\n+            source,\n+            destination,\n+            writable_bits,\n+            &mut files,\n+            &mut directories,\n+        )?;\n+        let result = (|| {\n+            super::clone_path(source, destination)?;\n+            try_for_each_bounded(files.iter().collect(), file_clone_parallelism(), |file| {\n+                let metadata = fs::symlink_metadata(&file.destination).map_err(|error| {\n+                    super::io(\"inspect bulk cloned permissions\", &file.destination, error)\n+                })?;\n+                super::set_mode(&file.destination, metadata.mode() | writable_bits)?;\n+                file.length.store(metadata.len(), Ordering::Relaxed);\n+                Ok::<(), crate::StorageError>(())\n+            })?;\n+            let read_ahead = super::read_ahead::ReadAhead::new();\n+            try_for_each_bounded(files, file_clone_parallelism(), |file| {\n+                read_ahead.advise(&file.destination, file.length.load(Ordering::Relaxed));\n+                Ok::<(), crate::StorageError>(())\n+            })?;\n+            for (path, mode) in directories.into_iter().rev() {\n+                super::set_mode(&path, mode)?;\n+            }\n+            Ok(())\n+        })();\n+        if result.is_err() && destination.exists() {\n+            let _ = super::make_tree_owner_writable(destination);\n+            let _ = fs::remove_dir_all(destination);\n+        }\n+        result\n+    }\n+\n+    #[test]\n+    fn writable_bulk_candidate_preserves_supported_files_and_private_writes() {\n+        let fixture = tempdir().unwrap();\n+        let source = fixture.path().join(\"source\");\n+        let iterative = fixture.path().join(\"iterative\");\n+        let bulk = fixture.path().join(\"bulk\");\n+        write_fixture(&source, 2, 3, 1024);\n+        super::make_tree_read_only(&source).unwrap();\n+        super::clone_tree_owner_writable(&source, &iterative).unwrap();\n+        bulk_writable_for_evaluation(&source, &bulk).unwrap();\n+        assert_tree_matches(&iterative, &bulk);\n+        let file = \"directory-00/file-0000.bin\";\n+        fs::write(bulk.join(file), b\"private\").unwrap();\n+        assert_eq!(\n+            fs::read(source.join(file)).unwrap(),\n+            fs::read(iterative.join(file)).unwrap()\n+        );\n+        assert_ne!(\n+            fs::read(bulk.join(file)).unwrap(),\n+            fs::read(source.join(file)).unwrap()\n+        );\n+        super::make_tree_owner_writable(&source).unwrap();\n+    }\n+\n+    #[test]\n+    fn writable_bulk_candidate_preflights_unsupported_entries_before_cloning() {\n+        let fixture = tempdir().unwrap();\n+        let source = fixture.path().join(\"source\");\n+        let destination = fixture.path().join(\"bulk\");\n+        write_fixture(&source, 1, 1, 128);\n+        let _socket = std::os::unix::net::UnixListener::bind(source.join(\"socket\")).unwrap();\n+        assert!(matches!(\n+            bulk_writable_for_evaluation(&source, &destination),\n+            Err(crate::StorageError::UnsupportedEntry(_))\n+        ));\n+        assert!(!destination.exists());\n+        assert!(source.join(\"socket\").exists());\n+    }\n+\n+    #[test]\n+    fn writable_bulk_candidate_still_has_the_directory_metadata_gap() {\n+        let fixture = tempdir().unwrap();\n+        let source = fixture.path().join(\"source\");\n+        let iterative = fixture.path().join(\"iterative\");\n+        let bulk = fixture.path().join(\"bulk\");\n+        write_fixture(&source, 1, 1, 128);\n+        set_xattr(&source, \"com.riftri.bulk-evaluation\", b\"source-only\");\n+        super::clone_tree_owner_writable(&source, &iterative).unwrap();\n+        bulk_writable_for_evaluation(&source, &bulk).unwrap();\n+        assert_eq!(get_xattr(&iterative, \"com.riftri.bulk-evaluation\"), None);\n+        assert_eq!(\n+            get_xattr(&bulk, \"com.riftri.bulk-evaluation\"),\n+            Some(b\"source-only\".to_vec())\n+        );\n+        assert_tree_matches(&iterative, &bulk);\n+    }\n+\n+    #[test]\n+    #[ignore = \"manual writable APFS bulk comparison; metadata policy is not production-ready\"]\n+    fn reports_writable_bulk_directory_clone_comparison() {\n+        let fixture = tempdir().unwrap();\n+        let source = fixture.path().join(\"source\");\n+        write_fixture(&source, 32, 128, 8192);\n+        super::make_tree_read_only(&source).unwrap();\n+        let mut samples = Vec::new();\n+        for round in 1..=8 {\n+            let iterative = fixture.path().join(format!(\"iterative-{round}\"));\n+            let bulk = fixture.path().join(format!(\"bulk-{round}\"));\n+            let order = if round % 2 == 1 {\n+                [false, true]\n+            } else {\n+                [true, false]\n+            };\n+            for candidate in order {\n+                let started = Instant::now();\n+                if candidate {\n+                    bulk_writable_for_evaluation(&source, &bulk).unwrap();\n+                } else {\n+                    super::clone_tree_owner_writable(&source, &iterative).unwrap();\n+                }\n+                samples.push(serde_json::json!({\"round\":round, \"candidate\":candidate,\n+                    \"microseconds\":elapsed_microseconds(started.elapsed())}));\n+            }\n+            assert_tree_matches(&iterative, &bulk);\n+            let file = \"directory-00/file-0000.bin\";\n+            fs::write(bulk.join(file), b\"private\").unwrap();\n+            assert_eq!(\n+                fs::read(source.join(file)).unwrap(),\n+                fs::read(iterative.join(file)).unwrap()\n+            );\n+            assert_ne!(\n+                fs::read(source.join(file)).unwrap(),\n+                fs::read(bulk.join(file)).unwrap()\n+            );\n+            fs::remove_dir_all(&iterative).unwrap();\n+            fs::remove_dir_all(&bulk).unwrap();\n+        }\n+        super::make_tree_owner_writable(&source).unwrap();\n+        println!(\n+            \"RIFTRI_WRITABLE_BULK_EVALUATION {}\",\n+            serde_json::json!({\n+                \"schema_version\":1, \"regular_files\":4097, \"symlinks\":1,\n+                \"logical_bytes\":32 * 128 * 8192 + 18, \"samples\":samples,\n+                \"scope\":\"storage clone, permission restoration and same deferred hints; not end-to-end startup\",\n+                \"production_eligible\":false,\n+            })\n+        );\n+    }\n+\n     #[test]\n     #[ignore = \"manual APFS bulk-directory comparison; reports measurements without a timing threshold\"]\n     fn reports_bulk_directory_clone_comparison() {\n",
+  "rawLogSha256": "b338b917088e92d145910192e7ee8fe5ee333528acb63e8e5ddc5e9b665a10fb",
+  "testExecutableSha256": "1287e66a78b868bd8bd0222b8174f2d877bc1209d30d60d2ae9811e4b4869e42",
+  "machine": {
+    "cpu": "Apple M1",
+    "release": "25.2.0",
+    "totalMemory": 17179869184
+  },
+  "build": "cargo test --release --locked -p riftri-storage --lib reports_writable_bulk_directory_clone_comparison --no-run",
+  "measurement": {
+    "logical_bytes": 33554450,
+    "production_eligible": false,
+    "regular_files": 4097,
+    "samples": [
+      {
+        "candidate": false,
+        "microseconds": 209914,
+        "round": 1
+      },
+      {
+        "candidate": true,
+        "microseconds": 165061,
+        "round": 1
+      },
+      {
+        "candidate": true,
+        "microseconds": 134075,
+        "round": 2
+      },
+      {
+        "candidate": false,
+        "microseconds": 216308,
+        "round": 2
+      },
+      {
+        "candidate": false,
+        "microseconds": 211456,
+        "round": 3
+      },
+      {
+        "candidate": true,
+        "microseconds": 139187,
+        "round": 3
+      },
+      {
+        "candidate": true,
+        "microseconds": 126365,
+        "round": 4
+      },
+      {
+        "candidate": false,
+        "microseconds": 231431,
+        "round": 4
+      },
+      {
+        "candidate": false,
+        "microseconds": 228000,
+        "round": 5
+      },
+      {
+        "candidate": true,
+        "microseconds": 141035,
+        "round": 5
+      },
+      {
+        "candidate": true,
+        "microseconds": 152812,
+        "round": 6
+      },
+      {
+        "candidate": false,
+        "microseconds": 234491,
+        "round": 6
+      },
+      {
+        "candidate": false,
+        "microseconds": 221459,
+        "round": 7
+      },
+      {
+        "candidate": true,
+        "microseconds": 155171,
+        "round": 7
+      },
+      {
+        "candidate": true,
+        "microseconds": 126183,
+        "round": 8
+      },
+      {
+        "candidate": false,
+        "microseconds": 212392,
+        "round": 8
+      }
+    ],
+    "schema_version": 1,
+    "scope": "storage clone, permission restoration and same deferred hints; not end-to-end startup",
+    "symlinks": 1
+  },
+  "summary": {
+    "iterativeMedianMicroseconds": 218883.5,
+    "bulkMedianMicroseconds": 140111,
+    "reductionPercent": 35.988322555149196,
+    "fasterPairs": 8
+  },
+  "platformContract": {
+    "directDirectoryClone": "discouraged by Apple",
+    "recursiveForceClone": "not supported by copyfile",
+    "sources": [
+      "https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/clonefile.2",
+      "https://github.com/apple-oss-distributions/copyfile/blob/main/copyfile.3"
+    ],
+    "nextCandidate": "bounded directory-relative per-file clonefileat; not implemented or measured"
+  },
+  "correctness": {
+    "supportedFileBytesModesSymlinks": true,
+    "distinctFileInodes": true,
+    "privateWritesPreservedSourceAndOtherClone": true,
+    "unsupportedEntriesRejectedBeforeDestination": true,
+    "directoryXattrParity": false,
+    "aclParity": "not established",
+    "fileFlagParity": "not established",
+    "physicalVolumeAllocation": "not measured",
+    "endToEndGitLifecycle": "not measured"
+  },
+  "caveats": [
+    "Test-only helper; the CLI cannot select it. No production eligibility policy is implemented.",
+    "The source has 32 flat directories with 128 regular files each, one root regular file and one symlink. This is not a real-project startup benchmark.",
+    "Entry-type preflight, permission restoration and the same deferred read-ahead are included in both path comparison timings as applicable. No integrity or journal cost is measured.",
+    "One machine, warm source data, eight alternating pairs; not a cross-machine or end-to-end improvement claim.",
+    "The directory extended-attribute mismatch remains an explicit regression gate. Existing per-file production cloning is unchanged."
+  ]
+}

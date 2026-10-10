@@ -1,0 +1,4392 @@
+{
+  "schemaVersion": 1,
+  "baselineCommit": "a58006d7c7b4989a055a967e65d5654281b77ea4",
+  "candidateCommit": "f6b32a4fca40136d4548c60e2180d6b12dd42d9b",
+  "rawResultsSha256": "d11b14aa7578f49d56c98c92c48c7598dfc7e720bdfc791c09600af9004b20d4",
+  "binarySha256": {
+    "before": "33240072e0f00873ecf588f0917dab1e198a5f9bd246bc3a3d195ad981f1c80a",
+    "after": "d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1"
+  },
+  "sourceCommit": "038cd9f82b418afe9e6d0080648738f78586fbca",
+  "sourceTree": "c4de7922b24126e860cb77652f5d080e04c8c396",
+  "fixtureTree": "c4de7922b24126e860cb77652f5d080e04c8c396",
+  "hardware": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "os": "25.2.0",
+    "cpu": "Apple M1",
+    "memory": 17179869184
+  },
+  "git": "git version 2.50.1 (Apple Git-155)",
+  "trackedEntries": 5864,
+  "logicalBytes": 73235130,
+  "startedAt": "2026-10-09T19:54:15.143Z",
+  "completedAt": "2026-10-09T20:02:06.992Z",
+  "allViewsVerifiedAndRemoved": true,
+  "finalStatus": "Riftri storage status\nState: /private/tmp/riftri-startup-scan.dAIrEx/deferred-git-shim-reference/repository/.git/riftri\nActive views: 0\nPending adds: 0\nCompleted removals: 0\nCancelled removals: 0\nPending removals: 0\nCompleted moves: 0\nCancelled moves: 0\nPending moves: 0\nCompleted compactions: 0\nCancelled compactions: 0\nPending compactions: 0\nCompleted prunes: 0\nPending prunes: 0\nCompleted collections: 1\nCancelled collections: 0\nPending collections: 0\nCoordination locks: 1 (safe persistent metadata)\nRetained bases: 0\nActive view storage:\nState issues: 0\nTotal logical: 0 bytes\nTotal filesystem-accounted allocated: 0 bytes\nAllocation note: filesystem-accounted allocation may count shared COW blocks more than once; it is not exclusive physical disk use\nPhysical-sharing proof: use the platform volume-delta benchmark on a quiet volume\n",
+  "singleRounds": 8,
+  "coldRounds": 8,
+  "batchRounds": 4,
+  "workers": 4,
+  "caveats": [
+    "Local loaded host, not quiet hardware. Only the base cache is cold; the OS cache is not purged.",
+    "Host-volume allocation deltas are contaminated by unrelated writes; not dedicated-volume allocation evidence.",
+    "Medians below use the midpoint of two central observations; the original harness distribution p50 uses nearest rank.",
+    "This second harness verifies every tracked byte, mode and symlink plus clean Git status and removal; private-write checks run after each concurrent batch."
+  ],
+  "cases": [
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-before",
+      "seconds": 8.238553166,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.393852125
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.422437958
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.422567
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 2.549352958
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 3.05238525
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 3.0783015
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 8.142744
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 8.231141666
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 8.237231958
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-after",
+      "seconds": 2.930872667,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.259372208
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.289181542
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.289230458
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.564276708
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.974242708
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.993128375
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.855851792
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.920306875
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.930142458
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-1-after",
+      "seconds": 2.894154584,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.252504792
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.276245417
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.276283
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.47929025
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.896818292
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.920792292
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.8136565
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.884522667
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.893430875
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-1-before",
+      "seconds": 4.029545542,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.251873417
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.277570875
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.277610292
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.525986792
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.883945375
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.9015965
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.950675667
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.018852292
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.028839084
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-2-before",
+      "seconds": 5.433449542,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.252061375
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.275994875
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.276036459
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.403574042
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.738525375
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.759784334
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.354566167
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.425523167
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.43257525
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-2-after",
+      "seconds": 2.714028417,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.240797458
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.265486167
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.265525792
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.367492792
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.7795175
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.794287125
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.643978417
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.705527417
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.71341175
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-3-after",
+      "seconds": 2.7511495,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.246487459
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.274532584
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.274571084
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.421525834
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.843665292
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.863448459
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.681557959
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.74250625
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.750510375
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-3-before",
+      "seconds": 4.1505675,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.32677775
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.355920125
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.35595975
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.669374875
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.115681166
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.139416083
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.037019333
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.134689333
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.149992708
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-4-before",
+      "seconds": 4.192315083,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.302230125
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.336628583
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.336667625
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.663246542
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.11820275
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.140639542
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.086727167
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.180731875
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.191705625
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-4-after",
+      "seconds": 5.033989417,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.277400209
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.311879917
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.311921417
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.549548375
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.974480459
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.997330625
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.900187209
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.982265459
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.033081459
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-5-after",
+      "seconds": 3.258753416,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.341362041
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.36894075
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.368986541
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.597397291
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.2104805
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.224956625
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.184724
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.250322375
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.258152291
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-5-before",
+      "seconds": 3.531743041,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.248406041
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.277509166
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.277545958
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.391793333
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.699943041
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.717994291
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.459295875
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.525334291
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.531209
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-6-before",
+      "seconds": 3.865450916,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.236621041
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.26692275
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.266960041
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.466827458
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.798218583
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.818678833
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.784019333
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.853792375
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.86480625
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-6-after",
+      "seconds": 3.121059875,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.272443
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.297891833
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.297929875
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.682784167
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.063682708
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.07977375
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.032664333
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.106729958
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.120352458
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "cold-7-after",
+      "seconds": 3.046828291,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.235913083
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.259697833
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.25974
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.425034708
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.020364208
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.039363666
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.974103791
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.037634
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.046234333
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "cold-7-before",
+      "seconds": 3.937433083,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.331352583
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.361605708
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.361643333
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.551876666
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.862241875
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.878596625
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.858039333
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.925604125
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.936764833
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "anchor",
+      "seconds": 4.04736925,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.273324
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.305994333
+        },
+        {
+          "line": "riftri: worktree-add: materializing new immutable base",
+          "seconds": 0.30603075
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 1.471938041
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.792028208
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.813850666
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.962853125
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.034826083
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.046730916
+        }
+      ],
+      "gitStarts": 15,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-0-explicit-before",
+      "seconds": 2.979789917,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.244626209
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.277320375
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.484012834
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.498761459
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.830315625
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.847212292
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.905345584
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.971219792
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.979004292
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-0-explicit-after",
+      "seconds": 2.090784375,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.262831875
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.289133708
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.500133417
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.523048917
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.942119958
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.971134
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.01613275
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.083980125
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.090001292
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-0-shim-before",
+      "seconds": 6.970553833,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-0-shim-after",
+      "seconds": 2.267026375,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-0-git-git",
+      "seconds": 1.396853333,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-1-git-git",
+      "seconds": 1.254279083,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-1-shim-after",
+      "seconds": 2.213383042,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-1-shim-before",
+      "seconds": 3.084419958,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-1-explicit-after",
+      "seconds": 2.189411417,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.303111167
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.335448
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.55036
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.565552833
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.096672417
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.116531208
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.1097825
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.178324667
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.188630208
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-1-explicit-before",
+      "seconds": 3.35144475,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.27934075
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.314151
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.528352042
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.539982459
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.879760209
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.897670959
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.269906125
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.342820334
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.350836917
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-2-explicit-before",
+      "seconds": 3.062282709,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.285447459
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.321284
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.52887475
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.551839167
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.955539375
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.973795292
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.980362584
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.050890084
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.061561167
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-2-explicit-after",
+      "seconds": 2.088685708,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.261781542
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.295286417
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.504259375
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.515832042
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.950600708
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.966642625
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 1.997609708
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.077863333
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.088060167
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-2-shim-before",
+      "seconds": 6.550549291,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-2-shim-after",
+      "seconds": 2.161214042,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-2-git-git",
+      "seconds": 1.59319725,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-3-git-git",
+      "seconds": 1.153213958,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-3-shim-after",
+      "seconds": 2.203138375,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-3-shim-before",
+      "seconds": 3.228150958,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-3-explicit-after",
+      "seconds": 2.049206708,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.257628416
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.284604833
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.489106583
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.501267791
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.97619025
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.993102708
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 1.969339
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.037772875
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.04857925
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-3-explicit-before",
+      "seconds": 3.105786458,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.241441833
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.265623583
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.471193958
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.484592666
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.837517166
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.856207291
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.024011833
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.095008666
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.105036791
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-4-explicit-before",
+      "seconds": 2.988358916,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.247943583
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.273182875
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.478545333
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.487758583
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.835840916
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.853795416
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.908414791
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.978920041
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.987662708
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-4-explicit-after",
+      "seconds": 2.010233292,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.274351333
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.298643958
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.502331625
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.511758458
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.940191583
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.964817208
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 1.930086917
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 1.996475292
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.009697458
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-4-shim-before",
+      "seconds": 3.06219975,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-4-shim-after",
+      "seconds": 1.948512834,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-4-git-git",
+      "seconds": 1.422388708,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-5-git-git",
+      "seconds": 0.927944625,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-5-shim-after",
+      "seconds": 2.228496584,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-5-shim-before",
+      "seconds": 3.08636125,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-5-explicit-after",
+      "seconds": 2.011731334,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.247584667
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.27506
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.482696459
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.496342375
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.962217625
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.982787
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 1.931999
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 1.998411084
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.011111042
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-5-explicit-before",
+      "seconds": 3.183878916,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.251735583
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.278555208
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.48339625
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.492652583
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.851160375
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.871778333
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.100438166
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.172035083
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.183233958
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-6-explicit-before",
+      "seconds": 3.08995075,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.247017708
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.273220917
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.478228542
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.494781458
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.847856375
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.874688917
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.006824292
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.075771458
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.089308083
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-6-explicit-after",
+      "seconds": 2.116947042,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.253013292
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.282034417
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.484106875
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.499217167
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.962279792
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.986957375
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.037159417
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.103219667
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.116333334
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-6-shim-before",
+      "seconds": 3.061779959,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-6-shim-after",
+      "seconds": 2.082329042,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-6-git-git",
+      "seconds": 2.773562667,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "single-7-git-git",
+      "seconds": 0.895066625,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "single-7-shim-after",
+      "seconds": 2.249363083,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "single-7-shim-before",
+      "seconds": 3.108666167,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "single-7-explicit-after",
+      "seconds": 1.978396125,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.253222208
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.280742333
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.487245708
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.502302958
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.925667708
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.9488505
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 1.89965925
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 1.967877542
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 1.977582792
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "single-7-explicit-before",
+      "seconds": 2.960321125,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.267691625
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.291672458
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.49678925
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.5107575
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 0.858774583
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 0.878761042
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.873185625
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.946586417
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.959688958
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-before-3",
+      "seconds": 4.668242792,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.296882667
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.324254125
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.550936208
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.564695667
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.536988583
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.565564667
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.562022667
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.645334
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.667473167
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-before-0",
+      "seconds": 4.679100375,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.263035583
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.325120458
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.351679208
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.37611325
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.5650335
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.577139125
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.537850541
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.571346125
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.574680375
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.663449583
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.678623666
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-before-2",
+      "seconds": 5.203545625,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.262354083
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.375496291
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.401669333
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.429711791
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.632708541
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.644244041
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.826868791
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.853777166
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.102710708
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.185690583
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.202755708
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-before-1",
+      "seconds": 5.222353708,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.262605708
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.429967375
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.457571958
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.486583333
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.734488417
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.750943875
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.91310825
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.932666292
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.120677458
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.214458667
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.221501583
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-after-3",
+      "seconds": 3.308464125,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.303215917
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.329955292
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.557185667
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.567926542
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.830035917
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.853895792
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.207689875
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.289210625
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.306808958
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-after-2",
+      "seconds": 3.324904,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.27648
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.330187542
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.35511825
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.396050709
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.588715459
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.603169375
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.891106584
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.912572334
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.232937792
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.324594375
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.324595917
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-after-1",
+      "seconds": 3.423286584,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.276684459
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.396293875
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.423591709
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.45534525
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.663099042
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.678023792
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.051523667
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.068406542
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.328312292
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.40777525
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.4224265
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-0-explicit-after-0",
+      "seconds": 3.435765917,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.277208042
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.4559335
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.48648125
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.510437292
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.746430833
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.769578667
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.081586542
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.097423333
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.344443292
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.426806625
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.434882875
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-0-shim-before-3",
+      "seconds": 4.710436833,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-0-shim-before-2",
+      "seconds": 4.720284875,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-0-shim-before-0",
+      "seconds": 5.241039041,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-0-shim-before-1",
+      "seconds": 5.257902666,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-0-shim-after-3",
+      "seconds": 3.346271875,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-0-shim-after-0",
+      "seconds": 3.354569084,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-0-shim-after-2",
+      "seconds": 3.37201875,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-0-shim-after-1",
+      "seconds": 3.451649,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-0-git-git-1",
+      "seconds": 2.82085,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-0-git-git-3",
+      "seconds": 2.83343125,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-0-git-git-0",
+      "seconds": 2.846195375,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-0-git-git-2",
+      "seconds": 2.848420209,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-1-git-git-0",
+      "seconds": 1.870675625,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-1-git-git-1",
+      "seconds": 1.873118834,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-1-git-git-2",
+      "seconds": 1.877792,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-1-git-git-3",
+      "seconds": 1.880661875,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-1-shim-after-1",
+      "seconds": 3.517433792,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-1-shim-after-0",
+      "seconds": 3.532690125,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-1-shim-after-3",
+      "seconds": 3.73216475,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-1-shim-after-2",
+      "seconds": 3.743197083,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-1-shim-before-3",
+      "seconds": 5.579984833,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-1-shim-before-0",
+      "seconds": 5.586777791,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-1-shim-before-1",
+      "seconds": 5.83955875,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-1-shim-before-2",
+      "seconds": 5.9338375,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-after-1",
+      "seconds": 3.914548167,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.259893417
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.309806584
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.338394334
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.3681985
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.559209084
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.569125709
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.721317167
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.739186417
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.8100405
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.890050792
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.913732167
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-after-0",
+      "seconds": 3.921418833,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.284408833
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.310332333
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.534214625
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.542804958
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.690843041
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.718687875
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.815610208
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.894864
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.921200041
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-after-2",
+      "seconds": 4.200584333,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.259714625
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.417918208
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.442893833
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.47182925
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.709767792
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.732118375
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.05897925
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.072500125
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.04949525
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.185876042
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.199835208
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-after-3",
+      "seconds": 4.215498917,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.259498125
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.367804792
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.393622834
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.417677459
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.619812417
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.62972575
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.027652959
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.055470167
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.121847167
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.208576084
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.214683709
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-before-2",
+      "seconds": 4.084404916,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.2861425
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.310651625
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.534296166
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.545125083
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.406280416
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.431503291
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.00557975
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.072723208
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.0836565
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-before-1",
+      "seconds": 4.149454833,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.2618205
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.310881375
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.336215083
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.363582333
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.553255875
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.562350541
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.532366083
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.558332583
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.058397791
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.134554791
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.148708208
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-before-0",
+      "seconds": 4.289879667,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.262244208
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.36406625
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.392802458
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.417486333
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.620952042
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.632741
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.80294075
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.826038583
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.203815917
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.278579
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.28910425
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-1-explicit-before-3",
+      "seconds": 4.359546,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.261452916
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.416692791
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.444979708
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.472609625
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.731803625
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.754588583
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.922323125
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.942206291
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.272530083
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.347753583
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.358855208
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-before-3",
+      "seconds": 4.69149075,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.287896541
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.311283583
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.534664208
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.549424291
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.527503666
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.55263425
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.589740583
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.669433041
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.690912625
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-before-0",
+      "seconds": 4.702891125,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.261530125
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.312100292
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.338804958
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.362967625
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.551686833
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.562983667
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.520242292
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.549135625
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 4.599263792
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 4.686110458
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 4.702326417
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-before-2",
+      "seconds": 5.208923417,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.260950334
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.362411459
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.39155925
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.41920075
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.619029334
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.6307285
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.752379292
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.778982959
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.134654042
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.199312667
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.208008959
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-before-1",
+      "seconds": 5.257460333,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.261146333
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.419488917
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.444809458
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.476868
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.740849708
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.761694333
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.961784792
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.9813095
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.185776792
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.247898917
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.256877083
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-after-3",
+      "seconds": 3.391147791,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.283632083
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.309080625
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.535378666
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.544186375
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.845732833
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.914705458
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.254191708
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.379697958
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.390141541
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-after-0",
+      "seconds": 3.430548083,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.258585458
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.362304042
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.388446792
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.416448625
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.618392292
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.635104542
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.944371917
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.963610083
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.3078675
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.406065458
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.42969
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-after-2",
+      "seconds": 3.437630459,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.257787334
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.309314375
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.337812334
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.361509375
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.553403542
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.565705209
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.871344167
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.927267834
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.302952
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.412616625
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.437548209
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-2-explicit-after-1",
+      "seconds": 3.531220834,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.2580435
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.416047542
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.444034209
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.46915325
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.700332125
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.717502167
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.297895334
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.319244209
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.451898875
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.517843167
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.530478334
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-2-shim-before-1",
+      "seconds": 4.178018792,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-2-shim-before-2",
+      "seconds": 4.234531708,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-2-shim-before-0",
+      "seconds": 4.288307833,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-2-shim-before-3",
+      "seconds": 4.390401208,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-2-shim-after-0",
+      "seconds": 3.266571333,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-2-shim-after-3",
+      "seconds": 3.293457375,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-2-shim-after-1",
+      "seconds": 3.297692959,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-2-shim-after-2",
+      "seconds": 3.403917917,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-2-git-git-0",
+      "seconds": 2.645258417,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-2-git-git-3",
+      "seconds": 2.752101625,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-2-git-git-1",
+      "seconds": 2.757878375,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-2-git-git-2",
+      "seconds": 2.761019,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-3-git-git-1",
+      "seconds": 1.726204042,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-3-git-git-0",
+      "seconds": 1.746194667,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-3-git-git-2",
+      "seconds": 1.751998125,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "git",
+      "mode": "git",
+      "label": "parallel-3-git-git-3",
+      "seconds": 1.752626292,
+      "gitStarts": 2,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-3-shim-after-1",
+      "seconds": 4.323278958,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-3-shim-after-2",
+      "seconds": 4.336597,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-3-shim-after-0",
+      "seconds": 4.546151875,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "shim",
+      "label": "parallel-3-shim-after-3",
+      "seconds": 4.549939167,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-3-shim-before-1",
+      "seconds": 4.067368875,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-3-shim-before-2",
+      "seconds": 4.120294333,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-3-shim-before-3",
+      "seconds": 4.221014042,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "shim",
+      "label": "parallel-3-shim-before-0",
+      "seconds": 4.322814083,
+      "backend": "apfs-clone",
+      "phases": [],
+      "gitStarts": 18,
+      "configGets": 1,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-after-1",
+      "seconds": 2.909864667,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.281303417
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.309975375
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.533226667
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.542859
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.519898042
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.571553417
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.829267875
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.899757
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.909657375
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-after-0",
+      "seconds": 2.973111875,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.255237667
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.3104695
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.340840709
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.368837875
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.560974542
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.569715542
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.59797175
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.619875209
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 2.887499542
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 2.954764459
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 2.97252625
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-after-3",
+      "seconds": 3.252021625,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.254348917
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.368014042
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.399164709
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.427984917
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.63376075
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.646104375
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.973958167
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.006725084
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.165327459
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.237602125
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.251298625
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "after",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-after-2",
+      "seconds": 3.2727275,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.254572084
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.428204542
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.457949292
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.487161292
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.75636475
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.777313459
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.045139
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.064078459
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 3.182553709
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 3.263124125
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 3.2720235
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-before-1",
+      "seconds": 5.538328541,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.329696541
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.363300541
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.6017635
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.61712
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.682746916
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.716796625
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.340575833
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.526786958
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.536839458
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-before-3",
+      "seconds": 5.6176655,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.287366667
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.362924875
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.390081792
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.425227
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.631650458
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.658865458
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 1.872305417
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 1.904822292
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.474727875
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.595146833
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.616944583
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-before-2",
+      "seconds": 5.732649166,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.287603458
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.425469708
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.463675208
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.503869791
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.721808208
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.735536708
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.145301041
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.194578208
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.630281375
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.715615375
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.731880625
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    },
+    {
+      "version": "before",
+      "mode": "explicit",
+      "label": "parallel-3-explicit-before-0",
+      "seconds": 5.772393625,
+      "backend": "apfs-clone",
+      "phases": [
+        {
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)",
+          "seconds": 0.290318375
+        },
+        {
+          "line": "riftri: resumed: lock Git worktree metadata",
+          "seconds": 0.504583334
+        },
+        {
+          "line": "riftri: worktree-add: intent-recorded",
+          "seconds": 0.535923209
+        },
+        {
+          "line": "riftri: worktree-add: git-metadata-created",
+          "seconds": 0.571947084
+        },
+        {
+          "line": "riftri: worktree-add: immutable base cached; reusing it",
+          "seconds": 0.840068834
+        },
+        {
+          "line": "riftri: worktree-add: base-ready",
+          "seconds": 0.867419625
+        },
+        {
+          "line": "riftri: worktree-add: view-created",
+          "seconds": 2.313471625
+        },
+        {
+          "line": "riftri: worktree-add: git-pointer-restored",
+          "seconds": 2.336349542
+        },
+        {
+          "line": "riftri: worktree-add: index-synchronized",
+          "seconds": 5.673934084
+        },
+        {
+          "line": "riftri: worktree-add: clean-verified",
+          "seconds": 5.757106792
+        },
+        {
+          "line": "riftri: worktree-add: active",
+          "seconds": 5.771631
+        }
+      ],
+      "gitStarts": 14,
+      "configGets": 0,
+      "configBatches": 1,
+      "verifiedAndRemoved": true
+    }
+  ],
+  "batches": [
+    {
+      "round": 0,
+      "version": "before",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 5.225272625,
+      "volumeDeltaBytes": 45449216
+    },
+    {
+      "round": 0,
+      "version": "after",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 3.438702709,
+      "volumeDeltaBytes": 37683200
+    },
+    {
+      "round": 0,
+      "version": "before",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 5.26108425,
+      "volumeDeltaBytes": 28266496
+    },
+    {
+      "round": 0,
+      "version": "after",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 3.454888875,
+      "volumeDeltaBytes": 36659200
+    },
+    {
+      "round": 0,
+      "version": "git",
+      "mode": "git",
+      "workers": 4,
+      "seconds": 2.85001325,
+      "volumeDeltaBytes": 386060288
+    },
+    {
+      "round": 1,
+      "version": "git",
+      "mode": "git",
+      "workers": 4,
+      "seconds": 1.884447916,
+      "volumeDeltaBytes": 379793408
+    },
+    {
+      "round": 1,
+      "version": "after",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 3.747084792,
+      "volumeDeltaBytes": 35823616
+    },
+    {
+      "round": 1,
+      "version": "before",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 5.938233416,
+      "volumeDeltaBytes": 50544640
+    },
+    {
+      "round": 1,
+      "version": "after",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 4.219189917,
+      "volumeDeltaBytes": 38526976
+    },
+    {
+      "round": 1,
+      "version": "before",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 4.36315025,
+      "volumeDeltaBytes": 49078272
+    },
+    {
+      "round": 2,
+      "version": "before",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 5.260921208,
+      "volumeDeltaBytes": 46235648
+    },
+    {
+      "round": 2,
+      "version": "after",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 3.5351745,
+      "volumeDeltaBytes": 36847616
+    },
+    {
+      "round": 2,
+      "version": "before",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 4.394996833,
+      "volumeDeltaBytes": 49082368
+    },
+    {
+      "round": 2,
+      "version": "after",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 3.408959875,
+      "volumeDeltaBytes": 43118592
+    },
+    {
+      "round": 2,
+      "version": "git",
+      "mode": "git",
+      "workers": 4,
+      "seconds": 2.762546125,
+      "volumeDeltaBytes": 388919296
+    },
+    {
+      "round": 3,
+      "version": "git",
+      "mode": "git",
+      "workers": 4,
+      "seconds": 1.754118292,
+      "volumeDeltaBytes": 379932672
+    },
+    {
+      "round": 3,
+      "version": "after",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 4.555333167,
+      "volumeDeltaBytes": 91631616
+    },
+    {
+      "round": 3,
+      "version": "before",
+      "mode": "shim",
+      "workers": 4,
+      "seconds": 4.32743975,
+      "volumeDeltaBytes": 20963328
+    },
+    {
+      "round": 3,
+      "version": "after",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 3.277381375,
+      "volumeDeltaBytes": 18747392
+    },
+    {
+      "round": 3,
+      "version": "before",
+      "mode": "explicit",
+      "workers": 4,
+      "seconds": 5.777087917,
+      "volumeDeltaBytes": -523681792
+    }
+  ],
+  "comparisons": [
+    {
+      "kind": "cold",
+      "baselineMedianSeconds": 4.090056521,
+      "candidateMedianSeconds": 2.988850479,
+      "reductionPercent": 26.92398103414866,
+      "fasterPairs": 7,
+      "pairs": 8
+    },
+    {
+      "kind": "single-explicit",
+      "baselineMedianSeconds": 3.0761167295,
+      "candidateMedianSeconds": 2.068946208,
+      "reductionPercent": 32.741622313653494,
+      "fasterPairs": 8,
+      "pairs": 8
+    },
+    {
+      "kind": "single-shim",
+      "baselineMedianSeconds": 3.0975137085,
+      "candidateMedianSeconds": 2.2082607085,
+      "reductionPercent": 28.7086057943753,
+      "fasterPairs": 8,
+      "pairs": 8
+    },
+    {
+      "kind": "parallel-explicit",
+      "baselineMedianSeconds": 5.2430969165,
+      "candidateMedianSeconds": 3.4869386045,
+      "reductionPercent": 33.49467576068217,
+      "fasterPairs": 4,
+      "pairs": 4
+    },
+    {
+      "kind": "parallel-shim",
+      "baselineMedianSeconds": 4.8280405415,
+      "candidateMedianSeconds": 3.6009868335,
+      "reductionPercent": 25.415149219496257,
+      "fasterPairs": 3,
+      "pairs": 4
+    }
+  ],
+  "plainGit": {
+    "serialMedianSeconds": 1.325566208,
+    "fourWayMedianSeconds": 2.3234970205
+  }
+}

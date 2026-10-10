@@ -1,0 +1,236 @@
+diff --git a/crates/riftri-storage/src/apfs.rs b/crates/riftri-storage/src/apfs.rs
+index f22a998..98b4316 100644
+--- a/crates/riftri-storage/src/apfs.rs
++++ b/crates/riftri-storage/src/apfs.rs
+@@ -62,11 +62,23 @@ fn clone_tree_with_permissions(
+             &mut directories,
+         )?;
+         let read_ahead = read_ahead::ReadAhead::new();
++        let admission = std::sync::OnceLock::new();
+         clone_files(
+             files,
+             writable_bits,
+             file_clone_parallelism(),
+-            &|path, length| read_ahead.advise(path, length),
++            &|path, length| {
++                // Try once, only after every native clone/mode worker joins.
++                // A competing hint pass from this base skips optional reads;
++                // it never waits or weakens clone, Git or integrity checks.
++                if length != 0
++                    && admission
++                        .get_or_init(|| read_ahead::HintAdmission::try_acquire(source))
++                        .is_some()
++                {
++                    read_ahead.advise(path, length);
++                }
++            },
+         )?;
+         for (path, mode) in directories.into_iter().rev() {
+             set_mode(&path, mode)?;
+@@ -335,6 +347,32 @@ mod tests {
+ 
+     use super::{clone_tree, clone_tree_bulk_for_evaluation};
+ 
++    #[test]
++    fn busy_hint_admission_never_blocks_or_changes_native_cloning() {
++        let fixture = tempdir().unwrap();
++        let source = fixture.path().join("base");
++        let expected = fixture.path().join("expected");
++        let destination = fixture.path().join("view");
++        write_fixture(&source, 2, 3, 4096);
++        super::make_tree_read_only(&source).unwrap();
++        clone_tree(&source, &expected).unwrap();
++        super::make_tree_owner_writable(&expected).unwrap();
++        let _held = super::read_ahead::HintAdmission::try_acquire(&source).unwrap();
++        super::clone_tree_owner_writable(&source, &destination).unwrap();
++        assert_tree_matches(&expected, &destination);
++        let private = "directory-00/file-0000.bin";
++        fs::write(destination.join(private), b"private").unwrap();
++        assert_eq!(
++            fs::read(source.join(private)).unwrap(),
++            fs::read(expected.join(private)).unwrap()
++        );
++        assert_eq!(
++            fs::metadata(source.join(private)).unwrap().mode() & 0o222,
++            0
++        );
++        super::make_tree_owner_writable(&source).unwrap();
++    }
++
+     #[test]
+     fn writable_clone_matches_the_two_pass_path_and_preserves_the_base() {
+         let fixture = tempdir().expect("writable clone fixture");
+diff --git a/crates/riftri-storage/src/apfs/read_ahead.rs b/crates/riftri-storage/src/apfs/read_ahead.rs
+index 2f6e79c..e57cb74 100644
+--- a/crates/riftri-storage/src/apfs/read_ahead.rs
++++ b/crates/riftri-storage/src/apfs/read_ahead.rs
+@@ -10,6 +10,46 @@ use std::sync::atomic::{AtomicU64, Ordering};
+ const MAX_FILE_BYTES: u64 = 64 * 1024;
+ const MAX_TREE_BYTES: u64 = 64 * 1024 * 1024;
+ 
++// Coordination for optional hints only, never an integrity or lifecycle lock.
++// The existing source directory inode needs no new durable bookkeeping file.
++pub(super) struct HintAdmission {
++    _directory: fs::File,
++}
++
++impl Drop for HintAdmission {
++    fn drop(&mut self) {
++        // A concurrent fork can briefly inherit this open-file description
++        // before exec closes CLOEXEC handles. Closing only our descriptor
++        // would leave admission held by that duplicate. Explicitly release
++        // this advisory hint lock before the File field closes.
++        // SAFETY: the owned descriptor remains live throughout unlock.
++        let _ = unsafe { libc::flock(self._directory.as_raw_fd(), libc::LOCK_UN) };
++    }
++}
++
++impl HintAdmission {
++    pub(super) fn try_acquire(source: &Path) -> Option<Self> {
++        Self::acquire(source).ok()
++    }
++
++    fn acquire(source: &Path) -> io::Result<Self> {
++        let directory = fs::OpenOptions::new()
++            .read(true)
++            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
++            .open(source)?;
++        // SAFETY: directory owns a live, no-follow directory descriptor.
++        // LOCK_NB never waits for another holder. Drop explicitly releases
++        // admission; process death closes owned handles. A failure of any
++        // kind skips optional hints without failing native creation.
++        if unsafe { libc::flock(directory.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
++            return Err(io::Error::last_os_error());
++        }
++        Ok(Self {
++            _directory: directory,
++        })
++    }
++}
++
+ pub(super) struct ReadAhead {
+     remaining: AtomicU64,
+ }
+@@ -83,6 +123,122 @@ mod tests {
+     use std::os::unix::ffi::OsStrExt;
+     use std::os::unix::fs::{MetadataExt, symlink};
+ 
++    #[test]
++    fn hint_admission_is_exclusive_and_released_without_creating_files() {
++        let fixture = tempfile::tempdir().unwrap();
++        let source = fixture.path().join("base");
++        let other = fixture.path().join("other");
++        fs::create_dir(&source).unwrap();
++        fs::create_dir(&other).unwrap();
++        let first = HintAdmission::try_acquire(&source).expect("first admission");
++        assert!(
++            HintAdmission::try_acquire(&source).is_none(),
++            "a busy base must skip optional hints"
++        );
++        assert!(HintAdmission::try_acquire(&other).is_some());
++        assert_eq!(fs::read_dir(&source).unwrap().count(), 0);
++        drop(first);
++        assert!(HintAdmission::try_acquire(&source).is_some());
++    }
++
++    #[test]
++    fn hint_admission_release_does_not_wait_for_a_duplicated_descriptor() {
++        let fixture = tempfile::tempdir().unwrap();
++        let held = HintAdmission::acquire(fixture.path()).unwrap();
++        // Model the shared open-file description a concurrent fork can retain
++        // briefly before exec closes CLOEXEC descriptors.
++        let inherited = held._directory.try_clone().unwrap();
++        drop(held);
++        let _next = HintAdmission::acquire(fixture.path())
++            .expect("release must not depend on a duplicated descriptor closing");
++        drop(inherited);
++    }
++
++    #[test]
++    fn hint_admission_rejects_links_and_files_and_follows_a_renamed_inode() {
++        let fixture = tempfile::tempdir().unwrap();
++        let source = fixture.path().join("base-名前");
++        let moved = fixture.path().join("moved");
++        let link = fixture.path().join("link");
++        let regular = fixture.path().join("file");
++        fs::create_dir(&source).unwrap();
++        fs::write(&regular, b"unchanged").unwrap();
++        symlink(&source, &link).unwrap();
++        assert!(HintAdmission::try_acquire(&link).is_none());
++        assert!(HintAdmission::try_acquire(&regular).is_none());
++        assert!(HintAdmission::try_acquire(&fixture.path().join("missing")).is_none());
++        let held = HintAdmission::try_acquire(&source).unwrap();
++        // SAFETY: the owned directory descriptor is live for F_GETFD.
++        let flags = unsafe { libc::fcntl(held._directory.as_raw_fd(), libc::F_GETFD) };
++        assert!(flags >= 0);
++        assert_ne!(flags & libc::FD_CLOEXEC, 0);
++        fs::rename(&source, &moved).unwrap();
++        assert!(HintAdmission::try_acquire(&moved).is_none());
++        drop(held);
++        let _next = HintAdmission::acquire(&moved).expect("admission after rename and release");
++        assert_eq!(fs::read(&regular).unwrap(), b"unchanged");
++        assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
++    }
++
++    #[test]
++    fn terminating_another_process_releases_its_hint_admission() {
++        use std::process::{Child, Command, Stdio};
++        use std::time::{Duration, Instant};
++
++        struct ChildGuard(Child);
++        impl Drop for ChildGuard {
++            fn drop(&mut self) {
++                let _ = self.0.kill();
++                let _ = self.0.wait();
++            }
++        }
++        let fixture = tempfile::tempdir().unwrap();
++        let source = fixture.path().join("base");
++        let ready = fixture.path().join("ready");
++        fs::create_dir(&source).unwrap();
++        let mut child = ChildGuard(
++            Command::new(std::env::current_exe().unwrap())
++                .args([
++                    "--exact",
++                    "apfs::read_ahead::tests::hold_hint_admission_child",
++                    "--ignored",
++                ])
++                .env("RIFTRI_TEST_ADMISSION_SOURCE", &source)
++                .env("RIFTRI_TEST_ADMISSION_READY", &ready)
++                .stdin(Stdio::piped())
++                .stdout(Stdio::null())
++                .spawn()
++                .unwrap(),
++        );
++        let deadline = Instant::now() + Duration::from_secs(10);
++        while !ready.exists() {
++            assert!(
++                child.0.try_wait().unwrap().is_none(),
++                "holder exited before admission"
++            );
++            assert!(Instant::now() < deadline, "holder never acquired admission");
++            std::thread::sleep(Duration::from_millis(10));
++        }
++        assert!(HintAdmission::try_acquire(&source).is_none());
++        child.0.kill().unwrap();
++        child.0.wait().unwrap();
++        assert!(HintAdmission::try_acquire(&source).is_some());
++        assert_eq!(fs::read_dir(source).unwrap().count(), 0);
++    }
++
++    #[test]
++    #[ignore = "subprocess fixture invoked by terminating_another_process_releases_its_hint_admission"]
++    fn hold_hint_admission_child() {
++        use std::io::Read;
++
++        let source = std::env::var_os("RIFTRI_TEST_ADMISSION_SOURCE").unwrap();
++        let ready = std::env::var_os("RIFTRI_TEST_ADMISSION_READY").unwrap();
++        let _held = HintAdmission::try_acquire(Path::new(&source)).unwrap();
++        fs::write(ready, b"ready").unwrap();
++        let mut release = [0];
++        let _ = std::io::stdin().read_exact(&mut release);
++    }
++
+     #[test]
+     fn reserves_only_nonempty_bounded_ranges() {
+         let hint = ReadAhead::new();

@@ -1,0 +1,211 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-10-09",
+  "scope": "Git refresh-handoff mechanism only; not a Riftri startup benchmark",
+  "git": "git version 2.50.1 (Apple Git-155)",
+  "platform": "darwin",
+  "release": "25.2.0",
+  "trackedEntries": 257,
+  "cases": [
+    {
+      "optionalLocks": "0",
+      "noRefresh": false,
+      "observations": [
+        {
+          "step": 0,
+          "command": [
+            "reset",
+            "--mixed",
+            "--quiet",
+            "HEAD"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            257
+          ],
+          "lstatCounts": []
+        },
+        {
+          "step": 1,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            0
+          ],
+          "lstatCounts": []
+        },
+        {
+          "step": 2,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            0
+          ],
+          "lstatCounts": []
+        }
+      ]
+    },
+    {
+      "optionalLocks": "0",
+      "noRefresh": true,
+      "observations": [
+        {
+          "step": 0,
+          "command": [
+            "reset",
+            "--mixed",
+            "--quiet",
+            "--no-refresh",
+            "HEAD"
+          ],
+          "indexSha256": "493ad6160766c987840b67ef9fe3294106853e9cb8e69010814e062db08810ce",
+          "refreshScans": [],
+          "lstatCounts": []
+        },
+        {
+          "step": 1,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "493ad6160766c987840b67ef9fe3294106853e9cb8e69010814e062db08810ce",
+          "refreshScans": [
+            257
+          ],
+          "lstatCounts": []
+        },
+        {
+          "step": 2,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "493ad6160766c987840b67ef9fe3294106853e9cb8e69010814e062db08810ce",
+          "refreshScans": [
+            257
+          ],
+          "lstatCounts": []
+        }
+      ]
+    },
+    {
+      "optionalLocks": "1",
+      "noRefresh": false,
+      "observations": [
+        {
+          "step": 0,
+          "command": [
+            "reset",
+            "--mixed",
+            "--quiet",
+            "HEAD"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            257
+          ],
+          "lstatCounts": []
+        },
+        {
+          "step": 1,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            0
+          ],
+          "lstatCounts": []
+        },
+        {
+          "step": 2,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            0
+          ],
+          "lstatCounts": []
+        }
+      ]
+    },
+    {
+      "optionalLocks": "1",
+      "noRefresh": true,
+      "observations": [
+        {
+          "step": 0,
+          "command": [
+            "reset",
+            "--mixed",
+            "--quiet",
+            "--no-refresh",
+            "HEAD"
+          ],
+          "indexSha256": "493ad6160766c987840b67ef9fe3294106853e9cb8e69010814e062db08810ce",
+          "refreshScans": [],
+          "lstatCounts": []
+        },
+        {
+          "step": 1,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            257
+          ],
+          "lstatCounts": []
+        },
+        {
+          "step": 2,
+          "command": [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all"
+          ],
+          "indexSha256": "c642f783272283ade41bee7637ec1eaa5cd4265a44af0809777611545c4c35ac",
+          "refreshScans": [
+            0
+          ],
+          "lstatCounts": []
+        }
+      ]
+    }
+  ],
+  "complete": true,
+  "sourceScript": "git-refresh-handoff.mjs",
+  "sourceScriptSha256": "81723c31e64155c33d5b829637d579e1fb06112573da5dc5156c0371be3d6090",
+  "rawResultsSha256": "ed96deb0af27189df9d9ab4989f0b3db268b2834a30255cf73016267e64f6073",
+  "decision": "Do not adopt unconditional no-refresh; optional-locks-disabled status repeats the full content scan.",
+  "caveats": [
+    "One disposable 257-file repository using isolated temporary indexes; not native COW views or full Riftri lifecycle.",
+    "Old modification timestamps avoid a racy-timestamp fixture; no timing improvement is claimed.",
+    "Sparse, FSMonitor, inherited-lock settings and recovery still need evaluation for any future guarded implementation."
+  ]
+}

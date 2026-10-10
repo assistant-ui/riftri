@@ -1,0 +1,711 @@
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const { createHash } = require("node:crypto");
+const { gunzipSync } = require("node:zlib");
+const { test } = require("node:test");
+const root = path.resolve(__dirname, "../..");
+const directory = path.join(root, "docs/benchmarks");
+const report = JSON.parse(fs.readFileSync(path.join(directory, "apfs-stage-local-2026-10-09.json")));
+const median = values => { const sorted = [...values].sort((a,b) => a-b); return (sorted[(sorted.length-1)>>1] + sorted[sorted.length>>1])/2; };
+
+test("diagnostic patches retain exact bytes on Windows checkouts", () => {
+  assert.ok(fs.readFileSync(path.join(root, ".gitattributes"), "utf8").split(/\r?\n/).includes("*.patch text eol=lf"));
+});
+
+test("stage diagnostics stay in explicit build patches, not the normal Rust runtime", () => {
+  for (const file of ["crates/riftri-storage/src/apfs.rs", "crates/riftri-core/src/worktree.rs"]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /DiagnosticStage|DIAGNOSTIC_HINTS|riftri: journal-stage:/);
+  }
+  for (const [file, expected] of [["apfs-stage-diagnostic.patch", report.patchSha256], ["apfs-stage-control.patch", report.controlPatchSha256]]) {
+    assert.equal(createHash("sha256").update(fs.readFileSync(path.join(directory, file))).digest("hex"), expected);
+  }
+  assert.notEqual(report.controlSha256, report.hintsSha256);
+});
+
+test("local stage diagnosis retains all observations and labels its limits", () => {
+  assert.equal(report.kind, "diagnostic, not a performance claim");
+  assert.equal(report.stageDiagnostics, true);
+  assert.equal(report.complete, true);
+  assert.equal(report.samples.length, 33);
+  assert.equal(report.batches.length, 8);
+  assert.equal(report.finalActiveViews, 0);
+  assert.equal(report.finalBases, 0);
+  assert.equal(report.finalDiagnosticIssues, 0);
+  for (const sample of report.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.indexScanned, report.trackedEntries);
+    assert.deepEqual(sample.stackSamples, []);
+  }
+  for (const label of ["baseline", "advice"]) {
+    const stages = {};
+    for (const sample of report.samples.filter(sample => sample.round > 0 && sample.label === label)) {
+      for (const phase of sample.phases) {
+        const match = /^riftri: (apfs|journal)-stage: finish (\S+) pid=\d+ microseconds=(\d+)$/.exec(phase.line);
+        if (match) (stages[`${match[1]}:${match[2]}`] ??= []).push(Number(match[3])/1000);
+      }
+    }
+    assert.deepEqual(Object.keys(stages).sort(), Object.keys(report.summaries[label]).sort());
+    for (const [stage, values] of Object.entries(stages)) {
+      assert.equal(values.length, 16);
+      assert.deepEqual(report.summaries[label][stage], { samples:values.length, medianMilliseconds:median(values), maximumMilliseconds:Math.max(...values) });
+    }
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /not another speedup claim/);
+  assert.match(markdown, /no\s+timeout reproduced locally/);
+  assert.match(markdown, /not a causal proof/);
+});
+
+test("hosted stage diagnosis retains complete samples, summaries and native stacks", () => {
+  const hosted = JSON.parse(fs.readFileSync(path.join(directory, "apfs-stage-ci-2026-10-09.json")));
+  assert.equal(hosted.kind, "diagnostic, not a performance claim");
+  assert.equal(hosted.fixtures.length, 2);
+  assert.equal(hosted.fixtures.reduce((total, run) => total + run.samples.length, 0), 82);
+  assert.equal(hosted.fixtures.reduce((total, run) => total + run.batches.length, 0), 20);
+  assert.equal(hosted.patchSha256, report.patchSha256);
+  assert.equal(hosted.controlPatchSha256, report.controlPatchSha256);
+  const stacks = [];
+  for (const run of hosted.fixtures) {
+    assert.equal(run.stageDiagnostics, true);
+    assert.equal(run.complete, true);
+    assert.equal(run.failure, null);
+    assert.equal(run.finalActiveViews, 0);
+    assert.equal(run.finalBases, 0);
+    assert.equal(run.finalDiagnosticIssues, 0);
+    assert.equal(run.samples.length, 1 + 2 * run.rounds * run.concurrency);
+    assert.equal(run.batches.length, 2 * run.rounds);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(sample.indexScanned, run.trackedEntries);
+      assert.equal(sample.indexEntries, run.trackedEntries);
+      const pending = new Set();
+      for (const phase of sample.phases) {
+        const match = /^riftri: (apfs|journal)-stage: (start|finish) (\S+) pid=(\d+)(?: microseconds=(\d+))?$/.exec(phase.line);
+        if (!match) continue;
+        const key = `${match[1]}:${match[3]}:${match[4]}`;
+        if (match[2] === "start") {
+          assert.equal(pending.has(key), false);
+          pending.add(key);
+        } else {
+          assert.ok(pending.delete(key), `unmatched finish: ${key}`);
+          assert.ok(Number.isFinite(Number(match[5])));
+        }
+      }
+      assert.equal(pending.size, 0);
+      for (const stack of sample.stackSamples) {
+        assert.equal(sample.label, "baseline");
+        assert.equal(sample.round, 2);
+        assert.equal(run.name, "synthetic-four");
+        assert.equal(stack.code, 0);
+        assert.equal(stack.timedOut, false);
+        assert.equal(createHash("sha256").update(stack.text).digest("hex"), stack.sha256);
+        assert.match(stack.text, /Call graph:/);
+        assert.match(stack.text, /riftri-stage-control/);
+        stacks.push(stack);
+      }
+    }
+    for (const label of ["baseline", "advice"]) {
+      const stages = {};
+      for (const sample of run.samples.filter(sample => sample.round > 0 && sample.label === label)) {
+        for (const phase of sample.phases) {
+          const match = /^riftri: (apfs|journal)-stage: finish (\S+) pid=\d+ microseconds=(\d+)$/.exec(phase.line);
+          if (match) (stages[`${match[1]}:${match[2]}`] ??= []).push(Number(match[3])/1000);
+        }
+      }
+      assert.deepEqual(Object.keys(stages).sort(), Object.keys(run.summaries[label]).sort());
+      for (const [stage, values] of Object.entries(stages)) {
+        assert.equal(values.length, run.rounds * run.concurrency);
+        assert.deepEqual(run.summaries[label][stage], { samples:values.length, medianMilliseconds:median(values), maximumMilliseconds:Math.max(...values) });
+      }
+    }
+  }
+  assert.equal(stacks.length, 3);
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /does not explain or resolve/);
+  assert.match(markdown, /overall CI run failed/);
+  assert.match(markdown, /child Git processes were not sampled/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  apfs-stage-diagnostics:/m);
+});
+
+test("the losing single-issuer experiment stays recorded rather than adopted", () => {
+  const experiment = JSON.parse(fs.readFileSync(path.join(directory, "apfs-single-issuer-2026-10-09.json")));
+  assert.equal(experiment.decision, "rejected; scheduling change reverted");
+  assert.equal(experiment.stageDiagnostics, false);
+  assert.match(experiment.baselineDescription, /not main/);
+  assert.match(experiment.candidatePatch, /deferred_read_ahead_uses_one_issuer/);
+  assert.equal(experiment.complete, true);
+  assert.equal(experiment.samples.length, 65);
+  assert.equal(experiment.batches.length, 16);
+  assert.equal(experiment.finalActiveViews, 0);
+  assert.equal(experiment.finalBases, 0);
+  assert.equal(experiment.finalDiagnosticIssues, 0);
+  for (const sample of experiment.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.indexScanned, 5864);
+    assert.equal(sample.indexEntries, 5864);
+  }
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(experiment.summary[label].medianMilliseconds,
+      median(experiment.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+  }
+  assert.equal(experiment.summary.fasterPairs, experiment.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < experiment.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(experiment.summary.wallReductionPercent,
+    100 * (1 - experiment.summary.advice.medianMilliseconds / experiment.summary.baseline.medianMilliseconds));
+  assert.equal(experiment.summary.fasterPairs, 2);
+  assert.ok(experiment.summary.wallReductionPercent < 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8"),
+    /deferred_read_ahead_uses_one_issuer/);
+});
+
+test("the losing hint time budget retains all successful checks without shipping", () => {
+  const experiment = JSON.parse(fs.readFileSync(path.join(directory, "apfs-time-admission-2026-10-09.json")));
+  assert.equal(experiment.decision, "rejected; runtime experiment reverted");
+  assert.equal(experiment.complete, true);
+  assert.equal(experiment.stageDiagnostics, false);
+  assert.equal(experiment.samples.length, 65);
+  assert.equal(experiment.batches.length, 16);
+  assert.equal(experiment.finalActiveViews, 0);
+  assert.equal(experiment.finalBases, 0);
+  assert.equal(experiment.finalDiagnosticIssues, 0);
+  assert.match(experiment.candidatePatch, /MAX_ISSUANCE_TIME: Duration = Duration::from_millis\(50\)/);
+  assert.match(experiment.baselineDescription, /not main/);
+  for (const sample of experiment.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.indexScanned, 5864);
+    assert.equal(sample.indexEntries, 5864);
+  }
+  for (const label of ["baseline", "advice"]) assert.equal(experiment.summary[label].medianMilliseconds,
+    median(experiment.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+  assert.equal(experiment.summary.fasterPairs, experiment.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < experiment.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(experiment.summary.wallReductionPercent,
+    100 * (1 - experiment.summary.advice.medianMilliseconds / experiment.summary.baseline.medianMilliseconds));
+  assert.equal(experiment.summary.fasterPairs, 2);
+  assert.ok(experiment.summary.wallReductionPercent < 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs/read_ahead.rs"), "utf8"), /MAX_ISSUANCE_TIME/);
+});
+
+test("the losing directory-handle prototype retains all observations without shipping", () => {
+  const experiment = JSON.parse(fs.readFileSync(path.join(directory, "apfs-directory-handles-2026-10-09.json")));
+  assert.equal(experiment.decision, "rejected; runtime experiment reverted");
+  assert.equal(experiment.complete, true);
+  assert.equal(experiment.stageDiagnostics, false);
+  assert.equal(experiment.samples.length, 65);
+  assert.equal(experiment.batches.length, 16);
+  assert.equal(experiment.finalActiveViews, 0);
+  assert.equal(experiment.finalBases, 0);
+  assert.equal(experiment.finalDiagnosticIssues, 0);
+  assert.match(experiment.candidatePatch, /libc::clonefileat/);
+  assert.match(experiment.candidatePatch, /bounded_workers_drop_every_private_state_before_returning_an_error/);
+  assert.match(experiment.baselineDescription, /not main/);
+  for (const sample of experiment.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.indexScanned, 5864);
+    assert.equal(sample.indexEntries, 5864);
+  }
+  for (const label of ["baseline", "advice"]) assert.equal(experiment.summary[label].medianMilliseconds,
+    median(experiment.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+  assert.equal(experiment.summary.fasterPairs, experiment.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < experiment.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(experiment.summary.wallReductionPercent,
+    100 * (1 - experiment.summary.advice.medianMilliseconds / experiment.summary.baseline.medianMilliseconds));
+  assert.equal(experiment.summary.fasterPairs, 2);
+  assert.ok(experiment.summary.wallReductionPercent < 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8"), /struct CloneWorker/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/parallel.rs"), "utf8"), /try_for_each_bounded_with_state/);
+});
+
+test("refresh-handoff evidence retains the optional-locks repeated-scan regression", () => {
+  const report = JSON.parse(fs.readFileSync(path.join(directory, "git-refresh-handoff-2026-10-09.json")));
+  assert.equal(report.complete, true);
+  assert.match(report.scope, /not a Riftri startup benchmark/);
+  assert.equal(report.trackedEntries, 257);
+  assert.equal(report.cases.length, 4);
+  assert.equal(new Set(report.cases.map(c => `${c.optionalLocks}-${c.noRefresh}`)).size, 4);
+  const source = fs.readFileSync(path.join(directory, report.sourceScript));
+  assert.equal(createHash("sha256").update(source).digest("hex"), report.sourceScriptSha256);
+  for (const entry of report.cases) {
+    assert.ok(["0", "1"].includes(entry.optionalLocks));
+    assert.equal(entry.observations.length, 3);
+    const [reset, first, second] = entry.observations;
+    assert.deepEqual(reset.refreshScans, entry.noRefresh ? [] : [257]);
+    assert.deepEqual(first.refreshScans, entry.noRefresh ? [257] : [0]);
+    assert.deepEqual(second.refreshScans, entry.noRefresh && entry.optionalLocks === "0" ? [257] : [0]);
+    assert.equal(first.indexSha256 === reset.indexSha256, !(entry.noRefresh && entry.optionalLocks === "1"));
+    assert.equal(first.indexSha256, second.indexSha256);
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /not a startup benchmark or a native/);
+  assert.match(markdown, /No Git behavior is changed/);
+});
+
+test("size-selective hint evidence retains all outcomes without shipping the cutoff", () => {
+  const experiment = JSON.parse(fs.readFileSync(path.join(directory, "apfs-large-file-hints-2026-10-09.json")));
+  const patch = fs.readFileSync(path.join(directory, "apfs-large-file-hints.patch"));
+  assert.equal(createHash("sha256").update(patch).digest("hex"), experiment.candidatePatchSha256);
+  assert.match(patch.toString(), /MIN_FILE_BYTES: u64 = 4 \* 1024/);
+  assert.match(patch.toString(), /small_files_do_not_consume_prefetch_budget/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs/read_ahead.rs"), "utf8"), /MIN_FILE_BYTES/);
+  assert.equal(experiment.decision, "not adopted; cutoff removed from normal source");
+  assert.equal(experiment.complete, true);
+  assert.equal(experiment.stageDiagnostics, false);
+  assert.match(experiment.baselineDescription, /not main/);
+  assert.equal(experiment.samples.length, 65);
+  assert.equal(experiment.batches.length, 16);
+  assert.equal(experiment.finalActiveViews, 0);
+  assert.equal(experiment.finalBases, 0);
+  assert.equal(experiment.finalDiagnosticIssues, 0);
+  for (const sample of experiment.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(sample.indexScanned, 5864);
+    assert.equal(sample.indexEntries, 5864);
+    const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+    assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+  }
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(experiment.summary[label].medianMilliseconds,
+      median(experiment.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+    assert.equal(experiment.summary[label].medianCpuSecondsPerView,
+      median(experiment.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+  }
+  assert.equal(experiment.summary.fasterPairs, experiment.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < experiment.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(experiment.summary.wallReductionPercent,
+    100 * (1 - experiment.summary.advice.medianMilliseconds / experiment.summary.baseline.medianMilliseconds));
+  assert.equal(experiment.summary.fasterPairs, 4);
+  assert.ok(experiment.summary.wallReductionPercent < 0);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  apfs-size-selective-evaluation:/m);
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /not traced syscall counts or a measured speedup/);
+  assert.match(markdown, /not a universal slowdown estimate/);
+});
+
+test("overlap evidence retains both full comparisons without shipping the scheduling prototype", () => {
+  const patch = fs.readFileSync(path.join(directory, "apfs-overlap-hints.patch"));
+  const patchSha = createHash("sha256").update(patch).digest("hex");
+  assert.match(patch.toString(), /overlaps_the_operation_and_joins_admitted_hints_on_error/);
+  assert.match(patch.toString(), /panic_stops_admission_and_joins_workers_before_unwinding/);
+  for (const file of ["crates/riftri-storage/src/apfs/read_ahead.rs", "crates/riftri-core/src/worktree.rs"]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /ReadAheadPlan|clone_tree_for_index_sync|read_ahead\.during/);
+  }
+  for (const [name, entries, wins] of [["reference", 5864, 6], ["synthetic", 4097, 3]]) {
+    const run = JSON.parse(fs.readFileSync(path.join(directory, `apfs-overlap-${name}-2026-10-09.json`)));
+    assert.equal(run.candidatePatchSha256, patchSha);
+    assert.equal(run.decision, "not adopted; overlap removed from normal source");
+    assert.match(run.baselineDescription, /not main/);
+    assert.equal(run.complete, true);
+    assert.equal(run.failure, null);
+    assert.equal(run.stageDiagnostics, false);
+    assert.equal(run.samples.length, 65);
+    assert.equal(run.batches.length, 16);
+    assert.equal(run.finalActiveViews, 0);
+    assert.equal(run.finalBases, 0);
+    assert.equal(run.finalDiagnosticIssues, 0);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(Number(sample.indexScanned), entries);
+      assert.equal(Number(sample.indexEntries), entries);
+      const reset = sample.gitCommands.find(command => command.argv[1] === "reset");
+      assert.equal(Number(reset.counters.find(counter => counter.key === "refresh/sum_scan").value), entries);
+      const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+      assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+    }
+    for (const label of ["baseline", "advice"]) {
+      assert.equal(run.summary[label].medianMilliseconds,
+        median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+      assert.equal(run.summary[label].medianCpuSecondsPerView,
+        median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+    }
+    assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" &&
+      batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+    assert.equal(run.summary.fasterPairs, wins);
+    assert.equal(run.summary.wallReductionPercent,
+      100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+    assert.ok(Math.abs(run.summary.wallReductionPercent) < 1);
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /small, mixed changes do not justify/);
+  assert.match(markdown, /not proof\s+that overlap can never help/);
+});
+
+test("fixed clone-worker cap evidence retains the serial latency tradeoff", () => {
+  const patch = fs.readFileSync(path.join(directory, "apfs-two-clone-workers.patch"));
+  const patchSha = createHash("sha256").update(patch).digest("hex");
+  assert.match(patch.toString(), /worker_limit\.clamp\(1, 2\)/);
+  assert.match(patch.toString(), /two_clone_workers_still_allow_four_deferred_hint_workers/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8"), /native_clone_workers/);
+  for (const [mode, count, wins] of [["four", 65, 6], ["serial", 17, 4]]) {
+    const run = JSON.parse(fs.readFileSync(path.join(directory, `apfs-two-clone-workers-${mode}-2026-10-09.json`)));
+    assert.equal(run.candidatePatchSha256, patchSha);
+    assert.equal(run.decision, "not adopted; fixed clone-worker cap removed from normal source");
+    assert.match(run.baselineDescription, /not main/);
+    assert.equal(run.complete, true);
+    assert.equal(run.failure, null);
+    assert.equal(run.stageDiagnostics, false);
+    assert.equal(run.samples.length, count);
+    assert.equal(run.batches.length, 16);
+    assert.equal(run.finalActiveViews, 0);
+    assert.equal(run.finalBases, 0);
+    assert.equal(run.finalDiagnosticIssues, 0);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(Number(sample.indexScanned), 5864);
+      assert.equal(Number(sample.indexEntries), 5864);
+      const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+      assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+    }
+    for (const label of ["baseline", "advice"]) {
+      assert.equal(run.summary[label].medianMilliseconds,
+        median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+      assert.equal(run.summary[label].medianCpuSecondsPerView,
+        median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+    }
+    assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" &&
+      batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+    assert.equal(run.summary.fasterPairs, wins);
+    assert.equal(run.summary.wallReductionPercent,
+      100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+    assert.ok(run.summary.advice.medianCpuSecondsPerView < run.summary.baseline.medianCpuSecondsPerView);
+    assert.equal(run.summary.wallReductionPercent > 0, mode === "four");
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /resource\/latency tradeoff, not a\s+consistent startup win/);
+});
+
+test("per-base hint admission evidence keeps its release failure and slow Git refreshes", () => {
+  const patch = fs.readFileSync(path.join(directory, "apfs-hint-admission.patch"));
+  const run = JSON.parse(fs.readFileSync(path.join(directory, "apfs-hint-admission-2026-10-09.json")));
+  assert.equal(run.candidatePatchSha256, createHash("sha256").update(patch).digest("hex"));
+  assert.match(patch.toString(), /libc::LOCK_EX \| libc::LOCK_NB/);
+  assert.match(patch.toString(), /impl Drop for HintAdmission/);
+  assert.match(patch.toString(), /hint_admission_release_does_not_wait_for_a_duplicated_descriptor/);
+  assert.match(patch.toString(), /terminating_another_process_releases_its_hint_admission/);
+  for (const file of ["crates/riftri-storage/src/apfs.rs", "crates/riftri-storage/src/apfs/read_ahead.rs"]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /HintAdmission/);
+  }
+  assert.equal(run.decision, "not adopted; hint admission guard removed from normal source");
+  assert.match(run.baselineDescription, /not main/);
+  assert.equal(run.preBenchmarkFailure.reproducedErrorKind, "WouldBlock");
+  assert.equal(run.preBenchmarkFailure.reproducedErrorCode, 35);
+  assert.match(run.preBenchmarkFailure.attributionLimit, /did not trace/);
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.workspacePassed, 707);
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.topLevelPassed, 700);
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.counting, "passing executions including subprocess helpers");
+  assert.equal(run.preBenchmarkFailure.verificationAfterFix.ignoredChildHelperInvokedByActiveParentTest, true);
+  assert.equal(run.complete, true);
+  assert.equal(run.failure, null);
+  assert.equal(run.stageDiagnostics, false);
+  assert.equal(run.samples.length, 65);
+  assert.equal(run.batches.length, 16);
+  assert.equal(run.finalActiveViews, 0);
+  assert.equal(run.finalBases, 0);
+  assert.equal(run.finalDiagnosticIssues, 0);
+  for (const sample of run.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(Number(sample.indexScanned), 5864);
+    assert.equal(Number(sample.indexEntries), 5864);
+    const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+    assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+  }
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(run.summary[label].medianMilliseconds,
+      median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+    assert.equal(run.summary[label].medianCpuSecondsPerView,
+      median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+  }
+  assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" &&
+    batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(run.summary.fasterPairs, 4);
+  assert.equal(run.summary.wallReductionPercent,
+    100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+  assert.ok(run.summary.wallReductionPercent < 0);
+  const slow = run.samples.filter(sample => sample.round === 6 && sample.label === "advice" && sample.indexRefreshSeconds > 18);
+  assert.equal(slow.length, 3);
+  for (const sample of slow) {
+    const reset = sample.gitCommands.find(command => command.argv[1] === "reset");
+    assert.equal(sample.indexRefreshSeconds, reset.regions.find(region => region.category === "index" && region.label === "refresh").seconds);
+  }
+  for (const sample of run.samples.filter(sample => sample.round === 6 && sample.label === "advice")) {
+    const reset = sample.gitCommands.find(command => command.argv.includes("reset"));
+    const preload = reset.regions.findIndex(region => region.category === "index" && region.label === "preload");
+    const refresh = reset.regions.findIndex(region => region.category === "index" && region.label === "refresh");
+    assert.ok(preload >= 0 && preload < refresh);
+    assert.ok(reset.regions[preload].seconds < 0.025);
+  }
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /prototype-only issue/);
+  assert.match(markdown, /no per-worker hint-admission trace/);
+});
+
+test("Git-child diagnosis retains every read-heavy stack and failed observer without claiming a speedup", () => {
+  const hosted = JSON.parse(fs.readFileSync(path.join(directory, "apfs-git-child-ci-2026-10-09.json")));
+  assert.equal(hosted.kind, "diagnostic, not a performance claim");
+  assert.equal(hosted.fixtures.length, 2);
+  assert.equal(hosted.jobId, 114066628129);
+  assert.equal(hosted.artifact.digest, "sha256:842bc9f8523f4b6b69fc10229feb7747bffbc9b33758171e9125968b24b91aff");
+  assert.equal(hosted.patchSha256, report.patchSha256);
+  assert.equal(hosted.controlPatchSha256, report.controlPatchSha256);
+  let observations = 0, captured = 0, observerTimeouts = 0, unavailable = 0;
+  let mainThreadSamples = 0, readSamples = 0, conversionSamples = 0;
+  for (const run of hosted.fixtures) {
+    assert.equal(run.stageDiagnostics, true);
+    assert.equal(run.complete, true);
+    assert.equal(run.failure, null);
+    assert.equal(run.rounds, 8);
+    assert.equal(run.concurrency, 4);
+    assert.equal(run.samples.length, 65);
+    assert.equal(run.batches.length, 16);
+    assert.deepEqual([run.finalActiveViews, run.finalBases, run.finalDiagnosticIssues], [0, 0, 0]);
+    assert.notEqual(run.controlSha256, run.hintsSha256);
+    for (const sample of run.samples) {
+      assert.equal(sample.success, true);
+      assert.equal(sample.code, 0);
+      assert.equal(sample.timedOut, false);
+      assert.equal(sample.indexScanned, run.trackedEntries);
+      assert.equal(sample.indexEntries, run.trackedEntries);
+      const reset = sample.gitCommands.find(command => command.argv.includes("reset"));
+      assert.equal(sample.indexRefreshSeconds, reset.regions.find(region => region.category === "index" && region.label === "refresh").seconds);
+      for (const stack of sample.stackSamples) {
+        observations++;
+        assert.equal(run.name, "reference-four");
+        assert.equal(sample.label, "baseline");
+        assert.ok([4, 6].includes(sample.round));
+        assert.ok(sample.indexRefreshSeconds > 78 && sample.indexRefreshSeconds < 83);
+        if (stack.skipped) { unavailable++; assert.equal(stack.skipped, "worker no longer identifiable"); continue; }
+        assert.equal(stack.role, "git-child");
+        assert.equal(stack.binary, run.sampleGitBinary);
+        assert.notEqual(stack.pid, stack.parentPid);
+        if (stack.timedOut) {
+          observerTimeouts++;
+          assert.equal(stack.code, null);
+          assert.equal(stack.signal, "SIGTERM");
+          assert.equal(stack.text, null);
+          continue;
+        }
+        captured++;
+        assert.equal(stack.code, 0);
+        assert.equal(createHash("sha256").update(stack.text).digest("hex"), stack.sha256);
+        assert.ok(stack.text.includes(`git [${stack.pid}]`));
+        assert.ok(stack.text.includes(`riftri-stage-control [${stack.parentPid}]`));
+        const graph = stack.text.split("Binary Images:")[0];
+        assert.match(graph, /refresh_index/);
+        mainThreadSamples += Number(graph.match(/Call graph:\s*\n\s*(\d+) Thread_/)[1]);
+        for (const line of graph.split("Sort by top of stack")[1].split("\n")) {
+          const top = line.match(/^\s*(.+?)\s+\(in .+?\)\s+(\d+)\s*$/);
+          if (top?.[1] === "read") readSamples += Number(top[2]);
+          if (top?.[1] === "gather_stats") conversionSamples += Number(top[2]);
+        }
+      }
+    }
+    for (const label of ["baseline", "advice"]) {
+      const stages = {};
+      for (const sample of run.samples.filter(sample => sample.round > 0 && sample.label === label)) {
+        for (const phase of sample.phases) {
+          const match = /^riftri: (apfs|journal)-stage: finish (\S+) pid=\d+ microseconds=(\d+)$/.exec(phase.line);
+          if (match) (stages[`${match[1]}:${match[2]}`] ??= []).push(Number(match[3]) / 1000);
+        }
+      }
+      for (const [stage, values] of Object.entries(stages)) {
+        assert.deepEqual(run.summaries[label][stage], { samples:values.length, medianMilliseconds:median(values), maximumMilliseconds:Math.max(...values) });
+      }
+    }
+  }
+  assert.deepEqual([observations, captured, observerTimeouts, unavailable], [33, 24, 8, 1]);
+  assert.deepEqual([mainThreadSamples, readSamples, conversionSamples], [3345, 2656, 612]);
+  const markdown = fs.readFileSync(path.join(directory, "apfs-stage-diagnostics-2026-10-09.md"), "utf8");
+  assert.match(markdown, /does not identify the kernel-level reason/);
+  assert.match(markdown, /unmeasured hypothesis/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  apfs-git-child-diagnostics:/m);
+});
+
+test("bounded prefix-read evidence retains its latency and CPU regression", () => {
+  const run = JSON.parse(fs.readFileSync(path.join(directory, "apfs-prefix-warming-2026-10-09.json")));
+  const patch = fs.readFileSync(path.join(directory, run.candidatePatch));
+  assert.equal(createHash("sha256").update(patch).digest("hex"), run.candidatePatchSha256);
+  assert.equal(run.candidatePatchSha256, "17b4c7e294d4f6994407814da63f0187276b88c4b64a0689785d4d934d1fab45");
+  assert.match(patch.toString(), /prefix_warming_never_reads_past_the_per_file_cap/);
+  assert.match(patch.toString(), /prefix_warming_handles_short_reads_interruptions_and_real_errors/);
+  assert.doesNotMatch(fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs/read_ahead.rs"), "utf8"), /warm_prefix/);
+  assert.equal(run.complete, true);
+  assert.equal(run.failure, null);
+  assert.equal(run.stageDiagnostics, false);
+  assert.equal(run.samples.length, 65);
+  assert.equal(run.batches.length, 16);
+  assert.deepEqual([run.finalActiveViews, run.finalBases, run.finalDiagnosticIssues], [0, 0, 0]);
+  assert.equal(run.baselineSha256, "d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1");
+  assert.equal(run.candidateSha256, "10b2ba689dc0225039f6edf3a4a9a6e0c163faef844cb56ece9cd7f882fa62c9");
+  for (const sample of run.samples) {
+    assert.equal(sample.success, true);
+    assert.equal(sample.code, 0);
+    assert.equal(sample.timedOut, false);
+    assert.equal(Number(sample.indexScanned), 5864);
+    assert.equal(Number(sample.indexEntries), 5864);
+    const cpu = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+    assert.equal(sample.cpuSeconds, Number(cpu[2]) + Number(cpu[3]));
+  }
+  for (const label of ["baseline", "advice"]) {
+    assert.equal(run.summary[label].medianMilliseconds, median(run.batches.filter(batch => batch.label === label).map(batch => batch.milliseconds)));
+    assert.equal(run.summary[label].medianCpuSecondsPerView, median(run.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => sample.cpuSeconds)));
+  }
+  assert.equal(run.summary.completeComparison, true);
+  assert.equal(run.summary.fasterPairs, run.batches.filter(batch => batch.label === "advice" && batch.milliseconds < run.batches.find(other => other.round === batch.round && other.label === "baseline").milliseconds).length);
+  assert.equal(run.summary.fasterPairs, 4);
+  assert.equal(run.summary.wallReductionPercent, 100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
+  assert.ok(run.summary.wallReductionPercent < 0);
+  assert.ok(run.summary.advice.medianCpuSecondsPerView > run.summary.baseline.medianCpuSecondsPerView);
+});
+
+test("three-runner replication retains every timeout and recomputes the failed acceptance gate", async () => {
+  const { evaluateReplicationFixture } = await import("../../docs/benchmarks/replication-gate.mjs");
+  const compressed = fs.readFileSync(path.join(directory, "apfs-deferred-replication-2026-10-09.json.gz"));
+  assert.equal(createHash("sha256").update(compressed).digest("hex"), "aea666b87ba83081e12460719a0e1f9b3f73dbfbee28e2cc29a79cfad61af00f");
+  const plain = gunzipSync(compressed);
+  assert.equal(createHash("sha256").update(plain).digest("hex"), "0b3fb8f7c6887c7eb8270195482b90af3a6564b887d67c8f1d23f02c8dd7121e");
+  const report = JSON.parse(plain);
+  assert.equal(report.sourceCommit, "88226a2210d1c1cca8b95b7b0a1962164fae0f13");
+  assert.equal(report.baselineCommit, "a58006d7c7b4989a055a967e65d5654281b77ea4");
+  assert.equal(report.runConclusion, "failure");
+  assert.equal(report.overallPerformanceGatePassed, false);
+  assert.deepEqual(report.replicas.map(replica => replica.replica), [1, 2, 3]);
+  const expectedArtifacts = [
+    "sha256:5424a534b79cfd517b17f0ee818d370b04367f34ceaba7e1ab5628b58ea7d4db",
+    "sha256:c86765d41ceef0f2ac3129d9e47b0a02827e20f51468d0dc3a2e667fc8ea6242",
+    "sha256:5f291df6162514855871ea2b2f803ebeac8413b9f322a94d23fbbc750683cddf",
+  ];
+  let samples = 0, batches = 0, candidateTimeouts = 0, baselineTimeouts = 0, passed = 0, complete = 0;
+  for (const replica of report.replicas) {
+    assert.equal(replica.jobConclusion, "failure");
+    assert.equal(replica.gatePassed, false);
+    assert.equal(replica.artifact.digest, expectedArtifacts[replica.replica - 1]);
+    assert.deepEqual(replica.fixtures.map(fixture => fixture.name), ["serial-many", "concurrent-four", "reference-serial", "reference-four"]);
+    for (const fixture of replica.fixtures) {
+      const concurrency = fixture.name.endsWith("four") ? 4 : 1;
+      assert.deepEqual(fixture.gate, evaluateReplicationFixture(fixture, concurrency));
+      assert.match(fixture.rawResultsSha256, /^[a-f0-9]{64}$/);
+      samples += fixture.samples.length; batches += fixture.batches.length;
+      candidateTimeouts += fixture.gate.candidateTimeouts;
+      baselineTimeouts += fixture.gate.baselineTimeouts;
+      passed += Number(fixture.gate.gatePassed); complete += Number(fixture.complete);
+      for (const sample of fixture.samples) {
+        assert.match(sample.traceSha256, /^[a-f0-9]{64}$/);
+        assert.deepEqual(sample.traceErrors, []);
+        if (sample.success) {
+          assert.equal(Number(sample.indexScanned), fixture.trackedEntries);
+          assert.equal(Number(sample.indexEntries), fixture.trackedEntries);
+        } else {
+          assert.equal(sample.label, "advice");
+          assert.equal(sample.timedOut, true);
+          assert.equal(fixture.complete, false);
+          assert.equal(fixture.gate.candidateMedianMilliseconds, null);
+          assert.equal(fixture.final, null);
+        }
+      }
+    }
+  }
+  assert.deepEqual([samples, batches, candidateTimeouts, baselineTimeouts, passed, complete], [272, 132, 20, 0, 3, 7]);
+  const workers = report.replicas.flatMap(replica => replica.fixtures.flatMap(fixture => fixture.samples));
+  const stalledBeforeViewCreated = workers.filter(sample => sample.timedOut &&
+    sample.phases.at(-1).line === "riftri: worktree-add: base-ready");
+  assert.equal(stalledBeforeViewCreated.length, 17);
+  const serialTails = report.replicas.flatMap(replica => replica.fixtures.filter(fixture => fixture.concurrency === 1)
+    .flatMap(fixture => fixture.samples.filter(sample => sample.success && sample.milliseconds > 30000)));
+  assert.equal(serialTails.length, 3);
+  for (const sample of serialTails) {
+    assert.equal(sample.label, "advice");
+    const baseReady = sample.phases.find(phase => phase.line === "riftri: worktree-add: base-ready").milliseconds;
+    const viewCreated = sample.phases.find(phase => phase.line === "riftri: worktree-add: view-created").milliseconds;
+    assert.ok(viewCreated - baseReady > 50000);
+  }
+  assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  deferred-read-ahead-replication:/m);
+});
+
+test("post-journal scheduling retains all four comparisons without shipping a losing prototype", async () => {
+  const { evaluateReplicationFixture } = await import("../../docs/benchmarks/replication-gate.mjs");
+  const compressed = fs.readFileSync(path.join(directory, "apfs-post-journal-hints-2026-10-09.json.gz"));
+  assert.equal(createHash("sha256").update(compressed).digest("hex"), "d2fe3639675c71b3364777eca7190b6b59b3a08b9d3715ceb3479770e9a609aa");
+  const plain = gunzipSync(compressed);
+  assert.equal(createHash("sha256").update(plain).digest("hex"), "3ed276461a7f22ed2745be7976627c228c536f9e85e54ef013c3a5cf6c5a76a2");
+  const report = JSON.parse(plain);
+  assert.equal(report.overallPerformanceGatePassed, false);
+  assert.match(report.decision, /not adopted/);
+  assert.equal(report.sourceCommit, "7d9148ca30953b548cd473a029bdf732b3fc92da");
+  assert.equal(report.baselineCommit, "a58006d7c7b4989a055a967e65d5654281b77ea4");
+  const patch = fs.readFileSync(path.join(directory, report.candidatePatch));
+  assert.equal(createHash("sha256").update(patch).digest("hex"), report.candidatePatchSha256);
+  assert.equal(report.candidatePatchSha256, "0de519714b3a16dc88c314f859afb44561822cdf9149f53ca357237ebb630f9a");
+  assert.match(patch.toString(), /deferred_plan_follows_activation_and_joins_every_hint_before_returning/);
+  assert.match(patch.toString(), /deferred_plan_is_optional_and_failed_clones_return_no_plan/);
+  for (const file of ["crates/riftri-storage/src/apfs/read_ahead.rs", "crates/riftri-core/src/worktree.rs"]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /ReadAheadPlan|clone_tree_for_index_sync|read_ahead\.issue/);
+  }
+  assert.deepEqual(report.fixtures.map(fixture => fixture.name), ["serial-many", "concurrent-four", "reference-serial", "reference-four"]);
+  let samples = 0, batches = 0;
+  for (const fixture of report.fixtures) {
+    const data = fixture.data;
+    const concurrency = fixture.name.endsWith("four") ? 4 : 1;
+    assert.deepEqual(fixture.gate, evaluateReplicationFixture(data, concurrency));
+    assert.equal(fixture.gate.completeComparison, true);
+    assert.deepEqual(fixture.failedWorkerTraces, []);
+    assert.equal(data.binarySha256, "33240072e0f00873ecf588f0917dab1e198a5f9bd246bc3a3d195ad981f1c80a");
+    assert.equal(data.candidateSha256, "2bd874e16bcd53c22214349d6a5a3bd4b4caf25fbb634388835eded3f5612e8a");
+    samples += data.samples.length; batches += data.batches.length;
+    for (const sample of data.samples) {
+      const reset = sample.gitCommands.find(command => command.argv[1] === "reset");
+      assert.equal(Number(reset.counters.find(counter => counter.key === "refresh/sum_scan").value), data.files);
+      assert.equal(Number(reset.counters.find(counter => counter.key === "write/cache_nr").value), data.files);
+    }
+    const cpu = label => median(data.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => {
+      const match = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+      return Number(match[2]) + Number(match[3]);
+    }));
+    assert.ok(cpu("advice") > cpu("baseline"), "the CPU increase must remain visible");
+  }
+  assert.deepEqual([samples, batches], [164, 64]);
+  assert.deepEqual(report.fixtures.map(fixture => fixture.gate.fasterPairs), [4, 1, 7, 0]);
+  assert.deepEqual(report.fixtures.map(fixture => fixture.gate.gatePassed), [false, false, true, false]);
+});
+
+test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
+  const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
+  assert.equal(bulk.measurement.production_eligible, false);
+  assert.equal(bulk.measurement.samples.length, 16);
+  assert.equal(bulk.correctness.directoryXattrParity, false);
+  assert.equal(bulk.correctness.aclParity, "not established");
+  assert.equal(bulk.correctness.fileFlagParity, "not established");
+  assert.equal(bulk.correctness.endToEndGitLifecycle, "not measured");
+  assert.equal(bulk.correctness.physicalVolumeAllocation, "not measured");
+  assert.equal(bulk.platformContract.directDirectoryClone, "discouraged by Apple");
+  assert.equal(bulk.platformContract.recursiveForceClone, "not supported by copyfile");
+  assert.equal(bulk.summary.iterativeMedianMicroseconds, median(bulk.measurement.samples.filter(s => !s.candidate).map(s => s.microseconds)));
+  assert.equal(bulk.summary.bulkMedianMicroseconds, median(bulk.measurement.samples.filter(s => s.candidate).map(s => s.microseconds)));
+  assert.equal(bulk.summary.reductionPercent, 100 * (1 - bulk.summary.bulkMedianMicroseconds / bulk.summary.iterativeMedianMicroseconds));
+  assert.equal(bulk.summary.fasterPairs, bulk.measurement.samples.filter(s => s.candidate &&
+    s.microseconds < bulk.measurement.samples.find(other => other.round === s.round && !other.candidate).microseconds).length);
+  const source = fs.readFileSync(path.join(root, "crates/riftri-storage/src/apfs.rs"), "utf8");
+  assert.doesNotMatch(source.split("#[cfg(test)]\nmod tests {")[0], /bulk_writable_for_evaluation/);
+  const markdown = fs.readFileSync(path.join(directory, "apfs-bulk-directory-clone-2026-09-13.md"), "utf8");
+  assert.match(markdown, /the CLI cannot select it/);
+  assert.match(markdown, /not.*measure Git initialization/);
+  assert.match(markdown, /35\.99%/);
+  assert.match(markdown, /Metadata parity tests alone therefore would not justify/);
+});

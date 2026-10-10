@@ -1,0 +1,5255 @@
+{
+  "schemaVersion": 1,
+  "kind": "diagnostic, not a performance claim",
+  "sourceCommit": "0463503afdc018e1e05f79956ff030bc95b108b1",
+  "patchSha256": "2118703662ab130f8809b6496682d52e185773474a724219891c6b96fb8bf43a",
+  "controlPatchSha256": "418e39ee407a600b43de8d662804b982b4d5adf5fe6af9f24aad2e8d5213d2ee",
+  "rawResultsSha256": "aba7466b7cf642fcd726d99befa17c7f20413957bcea7256d013ba0160d8513c",
+  "controlSha256": "43f25e9d0f09902495bd8d366fc329bacfefb139bd392f9c8fe3e04e7f08287c",
+  "hintsSha256": "c513c0e0c225bf7caf9ba1a21bd540ad241360d41585b002dc323f2450b22594",
+  "startedAt": "2026-10-09T20:31:23.082Z",
+  "hardware": {
+    "cpu": "Apple M1",
+    "release": "25.2.0",
+    "totalMemory": 17179869184
+  },
+  "git": "git version 2.50.1 (Apple Git-155)",
+  "sourceCommitOfFixture": "038cd9f82b418afe9e6d0080648738f78586fbca",
+  "fixtureTree": "c4de7922b24126e860cb77652f5d080e04c8c396",
+  "trackedEntries": 5864,
+  "concurrency": 4,
+  "rounds": 4,
+  "stageDiagnostics": true,
+  "complete": true,
+  "finalActiveViews": 0,
+  "finalBases": 0,
+  "finalDiagnosticIssues": 0,
+  "caveats": [
+    "Both builds are instrumented. The no-hint control still has the deferred scheduling helper; it is not an unmodified main binary.",
+    "Stage logging and optional stacks perturb timings. No headline speedup is claimed.",
+    "The local run did not reproduce a timeout and captured no slow-process stack.",
+    "Phases from separate processes can overlap even when each process defers its own hints."
+  ],
+  "summaries": {
+    "baseline": {
+      "journal:GitMetadataCreated": {
+        "samples": 16,
+        "medianMilliseconds": 9.89,
+        "maximumMilliseconds": 39.598
+      },
+      "journal:BaseReady": {
+        "samples": 16,
+        "medianMilliseconds": 11.611999999999998,
+        "maximumMilliseconds": 18.916
+      },
+      "apfs:directory-layout": {
+        "samples": 16,
+        "medianMilliseconds": 244.14100000000002,
+        "maximumMilliseconds": 574.549
+      },
+      "apfs:native-file-clones-and-modes": {
+        "samples": 16,
+        "medianMilliseconds": 815.6495,
+        "maximumMilliseconds": 1134.263
+      },
+      "apfs:read-ahead-pass": {
+        "samples": 16,
+        "medianMilliseconds": 0.703,
+        "maximumMilliseconds": 5.016
+      },
+      "apfs:directory-permissions": {
+        "samples": 16,
+        "medianMilliseconds": 24.807499999999997,
+        "maximumMilliseconds": 45.467
+      },
+      "journal:ViewCreated": {
+        "samples": 16,
+        "medianMilliseconds": 30.6095,
+        "maximumMilliseconds": 51.223
+      },
+      "journal:GitPointerRestored": {
+        "samples": 16,
+        "medianMilliseconds": 13.5945,
+        "maximumMilliseconds": 18.268
+      },
+      "journal:IndexSynchronized": {
+        "samples": 16,
+        "medianMilliseconds": 13.794,
+        "maximumMilliseconds": 32.977
+      },
+      "journal:CleanVerified": {
+        "samples": 16,
+        "medianMilliseconds": 11.619,
+        "maximumMilliseconds": 30.994
+      },
+      "journal:Active": {
+        "samples": 16,
+        "medianMilliseconds": 10.690000000000001,
+        "maximumMilliseconds": 54.867
+      }
+    },
+    "advice": {
+      "journal:GitMetadataCreated": {
+        "samples": 16,
+        "medianMilliseconds": 9.0335,
+        "maximumMilliseconds": 15.025
+      },
+      "journal:BaseReady": {
+        "samples": 16,
+        "medianMilliseconds": 13.5785,
+        "maximumMilliseconds": 65.064
+      },
+      "apfs:directory-layout": {
+        "samples": 16,
+        "medianMilliseconds": 253.4305,
+        "maximumMilliseconds": 856.215
+      },
+      "apfs:native-file-clones-and-modes": {
+        "samples": 16,
+        "medianMilliseconds": 1326.8445000000002,
+        "maximumMilliseconds": 1631.822
+      },
+      "apfs:read-ahead-pass": {
+        "samples": 16,
+        "medianMilliseconds": 268.9045,
+        "maximumMilliseconds": 1784.676
+      },
+      "apfs:directory-permissions": {
+        "samples": 16,
+        "medianMilliseconds": 28.189,
+        "maximumMilliseconds": 83.827
+      },
+      "journal:ViewCreated": {
+        "samples": 16,
+        "medianMilliseconds": 21.0805,
+        "maximumMilliseconds": 195.337
+      },
+      "journal:GitPointerRestored": {
+        "samples": 16,
+        "medianMilliseconds": 18.565,
+        "maximumMilliseconds": 39.702
+      },
+      "journal:IndexSynchronized": {
+        "samples": 16,
+        "medianMilliseconds": 18.9655,
+        "maximumMilliseconds": 176.343
+      },
+      "journal:CleanVerified": {
+        "samples": 16,
+        "medianMilliseconds": 18.006,
+        "maximumMilliseconds": 82.774
+      },
+      "journal:Active": {
+        "samples": 16,
+        "medianMilliseconds": 18.7905,
+        "maximumMilliseconds": 79.327
+      }
+    }
+  },
+  "batches": [
+    {
+      "round": 1,
+      "label": "baseline",
+      "concurrency": 4,
+      "milliseconds": 5092.490166
+    },
+    {
+      "round": 1,
+      "label": "advice",
+      "concurrency": 4,
+      "milliseconds": 7846.603000000003
+    },
+    {
+      "round": 2,
+      "label": "advice",
+      "concurrency": 4,
+      "milliseconds": 4583.284499999994
+    },
+    {
+      "round": 2,
+      "label": "baseline",
+      "concurrency": 4,
+      "milliseconds": 4325.467625000005
+    },
+    {
+      "round": 3,
+      "label": "baseline",
+      "concurrency": 4,
+      "milliseconds": 4263.227707999991
+    },
+    {
+      "round": 3,
+      "label": "advice",
+      "concurrency": 4,
+      "milliseconds": 4693.444499999998
+    },
+    {
+      "round": 4,
+      "label": "advice",
+      "concurrency": 4,
+      "milliseconds": 4568.155291000003
+    },
+    {
+      "round": 4,
+      "label": "baseline",
+      "concurrency": 4,
+      "milliseconds": 3942.1801660000056
+    }
+  ],
+  "samples": [
+    {
+      "round": 0,
+      "label": "baseline",
+      "worker": 0,
+      "milliseconds": 7816.304459000001,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 411.01308400000016,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 430.9480840000015,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55088"
+        },
+        {
+          "milliseconds": 438.9383340000004,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55088 microseconds=7881"
+        },
+        {
+          "milliseconds": 438.94179200000144,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 439.0112500000014,
+          "line": "riftri: worktree-add: materializing new immutable base"
+        },
+        {
+          "milliseconds": 2674.4944590000014,
+          "line": "riftri: journal-stage: start BaseReady pid=55088"
+        },
+        {
+          "milliseconds": 2697.099959000001,
+          "line": "riftri: journal-stage: finish BaseReady pid=55088 microseconds=22569"
+        },
+        {
+          "milliseconds": 2697.106917000001,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 2706.2821250000015,
+          "line": "riftri: apfs-stage: start directory-layout pid=55088"
+        },
+        {
+          "milliseconds": 2776.2397920000003,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55088 microseconds=69915"
+        },
+        {
+          "milliseconds": 2776.308167000001,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 2776.3085420000007,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55088"
+        },
+        {
+          "milliseconds": 3078.4605420000007,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55088 microseconds=302185"
+        },
+        {
+          "milliseconds": 3078.4627090000013,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55088"
+        },
+        {
+          "milliseconds": 3079.2194170000002,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55088 microseconds=776"
+        },
+        {
+          "milliseconds": 3079.2205000000013,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55088"
+        },
+        {
+          "milliseconds": 3093.426834,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55088 microseconds=14186"
+        },
+        {
+          "milliseconds": 3093.4274590000005,
+          "line": "riftri: journal-stage: start ViewCreated pid=55088"
+        },
+        {
+          "milliseconds": 3115.3493340000005,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55088 microseconds=21884"
+        },
+        {
+          "milliseconds": 3115.350875,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 3134.725459000001,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55088"
+        },
+        {
+          "milliseconds": 3150.453042000001,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55088 microseconds=15716"
+        },
+        {
+          "milliseconds": 3150.4553750000014,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 7696.336541999999,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55088"
+        },
+        {
+          "milliseconds": 7714.879959,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55088 microseconds=18560"
+        },
+        {
+          "milliseconds": 7714.881959,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 7776.216624999999,
+          "line": "riftri: journal-stage: start CleanVerified pid=55088"
+        },
+        {
+          "milliseconds": 7803.803209,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55088 microseconds=27550"
+        },
+        {
+          "milliseconds": 7803.805042000002,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 7803.805334000002,
+          "line": "riftri: journal-stage: start Active pid=55088"
+        },
+        {
+          "milliseconds": 7813.8724170000005,
+          "line": "riftri: journal-stage: finish Active pid=55088 microseconds=10078"
+        },
+        {
+          "milliseconds": 7813.910334000002,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "baseline",
+      "worker": 0,
+      "milliseconds": 4820.261999999999,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 412.3582920000008,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 439.90508300000147,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55323"
+        },
+        {
+          "milliseconds": 449.1820000000007,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55323 microseconds=9206"
+        },
+        {
+          "milliseconds": 449.1836250000015,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 791.1445420000018,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 791.1461249999993,
+          "line": "riftri: journal-stage: start BaseReady pid=55323"
+        },
+        {
+          "milliseconds": 801.0424170000006,
+          "line": "riftri: journal-stage: finish BaseReady pid=55323 microseconds=9406"
+        },
+        {
+          "milliseconds": 801.0438749999994,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 814.762917,
+          "line": "riftri: apfs-stage: start directory-layout pid=55323"
+        },
+        {
+          "milliseconds": 958.9105000000018,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55323 microseconds=144316"
+        },
+        {
+          "milliseconds": 958.9117499999993,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 958.9119580000006,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55323"
+        },
+        {
+          "milliseconds": 1884.5525420000013,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55323 microseconds=924532"
+        },
+        {
+          "milliseconds": 1884.5537079999995,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55323"
+        },
+        {
+          "milliseconds": 1890.4825420000016,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55323 microseconds=5016"
+        },
+        {
+          "milliseconds": 1890.4837079999998,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55323"
+        },
+        {
+          "milliseconds": 1920.4728749999995,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55323 microseconds=31710"
+        },
+        {
+          "milliseconds": 1920.4748749999999,
+          "line": "riftri: journal-stage: start ViewCreated pid=55323"
+        },
+        {
+          "milliseconds": 1952.705249999999,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55323 microseconds=32288"
+        },
+        {
+          "milliseconds": 1952.7180420000004,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1962.9588330000006,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55323"
+        },
+        {
+          "milliseconds": 1982.7124169999988,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55323 microseconds=14510"
+        },
+        {
+          "milliseconds": 1982.7135830000007,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4688.541499999999,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55323"
+        },
+        {
+          "milliseconds": 4710.160667,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55323 microseconds=21596"
+        },
+        {
+          "milliseconds": 4710.247041999999,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4793.407792000002,
+          "line": "riftri: journal-stage: start CleanVerified pid=55323"
+        },
+        {
+          "milliseconds": 4806.699292000001,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55323 microseconds=13286"
+        },
+        {
+          "milliseconds": 4806.702958000002,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4806.703292000002,
+          "line": "riftri: journal-stage: start Active pid=55323"
+        },
+        {
+          "milliseconds": 4817.710999999999,
+          "line": "riftri: journal-stage: finish Active pid=55323 microseconds=10784"
+        },
+        {
+          "milliseconds": 4817.712458000002,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "baseline",
+      "worker": 2,
+      "milliseconds": 4886.856166000001,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 354.09962500000256,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 369.70095800000126,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 389.6444160000028,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 448.14216600000145,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 495.29254100000253,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 521.7343330000003,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55322"
+        },
+        {
+          "milliseconds": 538.1127909999996,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55322 microseconds=16123"
+        },
+        {
+          "milliseconds": 538.1145410000026,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 854.4774160000015,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 854.4791250000017,
+          "line": "riftri: journal-stage: start BaseReady pid=55322"
+        },
+        {
+          "milliseconds": 865.2452080000003,
+          "line": "riftri: journal-stage: finish BaseReady pid=55322 microseconds=10783"
+        },
+        {
+          "milliseconds": 865.2491250000021,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 874.9887500000004,
+          "line": "riftri: apfs-stage: start directory-layout pid=55322"
+        },
+        {
+          "milliseconds": 1041.7396660000013,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55322 microseconds=166924"
+        },
+        {
+          "milliseconds": 1041.7427910000006,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1041.7430410000015,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55322"
+        },
+        {
+          "milliseconds": 2138.0346250000002,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55322 microseconds=1095933"
+        },
+        {
+          "milliseconds": 2138.0360830000027,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55322"
+        },
+        {
+          "milliseconds": 2139.599166,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55322 microseconds=2226"
+        },
+        {
+          "milliseconds": 2139.6000410000015,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55322"
+        },
+        {
+          "milliseconds": 2185.927708000003,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55322 microseconds=45467"
+        },
+        {
+          "milliseconds": 2185.9292080000014,
+          "line": "riftri: journal-stage: start ViewCreated pid=55322"
+        },
+        {
+          "milliseconds": 2227.389083000002,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55322 microseconds=41377"
+        },
+        {
+          "milliseconds": 2227.3903750000027,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2237.3537080000024,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55322"
+        },
+        {
+          "milliseconds": 2255.2463750000024,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55322 microseconds=15296"
+        },
+        {
+          "milliseconds": 2255.3839160000025,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4768.795875,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55322"
+        },
+        {
+          "milliseconds": 4796.327166000003,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55322 microseconds=27481"
+        },
+        {
+          "milliseconds": 4796.328958000002,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4858.391416000002,
+          "line": "riftri: journal-stage: start CleanVerified pid=55322"
+        },
+        {
+          "milliseconds": 4871.311874999999,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55322 microseconds=12904"
+        },
+        {
+          "milliseconds": 4871.312666000002,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4871.312875,
+          "line": "riftri: journal-stage: start Active pid=55322"
+        },
+        {
+          "milliseconds": 4885.921333000002,
+          "line": "riftri: journal-stage: finish Active pid=55322 microseconds=14500"
+        },
+        {
+          "milliseconds": 4885.922791000001,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "baseline",
+      "worker": 1,
+      "milliseconds": 4998.5951669999995,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 354.4543339999982,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 384.302249999997,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 408.02991699999984,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 538.789499999999,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 578.0686249999999,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 599.8451669999995,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55324"
+        },
+        {
+          "milliseconds": 609.8009169999968,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55324 microseconds=9536"
+        },
+        {
+          "milliseconds": 609.8940000000002,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 935.4879999999976,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 935.4892499999987,
+          "line": "riftri: journal-stage: start BaseReady pid=55324"
+        },
+        {
+          "milliseconds": 945.6117089999971,
+          "line": "riftri: journal-stage: finish BaseReady pid=55324 microseconds=10357"
+        },
+        {
+          "milliseconds": 945.6135839999988,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 950.2378749999989,
+          "line": "riftri: apfs-stage: start directory-layout pid=55324"
+        },
+        {
+          "milliseconds": 1246.9994589999988,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55324 microseconds=296177"
+        },
+        {
+          "milliseconds": 1247.001874999998,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1247.002124999999,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55324"
+        },
+        {
+          "milliseconds": 2380.589499999998,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55324 microseconds=1134263"
+        },
+        {
+          "milliseconds": 2380.5906669999968,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55324"
+        },
+        {
+          "milliseconds": 2381.564416999998,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55324 microseconds=886"
+        },
+        {
+          "milliseconds": 2381.5653749999983,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55324"
+        },
+        {
+          "milliseconds": 2408.812458999997,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55324 microseconds=27286"
+        },
+        {
+          "milliseconds": 2408.816584,
+          "line": "riftri: journal-stage: start ViewCreated pid=55324"
+        },
+        {
+          "milliseconds": 2444.2361249999994,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55324 microseconds=34684"
+        },
+        {
+          "milliseconds": 2444.2394589999967,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2453.7886249999974,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55324"
+        },
+        {
+          "milliseconds": 2466.949166999999,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55324 microseconds=13208"
+        },
+        {
+          "milliseconds": 2466.952041999997,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4906.637749999998,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55324"
+        },
+        {
+          "milliseconds": 4920.188791999997,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55324 microseconds=13545"
+        },
+        {
+          "milliseconds": 4920.223708999998,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4977.573124999999,
+          "line": "riftri: journal-stage: start CleanVerified pid=55324"
+        },
+        {
+          "milliseconds": 4987.396666999997,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55324 microseconds=9817"
+        },
+        {
+          "milliseconds": 4987.398041999997,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4987.398249999998,
+          "line": "riftri: journal-stage: start Active pid=55324"
+        },
+        {
+          "milliseconds": 4997.495166999997,
+          "line": "riftri: journal-stage: finish Active pid=55324 microseconds=10085"
+        },
+        {
+          "milliseconds": 4997.4963339999995,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "baseline",
+      "worker": 3,
+      "milliseconds": 5090.997540999997,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 353.8519579999993,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 396.8590409999997,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 429.18862499999886,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 609.4719159999986,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 636.0134579999976,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 656.0686659999992,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55325"
+        },
+        {
+          "milliseconds": 666.4331659999989,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55325 microseconds=10318"
+        },
+        {
+          "milliseconds": 666.5354159999988,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 1015.2895409999983,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 1015.2913749999971,
+          "line": "riftri: journal-stage: start BaseReady pid=55325"
+        },
+        {
+          "milliseconds": 1033.9356659999976,
+          "line": "riftri: journal-stage: finish BaseReady pid=55325 microseconds=18916"
+        },
+        {
+          "milliseconds": 1033.937582999999,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 1047.6895409999997,
+          "line": "riftri: apfs-stage: start directory-layout pid=55325"
+        },
+        {
+          "milliseconds": 1536.4839999999967,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55325 microseconds=488989"
+        },
+        {
+          "milliseconds": 1536.4857499999998,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1536.4859579999975,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55325"
+        },
+        {
+          "milliseconds": 2563.2476659999993,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55325 microseconds=1027075"
+        },
+        {
+          "milliseconds": 2563.323540999998,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55325"
+        },
+        {
+          "milliseconds": 2563.7235,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55325 microseconds=393"
+        },
+        {
+          "milliseconds": 2563.747124999998,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55325"
+        },
+        {
+          "milliseconds": 2583.4727909999965,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55325 microseconds=19692"
+        },
+        {
+          "milliseconds": 2583.4742909999986,
+          "line": "riftri: journal-stage: start ViewCreated pid=55325"
+        },
+        {
+          "milliseconds": 2608.993624999999,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55325 microseconds=25553"
+        },
+        {
+          "milliseconds": 2609.0312079999967,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2613.4451659999977,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55325"
+        },
+        {
+          "milliseconds": 2631.723915999999,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55325 microseconds=18268"
+        },
+        {
+          "milliseconds": 2631.724875,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4999.749540999997,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55325"
+        },
+        {
+          "milliseconds": 5008.9072909999995,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55325 microseconds=9143"
+        },
+        {
+          "milliseconds": 5008.927124999998,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 5066.274749999997,
+          "line": "riftri: journal-stage: start CleanVerified pid=55325"
+        },
+        {
+          "milliseconds": 5079.120916,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55325 microseconds=12853"
+        },
+        {
+          "milliseconds": 5079.122291,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 5079.159457999998,
+          "line": "riftri: journal-stage: start Active pid=55325"
+        },
+        {
+          "milliseconds": 5089.693499999998,
+          "line": "riftri: journal-stage: finish Active pid=55325 microseconds=10596"
+        },
+        {
+          "milliseconds": 5089.693874999997,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "advice",
+      "worker": 0,
+      "milliseconds": 6782.271958999998,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 446.7746249999982,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 500.8301670000001,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55981"
+        },
+        {
+          "milliseconds": 514.1809169999979,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55981 microseconds=13121"
+        },
+        {
+          "milliseconds": 514.182084,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 963.7962499999994,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 963.799500000001,
+          "line": "riftri: journal-stage: start BaseReady pid=55981"
+        },
+        {
+          "milliseconds": 1005.8774169999961,
+          "line": "riftri: journal-stage: finish BaseReady pid=55981 microseconds=41774"
+        },
+        {
+          "milliseconds": 1005.8796670000011,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 1030.5417919999963,
+          "line": "riftri: apfs-stage: start directory-layout pid=55981"
+        },
+        {
+          "milliseconds": 1268.31725,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55981 microseconds=237855"
+        },
+        {
+          "milliseconds": 1268.3188339999979,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 1268.3190840000025,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55981"
+        },
+        {
+          "milliseconds": 1968.0399170000019,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55981 microseconds=696578"
+        },
+        {
+          "milliseconds": 1968.3016669999997,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55981"
+        },
+        {
+          "milliseconds": 2222.467417,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55981 microseconds=253644"
+        },
+        {
+          "milliseconds": 2222.4688339999993,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55981"
+        },
+        {
+          "milliseconds": 2248.539875000002,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55981 microseconds=26306"
+        },
+        {
+          "milliseconds": 2248.5409999999974,
+          "line": "riftri: journal-stage: start ViewCreated pid=55981"
+        },
+        {
+          "milliseconds": 2269.430333999997,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55981 microseconds=20977"
+        },
+        {
+          "milliseconds": 2269.4321249999994,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2278.6825420000023,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55981"
+        },
+        {
+          "milliseconds": 2300.343249999998,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55981 microseconds=19975"
+        },
+        {
+          "milliseconds": 2300.346292000002,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 6636.977334000003,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55981"
+        },
+        {
+          "milliseconds": 6660.688667000002,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55981 microseconds=23688"
+        },
+        {
+          "milliseconds": 6660.689874999996,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 6746.443166999998,
+          "line": "riftri: journal-stage: start CleanVerified pid=55981"
+        },
+        {
+          "milliseconds": 6760.567167000001,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55981 microseconds=14338"
+        },
+        {
+          "milliseconds": 6760.571167000002,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 6760.571750000003,
+          "line": "riftri: journal-stage: start Active pid=55981"
+        },
+        {
+          "milliseconds": 6769.376083999996,
+          "line": "riftri: journal-stage: finish Active pid=55981 microseconds=8771"
+        },
+        {
+          "milliseconds": 6769.379500000003,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "advice",
+      "worker": 2,
+      "milliseconds": 7674.428332999996,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 525.8462909999944,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 607.6612909999967,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 696.9243329999954,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 741.2205409999951,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55983"
+        },
+        {
+          "milliseconds": 750.2912079999951,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55983 microseconds=9023"
+        },
+        {
+          "milliseconds": 750.3722500000003,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 1486.5765829999946,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 1486.5798329999961,
+          "line": "riftri: journal-stage: start BaseReady pid=55983"
+        },
+        {
+          "milliseconds": 1551.5434999999998,
+          "line": "riftri: journal-stage: finish BaseReady pid=55983 microseconds=65064"
+        },
+        {
+          "milliseconds": 1551.5468330000003,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 1562.2821659999972,
+          "line": "riftri: apfs-stage: start directory-layout pid=55983"
+        },
+        {
+          "milliseconds": 2182.9064999999973,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55983 microseconds=620343"
+        },
+        {
+          "milliseconds": 2182.907790999998,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 2182.908040999995,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55983"
+        },
+        {
+          "milliseconds": 3794.0862500000003,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55983 microseconds=1609463"
+        },
+        {
+          "milliseconds": 3794.0890409999993,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55983"
+        },
+        {
+          "milliseconds": 4056.086958,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55983 microseconds=263642"
+        },
+        {
+          "milliseconds": 4056.0891249999986,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55983"
+        },
+        {
+          "milliseconds": 4083.2637499999983,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55983 microseconds=27238"
+        },
+        {
+          "milliseconds": 4083.2649999999994,
+          "line": "riftri: journal-stage: start ViewCreated pid=55983"
+        },
+        {
+          "milliseconds": 4135.841540999994,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55983 microseconds=52679"
+        },
+        {
+          "milliseconds": 4135.843374999997,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 4149.687165999996,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55983"
+        },
+        {
+          "milliseconds": 4174.820832999998,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55983 microseconds=24838"
+        },
+        {
+          "milliseconds": 4174.822374999996,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 7519.285665999996,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55983"
+        },
+        {
+          "milliseconds": 7538.084707999995,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55983 microseconds=18681"
+        },
+        {
+          "milliseconds": 7538.086749999995,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 7637.926415999995,
+          "line": "riftri: journal-stage: start CleanVerified pid=55983"
+        },
+        {
+          "milliseconds": 7656.776624999999,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55983 microseconds=18760"
+        },
+        {
+          "milliseconds": 7656.778165999996,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 7656.778458000001,
+          "line": "riftri: journal-stage: start Active pid=55983"
+        },
+        {
+          "milliseconds": 7670.659957999997,
+          "line": "riftri: journal-stage: finish Active pid=55983 microseconds=13694"
+        },
+        {
+          "milliseconds": 7670.661540999994,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "advice",
+      "worker": 1,
+      "milliseconds": 7835.122457999998,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 469.838957999993,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 519.7583749999976,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 558.6498329999959,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 751.2722079999949,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 783.4394579999935,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 828.512999999999,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55982"
+        },
+        {
+          "milliseconds": 843.5828329999931,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55982 microseconds=15025"
+        },
+        {
+          "milliseconds": 843.5838749999966,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 1561.7387909999961,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 1561.7397079999937,
+          "line": "riftri: journal-stage: start BaseReady pid=55982"
+        },
+        {
+          "milliseconds": 1594.236957999994,
+          "line": "riftri: journal-stage: finish BaseReady pid=55982 microseconds=32537"
+        },
+        {
+          "milliseconds": 1594.2403329999943,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 1648.012999999999,
+          "line": "riftri: apfs-stage: start directory-layout pid=55982"
+        },
+        {
+          "milliseconds": 2505.5675409999967,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55982 microseconds=856215"
+        },
+        {
+          "milliseconds": 2505.570249999997,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 2505.5709579999966,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55982"
+        },
+        {
+          "milliseconds": 4054.0667909999975,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55982 microseconds=1549690"
+        },
+        {
+          "milliseconds": 4054.0680829999983,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55982"
+        },
+        {
+          "milliseconds": 4302.158374999999,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55982 microseconds=248089"
+        },
+        {
+          "milliseconds": 4302.159790999998,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55982"
+        },
+        {
+          "milliseconds": 4344.915332999997,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55982 microseconds=42190"
+        },
+        {
+          "milliseconds": 4344.91575,
+          "line": "riftri: journal-stage: start ViewCreated pid=55982"
+        },
+        {
+          "milliseconds": 4365.126165999995,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55982 microseconds=20745"
+        },
+        {
+          "milliseconds": 4365.1679159999985,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 4373.033665999996,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55982"
+        },
+        {
+          "milliseconds": 4391.459290999999,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55982 microseconds=18347"
+        },
+        {
+          "milliseconds": 4391.557249999998,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 7686.168999999994,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55982"
+        },
+        {
+          "milliseconds": 7696.7388749999955,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55982 microseconds=10632"
+        },
+        {
+          "milliseconds": 7696.7464159999945,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 7799.682540999995,
+          "line": "riftri: journal-stage: start CleanVerified pid=55982"
+        },
+        {
+          "milliseconds": 7814.461874999994,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55982 microseconds=14761"
+        },
+        {
+          "milliseconds": 7814.463291,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 7814.463540999997,
+          "line": "riftri: journal-stage: start Active pid=55982"
+        },
+        {
+          "milliseconds": 7833.082790999993,
+          "line": "riftri: journal-stage: finish Active pid=55982 microseconds=18547"
+        },
+        {
+          "milliseconds": 7833.124790999995,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 1,
+      "label": "advice",
+      "worker": 3,
+      "milliseconds": 7843.862041999993,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 431.11704199999804,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 518.1515419999996,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 560.7783749999944,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 592.5219589999979,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=55984"
+        },
+        {
+          "milliseconds": 607.0703339999964,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=55984 microseconds=13854"
+        },
+        {
+          "milliseconds": 607.0714589999989,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 1588.544958999999,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 1588.547083999998,
+          "line": "riftri: journal-stage: start BaseReady pid=55984"
+        },
+        {
+          "milliseconds": 1610.7689589999936,
+          "line": "riftri: journal-stage: finish BaseReady pid=55984 microseconds=19054"
+        },
+        {
+          "milliseconds": 1610.7704589999994,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 1656.307958999998,
+          "line": "riftri: apfs-stage: start directory-layout pid=55984"
+        },
+        {
+          "milliseconds": 2407.6191249999974,
+          "line": "riftri: apfs-stage: finish directory-layout pid=55984 microseconds=751412"
+        },
+        {
+          "milliseconds": 2407.6201669999937,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 2407.6203749999986,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=55984"
+        },
+        {
+          "milliseconds": 4039.4782089999935,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=55984 microseconds=1631822"
+        },
+        {
+          "milliseconds": 4039.4809169999935,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=55984"
+        },
+        {
+          "milliseconds": 4313.631583999995,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=55984 microseconds=274167"
+        },
+        {
+          "milliseconds": 4313.632833999996,
+          "line": "riftri: apfs-stage: start directory-permissions pid=55984"
+        },
+        {
+          "milliseconds": 4343.542458999997,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=55984 microseconds=23525"
+        },
+        {
+          "milliseconds": 4343.543583999999,
+          "line": "riftri: journal-stage: start ViewCreated pid=55984"
+        },
+        {
+          "milliseconds": 4357.9339589999945,
+          "line": "riftri: journal-stage: finish ViewCreated pid=55984 microseconds=20680"
+        },
+        {
+          "milliseconds": 4357.937124999997,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 4368.211458999998,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=55984"
+        },
+        {
+          "milliseconds": 4385.436874999999,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=55984 microseconds=17152"
+        },
+        {
+          "milliseconds": 4385.484708999997,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 7701.166916999995,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=55984"
+        },
+        {
+          "milliseconds": 7715.7179169999945,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=55984 microseconds=14414"
+        },
+        {
+          "milliseconds": 7715.721249999995,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 7808.048333999999,
+          "line": "riftri: journal-stage: start CleanVerified pid=55984"
+        },
+        {
+          "milliseconds": 7826.794708999994,
+          "line": "riftri: journal-stage: finish CleanVerified pid=55984 microseconds=18732"
+        },
+        {
+          "milliseconds": 7826.847999999998,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 7826.848333999995,
+          "line": "riftri: journal-stage: start Active pid=55984"
+        },
+        {
+          "milliseconds": 7842.4887089999975,
+          "line": "riftri: journal-stage: finish Active pid=55984 microseconds=15077"
+        },
+        {
+          "milliseconds": 7842.489999999998,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "advice",
+      "worker": 2,
+      "milliseconds": 4543.301041999992,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 254.7916669999977,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 265.9838749999981,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 281.3263749999969,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 318.83287500000006,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 340.627916999998,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 361.14191699999355,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=57907"
+        },
+        {
+          "milliseconds": 370.93041699999594,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=57907 microseconds=9722"
+        },
+        {
+          "milliseconds": 370.9320829999997,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 573.7999169999966,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 573.8013749999955,
+          "line": "riftri: journal-stage: start BaseReady pid=57907"
+        },
+        {
+          "milliseconds": 587.0061669999996,
+          "line": "riftri: journal-stage: finish BaseReady pid=57907 microseconds=13009"
+        },
+        {
+          "milliseconds": 587.0097079999978,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 591.315582999996,
+          "line": "riftri: apfs-stage: start directory-layout pid=57907"
+        },
+        {
+          "milliseconds": 715.9328749999986,
+          "line": "riftri: apfs-stage: finish directory-layout pid=57907 microseconds=124155"
+        },
+        {
+          "milliseconds": 715.9339169999948,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 715.9342079999988,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=57907"
+        },
+        {
+          "milliseconds": 1871.776582999999,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=57907 microseconds=1156342"
+        },
+        {
+          "milliseconds": 1871.778207999996,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=57907"
+        },
+        {
+          "milliseconds": 2566.9877500000002,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=57907 microseconds=691656"
+        },
+        {
+          "milliseconds": 2566.9897920000003,
+          "line": "riftri: apfs-stage: start directory-permissions pid=57907"
+        },
+        {
+          "milliseconds": 2616.605791999995,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=57907 microseconds=52895"
+        },
+        {
+          "milliseconds": 2616.607207999994,
+          "line": "riftri: journal-stage: start ViewCreated pid=57907"
+        },
+        {
+          "milliseconds": 2666.9884999999995,
+          "line": "riftri: journal-stage: finish ViewCreated pid=57907 microseconds=50622"
+        },
+        {
+          "milliseconds": 2666.991666999995,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2676.715624999997,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=57907"
+        },
+        {
+          "milliseconds": 2695.769374999996,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=57907 microseconds=19060"
+        },
+        {
+          "milliseconds": 2695.800707999995,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4119.738041999997,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=57907"
+        },
+        {
+          "milliseconds": 4296.071750000003,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=57907 microseconds=176343"
+        },
+        {
+          "milliseconds": 4296.113666999998,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4447.509957999995,
+          "line": "riftri: journal-stage: start CleanVerified pid=57907"
+        },
+        {
+          "milliseconds": 4461.731499999994,
+          "line": "riftri: journal-stage: finish CleanVerified pid=57907 microseconds=14290"
+        },
+        {
+          "milliseconds": 4461.868583000003,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4461.869292000003,
+          "line": "riftri: journal-stage: start Active pid=57907"
+        },
+        {
+          "milliseconds": 4541.281292,
+          "line": "riftri: journal-stage: finish Active pid=57907 microseconds=79327"
+        },
+        {
+          "milliseconds": 4541.28283299999,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "advice",
+      "worker": 0,
+      "milliseconds": 4579.319333000007,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 259.89004099999875,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 277.8130000000019,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 300.42145800000435,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 372.23475000000326,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 394.0175410000011,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 409.96316600000137,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=57905"
+        },
+        {
+          "milliseconds": 421.07345799999894,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=57905 microseconds=11068"
+        },
+        {
+          "milliseconds": 421.16454100000556,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 630.7352080000055,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 630.739416000004,
+          "line": "riftri: journal-stage: start BaseReady pid=57905"
+        },
+        {
+          "milliseconds": 641.0142080000005,
+          "line": "riftri: journal-stage: finish BaseReady pid=57905 microseconds=10273"
+        },
+        {
+          "milliseconds": 641.0157910000053,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 645.0327910000051,
+          "line": "riftri: apfs-stage: start directory-layout pid=57905"
+        },
+        {
+          "milliseconds": 906.7758749999994,
+          "line": "riftri: apfs-stage: finish directory-layout pid=57905 microseconds=261590"
+        },
+        {
+          "milliseconds": 907.8473750000048,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 907.8862080000035,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=57905"
+        },
+        {
+          "milliseconds": 2257.3085409999985,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=57905 microseconds=1349103"
+        },
+        {
+          "milliseconds": 2257.3104160000003,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=57905"
+        },
+        {
+          "milliseconds": 2663.896625000001,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=57905 microseconds=406935"
+        },
+        {
+          "milliseconds": 2663.8975830000054,
+          "line": "riftri: apfs-stage: start directory-permissions pid=57905"
+        },
+        {
+          "milliseconds": 2683.9681249999994,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=57905 microseconds=20033"
+        },
+        {
+          "milliseconds": 2683.9696660000045,
+          "line": "riftri: journal-stage: start ViewCreated pid=57905"
+        },
+        {
+          "milliseconds": 2709.009416000001,
+          "line": "riftri: journal-stage: finish ViewCreated pid=57905 microseconds=25009"
+        },
+        {
+          "milliseconds": 2709.0109999999986,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2714.9633329999997,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=57905"
+        },
+        {
+          "milliseconds": 2725.032625,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=57905 microseconds=9919"
+        },
+        {
+          "milliseconds": 2725.034166000005,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4300.647500000006,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=57905"
+        },
+        {
+          "milliseconds": 4329.4257910000015,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=57905 microseconds=27992"
+        },
+        {
+          "milliseconds": 4329.427416000006,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4459.450500000006,
+          "line": "riftri: journal-stage: start CleanVerified pid=57905"
+        },
+        {
+          "milliseconds": 4534.955666000009,
+          "line": "riftri: journal-stage: finish CleanVerified pid=57905 microseconds=75514"
+        },
+        {
+          "milliseconds": 4534.993875,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4534.994541000007,
+          "line": "riftri: journal-stage: start Active pid=57905"
+        },
+        {
+          "milliseconds": 4578.927458000006,
+          "line": "riftri: journal-stage: finish Active pid=57905 microseconds=41153"
+        },
+        {
+          "milliseconds": 4578.927582999997,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "advice",
+      "worker": 1,
+      "milliseconds": 4580.750666000007,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 291.0858750000043,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 310.05116600000474,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=57906"
+        },
+        {
+          "milliseconds": 319.1035000000047,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=57906 microseconds=9044"
+        },
+        {
+          "milliseconds": 319.1197500000053,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 568.0464160000047,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 568.0494160000017,
+          "line": "riftri: journal-stage: start BaseReady pid=57906"
+        },
+        {
+          "milliseconds": 578.791416,
+          "line": "riftri: journal-stage: finish BaseReady pid=57906 microseconds=10828"
+        },
+        {
+          "milliseconds": 578.8365410000042,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 582.9051660000041,
+          "line": "riftri: apfs-stage: start directory-layout pid=57906"
+        },
+        {
+          "milliseconds": 684.629875000006,
+          "line": "riftri: apfs-stage: finish directory-layout pid=57906 microseconds=101027"
+        },
+        {
+          "milliseconds": 684.6316660000011,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 684.6430000000037,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=57906"
+        },
+        {
+          "milliseconds": 1842.500500000002,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=57906 microseconds=1157826"
+        },
+        {
+          "milliseconds": 1842.5022910000043,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=57906"
+        },
+        {
+          "milliseconds": 2575.7702080000017,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=57906 microseconds=731524"
+        },
+        {
+          "milliseconds": 2575.772250000002,
+          "line": "riftri: apfs-stage: start directory-permissions pid=57906"
+        },
+        {
+          "milliseconds": 2609.371125000005,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=57906 microseconds=35519"
+        },
+        {
+          "milliseconds": 2609.6027500000055,
+          "line": "riftri: journal-stage: start ViewCreated pid=57906"
+        },
+        {
+          "milliseconds": 2660.5829159999994,
+          "line": "riftri: journal-stage: finish ViewCreated pid=57906 microseconds=50845"
+        },
+        {
+          "milliseconds": 2660.584833000001,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2672.395375,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=57906"
+        },
+        {
+          "milliseconds": 2691.1029160000035,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=57906 microseconds=18783"
+        },
+        {
+          "milliseconds": 2691.1377500000017,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4122.594125000003,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=57906"
+        },
+        {
+          "milliseconds": 4290.786541000009,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=57906 microseconds=168147"
+        },
+        {
+          "milliseconds": 4290.858875000005,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4458.734500000006,
+          "line": "riftri: journal-stage: start CleanVerified pid=57906"
+        },
+        {
+          "milliseconds": 4541.668583000006,
+          "line": "riftri: journal-stage: finish CleanVerified pid=57906 microseconds=82774"
+        },
+        {
+          "milliseconds": 4541.668833000003,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4541.669000000009,
+          "line": "riftri: journal-stage: start Active pid=57906"
+        },
+        {
+          "milliseconds": 4578.154957999999,
+          "line": "riftri: journal-stage: finish Active pid=57906 microseconds=33825"
+        },
+        {
+          "milliseconds": 4578.155125000005,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "advice",
+      "worker": 3,
+      "milliseconds": 4581.856082999999,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 258.55387500000506,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 291.29820800000016,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 307.76637499999924,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 419.8267909999995,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 450.5510410000061,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 474.6038750000007,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=57908"
+        },
+        {
+          "milliseconds": 484.520666000004,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=57908 microseconds=9877"
+        },
+        {
+          "milliseconds": 484.5238329999993,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 742.4913330000054,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 742.4934160000048,
+          "line": "riftri: journal-stage: start BaseReady pid=57908"
+        },
+        {
+          "milliseconds": 759.8067500000034,
+          "line": "riftri: journal-stage: finish BaseReady pid=57908 microseconds=17813"
+        },
+        {
+          "milliseconds": 759.8080000000045,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 779.6358330000003,
+          "line": "riftri: apfs-stage: start directory-layout pid=57908"
+        },
+        {
+          "milliseconds": 1434.228916,
+          "line": "riftri: apfs-stage: finish directory-layout pid=57908 microseconds=640799"
+        },
+        {
+          "milliseconds": 1436.1672080000062,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 1436.1690830000007,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=57908"
+        },
+        {
+          "milliseconds": 2875.753291000001,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=57908 microseconds=1439937"
+        },
+        {
+          "milliseconds": 2875.754375000004,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=57908"
+        },
+        {
+          "milliseconds": 3029.164583000005,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=57908 microseconds=153532"
+        },
+        {
+          "milliseconds": 3029.1674580000035,
+          "line": "riftri: apfs-stage: start directory-permissions pid=57908"
+        },
+        {
+          "milliseconds": 3059.492250000003,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=57908 microseconds=30123"
+        },
+        {
+          "milliseconds": 3059.4939159999994,
+          "line": "riftri: journal-stage: start ViewCreated pid=57908"
+        },
+        {
+          "milliseconds": 3078.0970830000006,
+          "line": "riftri: journal-stage: finish ViewCreated pid=57908 microseconds=18753"
+        },
+        {
+          "milliseconds": 3078.1008750000037,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 3082.7568329999995,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=57908"
+        },
+        {
+          "milliseconds": 3094.5620830000043,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=57908 microseconds=11969"
+        },
+        {
+          "milliseconds": 3094.5636250000025,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4298.748666000007,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=57908"
+        },
+        {
+          "milliseconds": 4321.505375000001,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=57908 microseconds=22728"
+        },
+        {
+          "milliseconds": 4321.551790999998,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4458.165583000002,
+          "line": "riftri: journal-stage: start CleanVerified pid=57908"
+        },
+        {
+          "milliseconds": 4525.1701660000035,
+          "line": "riftri: journal-stage: finish CleanVerified pid=57908 microseconds=66888"
+        },
+        {
+          "milliseconds": 4525.221666000005,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4525.222333000005,
+          "line": "riftri: journal-stage: start Active pid=57908"
+        },
+        {
+          "milliseconds": 4577.531250000007,
+          "line": "riftri: journal-stage: finish Active pid=57908 microseconds=42644"
+        },
+        {
+          "milliseconds": 4577.532874999997,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "baseline",
+      "worker": 2,
+      "milliseconds": 3988.787832999995,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 349.502708,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 371.78145799999766,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58246"
+        },
+        {
+          "milliseconds": 381.5776249999908,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58246 microseconds=8684"
+        },
+        {
+          "milliseconds": 381.66504199999326,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 667.6157499999972,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 667.6178749999963,
+          "line": "riftri: journal-stage: start BaseReady pid=58246"
+        },
+        {
+          "milliseconds": 679.0327499999985,
+          "line": "riftri: journal-stage: finish BaseReady pid=58246 microseconds=11633"
+        },
+        {
+          "milliseconds": 679.0362079999904,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 687.8594999999914,
+          "line": "riftri: apfs-stage: start directory-layout pid=58246"
+        },
+        {
+          "milliseconds": 810.481667,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58246 microseconds=122732"
+        },
+        {
+          "milliseconds": 810.4834169999958,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 810.4836249999935,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58246"
+        },
+        {
+          "milliseconds": 1533.057416999989,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58246 microseconds=722575"
+        },
+        {
+          "milliseconds": 1533.0592079999915,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58246"
+        },
+        {
+          "milliseconds": 1533.7019169999985,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58246 microseconds=700"
+        },
+        {
+          "milliseconds": 1533.7027919999964,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58246"
+        },
+        {
+          "milliseconds": 1572.702541999999,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58246 microseconds=37523"
+        },
+        {
+          "milliseconds": 1572.7097499999945,
+          "line": "riftri: journal-stage: start ViewCreated pid=58246"
+        },
+        {
+          "milliseconds": 1603.7460419999989,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58246 microseconds=30935"
+        },
+        {
+          "milliseconds": 1603.7491669999872,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1613.9204579999932,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58246"
+        },
+        {
+          "milliseconds": 1627.4620829999913,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58246 microseconds=13547"
+        },
+        {
+          "milliseconds": 1627.5232079999987,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3882.665541999988,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58246"
+        },
+        {
+          "milliseconds": 3898.316791999998,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58246 microseconds=15667"
+        },
+        {
+          "milliseconds": 3898.3675419999927,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3966.1167080000014,
+          "line": "riftri: journal-stage: start CleanVerified pid=58246"
+        },
+        {
+          "milliseconds": 3978.4539169999916,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58246 microseconds=12361"
+        },
+        {
+          "milliseconds": 3978.4914169999975,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3978.492041999998,
+          "line": "riftri: journal-stage: start Active pid=58246"
+        },
+        {
+          "milliseconds": 3987.4857499999925,
+          "line": "riftri: journal-stage: finish Active pid=58246 microseconds=8967"
+        },
+        {
+          "milliseconds": 3987.4876249999943,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "baseline",
+      "worker": 3,
+      "milliseconds": 4170.002374999996,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 303.1655419999879,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 319.32283299999835,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 339.94587499999034,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 381.4787919999944,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 415.8895829999965,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 438.42462499999965,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58245"
+        },
+        {
+          "milliseconds": 447.53470799999195,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58245 microseconds=8995"
+        },
+        {
+          "milliseconds": 447.5385419999948,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 683.5283749999944,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 683.5302499999962,
+          "line": "riftri: journal-stage: start BaseReady pid=58245"
+        },
+        {
+          "milliseconds": 692.0513329999958,
+          "line": "riftri: journal-stage: finish BaseReady pid=58245 microseconds=8902"
+        },
+        {
+          "milliseconds": 692.0531249999913,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 721.9537920000002,
+          "line": "riftri: apfs-stage: start directory-layout pid=58245"
+        },
+        {
+          "milliseconds": 901.4062919999997,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58245 microseconds=179843"
+        },
+        {
+          "milliseconds": 901.4078329999902,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 901.4079999999958,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58245"
+        },
+        {
+          "milliseconds": 1778.8243749999965,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58245 microseconds=877705"
+        },
+        {
+          "milliseconds": 1778.8272079999879,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58245"
+        },
+        {
+          "milliseconds": 1779.6315419999883,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58245 microseconds=882"
+        },
+        {
+          "milliseconds": 1779.636249999996,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58245"
+        },
+        {
+          "milliseconds": 1802.0494169999874,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58245 microseconds=22378"
+        },
+        {
+          "milliseconds": 1802.0512919999892,
+          "line": "riftri: journal-stage: start ViewCreated pid=58245"
+        },
+        {
+          "milliseconds": 1832.8194169999915,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58245 microseconds=30789"
+        },
+        {
+          "milliseconds": 1832.8211669999873,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1840.5666249999922,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58245"
+        },
+        {
+          "milliseconds": 1855.1396249999962,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58245 microseconds=14603"
+        },
+        {
+          "milliseconds": 1855.3102079999953,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4069.0911669999914,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58245"
+        },
+        {
+          "milliseconds": 4081.547207999989,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58245 microseconds=12435"
+        },
+        {
+          "milliseconds": 4081.549082999991,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4142.047999999995,
+          "line": "riftri: journal-stage: start CleanVerified pid=58245"
+        },
+        {
+          "milliseconds": 4151.899916999988,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58245 microseconds=9930"
+        },
+        {
+          "milliseconds": 4151.990957999995,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4151.99212499999,
+          "line": "riftri: journal-stage: start Active pid=58245"
+        },
+        {
+          "milliseconds": 4168.984249999994,
+          "line": "riftri: journal-stage: finish Active pid=58245 microseconds=16975"
+        },
+        {
+          "milliseconds": 4168.986832999988,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "baseline",
+      "worker": 0,
+      "milliseconds": 4277.506249999991,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 304.11833299999125,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 334.529165999993,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 363.33012499999313,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 448.57904099998996,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 479.336415999991,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 505.934957999998,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58243"
+        },
+        {
+          "milliseconds": 516.9551249999931,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58243 microseconds=10003"
+        },
+        {
+          "milliseconds": 516.9573749999981,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 768.4858749999985,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 768.4889580000017,
+          "line": "riftri: journal-stage: start BaseReady pid=58243"
+        },
+        {
+          "milliseconds": 783.3994579999999,
+          "line": "riftri: journal-stage: finish BaseReady pid=58243 microseconds=14709"
+        },
+        {
+          "milliseconds": 783.401457999993,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 790.9142500000016,
+          "line": "riftri: apfs-stage: start directory-layout pid=58243"
+        },
+        {
+          "milliseconds": 1200.8276249999908,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58243 microseconds=409240"
+        },
+        {
+          "milliseconds": 1200.8292079999956,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1200.8294579999929,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58243"
+        },
+        {
+          "milliseconds": 1996.7914159999928,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58243 microseconds=796668"
+        },
+        {
+          "milliseconds": 1996.7934999999998,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58243"
+        },
+        {
+          "milliseconds": 1997.3028329999943,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58243 microseconds=417"
+        },
+        {
+          "milliseconds": 1997.3031659999979,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58243"
+        },
+        {
+          "milliseconds": 2018.3326249999955,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58243 microseconds=21026"
+        },
+        {
+          "milliseconds": 2018.3344999999972,
+          "line": "riftri: journal-stage: start ViewCreated pid=58243"
+        },
+        {
+          "milliseconds": 2048.839458000002,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58243 microseconds=30430"
+        },
+        {
+          "milliseconds": 2048.842499999999,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2054.7098750000005,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58243"
+        },
+        {
+          "milliseconds": 2069.514832999994,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58243 microseconds=14640"
+        },
+        {
+          "milliseconds": 2069.5167079999956,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4166.30975,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58243"
+        },
+        {
+          "milliseconds": 4180.171415999997,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58243 microseconds=13397"
+        },
+        {
+          "milliseconds": 4180.172749999998,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4259.791832999996,
+          "line": "riftri: journal-stage: start CleanVerified pid=58243"
+        },
+        {
+          "milliseconds": 4267.830707999994,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58243 microseconds=7968"
+        },
+        {
+          "milliseconds": 4267.835124999998,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4267.835665999999,
+          "line": "riftri: journal-stage: start Active pid=58243"
+        },
+        {
+          "milliseconds": 4275.766290999993,
+          "line": "riftri: journal-stage: finish Active pid=58243 microseconds=7927"
+        },
+        {
+          "milliseconds": 4275.8273749999935,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 2,
+      "label": "baseline",
+      "worker": 1,
+      "milliseconds": 4324.937665999998,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 310.445624999993,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 350.6662079999951,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 369.6737080000021,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 516.9552910000057,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 552.1448749999981,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 584.4647499999992,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58244"
+        },
+        {
+          "milliseconds": 593.3055000000022,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58244 microseconds=8964"
+        },
+        {
+          "milliseconds": 593.3490829999937,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 886.8267079999932,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 886.828582999995,
+          "line": "riftri: journal-stage: start BaseReady pid=58244"
+        },
+        {
+          "milliseconds": 899.4929580000025,
+          "line": "riftri: journal-stage: finish BaseReady pid=58244 microseconds=13662"
+        },
+        {
+          "milliseconds": 899.4945829999924,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 920.9332500000019,
+          "line": "riftri: apfs-stage: start directory-layout pid=58244"
+        },
+        {
+          "milliseconds": 1493.424457999994,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58244 microseconds=574549"
+        },
+        {
+          "milliseconds": 1493.4262909999961,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1493.4265409999934,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58244"
+        },
+        {
+          "milliseconds": 2167.274332999994,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58244 microseconds=673853"
+        },
+        {
+          "milliseconds": 2167.276666000005,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58244"
+        },
+        {
+          "milliseconds": 2167.732791000002,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58244 microseconds=473"
+        },
+        {
+          "milliseconds": 2167.7339999999967,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58244"
+        },
+        {
+          "milliseconds": 2188.6440830000065,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58244 microseconds=20725"
+        },
+        {
+          "milliseconds": 2188.645915999994,
+          "line": "riftri: journal-stage: start ViewCreated pid=58244"
+        },
+        {
+          "milliseconds": 2215.910499999998,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58244 microseconds=27220"
+        },
+        {
+          "milliseconds": 2215.912500000006,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2222.134374999994,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58244"
+        },
+        {
+          "milliseconds": 2232.2524580000027,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58244 microseconds=10444"
+        },
+        {
+          "milliseconds": 2232.3912500000006,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4222.792665999994,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58244"
+        },
+        {
+          "milliseconds": 4232.282040999999,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58244 microseconds=9446"
+        },
+        {
+          "milliseconds": 4232.286374999996,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4298.847250000006,
+          "line": "riftri: journal-stage: start CleanVerified pid=58244"
+        },
+        {
+          "milliseconds": 4309.720207999999,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58244 microseconds=10877"
+        },
+        {
+          "milliseconds": 4309.722165999992,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4309.722416000004,
+          "line": "riftri: journal-stage: start Active pid=58244"
+        },
+        {
+          "milliseconds": 4323.395915999994,
+          "line": "riftri: journal-stage: finish Active pid=58244 microseconds=13619"
+        },
+        {
+          "milliseconds": 4323.447625000001,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "baseline",
+      "worker": 1,
+      "milliseconds": 3430.8053749999963,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 298.00187500000175,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 318.28791600000113,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58460"
+        },
+        {
+          "milliseconds": 328.61733300000196,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58460 microseconds=10280"
+        },
+        {
+          "milliseconds": 328.61937499999476,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 549.0934160000033,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 549.0974160000042,
+          "line": "riftri: journal-stage: start BaseReady pid=58460"
+        },
+        {
+          "milliseconds": 557.2107079999987,
+          "line": "riftri: journal-stage: finish BaseReady pid=58460 microseconds=8116"
+        },
+        {
+          "milliseconds": 557.2142080000049,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 562.294624999995,
+          "line": "riftri: apfs-stage: start directory-layout pid=58460"
+        },
+        {
+          "milliseconds": 656.6684580000001,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58460 microseconds=94416"
+        },
+        {
+          "milliseconds": 656.6693749999977,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 656.6695829999953,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58460"
+        },
+        {
+          "milliseconds": 1292.9727500000008,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58460 microseconds=635487"
+        },
+        {
+          "milliseconds": 1292.9748330000002,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58460"
+        },
+        {
+          "milliseconds": 1297.179415999999,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58460 microseconds=3619"
+        },
+        {
+          "milliseconds": 1297.1806660000002,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58460"
+        },
+        {
+          "milliseconds": 1321.3997079999972,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58460 microseconds=25345"
+        },
+        {
+          "milliseconds": 1321.4030829999974,
+          "line": "riftri: journal-stage: start ViewCreated pid=58460"
+        },
+        {
+          "milliseconds": 1362.9536249999946,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58460 microseconds=41803"
+        },
+        {
+          "milliseconds": 1362.9551659999997,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1370.8076659999933,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58460"
+        },
+        {
+          "milliseconds": 1384.8475000000035,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58460 microseconds=13642"
+        },
+        {
+          "milliseconds": 1384.8488329999964,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3328.173125000001,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58460"
+        },
+        {
+          "milliseconds": 3339.4028749999998,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58460 microseconds=11260"
+        },
+        {
+          "milliseconds": 3339.4182500000024,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3396.7951659999962,
+          "line": "riftri: journal-stage: start CleanVerified pid=58460"
+        },
+        {
+          "milliseconds": 3413.527541000003,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58460 microseconds=16658"
+        },
+        {
+          "milliseconds": 3413.5292079999927,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3413.5294580000045,
+          "line": "riftri: journal-stage: start Active pid=58460"
+        },
+        {
+          "milliseconds": 3429.9940829999978,
+          "line": "riftri: journal-stage: finish Active pid=58460 microseconds=16338"
+        },
+        {
+          "milliseconds": 3429.997332999992,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "baseline",
+      "worker": 0,
+      "milliseconds": 3586.923541000011,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 259.11200000000827,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 270.8265410000022,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 288.5457080000051,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 329.1747500000056,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 353.3365000000049,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 373.0641250000044,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58461"
+        },
+        {
+          "milliseconds": 383.9336660000117,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58461 microseconds=10867"
+        },
+        {
+          "milliseconds": 383.9354580000072,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 576.6838330000028,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 576.6857080000045,
+          "line": "riftri: journal-stage: start BaseReady pid=58461"
+        },
+        {
+          "milliseconds": 586.1893750000017,
+          "line": "riftri: journal-stage: finish BaseReady pid=58461 microseconds=9693"
+        },
+        {
+          "milliseconds": 586.1910410000128,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 590.4198330000072,
+          "line": "riftri: apfs-stage: start directory-layout pid=58461"
+        },
+        {
+          "milliseconds": 703.3046250000043,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58461 microseconds=111997"
+        },
+        {
+          "milliseconds": 703.3062910000008,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 703.3065830000123,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58461"
+        },
+        {
+          "milliseconds": 1486.1932500000112,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58461 microseconds=783486"
+        },
+        {
+          "milliseconds": 1486.4512910000049,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58461"
+        },
+        {
+          "milliseconds": 1487.7770830000081,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58461 microseconds=1234"
+        },
+        {
+          "milliseconds": 1487.7790000000095,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58461"
+        },
+        {
+          "milliseconds": 1513.5724580000096,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58461 microseconds=26044"
+        },
+        {
+          "milliseconds": 1513.5738750000019,
+          "line": "riftri: journal-stage: start ViewCreated pid=58461"
+        },
+        {
+          "milliseconds": 1537.675500000012,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58461 microseconds=24238"
+        },
+        {
+          "milliseconds": 1537.6774580000056,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1544.8580409999995,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58461"
+        },
+        {
+          "milliseconds": 1561.6595000000088,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58461 microseconds=16947"
+        },
+        {
+          "milliseconds": 1561.660916000008,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3449.128541000013,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58461"
+        },
+        {
+          "milliseconds": 3482.1292910000047,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58461 microseconds=32977"
+        },
+        {
+          "milliseconds": 3482.1601250000094,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3556.8680830000085,
+          "line": "riftri: journal-stage: start CleanVerified pid=58461"
+        },
+        {
+          "milliseconds": 3575.8939580000006,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58461 microseconds=19022"
+        },
+        {
+          "milliseconds": 3575.9310410000035,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3575.9315830000123,
+          "line": "riftri: journal-stage: start Active pid=58461"
+        },
+        {
+          "milliseconds": 3586.1715000000113,
+          "line": "riftri: journal-stage: finish Active pid=58461 microseconds=10229"
+        },
+        {
+          "milliseconds": 3586.1735000000044,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "baseline",
+      "worker": 3,
+      "milliseconds": 3749.7850000000035,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 258.0652919999993,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 280.79666700000234,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 303.9467080000031,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 382.88750000001164,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 412.5055420000135,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 427.599000000002,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58463"
+        },
+        {
+          "milliseconds": 438.61366700001236,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58463 microseconds=11018"
+        },
+        {
+          "milliseconds": 438.6152080000029,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 638.028083000012,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 638.0300000000134,
+          "line": "riftri: journal-stage: start BaseReady pid=58463"
+        },
+        {
+          "milliseconds": 648.0805830000027,
+          "line": "riftri: journal-stage: finish BaseReady pid=58463 microseconds=10182"
+        },
+        {
+          "milliseconds": 648.0818750000035,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 652.2638750000042,
+          "line": "riftri: apfs-stage: start directory-layout pid=58463"
+        },
+        {
+          "milliseconds": 921.5529170000082,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58463 microseconds=268814"
+        },
+        {
+          "milliseconds": 921.5550829999993,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 921.5553330000112,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58463"
+        },
+        {
+          "milliseconds": 1685.1495419999992,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58463 microseconds=763997"
+        },
+        {
+          "milliseconds": 1685.1515420000069,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58463"
+        },
+        {
+          "milliseconds": 1686.2896670000046,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58463 microseconds=1126"
+        },
+        {
+          "milliseconds": 1686.2906670000084,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58463"
+        },
+        {
+          "milliseconds": 1710.4633750000066,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58463 microseconds=24270"
+        },
+        {
+          "milliseconds": 1710.4648330000055,
+          "line": "riftri: journal-stage: start ViewCreated pid=58463"
+        },
+        {
+          "milliseconds": 1733.4136670000007,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58463 microseconds=22664"
+        },
+        {
+          "milliseconds": 1733.4155000000028,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1740.0919580000045,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58463"
+        },
+        {
+          "milliseconds": 1748.6776670000108,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58463 microseconds=8688"
+        },
+        {
+          "milliseconds": 1748.6792080000014,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3598.5713749999995,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58463"
+        },
+        {
+          "milliseconds": 3613.0798750000104,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58463 microseconds=14463"
+        },
+        {
+          "milliseconds": 3613.1100420000002,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3667.5252080000064,
+          "line": "riftri: journal-stage: start CleanVerified pid=58463"
+        },
+        {
+          "milliseconds": 3694.0707500000135,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58463 microseconds=26513"
+        },
+        {
+          "milliseconds": 3694.072542000009,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3694.072708000007,
+          "line": "riftri: journal-stage: start Active pid=58463"
+        },
+        {
+          "milliseconds": 3748.9679580000084,
+          "line": "riftri: journal-stage: finish Active pid=58463 microseconds=54867"
+        },
+        {
+          "milliseconds": 3748.9695000000065,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "baseline",
+      "worker": 2,
+      "milliseconds": 4262.374083000002,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 258.3315409999923,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 295.1370409999945,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 316.59754099999554,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 438.90262500000244,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 462.5012909999932,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 478.0579579999903,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58462"
+        },
+        {
+          "milliseconds": 488.0874999999942,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58462 microseconds=10042"
+        },
+        {
+          "milliseconds": 488.0906249999971,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 734.8184579999943,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 734.8197499999951,
+          "line": "riftri: journal-stage: start BaseReady pid=58462"
+        },
+        {
+          "milliseconds": 750.2792909999989,
+          "line": "riftri: journal-stage: finish BaseReady pid=58462 microseconds=15751"
+        },
+        {
+          "milliseconds": 750.2811249999941,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 767.0665000000008,
+          "line": "riftri: apfs-stage: start directory-layout pid=58462"
+        },
+        {
+          "milliseconds": 1164.9552909999911,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58462 microseconds=398435"
+        },
+        {
+          "milliseconds": 1164.958541,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1164.9592080000002,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58462"
+        },
+        {
+          "milliseconds": 1830.6344160000008,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58462 microseconds=665683"
+        },
+        {
+          "milliseconds": 1830.636415999994,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58462"
+        },
+        {
+          "milliseconds": 1831.2601250000007,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58462 microseconds=648"
+        },
+        {
+          "milliseconds": 1831.26041599999,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58462"
+        },
+        {
+          "milliseconds": 1850.1192499999888,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58462 microseconds=18809"
+        },
+        {
+          "milliseconds": 1850.1211249999906,
+          "line": "riftri: journal-stage: start ViewCreated pid=58462"
+        },
+        {
+          "milliseconds": 1873.4764999999898,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58462 microseconds=23308"
+        },
+        {
+          "milliseconds": 1873.4780829999945,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1878.369624999992,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58462"
+        },
+        {
+          "milliseconds": 1890.2234579999931,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58462 microseconds=11829"
+        },
+        {
+          "milliseconds": 1890.224915999992,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4122.343290999997,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58462"
+        },
+        {
+          "milliseconds": 4153.419083000001,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58462 microseconds=31014"
+        },
+        {
+          "milliseconds": 4153.422040999998,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4205.132291000002,
+          "line": "riftri: journal-stage: start CleanVerified pid=58462"
+        },
+        {
+          "milliseconds": 4236.133124999993,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58462 microseconds=30994"
+        },
+        {
+          "milliseconds": 4236.134957999995,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4236.135125000001,
+          "line": "riftri: journal-stage: start Active pid=58462"
+        },
+        {
+          "milliseconds": 4261.612041,
+          "line": "riftri: journal-stage: finish Active pid=58462 microseconds=25431"
+        },
+        {
+          "milliseconds": 4261.614082999993,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "advice",
+      "worker": 1,
+      "milliseconds": 4656.292707999994,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 292.0093329999945,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 307.8396669999929,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58649"
+        },
+        {
+          "milliseconds": 315.9916249999951,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58649 microseconds=8096"
+        },
+        {
+          "milliseconds": 315.99333299999125,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 540.8184169999877,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 540.8217079999886,
+          "line": "riftri: journal-stage: start BaseReady pid=58649"
+        },
+        {
+          "milliseconds": 556.9093329999887,
+          "line": "riftri: journal-stage: finish BaseReady pid=58649 microseconds=16096"
+        },
+        {
+          "milliseconds": 556.9110419999924,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 561.4260829999985,
+          "line": "riftri: apfs-stage: start directory-layout pid=58649"
+        },
+        {
+          "milliseconds": 661.9872079999914,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58649 microseconds=100463"
+        },
+        {
+          "milliseconds": 661.9886669999978,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 661.9888749999955,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58649"
+        },
+        {
+          "milliseconds": 1486.174457999994,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58649 microseconds=824176"
+        },
+        {
+          "milliseconds": 1486.1765829999931,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58649"
+        },
+        {
+          "milliseconds": 3270.809792,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58649 microseconds=1784676"
+        },
+        {
+          "milliseconds": 3270.810666999998,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58649"
+        },
+        {
+          "milliseconds": 3289.816791999998,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58649 microseconds=18988"
+        },
+        {
+          "milliseconds": 3289.8177499999874,
+          "line": "riftri: journal-stage: start ViewCreated pid=58649"
+        },
+        {
+          "milliseconds": 3439.845874999999,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58649 microseconds=149949"
+        },
+        {
+          "milliseconds": 3439.9222499999887,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 3452.483082999999,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58649"
+        },
+        {
+          "milliseconds": 3471.2530419999966,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58649 microseconds=15604"
+        },
+        {
+          "milliseconds": 3471.254416999989,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4476.651124999989,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58649"
+        },
+        {
+          "milliseconds": 4488.073957999994,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58649 microseconds=11345"
+        },
+        {
+          "milliseconds": 4488.075791999989,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4612.987957999998,
+          "line": "riftri: journal-stage: start CleanVerified pid=58649"
+        },
+        {
+          "milliseconds": 4624.947457999995,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58649 microseconds=11996"
+        },
+        {
+          "milliseconds": 4624.973291999995,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4624.97379199999,
+          "line": "riftri: journal-stage: start Active pid=58649"
+        },
+        {
+          "milliseconds": 4655.26112499999,
+          "line": "riftri: journal-stage: finish Active pid=58649 microseconds=30282"
+        },
+        {
+          "milliseconds": 4655.297124999997,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "advice",
+      "worker": 0,
+      "milliseconds": 4683.339040999999,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 254.70974999999453,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 276.7500829999917,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 296.75458300000173,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 364.51254099998914,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 387.57966599999054,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 406.4157500000001,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58646"
+        },
+        {
+          "milliseconds": 412.4675409999909,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58646 microseconds=6072"
+        },
+        {
+          "milliseconds": 412.4685829999944,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 618.6814579999918,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 618.6834579999995,
+          "line": "riftri: journal-stage: start BaseReady pid=58646"
+        },
+        {
+          "milliseconds": 629.6393749999988,
+          "line": "riftri: journal-stage: finish BaseReady pid=58646 microseconds=10951"
+        },
+        {
+          "milliseconds": 629.6405830000003,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 635.3925409999938,
+          "line": "riftri: apfs-stage: start directory-layout pid=58646"
+        },
+        {
+          "milliseconds": 881.0344579999946,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58646 microseconds=245271"
+        },
+        {
+          "milliseconds": 881.0362909999967,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 881.036540999994,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58646"
+        },
+        {
+          "milliseconds": 1695.7494999999908,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58646 microseconds=814970"
+        },
+        {
+          "milliseconds": 1695.7512080000015,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58646"
+        },
+        {
+          "milliseconds": 3442.662415999992,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58646 microseconds=1747374"
+        },
+        {
+          "milliseconds": 3442.7137499999953,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58646"
+        },
+        {
+          "milliseconds": 3466.9040830000013,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58646 microseconds=24059"
+        },
+        {
+          "milliseconds": 3466.904290999999,
+          "line": "riftri: journal-stage: start ViewCreated pid=58646"
+        },
+        {
+          "milliseconds": 3486.6389159999962,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58646 microseconds=19796"
+        },
+        {
+          "milliseconds": 3486.641957999993,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 3494.524790999989,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58646"
+        },
+        {
+          "milliseconds": 3511.69183299999,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58646 microseconds=17096"
+        },
+        {
+          "milliseconds": 3511.6920830000017,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4493.68841599999,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58646"
+        },
+        {
+          "milliseconds": 4507.507207999995,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58646 microseconds=13855"
+        },
+        {
+          "milliseconds": 4507.534,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4613.687999999995,
+          "line": "riftri: journal-stage: start CleanVerified pid=58646"
+        },
+        {
+          "milliseconds": 4630.977874999997,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58646 microseconds=17280"
+        },
+        {
+          "milliseconds": 4630.978332999992,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4630.9785409999895,
+          "line": "riftri: journal-stage: start Active pid=58646"
+        },
+        {
+          "milliseconds": 4655.828290999998,
+          "line": "riftri: journal-stage: finish Active pid=58646 microseconds=24770"
+        },
+        {
+          "milliseconds": 4655.828915999999,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "advice",
+      "worker": 2,
+      "milliseconds": 4689.816583000007,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 253.89441700000316,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 264.9955420000042,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 281.05145800000173,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 315.77675000000454,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 337.81570799999463,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 355.67341699999815,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58647"
+        },
+        {
+          "milliseconds": 363.7152080000087,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58647 microseconds=8057"
+        },
+        {
+          "milliseconds": 363.7162499999977,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 560.8716669999994,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 560.8732920000039,
+          "line": "riftri: journal-stage: start BaseReady pid=58647"
+        },
+        {
+          "milliseconds": 570.4927080000052,
+          "line": "riftri: journal-stage: finish BaseReady pid=58647 microseconds=9573"
+        },
+        {
+          "milliseconds": 570.4966249999998,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 574.9072080000042,
+          "line": "riftri: apfs-stage: start directory-layout pid=58647"
+        },
+        {
+          "milliseconds": 666.0550829999993,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58647 microseconds=90322"
+        },
+        {
+          "milliseconds": 666.0566249999974,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 666.0568329999951,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58647"
+        },
+        {
+          "milliseconds": 1462.3819999999978,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58647 microseconds=796536"
+        },
+        {
+          "milliseconds": 1462.3838749999995,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58647"
+        },
+        {
+          "milliseconds": 3208.011958000003,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58647 microseconds=1746195"
+        },
+        {
+          "milliseconds": 3208.0132920000033,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58647"
+        },
+        {
+          "milliseconds": 3226.721583000006,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58647 microseconds=18704"
+        },
+        {
+          "milliseconds": 3226.7229170000064,
+          "line": "riftri: journal-stage: start ViewCreated pid=58647"
+        },
+        {
+          "milliseconds": 3422.1386670000065,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58647 microseconds=195337"
+        },
+        {
+          "milliseconds": 3422.141625000004,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 3444.1462080000056,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58647"
+        },
+        {
+          "milliseconds": 3466.098041999998,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58647 microseconds=21437"
+        },
+        {
+          "milliseconds": 3466.0995419999963,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4503.038874999998,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58647"
+        },
+        {
+          "milliseconds": 4524.464124999999,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58647 microseconds=19432"
+        },
+        {
+          "milliseconds": 4524.468292000005,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4631.122583000004,
+          "line": "riftri: journal-stage: start CleanVerified pid=58647"
+        },
+        {
+          "milliseconds": 4689.710833000005,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58647 microseconds=36303"
+        },
+        {
+          "milliseconds": 4689.711125000002,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4689.711250000008,
+          "line": "riftri: journal-stage: start Active pid=58647"
+        },
+        {
+          "milliseconds": 4689.711374999999,
+          "line": "riftri: journal-stage: finish Active pid=58647 microseconds=19757"
+        },
+        {
+          "milliseconds": 4689.711458000005,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 3,
+      "label": "advice",
+      "worker": 3,
+      "milliseconds": 4692.408125000002,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 253.71366699998907,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 289.5074170000007,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 305.796583000003,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 411.50108299999556,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 435.575417,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 450.8516249999957,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58648"
+        },
+        {
+          "milliseconds": 460.5638329999929,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58648 microseconds=9688"
+        },
+        {
+          "milliseconds": 460.5672499999928,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 692.0241249999963,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 692.0257920000004,
+          "line": "riftri: journal-stage: start BaseReady pid=58648"
+        },
+        {
+          "milliseconds": 705.7583329999907,
+          "line": "riftri: journal-stage: finish BaseReady pid=58648 microseconds=14148"
+        },
+        {
+          "milliseconds": 705.7597919999971,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 719.026291999995,
+          "line": "riftri: apfs-stage: start directory-layout pid=58648"
+        },
+        {
+          "milliseconds": 1063.164374999993,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58648 microseconds=344357"
+        },
+        {
+          "milliseconds": 1063.1665419999918,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 1063.166791999989,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58648"
+        },
+        {
+          "milliseconds": 1736.2100419999915,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58648 microseconds=673469"
+        },
+        {
+          "milliseconds": 1736.2114169999986,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58648"
+        },
+        {
+          "milliseconds": 3449.061707999994,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58648 microseconds=1712779"
+        },
+        {
+          "milliseconds": 3449.063832999993,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58648"
+        },
+        {
+          "milliseconds": 3470.8191249999945,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58648 microseconds=21566"
+        },
+        {
+          "milliseconds": 3470.819374999992,
+          "line": "riftri: journal-stage: start ViewCreated pid=58648"
+        },
+        {
+          "milliseconds": 3481.698833000002,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58648 microseconds=11006"
+        },
+        {
+          "milliseconds": 3481.7009580000013,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 3489.866207999992,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58648"
+        },
+        {
+          "milliseconds": 3510.665374999997,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58648 microseconds=20621"
+        },
+        {
+          "milliseconds": 3510.6670000000013,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4493.206124999997,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58648"
+        },
+        {
+          "milliseconds": 4512.429292000001,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58648 microseconds=19250"
+        },
+        {
+          "milliseconds": 4512.430874999991,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4626.028666999991,
+          "line": "riftri: journal-stage: start CleanVerified pid=58648"
+        },
+        {
+          "milliseconds": 4689.477375000002,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58648 microseconds=36481"
+        },
+        {
+          "milliseconds": 4689.478457999998,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4689.478749999995,
+          "line": "riftri: journal-stage: start Active pid=58648"
+        },
+        {
+          "milliseconds": 4689.478875000001,
+          "line": "riftri: journal-stage: finish Active pid=58648 microseconds=19034"
+        },
+        {
+          "milliseconds": 4689.478957999992,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "advice",
+      "worker": 3,
+      "milliseconds": 4347.355416999999,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 328.02537499999744,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 349.52904199999466,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58923"
+        },
+        {
+          "milliseconds": 357.5689169999969,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58923 microseconds=7987"
+        },
+        {
+          "milliseconds": 357.57045800000196,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 588.328125,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 588.3320419999945,
+          "line": "riftri: journal-stage: start BaseReady pid=58923"
+        },
+        {
+          "milliseconds": 598.3907500000059,
+          "line": "riftri: journal-stage: finish BaseReady pid=58923 microseconds=10043"
+        },
+        {
+          "milliseconds": 598.4501670000027,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 603.1094580000063,
+          "line": "riftri: apfs-stage: start directory-layout pid=58923"
+        },
+        {
+          "milliseconds": 704.676999999996,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58923 microseconds=101538"
+        },
+        {
+          "milliseconds": 704.6786250000005,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 704.6789169999975,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58923"
+        },
+        {
+          "milliseconds": 2103.3044999999984,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58923 microseconds=1398352"
+        },
+        {
+          "milliseconds": 2103.3069169999944,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58923"
+        },
+        {
+          "milliseconds": 2325.914583000005,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58923 microseconds=222284"
+        },
+        {
+          "milliseconds": 2325.9166669999977,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58923"
+        },
+        {
+          "milliseconds": 2354.7973749999946,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58923 microseconds=29140"
+        },
+        {
+          "milliseconds": 2354.801166999998,
+          "line": "riftri: journal-stage: start ViewCreated pid=58923"
+        },
+        {
+          "milliseconds": 2395.3612500000017,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58923 microseconds=40814"
+        },
+        {
+          "milliseconds": 2395.362792,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2407.2854579999985,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58923"
+        },
+        {
+          "milliseconds": 2447.0518750000047,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58923 microseconds=39702"
+        },
+        {
+          "milliseconds": 2447.053832999998,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4126.268916999994,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58923"
+        },
+        {
+          "milliseconds": 4141.466249999998,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58923 microseconds=15638"
+        },
+        {
+          "milliseconds": 4141.519792000006,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4320.411082999999,
+          "line": "riftri: journal-stage: start CleanVerified pid=58923"
+        },
+        {
+          "milliseconds": 4333.0847499999945,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58923 microseconds=12189"
+        },
+        {
+          "milliseconds": 4333.0874579999945,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4333.087708000006,
+          "line": "riftri: journal-stage: start Active pid=58923"
+        },
+        {
+          "milliseconds": 4344.690875,
+          "line": "riftri: journal-stage: finish Active pid=58923 microseconds=12064"
+        },
+        {
+          "milliseconds": 4344.954083000004,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "advice",
+      "worker": 0,
+      "milliseconds": 4455.854332999996,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 289.8982079999987,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 302.6435829999973,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 321.1600829999952,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 359.6842500000057,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 384.6137500000041,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 403.21895799999766,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58920"
+        },
+        {
+          "milliseconds": 410.59995800000615,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58920 microseconds=7347"
+        },
+        {
+          "milliseconds": 410.6019579999993,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 606.4488750000019,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 606.4511250000069,
+          "line": "riftri: journal-stage: start BaseReady pid=58920"
+        },
+        {
+          "milliseconds": 615.6452500000014,
+          "line": "riftri: journal-stage: finish BaseReady pid=58920 microseconds=9167"
+        },
+        {
+          "milliseconds": 615.6489580000052,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 620.1888750000071,
+          "line": "riftri: apfs-stage: start directory-layout pid=58920"
+        },
+        {
+          "milliseconds": 720.4924159999937,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58920 microseconds=99929"
+        },
+        {
+          "milliseconds": 720.4943329999951,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 720.494583000007,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58920"
+        },
+        {
+          "milliseconds": 2188.194583000004,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58920 microseconds=1467730"
+        },
+        {
+          "milliseconds": 2188.1970410000067,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58920"
+        },
+        {
+          "milliseconds": 2442.6857080000045,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58920 microseconds=253165"
+        },
+        {
+          "milliseconds": 2442.6875410000066,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58920"
+        },
+        {
+          "milliseconds": 2525.010540999996,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58920 microseconds=83827"
+        },
+        {
+          "milliseconds": 2525.0118749999965,
+          "line": "riftri: journal-stage: start ViewCreated pid=58920"
+        },
+        {
+          "milliseconds": 2546.313374999998,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58920 microseconds=21184"
+        },
+        {
+          "milliseconds": 2546.3149580000027,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2554.6602910000074,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58920"
+        },
+        {
+          "milliseconds": 2579.3721249999944,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58920 microseconds=23156"
+        },
+        {
+          "milliseconds": 2579.373707999999,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4251.891791000002,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58920"
+        },
+        {
+          "milliseconds": 4268.610249999998,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58920 microseconds=17095"
+        },
+        {
+          "milliseconds": 4268.612999999998,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4420.467290999994,
+          "line": "riftri: journal-stage: start CleanVerified pid=58920"
+        },
+        {
+          "milliseconds": 4439.837625,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58920 microseconds=19518"
+        },
+        {
+          "milliseconds": 4439.8687079999945,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4439.869166000004,
+          "line": "riftri: journal-stage: start Active pid=58920"
+        },
+        {
+          "milliseconds": 4454.687791000004,
+          "line": "riftri: journal-stage: finish Active pid=58920 microseconds=14755"
+        },
+        {
+          "milliseconds": 4454.721583000006,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "advice",
+      "worker": 2,
+      "milliseconds": 4474.2752499999915,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 288.3196249999892,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 312.69558299999335,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 339.3991659999883,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 408.86020799999824,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 431.81874999999127,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 446.88341599999694,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58922"
+        },
+        {
+          "milliseconds": 454.7873749999999,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58922 microseconds=7887"
+        },
+        {
+          "milliseconds": 454.78933299999335,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 662.3669999999984,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 662.3708329999936,
+          "line": "riftri: journal-stage: start BaseReady pid=58922"
+        },
+        {
+          "milliseconds": 672.877708,
+          "line": "riftri: journal-stage: finish BaseReady pid=58922 microseconds=10459"
+        },
+        {
+          "milliseconds": 672.8792499999981,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 677.8374999999942,
+          "line": "riftri: apfs-stage: start directory-layout pid=58922"
+        },
+        {
+          "milliseconds": 1049.8378329999978,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58922 microseconds=372523"
+        },
+        {
+          "milliseconds": 1049.8700409999874,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 1049.87049999999,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58922"
+        },
+        {
+          "milliseconds": 2356.037540999998,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58922 microseconds=1306183"
+        },
+        {
+          "milliseconds": 2356.0389999999898,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58922"
+        },
+        {
+          "milliseconds": 2609.488124999989,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58922 microseconds=253058"
+        },
+        {
+          "milliseconds": 2609.4899159999914,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58922"
+        },
+        {
+          "milliseconds": 2652.009416000001,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58922 microseconds=42236"
+        },
+        {
+          "milliseconds": 2652.0110829999903,
+          "line": "riftri: journal-stage: start ViewCreated pid=58922"
+        },
+        {
+          "milliseconds": 2665.7183749999967,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58922 microseconds=13514"
+        },
+        {
+          "milliseconds": 2665.7202499999985,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2671.3282079999917,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58922"
+        },
+        {
+          "milliseconds": 2682.382375000001,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58922 microseconds=11025"
+        },
+        {
+          "milliseconds": 2682.384665999998,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4342.134165999989,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58922"
+        },
+        {
+          "milliseconds": 4357.992624999999,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58922 microseconds=13189"
+        },
+        {
+          "milliseconds": 4357.994500000001,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4450.442374999999,
+          "line": "riftri: journal-stage: start CleanVerified pid=58922"
+        },
+        {
+          "milliseconds": 4467.127415999988,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58922 microseconds=11362"
+        },
+        {
+          "milliseconds": 4467.12866599999,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4467.128874999995,
+          "line": "riftri: journal-stage: start Active pid=58922"
+        },
+        {
+          "milliseconds": 4473.620749999987,
+          "line": "riftri: journal-stage: finish Active pid=58922 microseconds=9683"
+        },
+        {
+          "milliseconds": 4473.623374999996,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "advice",
+      "worker": 1,
+      "milliseconds": 4567.017041999992,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 291.6511669999891,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 329.88179200000013,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 347.9280829999916,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 455.48529199999757,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 482.71954199999163,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 501.1252499999973,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=58921"
+        },
+        {
+          "milliseconds": 509.50170799999614,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=58921 microseconds=8351"
+        },
+        {
+          "milliseconds": 509.5035419999913,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 743.1533329999947,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 743.1547500000015,
+          "line": "riftri: journal-stage: start BaseReady pid=58921"
+        },
+        {
+          "milliseconds": 758.5222499999945,
+          "line": "riftri: journal-stage: finish BaseReady pid=58921 microseconds=15513"
+        },
+        {
+          "milliseconds": 758.5244579999999,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 851.3772079999908,
+          "line": "riftri: apfs-stage: start directory-layout pid=58921"
+        },
+        {
+          "milliseconds": 1353.2861669999984,
+          "line": "riftri: apfs-stage: finish directory-layout pid=58921 microseconds=504034"
+        },
+        {
+          "milliseconds": 1353.3196249999892,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=true"
+        },
+        {
+          "milliseconds": 1353.3201249999984,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=58921"
+        },
+        {
+          "milliseconds": 2700.8420419999893,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=58921 microseconds=1347506"
+        },
+        {
+          "milliseconds": 2700.8444579999923,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=58921"
+        },
+        {
+          "milliseconds": 2857.8512079999928,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=58921 microseconds=156957"
+        },
+        {
+          "milliseconds": 2857.855832999994,
+          "line": "riftri: apfs-stage: start directory-permissions pid=58921"
+        },
+        {
+          "milliseconds": 2887.67620799999,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=58921 microseconds=29838"
+        },
+        {
+          "milliseconds": 2887.678457999995,
+          "line": "riftri: journal-stage: start ViewCreated pid=58921"
+        },
+        {
+          "milliseconds": 2900.495750000002,
+          "line": "riftri: journal-stage: finish ViewCreated pid=58921 microseconds=12445"
+        },
+        {
+          "milliseconds": 2900.4978330000013,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2906.843916999991,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=58921"
+        },
+        {
+          "milliseconds": 2915.637582999989,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=58921 microseconds=8664"
+        },
+        {
+          "milliseconds": 2915.6394579999906,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 4421.385291999992,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=58921"
+        },
+        {
+          "milliseconds": 4445.417999999991,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=58921 microseconds=23971"
+        },
+        {
+          "milliseconds": 4445.478917,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 4533.600292000003,
+          "line": "riftri: journal-stage: start CleanVerified pid=58921"
+        },
+        {
+          "milliseconds": 4541.485291999998,
+          "line": "riftri: journal-stage: finish CleanVerified pid=58921 microseconds=7875"
+        },
+        {
+          "milliseconds": 4541.490332999994,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 4541.490957999995,
+          "line": "riftri: journal-stage: start Active pid=58921"
+        },
+        {
+          "milliseconds": 4557.673416999998,
+          "line": "riftri: journal-stage: finish Active pid=58921 microseconds=9029"
+        },
+        {
+          "milliseconds": 4557.6762499999895,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "baseline",
+      "worker": 2,
+      "milliseconds": 3570.5158340000053,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 307.8690840000054,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 328.00800000000163,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=59246"
+        },
+        {
+          "milliseconds": 337.05958400000236,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=59246 microseconds=9070"
+        },
+        {
+          "milliseconds": 337.0604170000006,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 557.71875,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 557.7230000000127,
+          "line": "riftri: journal-stage: start BaseReady pid=59246"
+        },
+        {
+          "milliseconds": 575.0702090000123,
+          "line": "riftri: journal-stage: finish BaseReady pid=59246 microseconds=17077"
+        },
+        {
+          "milliseconds": 575.0727920000063,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 581.2957920000044,
+          "line": "riftri: apfs-stage: start directory-layout pid=59246"
+        },
+        {
+          "milliseconds": 696.2196250000125,
+          "line": "riftri: apfs-stage: finish directory-layout pid=59246 microseconds=115511"
+        },
+        {
+          "milliseconds": 696.2210420000047,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 696.221292000002,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=59246"
+        },
+        {
+          "milliseconds": 1470.9628340000054,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=59246 microseconds=775309"
+        },
+        {
+          "milliseconds": 1470.9667920000065,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=59246"
+        },
+        {
+          "milliseconds": 1472.265750000006,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=59246 microseconds=592"
+        },
+        {
+          "milliseconds": 1472.266834000009,
+          "line": "riftri: apfs-stage: start directory-permissions pid=59246"
+        },
+        {
+          "milliseconds": 1498.3734590000095,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=59246 microseconds=27177"
+        },
+        {
+          "milliseconds": 1498.3744589999988,
+          "line": "riftri: journal-stage: start ViewCreated pid=59246"
+        },
+        {
+          "milliseconds": 1531.2356250000012,
+          "line": "riftri: journal-stage: finish ViewCreated pid=59246 microseconds=32853"
+        },
+        {
+          "milliseconds": 1531.262917,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1539.899000000005,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=59246"
+        },
+        {
+          "milliseconds": 1550.8447500000038,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=59246 microseconds=10920"
+        },
+        {
+          "milliseconds": 1550.8726670000033,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3467.5312919999997,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=59246"
+        },
+        {
+          "milliseconds": 3484.8541250000126,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=59246 microseconds=17301"
+        },
+        {
+          "milliseconds": 3484.8560419999994,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3550.5890840000066,
+          "line": "riftri: journal-stage: start CleanVerified pid=59246"
+        },
+        {
+          "milliseconds": 3559.951667000001,
+          "line": "riftri: journal-stage: finish CleanVerified pid=59246 microseconds=9174"
+        },
+        {
+          "milliseconds": 3559.9532920000056,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3559.9535840000026,
+          "line": "riftri: journal-stage: start Active pid=59246"
+        },
+        {
+          "milliseconds": 3569.246167000005,
+          "line": "riftri: journal-stage: finish Active pid=59246 microseconds=9312"
+        },
+        {
+          "milliseconds": 3569.249542000005,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "baseline",
+      "worker": 0,
+      "milliseconds": 3717.3782909999863,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 260.5349579999893,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 269.6532079999888,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 286.99824999998964,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 337.85149999998976,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 363.00066599999263,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 384.0275829999882,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=59244"
+        },
+        {
+          "milliseconds": 423.6306249999907,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=59244 microseconds=39598"
+        },
+        {
+          "milliseconds": 423.63229099998716,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 637.1275409999944,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 637.1297499999928,
+          "line": "riftri: journal-stage: start BaseReady pid=59244"
+        },
+        {
+          "milliseconds": 648.5985409999994,
+          "line": "riftri: journal-stage: finish BaseReady pid=59244 microseconds=11591"
+        },
+        {
+          "milliseconds": 648.601999999999,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 657.1845409999951,
+          "line": "riftri: apfs-stage: start directory-layout pid=59244"
+        },
+        {
+          "milliseconds": 877.2189999999973,
+          "line": "riftri: apfs-stage: finish directory-layout pid=59244 microseconds=219468"
+        },
+        {
+          "milliseconds": 877.2215829999914,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 877.2218329999887,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=59244"
+        },
+        {
+          "milliseconds": 1771.0654579999973,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=59244 microseconds=894379"
+        },
+        {
+          "milliseconds": 1771.0674579999904,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=59244"
+        },
+        {
+          "milliseconds": 1771.921166,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=59244 microseconds=626"
+        },
+        {
+          "milliseconds": 1771.9221659999894,
+          "line": "riftri: apfs-stage: start directory-permissions pid=59244"
+        },
+        {
+          "milliseconds": 1798.1222909999924,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=59244 microseconds=26226"
+        },
+        {
+          "milliseconds": 1798.1398329999938,
+          "line": "riftri: journal-stage: start ViewCreated pid=59244"
+        },
+        {
+          "milliseconds": 1820.5039999999863,
+          "line": "riftri: journal-stage: finish ViewCreated pid=59244 microseconds=21832"
+        },
+        {
+          "milliseconds": 1820.5155830000003,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 1832.520457999999,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=59244"
+        },
+        {
+          "milliseconds": 1845.8764999999985,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=59244 microseconds=13306"
+        },
+        {
+          "milliseconds": 1845.907290999996,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3619.8863749999873,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=59244"
+        },
+        {
+          "milliseconds": 3630.6705409999995,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=59244 microseconds=10724"
+        },
+        {
+          "milliseconds": 3630.702874999988,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3697.8903329999885,
+          "line": "riftri: journal-stage: start CleanVerified pid=59244"
+        },
+        {
+          "milliseconds": 3708.1517909999966,
+          "line": "riftri: journal-stage: finish CleanVerified pid=59244 microseconds=10271"
+        },
+        {
+          "milliseconds": 3708.174915999989,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3708.1753749999916,
+          "line": "riftri: journal-stage: start Active pid=59244"
+        },
+        {
+          "milliseconds": 3716.399416,
+          "line": "riftri: journal-stage: finish Active pid=59244 microseconds=8140"
+        },
+        {
+          "milliseconds": 3716.455124999993,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "baseline",
+      "worker": 1,
+      "milliseconds": 3886.7038750000065,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 260.1008340000117,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 280.4627920000057,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 297.9677500000107,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 423.1877500000119,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 448.1686250000057,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 466.4725000000035,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=59245"
+        },
+        {
+          "milliseconds": 476.24845900000946,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=59245 microseconds=9777"
+        },
+        {
+          "milliseconds": 476.25037500000326,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 719.101834000001,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 719.1032920000143,
+          "line": "riftri: journal-stage: start BaseReady pid=59245"
+        },
+        {
+          "milliseconds": 736.5900840000104,
+          "line": "riftri: journal-stage: finish BaseReady pid=59245 microseconds=17008"
+        },
+        {
+          "milliseconds": 736.5919590000121,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 772.9756670000061,
+          "line": "riftri: apfs-stage: start directory-layout pid=59245"
+        },
+        {
+          "milliseconds": 1059.6893750000017,
+          "line": "riftri: apfs-stage: finish directory-layout pid=59245 microseconds=289156"
+        },
+        {
+          "milliseconds": 1059.691417000009,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1059.691709000006,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=59245"
+        },
+        {
+          "milliseconds": 1951.44200000001,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=59245 microseconds=892005"
+        },
+        {
+          "milliseconds": 1951.4442920000001,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=59245"
+        },
+        {
+          "milliseconds": 1951.847959000006,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=59245 microseconds=544"
+        },
+        {
+          "milliseconds": 1951.8487500000047,
+          "line": "riftri: apfs-stage: start directory-permissions pid=59245"
+        },
+        {
+          "milliseconds": 1974.8267500000075,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=59245 microseconds=22607"
+        },
+        {
+          "milliseconds": 1974.8278340000106,
+          "line": "riftri: journal-stage: start ViewCreated pid=59245"
+        },
+        {
+          "milliseconds": 2026.0199170000124,
+          "line": "riftri: journal-stage: finish ViewCreated pid=59245 microseconds=51223"
+        },
+        {
+          "milliseconds": 2026.0217499999999,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2031.5862500000076,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=59245"
+        },
+        {
+          "milliseconds": 2046.2693340000114,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=59245 microseconds=14461"
+        },
+        {
+          "milliseconds": 2046.2709170000016,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3796.010459000012,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=59245"
+        },
+        {
+          "milliseconds": 3810.0739170000015,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=59245 microseconds=14043"
+        },
+        {
+          "milliseconds": 3810.076209000006,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3866.0657920000085,
+          "line": "riftri: journal-stage: start CleanVerified pid=59245"
+        },
+        {
+          "milliseconds": 3875.4984590000095,
+          "line": "riftri: journal-stage: finish CleanVerified pid=59245 microseconds=9068"
+        },
+        {
+          "milliseconds": 3875.5004590000026,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3875.5006670000002,
+          "line": "riftri: journal-stage: start Active pid=59245"
+        },
+        {
+          "milliseconds": 3885.7025840000133,
+          "line": "riftri: journal-stage: finish Active pid=59245 microseconds=10268"
+        },
+        {
+          "milliseconds": 3885.7056250000023,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    },
+    {
+      "round": 4,
+      "label": "baseline",
+      "worker": 3,
+      "milliseconds": 3941.072042,
+      "success": true,
+      "code": 0,
+      "signal": null,
+      "timedOut": false,
+      "phases": [
+        {
+          "milliseconds": 259.49899999999616,
+          "line": "riftri: waiting: lock state-directory locators (held by another process)"
+        },
+        {
+          "milliseconds": 290.74124999999185,
+          "line": "riftri: resumed: lock state-directory locators"
+        },
+        {
+          "milliseconds": 314.6434169999993,
+          "line": "riftri: waiting: lock Git worktree metadata (held by another process)"
+        },
+        {
+          "milliseconds": 475.7267079999874,
+          "line": "riftri: resumed: lock Git worktree metadata"
+        },
+        {
+          "milliseconds": 501.4617920000019,
+          "line": "riftri: worktree-add: intent-recorded"
+        },
+        {
+          "milliseconds": 521.5275419999962,
+          "line": "riftri: journal-stage: start GitMetadataCreated pid=59247"
+        },
+        {
+          "milliseconds": 529.5080420000013,
+          "line": "riftri: journal-stage: finish GitMetadataCreated pid=59247 microseconds=7949"
+        },
+        {
+          "milliseconds": 529.5127079999947,
+          "line": "riftri: worktree-add: git-metadata-created"
+        },
+        {
+          "milliseconds": 827.4318329999951,
+          "line": "riftri: worktree-add: immutable base cached; reusing it"
+        },
+        {
+          "milliseconds": 827.4335419999989,
+          "line": "riftri: journal-stage: start BaseReady pid=59247"
+        },
+        {
+          "milliseconds": 838.7339169999905,
+          "line": "riftri: journal-stage: finish BaseReady pid=59247 microseconds=11824"
+        },
+        {
+          "milliseconds": 838.7353329999896,
+          "line": "riftri: worktree-add: base-ready"
+        },
+        {
+          "milliseconds": 851.0320829999982,
+          "line": "riftri: apfs-stage: start directory-layout pid=59247"
+        },
+        {
+          "milliseconds": 1217.0591249999998,
+          "line": "riftri: apfs-stage: finish directory-layout pid=59247 microseconds=365997"
+        },
+        {
+          "milliseconds": 1217.0612499999988,
+          "line": "riftri: apfs-stage: jobs files=5863 directories=1103 workers=4 hints=false"
+        },
+        {
+          "milliseconds": 1217.0614579999965,
+          "line": "riftri: apfs-stage: start native-file-clones-and-modes pid=59247"
+        },
+        {
+          "milliseconds": 2051.7241249999934,
+          "line": "riftri: apfs-stage: finish native-file-clones-and-modes pid=59247 microseconds=834631"
+        },
+        {
+          "milliseconds": 2051.725999999995,
+          "line": "riftri: apfs-stage: start read-ahead-pass pid=59247"
+        },
+        {
+          "milliseconds": 2052.3019169999898,
+          "line": "riftri: apfs-stage: finish read-ahead-pass pid=59247 microseconds=706"
+        },
+        {
+          "milliseconds": 2052.3024999999907,
+          "line": "riftri: apfs-stage: start directory-permissions pid=59247"
+        },
+        {
+          "milliseconds": 2071.551542000001,
+          "line": "riftri: apfs-stage: finish directory-permissions pid=59247 microseconds=19014"
+        },
+        {
+          "milliseconds": 2071.553541999994,
+          "line": "riftri: journal-stage: start ViewCreated pid=59247"
+        },
+        {
+          "milliseconds": 2083.4264580000017,
+          "line": "riftri: journal-stage: finish ViewCreated pid=59247 microseconds=11724"
+        },
+        {
+          "milliseconds": 2083.428457999995,
+          "line": "riftri: worktree-add: view-created"
+        },
+        {
+          "milliseconds": 2089.3239999999932,
+          "line": "riftri: journal-stage: start GitPointerRestored pid=59247"
+        },
+        {
+          "milliseconds": 2100.1064579999947,
+          "line": "riftri: journal-stage: finish GitPointerRestored pid=59247 microseconds=10908"
+        },
+        {
+          "milliseconds": 2100.1086249999935,
+          "line": "riftri: worktree-add: git-pointer-restored"
+        },
+        {
+          "milliseconds": 3841.673999999999,
+          "line": "riftri: journal-stage: start IndexSynchronized pid=59247"
+        },
+        {
+          "milliseconds": 3853.469499999992,
+          "line": "riftri: journal-stage: finish IndexSynchronized pid=59247 microseconds=11780"
+        },
+        {
+          "milliseconds": 3853.503749999989,
+          "line": "riftri: worktree-add: index-synchronized"
+        },
+        {
+          "milliseconds": 3918.7739999999903,
+          "line": "riftri: journal-stage: start CleanVerified pid=59247"
+        },
+        {
+          "milliseconds": 3928.7296249999927,
+          "line": "riftri: journal-stage: finish CleanVerified pid=59247 microseconds=9937"
+        },
+        {
+          "milliseconds": 3928.76995799999,
+          "line": "riftri: worktree-add: clean-verified"
+        },
+        {
+          "milliseconds": 3928.770457999999,
+          "line": "riftri: journal-stage: start Active pid=59247"
+        },
+        {
+          "milliseconds": 3939.9851669999916,
+          "line": "riftri: journal-stage: finish Active pid=59247 microseconds=11270"
+        },
+        {
+          "milliseconds": 3939.985707999993,
+          "line": "riftri: worktree-add: active"
+        }
+      ],
+      "stackSamples": [],
+      "indexScanned": 5864
+    }
+  ]
+}

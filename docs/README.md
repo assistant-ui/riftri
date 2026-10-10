@@ -56,6 +56,12 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Measurements
 
+- [APFS stage diagnosis, October 9](benchmarks/apfs-stage-diagnostics-2026-10-09.md)
+  — separate clone, hint and journal timings; diagnostic builds only, not a speedup claim.
+- [Deferred APFS read-ahead, October 9](benchmarks/apfs-deferred-read-ahead-2026-10-09.md)
+  — local gains, but hosted concurrent regression and candidate timeouts keep the PR in draft.
+- [APFS read-ahead, October 9](benchmarks/apfs-read-ahead-2026-10-09.md)
+  — historical inline-hint gains and concurrent regressions; rejected budget prototypes retained.
 - [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)
   — repeated status gains on a large synthetic worktree, not a startup speedup.
 - [Assistant-ui diagnostic, October 1](benchmarks/assistant-ui-diagnostic-2026-10-01.md)
