@@ -61,13 +61,52 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+For new paired APFS startup experiments, use the supervised runner directly:
+
+```sh
+node docs/benchmarks/apfs-startup.mjs BEFORE NEW_OUTPUT 4096 8 AFTER 8192 SOURCE_REPO 4 1800000
+```
+
+Use `-` for `SOURCE_REPO` to generate the many-file fixture; use `1` instead of
+`4` for serial creation. Output must not already exist. The final argument is
+the whole-fixture budget in milliseconds (default: 30 minutes), covering setup,
+creation, verification and cleanup. Run one fixture per CI step, with at least
+five minutes between this budget and the outer step deadline for cancellation,
+evidence upload and non-forced image detach. Do not put this runner under the
+old location-control driver: that driver's cancellation behavior is frozen.
+
+Every external command is asynchronous and supervised, including Git setup,
+verification, remove and GC. On budget expiry, SIGINT, SIGTERM or SIGHUP, the
+runner refuses new commands and sends TERM to its exact owned process groups,
+then performs a KILL sweep after one second even if the time wrapper has
+already exited. It waits for the command pipes to close and the sweep to finish
+before exiting unsuccessfully. It never kills by process name or force-deletes
+interrupted worktrees. SIGKILL of the owner, host failure, uninterruptible I/O
+and descendants deliberately escaping their process group remain outside this
+cooperative guarantee. Confirm workers are gone before image teardown.
+
+Started attempts and their empty log files are recorded before spawning; stdout
+and stderr are retained as they arrive. Atomic result replacement keeps partial
+receipts readable on cancellation. Incomplete runs cannot be treated as timing
+successes. These are process-interruption safeguards, not power-loss durability
+guarantees for benchmark output. Interrupted test fixtures are intentionally
+retained for inspection, including their real Git registrations and bases.
+
+The runner still checks every file, symlink, executable bit, Git cleanliness,
+private-write isolation, base reuse, removal and final empty state. Streaming
+logs and asynchronous setup change the measurement harness: collect fresh
+same-binary controls, do not mix these timings with archived runner results,
+and do not infer a product speedup from supervisor tests. Stack sampling is not
+supported in this timing lane. Small real-APFS and cancellation tests run in
+the existing macOS benchmark-test CI step.
+
 The [October 10 location controls](benchmarks/apfs-location-controls-2026-10-10.md)
 found unstable unchanged-code timings on both host APFS and nested APFS images.
 Fourteen cases completed; one was interrupted and one never started. No runtime
 optimization or quiet measurement location was accepted. All available records
 and the failed outer timeout/cleanup remain in the replayable evidence archive.
 
-To diagnose APFS benchmark-location variability without changing Riftri, use
+The historical location study used
 `node docs/benchmarks/apfs-location-controls.mjs BINARY EMPTY_HOST_DIR EMPTY_IMAGE_DIR SOURCE_REPO ATTACHED_IMAGE NEW_REPORT_DIR`.
 The image directory must be inside the exact attached APFS image; its backing
 file must be on the host directory's filesystem. Both input directories must
@@ -81,11 +120,11 @@ It stops after an operational failure, retains failed state, and never retries
 or forces cleanup. Raw fixture data stays in the measured directories; the
 new report directory contains identities, evaluations and driver logs.
 
-Known limitation: an outer cancellation can bypass the archived harness's
-per-create process-group timeout. Use disposable fixtures only, preserve all
-partial records, and confirm child processes have settled before detaching an
-image. The CI failure below is not a successful cleanup test; cancellation
-supervision needs a separate tested fix before another long hosted run.
+Known historical limitation: an outer cancellation can bypass that archived
+harness's per-create process-group timeout. It remains unchanged for replay;
+do not use it for new long hosted runs. The CI failure below is not a successful
+cleanup test. Use the supervised runner above for future experiments and keep
+the original failed evidence intact.
 
 These are unchanged-code controls, not a software speedup comparison. Each
 case separately reports correctness/completeness and symmetric timing/CPU
