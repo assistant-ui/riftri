@@ -74,12 +74,12 @@ approximate result ([troubleshooting](troubleshooting.md)). Concretely:
 ## Verified on real filesystems
 
 Copy-on-write behavior cannot be tested on a filesystem that does not have
-it. GitHub runners default to filesystems without the primitives Riftri uses
-— there is no APFS `clonefile`, `FICLONE` reflink, or ReFS block clone on a
-stock runner temp directory — so a CI suite that stayed there would only ever
-exercise the refusal paths. Instead, [`ci.yml`](../.github/workflows/ci.yml)
-creates a disposable real volume per backend and runs the integration suites
-and lifecycle smoke tests on it:
+it. Capabilities vary by runner: the default Linux and Windows temporary
+filesystems are not the supported Btrfs/XFS/OverlayFS and ReFS test volumes.
+macOS may already provide native APFS, but a dedicated volume also gives the
+allocation benchmarks a controlled accounting boundary. Accordingly,
+[`ci.yml`](../.github/workflows/ci.yml) creates disposable real volumes for
+the filesystem-specific integration suites and lifecycle measurements:
 
 - **macOS/APFS**: an `hdiutil` APFS sparsebundle volume.
 - **Linux reflink**: loop-mounted Btrfs and reflink-enabled XFS (`mkfs.xfs -m

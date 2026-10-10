@@ -56,6 +56,8 @@ add it to that overview's documentation index — CI enforces the link.
 
 ## Measurements
 
+- [Same-binary APFS locations, October 10](benchmarks/apfs-location-controls-2026-10-10.md)
+  — instability on host APFS and disk images, including the interrupted reverse run.
 - [Adaptive APFS clone workers, October 9](benchmarks/apfs-adaptive-clones-2026-10-09.md)
   — rejected prototype; local failures, three independent comparisons, and same-binary controls.
 - [Optional Git FSMonitor, October 8](benchmarks/fsmonitor-2026-10-08.md)
