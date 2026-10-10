@@ -639,6 +639,52 @@ test("three-runner replication retains every timeout and recomputes the failed a
   assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  deferred-read-ahead-replication:/m);
 });
 
+test("post-journal scheduling retains all four comparisons without shipping a losing prototype", async () => {
+  const { evaluateReplicationFixture } = await import("../../docs/benchmarks/replication-gate.mjs");
+  const compressed = fs.readFileSync(path.join(directory, "apfs-post-journal-hints-2026-10-09.json.gz"));
+  assert.equal(createHash("sha256").update(compressed).digest("hex"), "d2fe3639675c71b3364777eca7190b6b59b3a08b9d3715ceb3479770e9a609aa");
+  const plain = gunzipSync(compressed);
+  assert.equal(createHash("sha256").update(plain).digest("hex"), "3ed276461a7f22ed2745be7976627c228c536f9e85e54ef013c3a5cf6c5a76a2");
+  const report = JSON.parse(plain);
+  assert.equal(report.overallPerformanceGatePassed, false);
+  assert.match(report.decision, /not adopted/);
+  assert.equal(report.sourceCommit, "7d9148ca30953b548cd473a029bdf732b3fc92da");
+  assert.equal(report.baselineCommit, "a58006d7c7b4989a055a967e65d5654281b77ea4");
+  const patch = fs.readFileSync(path.join(directory, report.candidatePatch));
+  assert.equal(createHash("sha256").update(patch).digest("hex"), report.candidatePatchSha256);
+  assert.equal(report.candidatePatchSha256, "0de519714b3a16dc88c314f859afb44561822cdf9149f53ca357237ebb630f9a");
+  assert.match(patch.toString(), /deferred_plan_follows_activation_and_joins_every_hint_before_returning/);
+  assert.match(patch.toString(), /deferred_plan_is_optional_and_failed_clones_return_no_plan/);
+  for (const file of ["crates/riftri-storage/src/apfs/read_ahead.rs", "crates/riftri-core/src/worktree.rs"]) {
+    assert.doesNotMatch(fs.readFileSync(path.join(root, file), "utf8"), /ReadAheadPlan|clone_tree_for_index_sync|read_ahead\.issue/);
+  }
+  assert.deepEqual(report.fixtures.map(fixture => fixture.name), ["serial-many", "concurrent-four", "reference-serial", "reference-four"]);
+  let samples = 0, batches = 0;
+  for (const fixture of report.fixtures) {
+    const data = fixture.data;
+    const concurrency = fixture.name.endsWith("four") ? 4 : 1;
+    assert.deepEqual(fixture.gate, evaluateReplicationFixture(data, concurrency));
+    assert.equal(fixture.gate.completeComparison, true);
+    assert.deepEqual(fixture.failedWorkerTraces, []);
+    assert.equal(data.binarySha256, "33240072e0f00873ecf588f0917dab1e198a5f9bd246bc3a3d195ad981f1c80a");
+    assert.equal(data.candidateSha256, "2bd874e16bcd53c22214349d6a5a3bd4b4caf25fbb634388835eded3f5612e8a");
+    samples += data.samples.length; batches += data.batches.length;
+    for (const sample of data.samples) {
+      const reset = sample.gitCommands.find(command => command.argv[1] === "reset");
+      assert.equal(Number(reset.counters.find(counter => counter.key === "refresh/sum_scan").value), data.files);
+      assert.equal(Number(reset.counters.find(counter => counter.key === "write/cache_nr").value), data.files);
+    }
+    const cpu = label => median(data.samples.filter(sample => sample.round > 0 && sample.label === label).map(sample => {
+      const match = sample.resources.join("\n").match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+      return Number(match[2]) + Number(match[3]);
+    }));
+    assert.ok(cpu("advice") > cpu("baseline"), "the CPU increase must remain visible");
+  }
+  assert.deepEqual([samples, batches], [164, 64]);
+  assert.deepEqual(report.fixtures.map(fixture => fixture.gate.fasterPairs), [4, 1, 7, 0]);
+  assert.deepEqual(report.fixtures.map(fixture => fixture.gate.gatePassed), [false, false, true, false]);
+});
+
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
   const bulk = JSON.parse(fs.readFileSync(path.join(directory, "apfs-writable-bulk-2026-10-09.json")));
   assert.equal(bulk.measurement.production_eligible, false);

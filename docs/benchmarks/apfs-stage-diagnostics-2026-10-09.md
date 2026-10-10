@@ -683,6 +683,76 @@ the full workspace suite and all 293 package tests (four skipped). The manual
 benchmark helper suite passes 20 tests, with nine environment-gated tests
 skipped. No production Rust code is changed by retaining these results.
 
+## Post-journal hints: measured and rejected
+
+The next [prototype](apfs-post-journal-hints.patch) captured optional hint jobs
+while cloning, then issued them only after ViewCreated, view activation,
+parent synchronization and GitPointerRestored had completed. Hint workers
+joined before Git's unchanged index synchronization. This does not imply that
+the kernel finished its asynchronous reads. Compaction, other clone callers,
+Linux and Windows were unchanged; no durability transition was removed.
+
+Two new storage tests cover paths after activation rename, joining every hint
+worker, absent optional inputs and failed-clone cleanup. The existing
+same-size/restored-mtime mutation test still detects edits and preserves them
+on repeated recovery. Formatting, all-target/all-feature Clippy, the full Rust
+workspace suite and all 293 package tests (four skipped) passed before timing.
+The candidate release checksum was
+`2bd874e16bcd53c22214349d6a5a3bd4b4caf25fbb634388835eded3f5612e8a`.
+
+The [complete record](apfs-post-journal-hints-2026-10-09.json.gz) compares the
+prototype with **main `a58006d7`**, not the prior deferred candidate, on a fresh
+local 4 GiB APFS sparsebundle. It retains the predeclared plan, all 164 attempts
+and all 64 batches. Each workload used eight alternating pairs and one baseline
+cold anchor; these are cached comparisons. All attempts completed full Git
+scans, byte/mode/symlink, private-write, removal and final-GC checks. Neither
+side timed out. No build, test, fetch, stage probe or stack observer overlapped
+timing. Host load and free memory varied, and free storage fell to about 1 GiB
+near the end; this was not a quiet-host benchmark.
+
+| Cached fixture | Main median | Post-journal hints | Faster pairs | CPU/view, main → prototype |
+| --- | ---: | ---: | ---: | ---: |
+| Synthetic serial | 1,582.12 ms | 1,517.12 ms | 4/8 | 0.960 → 1.025 s |
+| Synthetic four-way | 3,952.45 ms | 4,883.37 ms | 1/8 | 1.045 → 1.110 s |
+| Reference serial | 3,368.21 ms | 2,877.24 ms | 7/8 | 1.975 → 2.040 s |
+| Reference four-way | 7,966.25 ms | 12,404.61 ms | 0/8 | 2.105 → 2.245 s |
+
+Only reference serial passed the predeclared consistency gate. Synthetic and
+reference four-way medians regressed **23.55% and 55.71%**, respectively. CPU
+per view increased in every fixture. These observations reject adoption of
+this prototype; they do not estimate universal slowdowns or prove a kernel
+cause. In particular, this local run cannot certify that hosted timeouts are
+fixed. No hosted evaluation was launched for the losing variant.
+
+The prototype and implementation-specific tests were removed from normal
+Rust. Its source patch (including the temporary evidence-test adjustment) has
+SHA-256 `0de519714b3a16dc88c314f859afb44561822cdf9149f53ca357237ebb630f9a`.
+The complete compressed report has SHA-256
+`d2fe3639675c71b3364777eca7190b6b59b3a08b9d3715ceb3479770e9a609aa`;
+decompressed JSON has SHA-256
+`3ed276461a7f22ed2745be7976627c228c536f9e85e54ef013c3a5cf6c5a76a2`.
+Package tests recompute all four gates, every initial scan, paired wins and
+the CPU increases. The test disk image was detached without forcing and
+compacted, reclaiming the reported 64.5 MB of unused space while retaining its files.
+
+After restoring normal Rust, formatting, all-target/all-feature Clippy, the
+full workspace suite and all 294 package tests (four skipped) passed again.
+The rebuilt release reproduced the prior deferred candidate checksum
+`d3ace58ebedba2ae332c756e4c8b7573aa1d714ed1eca5fb8bcb4421844ac4c1`;
+this evidence follow-up ships no new runtime behavior. That unchanged candidate
+is still rejected for merge by the hosted evidence above.
+
+This ends the current read-ahead scheduling lead; neither early, overlapping
+nor post-journal hints have established a consistent cross-workload gain.
+The next separate hypothesis should be tested against main **without hints**:
+adapt clone-worker fan-out when another creator uses the same immutable base,
+preserving the existing four-worker limit for a lone creator. The earlier
+fixed two-worker experiment only compared against a hint-enabled candidate
+and traded serial latency for concurrency; it is not evidence that adaptive
+scheduling will improve main. Any admission guard must be nonblocking,
+release correctly on errors and inherited/duplicated descriptors, and leave
+all clone, Git and recovery behavior intact. No such guard is shipped here.
+
 ## Reproduce safely
 
 Use a disposable checkout at the report's source revision. Apply the diagnostic
