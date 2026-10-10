@@ -110,6 +110,7 @@ try {
   report.version = (await run(binary, ['--version'])).toString().trim();
   function verify(directory) {
     for (const entry of manifest) {
+      scope.check();
       const file = path.join(directory, entry.relative);
       if (entry.link !== null) assert.equal(fs.readlinkSync(file), entry.link);
       else {
@@ -133,7 +134,7 @@ try {
     assert.equal((await git(['rev-parse', 'HEAD'], sample.view)).toString().trim(), report.commit);
   }
   async function create(round, label = 'baseline', executable = binary, worker = 0) {
-    scope.signal.throwIfAborted();
+    scope.check();
     const key = `${round}-${label}-${worker}`;
     const view = path.join(output, `view-${key}`), trace = path.join(output, `git-${key}.jsonl`);
     assert.ok(!fs.existsSync(view));
@@ -223,7 +224,7 @@ try {
   assert.equal(report.final.operations.active_views, 0);
   assert.deepEqual(report.final.bases, []);
   assert.deepEqual(report.final.diagnostic_issues, []);
-  verify(repo); scope.signal.throwIfAborted(); report.complete = true; save();
+  verify(repo); scope.check(); report.complete = true; save();
 } catch (error) {
   report.failure = String(error.stack); report.retained = [...live]; save();
   throw error; // Preserve unexpected state for inspection; never force cleanup.

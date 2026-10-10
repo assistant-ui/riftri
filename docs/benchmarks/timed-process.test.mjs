@@ -104,3 +104,13 @@ test('invalid timers cannot silently turn a long budget into a one-millisecond t
     await assert.rejects(timedProcess(process.execPath, [], {timeoutMs}), /timer durations/);
   }
 });
+
+test('wall budget still expires if synchronous work delays its timer callback', async () => {
+  const scope = createProcessScope({budgetMs: 10});
+  try {
+    const until = performance.now() + 30;
+    while (performance.now() < until) { /* Simulate a synchronous manifest check. */ }
+    assert.throws(() => scope.check(), /budget exhausted/);
+    await assert.rejects(scope.run('/riftri-test-missing-command', []), /budget exhausted/);
+  } finally { await scope.close(); }
+});
