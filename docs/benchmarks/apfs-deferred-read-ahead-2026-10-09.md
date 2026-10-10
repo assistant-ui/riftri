@@ -5,6 +5,12 @@ serial and four-way tests, without removing Git content checks. **Do not merge
 this candidate:** independent CI found a 6.55% slower four-way synthetic median
 and timed out all four candidate workers in a real-source round.
 
+A [subsequent three-runner replication](apfs-stage-diagnostics-2026-10-09.md#three-runner-replication-rejected-for-merge)
+reproduced 20 candidate timeouts, with no baseline timeouts. Only 3/12
+fixture/runner combinations passed the gate declared before the run. The
+current candidate is rejected for merge; the local gains below remain
+historical measurements, not a readiness claim.
+
 This follows the [original inline experiment](apfs-read-ahead-2026-10-09.md),
 which regressed four-way creation on a hosted runner. Those negative results
 and the unsuccessful budget variants remain recorded; this is a different

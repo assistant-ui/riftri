@@ -611,6 +611,78 @@ the original failed run and the existing cold, tiny, large-file and allocation
 evidence before a merge recommendation; this narrower replication alone does
 not certify those cases or erase unexplained tail behavior.
 
+## Three-runner replication: rejected for merge
+
+[Run 38006114772](https://github.com/assistant-ui/riftri/actions/runs/38006114772)
+finished with all ordinary jobs successful and all three replication jobs
+failed. The predeclared gate failed on every runner. The
+[complete normalized record](apfs-deferred-replication-2026-10-09.json.gz)
+retains 272 worker attempts and 132 completed batches, including all 20
+candidate deadline failures. No baseline worker timed out. Seven fixtures
+completed their correctness and final-GC checks; five did not complete and
+must not be described as verified cleanups. Their owned process groups were
+stopped; the volume was detached without forcing. The temporary evaluation
+job was removed only after every job finished and its artifacts were retained.
+
+| Runner | Cached fixture | Baseline median | Candidate median | Faster pairs | Gate |
+| --- | --- | ---: | ---: | ---: | --- |
+| 1 | Synthetic serial | 1,444.39 ms | 1,411.62 ms | 6/8 | Pass |
+| 1 | Synthetic four-way | — | 4 worker timeouts | — | Fail |
+| 1 | Reference serial | 2,917.83 ms | 2,565.12 ms | 7/8 | Pass |
+| 1 | Reference four-way | — | 4 worker timeouts | — | Fail |
+| 2 | Synthetic serial | 1,394.90 ms | 1,436.62 ms | 4/8 | Fail |
+| 2 | Synthetic four-way | — | 4 worker timeouts | — | Fail |
+| 2 | Reference serial | 2,838.27 ms | 2,989.80 ms | 2/8 | Fail |
+| 2 | Reference four-way | 12,739.77 ms | 9,068.82 ms | 6/8 | Pass |
+| 3 | Synthetic serial | 1,233.33 ms | 1,165.74 ms | 5/8 | Fail |
+| 3 | Synthetic four-way | — | 4 worker timeouts | — | Fail |
+| 3 | Reference serial | 2,200.12 ms | 2,214.19 ms | 6/8 | Fail |
+| 3 | Reference four-way | — | 4 worker timeouts | — | Fail |
+
+These are three fresh runner instances, not proof of physically independent
+hosts. Each fixture has one baseline cold anchor; these are cached comparisons,
+not cold-base measurements. The failure occurs on synthetic four-way on all
+three runners and reference four-way on two. Only 3/12 fixture/runner cases
+pass the performance gate. This is affirmative evidence **against merging the
+current candidate**, not merely an inconclusive local benchmark.
+
+The [gate](replication-gate.mjs) recomputes each result independently and refuses
+incomplete, instrumented, duplicated, unidentified-binary or unclean evidence.
+Its tests cover both a lower median with too few wins and six wins with a worse
+median. Package tests verify compressed/uncompressed checksums, artifact
+digests, every retained timeout, complete initial Git scans and all 12 gates.
+The compressed report SHA-256 is
+`aea666b87ba83081e12460719a0e1f9b3f73dbfbee28e2cc29a79cfad61af00f`;
+decompressed JSON SHA-256 is
+`0b3fb8f7c6887c7eb8270195482b90af3a6564b887d67c8f1d23f02c8dd7121e`.
+
+Seventeen timed-out workers did not emit ViewCreated. On runner 1's failed synthetic
+batch, three did reach it at 61.08–98.21 seconds and reached GitPointerRestored
+at 79.83–104.52 seconds. These receipts include durable journal work and are
+not syscall timings. They do not establish whether cloning, optional reads,
+filesystem contention or persistence caused the delays. The previous captured
+Git read stacks came from no-hint controls and do not explain this failure.
+
+Concurrency alone also cannot explain every observed tail: three completed
+**serial candidate** creates took 88.44, 65.51 and 57.15 seconds. Their
+BaseReady-to-ViewCreated intervals were each over 50 seconds; the corresponding
+Git refreshes were only 3.10, 11.28 and 0.67 seconds. These samples remain in
+their comparisons. Simply skipping hints when another creator is active
+would not address these single-creator observations.
+
+The next isolated hypothesis is to finish the pre-Git journal writes **before**
+issuing optional hints, then join hint workers before Git's unchanged full
+index check. This differs from the rejected hint/Git-overlap prototype. It
+cannot prevent another process's filesystem work or guarantee that kernel
+read requests have finished. It needs explicit ordering/recovery tests and
+new comparisons; no speedup or timeout fix is claimed in advance. No durability,
+Git validation, private-write protection or timeout threshold is relaxed.
+
+The evidence-only follow-up passes formatting, all-target/all-feature Clippy,
+the full workspace suite and all 293 package tests (four skipped). The manual
+benchmark helper suite passes 20 tests, with nine environment-gated tests
+skipped. No production Rust code is changed by retaining these results.
+
 ## Reproduce safely
 
 Use a disposable checkout at the report's source revision. Apply the diagnostic

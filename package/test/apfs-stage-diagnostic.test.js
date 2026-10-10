@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { createHash } = require("node:crypto");
+const { gunzipSync } = require("node:zlib");
 const { test } = require("node:test");
 const root = path.resolve(__dirname, "../..");
 const directory = path.join(root, "docs/benchmarks");
@@ -572,6 +573,70 @@ test("bounded prefix-read evidence retains its latency and CPU regression", () =
   assert.equal(run.summary.wallReductionPercent, 100 * (1 - run.summary.advice.medianMilliseconds / run.summary.baseline.medianMilliseconds));
   assert.ok(run.summary.wallReductionPercent < 0);
   assert.ok(run.summary.advice.medianCpuSecondsPerView > run.summary.baseline.medianCpuSecondsPerView);
+});
+
+test("three-runner replication retains every timeout and recomputes the failed acceptance gate", async () => {
+  const { evaluateReplicationFixture } = await import("../../docs/benchmarks/replication-gate.mjs");
+  const compressed = fs.readFileSync(path.join(directory, "apfs-deferred-replication-2026-10-09.json.gz"));
+  assert.equal(createHash("sha256").update(compressed).digest("hex"), "aea666b87ba83081e12460719a0e1f9b3f73dbfbee28e2cc29a79cfad61af00f");
+  const plain = gunzipSync(compressed);
+  assert.equal(createHash("sha256").update(plain).digest("hex"), "0b3fb8f7c6887c7eb8270195482b90af3a6564b887d67c8f1d23f02c8dd7121e");
+  const report = JSON.parse(plain);
+  assert.equal(report.sourceCommit, "88226a2210d1c1cca8b95b7b0a1962164fae0f13");
+  assert.equal(report.baselineCommit, "a58006d7c7b4989a055a967e65d5654281b77ea4");
+  assert.equal(report.runConclusion, "failure");
+  assert.equal(report.overallPerformanceGatePassed, false);
+  assert.deepEqual(report.replicas.map(replica => replica.replica), [1, 2, 3]);
+  const expectedArtifacts = [
+    "sha256:5424a534b79cfd517b17f0ee818d370b04367f34ceaba7e1ab5628b58ea7d4db",
+    "sha256:c86765d41ceef0f2ac3129d9e47b0a02827e20f51468d0dc3a2e667fc8ea6242",
+    "sha256:5f291df6162514855871ea2b2f803ebeac8413b9f322a94d23fbbc750683cddf",
+  ];
+  let samples = 0, batches = 0, candidateTimeouts = 0, baselineTimeouts = 0, passed = 0, complete = 0;
+  for (const replica of report.replicas) {
+    assert.equal(replica.jobConclusion, "failure");
+    assert.equal(replica.gatePassed, false);
+    assert.equal(replica.artifact.digest, expectedArtifacts[replica.replica - 1]);
+    assert.deepEqual(replica.fixtures.map(fixture => fixture.name), ["serial-many", "concurrent-four", "reference-serial", "reference-four"]);
+    for (const fixture of replica.fixtures) {
+      const concurrency = fixture.name.endsWith("four") ? 4 : 1;
+      assert.deepEqual(fixture.gate, evaluateReplicationFixture(fixture, concurrency));
+      assert.match(fixture.rawResultsSha256, /^[a-f0-9]{64}$/);
+      samples += fixture.samples.length; batches += fixture.batches.length;
+      candidateTimeouts += fixture.gate.candidateTimeouts;
+      baselineTimeouts += fixture.gate.baselineTimeouts;
+      passed += Number(fixture.gate.gatePassed); complete += Number(fixture.complete);
+      for (const sample of fixture.samples) {
+        assert.match(sample.traceSha256, /^[a-f0-9]{64}$/);
+        assert.deepEqual(sample.traceErrors, []);
+        if (sample.success) {
+          assert.equal(Number(sample.indexScanned), fixture.trackedEntries);
+          assert.equal(Number(sample.indexEntries), fixture.trackedEntries);
+        } else {
+          assert.equal(sample.label, "advice");
+          assert.equal(sample.timedOut, true);
+          assert.equal(fixture.complete, false);
+          assert.equal(fixture.gate.candidateMedianMilliseconds, null);
+          assert.equal(fixture.final, null);
+        }
+      }
+    }
+  }
+  assert.deepEqual([samples, batches, candidateTimeouts, baselineTimeouts, passed, complete], [272, 132, 20, 0, 3, 7]);
+  const workers = report.replicas.flatMap(replica => replica.fixtures.flatMap(fixture => fixture.samples));
+  const stalledBeforeViewCreated = workers.filter(sample => sample.timedOut &&
+    sample.phases.at(-1).line === "riftri: worktree-add: base-ready");
+  assert.equal(stalledBeforeViewCreated.length, 17);
+  const serialTails = report.replicas.flatMap(replica => replica.fixtures.filter(fixture => fixture.concurrency === 1)
+    .flatMap(fixture => fixture.samples.filter(sample => sample.success && sample.milliseconds > 30000)));
+  assert.equal(serialTails.length, 3);
+  for (const sample of serialTails) {
+    assert.equal(sample.label, "advice");
+    const baseReady = sample.phases.find(phase => phase.line === "riftri: worktree-add: base-ready").milliseconds;
+    const viewCreated = sample.phases.find(phase => phase.line === "riftri: worktree-add: view-created").milliseconds;
+    assert.ok(viewCreated - baseReady > 50000);
+  }
+  assert.doesNotMatch(fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8"), /^  deferred-read-ahead-replication:/m);
 });
 
 test("writable bulk evidence remains a test-only storage-phase result with open metadata gates", () => {
