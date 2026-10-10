@@ -61,6 +61,42 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+To diagnose APFS benchmark-location variability without changing Riftri, use
+`node docs/benchmarks/apfs-location-controls.mjs BINARY EMPTY_HOST_DIR EMPTY_IMAGE_DIR SOURCE_REPO ATTACHED_IMAGE NEW_REPORT_DIR`.
+The image directory must be inside the exact attached APFS image; its backing
+file must be on the host directory's filesystem. Both input directories must
+be fresh and empty. The script verifies mount identity and uses the checksummed
+existing full-verification harness against pinned assistant-ui commit
+`038cd9f82b418afe9e6d0080648738f78586fbca`. It runs the same binary on both
+labels, serial and four-way, twice per location, with eight alternating pairs
+per case. The second set reverses location order; optional final argument
+`reverse` reverses the whole sequence for independent counterbalancing.
+It stops after an operational failure, retains failed state, and never retries
+or forces cleanup. Raw fixture data stays in the measured directories; the
+new report directory contains identities, evaluations and driver logs.
+
+These are unchanged-code controls, not a software speedup comparison. Each
+case separately reports correctness/completeness and symmetric timing/CPU
+stability. Whole fixtures are sequenced rather than interleaving locations
+batch by batch, so load, cache history and available space remain confounders.
+Keep all samples and retain the image results before detaching it. A complete
+run does not imply stable timings or an accepted optimization.
+
+The initial location study is predeclared for two independent macOS CI runners,
+one in each order, using production commit
+`a58006d7c7b4989a055a967e65d5654281b77ea4` without any candidate patch. Each
+runner builds once before timing and uses that executable for every label and
+location. Require at least 8 GiB free on the backing filesystem before starting.
+There are 328 planned creations and 128 measured batches per runner. Each case
+must be complete and pass the existing full lifecycle verification; timing
+stability additionally requires median and paired-median ratios within 5% of
+one, all paired ratios in `[0.5, 2]`, and median CPU per view within 5% of one.
+Retain unstable cases unchanged. This is an environment diagnostic, not a gate
+for adopting any runtime optimization. Local timing was not started because
+the development machine had only approximately 1.1 GiB available; no local
+measurements are claimed. The temporary research workflow is removed after
+its terminal results have been retained.
+
 For `worktree list --all-states` identity reuse, run
 `node docs/benchmarks/listing-identity.mjs BEFORE AFTER NEW_OUTPUT_DIR`.
 The fixture has two repositories sharing a state directory. Six alternating

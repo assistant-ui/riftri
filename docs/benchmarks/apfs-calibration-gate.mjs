@@ -1,12 +1,12 @@
 // Same-binary diagnostic only. Never accepts an optimization for adoption.
-export function evaluateCalibration(data, expectedBinarySha256 = '33240072e0f00873ecf588f0917dab1e198a5f9bd246bc3a3d195ad981f1c80a') {
+export function evaluateCalibration(data, expectedBinarySha256 = '33240072e0f00873ecf588f0917dab1e198a5f9bd246bc3a3d195ad981f1c80a', concurrency = 1) {
   const reasons = [];
   const median = values => {
     const sorted = [...values].sort((a, b) => a - b);
     return sorted.length ? (sorted[(sorted.length - 1) >> 1] + sorted[sorted.length >> 1]) / 2 : null;
   };
   if (data?.complete !== true || data.failure) reasons.push('fixture did not complete');
-  if (data?.stageDiagnostics !== false || data?.rounds !== 8 || data?.concurrency !== 1) reasons.push('wrong comparison shape');
+  if (![1, 4].includes(concurrency) || data?.stageDiagnostics !== false || data?.rounds !== 8 || data?.concurrency !== concurrency) reasons.push('wrong comparison shape');
   const baseline = expectedBinarySha256;
   if (typeof baseline !== 'string' || !/^[a-f0-9]{64}$/.test(baseline)) reasons.push('invalid expected binary identity');
   if (data?.binarySha256 !== baseline || data?.candidateSha256 !== baseline) reasons.push('not the pinned identical binary');
@@ -18,25 +18,25 @@ export function evaluateCalibration(data, expectedBinarySha256 = '33240072e0f008
   for (const s of samples) {
     const anchor = s?.round === 0 && s.label === 'baseline' && s.worker === 0;
     const measured = Number.isInteger(s?.round) && s.round >= 1 && s.round <= 8 &&
-      ['baseline', 'advice'].includes(s.label) && s.worker === 0;
+      ['baseline', 'advice'].includes(s.label) && Number.isInteger(s.worker) && s.worker >= 0 && s.worker < concurrency;
     if (!anchor && !measured) reasons.push('invalid worker identity');
     const key = `${s?.round}-${s?.label}-${s?.worker}`;
     if (keys.has(key)) reasons.push('duplicate worker');
     keys.add(key);
     if (s?.success !== true || s.code !== 0 || s.timedOut !== false || s.error !== null || s.reused !== !anchor) reasons.push('unsuccessful worker');
     if (measured) {
-      const match = s.resources?.join('\n').match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/);
+      const match = Array.isArray(s.resources) ? s.resources.join('\n').match(/([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys/) : null;
       const seconds = match ? Number(match[2]) + Number(match[3]) : NaN;
       if (!Number.isFinite(seconds) || seconds <= 0) reasons.push('invalid CPU evidence');
       else cpu[s.label].push(seconds);
     }
   }
-  if (samples.length !== 17 || keys.size !== 17) reasons.push('missing or extra workers');
+  if (samples.length !== 1 + 16 * concurrency || keys.size !== 1 + 16 * concurrency) reasons.push('missing or extra workers');
   const batches = Array.isArray(data?.batches) ? data.batches : [];
   const batchMap = new Map();
   for (const b of batches) {
     if (!Number.isInteger(b?.round) || b.round < 1 || b.round > 8 || !['baseline', 'advice'].includes(b.label) ||
-        b.concurrency !== 1 || !Number.isFinite(b.milliseconds) || b.milliseconds <= 0) reasons.push('invalid batch');
+        b.concurrency !== concurrency || !Number.isFinite(b.milliseconds) || b.milliseconds <= 0) reasons.push('invalid batch');
     const key = `${b?.round}-${b?.label}`;
     if (batchMap.has(key)) reasons.push('duplicate batch');
     batchMap.set(key, b?.milliseconds);
