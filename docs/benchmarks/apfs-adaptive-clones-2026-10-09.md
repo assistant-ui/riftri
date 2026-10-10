@@ -1,4 +1,4 @@
-# Adaptive APFS clone workers: rejected local prototype
+# Adaptive APFS clone workers: rejected after independent replication
 
 This is a failed experiment, not a speedup claim or a production change. The
 prototype has been removed from the runtime. It must not be merged or released
@@ -107,12 +107,12 @@ tree, while synthetic controls crossed the serial paired/tail limits. Local
 timing variation is substantial. This does not explain the four-way timeouts,
 prove the candidate equivalent, or reverse its rejection.
 
-## Independent replication plan
+## Independent replication method
 
-The temporary `Adaptive APFS evaluation` workflow reconstructs the exact
+The temporary `Adaptive APFS evaluation` workflow reconstructed the exact
 checksummed prototype in an isolated checkout of the pinned main commit; it
-does not change this branch's Rust runtime. Three macOS runners build both
-binaries and complete prototype quality gates before timing. Each runs the two
+did not change this branch's Rust runtime. Three macOS runners built both
+binaries and completed prototype quality gates before timing. Each ran the two
 same-binary controls, then the same four candidate fixtures, without concurrent
 benchmark jobs on that runner. Fixture directories are fresh, and any
 operational failure stops the sequence without retrying; unrun cases fail the
@@ -128,5 +128,53 @@ All controls and candidate fixtures must pass on every runner. Do not pool
 results to hide a failure. Even success still requires cold/tiny/large-file,
 allocation and fresh cross-platform validation before production adoption.
 
-Remove the temporary workflow once its terminal results are retained. Do not
-weaken Git's first full scan to hide the remaining startup cost.
+## Independent replication results
+
+All three jobs in [run 38016437732](https://github.com/assistant-ui/riftri/actions/runs/38016437732)
+finished. All 18 fixtures completed their eight alternating pairs and full
+verification/cleanup: **594 successful creates, 288 completed batches, and no
+CLI timeout** on either label. This includes 18 cold baseline anchors; the
+paired measurements are cached adds, not cold-creation comparisons.
+
+The jobs failed their predeclared performance gates, not their correctness
+checks. Only the three synthetic serial non-regression cases passed among the
+12 candidate comparisons. No concurrent comparison qualified. Only one of
+six same-binary stability controls passed. Results are kept separate below;
+positive reduction means a lower candidate median, not an accepted speedup.
+
+| Candidate median reduction | Runner 1 | Runner 2 | Runner 3 |
+| --- | ---: | ---: | ---: |
+| Synthetic serial | 0.52% | 1.90% | 11.27% |
+| Synthetic four-way | -8.68% | -4.68% | 10.58% |
+| Reference serial | 2.04% | 2.88% | -3.91% |
+| Reference four-way | 1.40% | -6.06% | -10.79% |
+
+Runner 3's apparently faster synthetic four-way median still had only four
+of eight faster pairs and a 10.61x paired tail. All reference serial cases
+crossed the 2x tail limit. The reference four-way cases had 3/8, 4/8 and 5/8
+faster pairs and maximum paired ratios of 9.45x, 5.61x and 10.52x respectively.
+Runner 2 also exceeded the CPU allowance in synthetic four-way creation.
+
+Controls independently demonstrated substantial variability. The same binary
+showed a 6.74x synthetic paired tail on runner 1 and a 6.00x reference paired
+tail on runner 2. Runner 3 had a reference ratio of 0.132 and an apparent
+11.34% synthetic median reduction with unchanged code. This does not establish
+the source of the stalls, excuse candidate regressions, or justify loosening
+the acceptance limits.
+
+The [hosted evidence archive](apfs-adaptive-replication-2026-10-09.json.gz)
+retains the terminal run/job record, all three exact build identities,
+evaluations, results, worker logs and Git traces, plus the exact workflow and
+gate sources from `f08762a445c2163fab9c16a008c2f02f601e45d8`. Its SHA-256 is
+`d695be8d487d8f49cd5dcb1f919096f63ea7354d2091f71347c2b47bfd18769f`.
+Every retained file has its own digest, and offline reevaluation exactly
+matches each hosted result. All final fixtures report zero active views,
+bases and diagnostic issues; each job detached its owned test image without
+forcing. The temporary workflow has been removed after retaining the results.
+
+Decision: **reject the adaptive scheduling prototype**. The research branch
+contains evidence and gate tests only; production Rust remains identical to
+the pinned main commit. A new proposal needs a distinct hypothesis and fresh
+controls, not another run selected for a favorable median. Keep full Git and
+immutable-base verification. In particular, do not weaken Git's first full
+scan to hide the remaining startup cost.

@@ -384,7 +384,7 @@ maps every document in one place.
 
 ### Measurements and optimization work
 
-- [Adaptive APFS clone workers, October 9](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/apfs-adaptive-clones-2026-10-09.md): rejected prototype with mixed timings, deadline failures, and retained evidence.
+- [Adaptive APFS clone workers, October 9](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/apfs-adaptive-clones-2026-10-09.md): rejected prototype with local failures, three independent comparisons, and same-binary controls.
 - [Optional Git FSMonitor, October 8](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/fsmonitor-2026-10-08.md): large-worktree status gains, not a creation speedup; raw samples and a reproducible harness.
 - [Assistant-ui diagnostic, October 1](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks/assistant-ui-diagnostic-2026-10-01.md): serial process counts and follow-up priorities; no latency claim.
 - [Benchmark guide](https://github.com/assistant-ui/riftri/blob/main/docs/benchmarks.md): running and interpreting native-COW benchmarks.
