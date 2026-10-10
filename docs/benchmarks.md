@@ -61,6 +61,12 @@ place. No command syntax, opt-in requirement, or checkout default changes.
 
 ## Real-project comparisons
 
+The [October 10 location controls](benchmarks/apfs-location-controls-2026-10-10.md)
+found unstable unchanged-code timings on both host APFS and nested APFS images.
+Fourteen cases completed; one was interrupted and one never started. No runtime
+optimization or quiet measurement location was accepted. All available records
+and the failed outer timeout/cleanup remain in the replayable evidence archive.
+
 To diagnose APFS benchmark-location variability without changing Riftri, use
 `node docs/benchmarks/apfs-location-controls.mjs BINARY EMPTY_HOST_DIR EMPTY_IMAGE_DIR SOURCE_REPO ATTACHED_IMAGE NEW_REPORT_DIR`.
 The image directory must be inside the exact attached APFS image; its backing
@@ -74,6 +80,12 @@ per case. The second set reverses location order; optional final argument
 It stops after an operational failure, retains failed state, and never retries
 or forces cleanup. Raw fixture data stays in the measured directories; the
 new report directory contains identities, evaluations and driver logs.
+
+Known limitation: an outer cancellation can bypass the archived harness's
+per-create process-group timeout. Use disposable fixtures only, preserve all
+partial records, and confirm child processes have settled before detaching an
+image. The CI failure below is not a successful cleanup test; cancellation
+supervision needs a separate tested fix before another long hosted run.
 
 These are unchanged-code controls, not a software speedup comparison. Each
 case separately reports correctness/completeness and symmetric timing/CPU
@@ -94,8 +106,9 @@ one, all paired ratios in `[0.5, 2]`, and median CPU per view within 5% of one.
 Retain unstable cases unchanged. This is an environment diagnostic, not a gate
 for adopting any runtime optimization. Local timing was not started because
 the development machine had only approximately 1.1 GiB available; no local
-measurements are claimed. The temporary research workflow is removed after
-its terminal results have been retained.
+measurements are claimed. The temporary research workflow was removed after
+its terminal results were retained, including the reverse run's 35-minute
+deadline and failed non-forced detach. Its source remains in the archive.
 
 For `worktree list --all-states` identity reuse, run
 `node docs/benchmarks/listing-identity.mjs BEFORE AFTER NEW_OUTPUT_DIR`.
