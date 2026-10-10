@@ -5,6 +5,9 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+#[cfg(target_os = "macos")]
+mod pipeline;
+
 pub(crate) fn open_regular(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true);
@@ -76,14 +79,16 @@ fn marker_v1(root: &Path, special: SpecialEntries) -> io::Result<Vec<u8>> {
 /// what the ReFS cloner propagates.
 pub(crate) fn marker_v2(root: &Path) -> io::Result<Vec<u8>> {
     let mut digest = Sha256::new();
-    let mut scratch = HashScratch::new();
     digest.update(b"riftri-base-content-v2\0");
+    #[cfg(target_os = "macos")]
+    pipeline::hash(root, &mut digest)?;
+    #[cfg(not(target_os = "macos"))]
     hash_entry(
         root,
         &mut digest,
         MarkerVersion::V2,
         SpecialEntries::Refuse,
-        &mut scratch,
+        &mut HashScratch::new(),
     )?;
     Ok(format!("riftri-base-sha256-v2\n{}\n", hex_lower(digest.finalize())).into_bytes())
 }
@@ -139,21 +144,21 @@ pub(crate) fn hex_lower(bytes: impl AsRef<[u8]>) -> String {
     rendered
 }
 
-fn hash_native(value: &OsStr, digest: &mut Sha256) {
+fn hash_native(value: &OsStr, digest: &mut impl sha2::digest::Update) {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
         let bytes = value.as_bytes();
-        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(&(bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     }
     #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
         let units = value.encode_wide();
-        digest.update((units.clone().count() as u64).to_le_bytes());
+        digest.update(&(units.clone().count() as u64).to_le_bytes());
         for unit in units {
-            digest.update(unit.to_le_bytes());
+            digest.update(&unit.to_le_bytes());
         }
     }
 }
@@ -206,24 +211,24 @@ mod windows_tests {
 fn hash_v2_metadata(
     path: &Path,
     metadata: &fs::Metadata,
-    digest: &mut Sha256,
+    digest: &mut impl sha2::digest::Update,
     scratch: &mut HashScratch,
 ) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        digest.update(metadata.mode().to_le_bytes());
+        digest.update(&metadata.mode().to_le_bytes());
         hash_xattrs(path, digest, scratch)?;
     }
     #[cfg(target_os = "macos")]
-    digest.update([u8::from(
+    digest.update(&[u8::from(
         riftri_storage::has_macos_acl(path).map_err(io::Error::other)?,
     )]);
     #[cfg(windows)]
     {
         let _ = path;
         let _ = scratch;
-        digest.update([u8::from(metadata.permissions().readonly())]);
+        digest.update(&[u8::from(metadata.permissions().readonly())]);
     }
     Ok(())
 }
@@ -232,7 +237,11 @@ fn hash_v2_metadata(
 /// in sorted-name order. The byte layout matches the forced-removal metadata
 /// snapshot so both features attest the same facts the same way.
 #[cfg(unix)]
-fn hash_xattrs(path: &Path, digest: &mut Sha256, scratch: &mut HashScratch) -> io::Result<()> {
+fn hash_xattrs(
+    path: &Path,
+    digest: &mut impl sha2::digest::Update,
+    scratch: &mut HashScratch,
+) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
 
     scratch.xattr_names.clear();
@@ -242,7 +251,7 @@ fn hash_xattrs(path: &Path, digest: &mut Sha256, scratch: &mut HashScratch) -> i
     )
     .map_err(io::Error::from)?;
     let names = sorted_xattr_names(&scratch.xattr_names);
-    digest.update((names.len() as u64).to_le_bytes());
+    digest.update(&(names.len() as u64).to_le_bytes());
     for name in names {
         scratch.xattr_value.clear();
         rustix::fs::lgetxattr(
@@ -251,9 +260,9 @@ fn hash_xattrs(path: &Path, digest: &mut Sha256, scratch: &mut HashScratch) -> i
             rustix::buffer::spare_capacity(&mut scratch.xattr_value),
         )
         .map_err(io::Error::from)?;
-        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(&(name.len() as u64).to_le_bytes());
         digest.update(name);
-        digest.update((scratch.xattr_value.len() as u64).to_le_bytes());
+        digest.update(&(scratch.xattr_value.len() as u64).to_le_bytes());
         digest.update(&scratch.xattr_value);
     }
     Ok(())
@@ -273,12 +282,23 @@ fn sorted_xattr_names(buffer: &[u8]) -> Vec<&[u8]> {
 
 fn hash_entry(
     path: &Path,
-    digest: &mut Sha256,
+    digest: &mut impl sha2::digest::Update,
     version: MarkerVersion,
     special: SpecialEntries,
     scratch: &mut HashScratch,
 ) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
+    hash_entry_with_metadata(path, metadata, digest, version, special, scratch)
+}
+
+fn hash_entry_with_metadata(
+    path: &Path,
+    metadata: fs::Metadata,
+    digest: &mut impl sha2::digest::Update,
+    version: MarkerVersion,
+    special: SpecialEntries,
+    scratch: &mut HashScratch,
+) -> io::Result<()> {
     if version == MarkerVersion::V2 {
         hash_v2_metadata(path, &metadata, digest, scratch)?;
     }
@@ -291,10 +311,10 @@ fn hash_entry(
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            digest.update((metadata.permissions().mode() & 0o777).to_le_bytes());
+            digest.update(&(metadata.permissions().mode() & 0o777).to_le_bytes());
         }
         #[cfg(windows)]
-        digest.update([u8::from(metadata.permissions().readonly())]);
+        digest.update(&[u8::from(metadata.permissions().readonly())]);
     }
 
     if metadata.is_dir() {
@@ -305,7 +325,7 @@ fn hash_entry(
             .map(|entry| entry.map(|entry| entry.file_name()))
             .collect::<io::Result<Vec<_>>>()?;
         entries.sort_unstable();
-        digest.update((entries.len() as u64).to_le_bytes());
+        digest.update(&(entries.len() as u64).to_le_bytes());
         let mut child = path.to_path_buf();
         for name in entries {
             hash_native(&name, digest);
@@ -315,15 +335,15 @@ fn hash_entry(
         }
     } else if metadata.is_file() {
         digest.update(b"file");
-        digest.update(metadata.len().to_le_bytes());
+        digest.update(&metadata.len().to_le_bytes());
         hash_file_bytes(path, metadata.len(), digest, &mut scratch.file_bytes)?;
     } else if special == SpecialEntries::Hash {
         digest.update(b"special");
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            digest.update(metadata.mode().to_le_bytes());
-            digest.update(metadata.rdev().to_le_bytes());
+            digest.update(&metadata.mode().to_le_bytes());
+            digest.update(&metadata.rdev().to_le_bytes());
         }
     } else {
         return Err(io::Error::other("unsupported entry in immutable base"));
@@ -338,7 +358,7 @@ fn hash_entry(
 fn hash_file_bytes(
     path: &Path,
     expected_length: u64,
-    digest: &mut Sha256,
+    digest: &mut impl sha2::digest::Update,
     buffer: &mut [u8],
 ) -> io::Result<()> {
     let mut file = open_regular(path)?;
@@ -377,6 +397,118 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::time::Instant;
+
+    fn serial_v2(root: &Path) -> io::Result<Vec<u8>> {
+        let mut digest = Sha256::new();
+        digest.update(b"riftri-base-content-v2\0");
+        hash_entry(
+            root,
+            &mut digest,
+            MarkerVersion::V2,
+            SpecialEntries::Refuse,
+            &mut HashScratch::new(),
+        )?;
+        Ok(format!("riftri-base-sha256-v2\n{}\n", hex_lower(digest.finalize())).into_bytes())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "manual release-mode pipeline viability screen, not startup evidence"]
+    fn reports_pipelined_integrity_latency() {
+        let fixture = tempfile::tempdir().unwrap();
+        let source = std::env::var_os("RIFTRI_INTEGRITY_FIXTURE");
+        let root = if let Some(source) = source.as_ref() {
+            Path::new(source)
+        } else {
+            for directory in 0..96 {
+                let path = fixture.path().join(format!("directory-{directory:03}"));
+                fs::create_dir(&path).unwrap();
+                for file in 0..64 {
+                    fs::write(path.join(format!("file-{file:03}")), vec![b'x'; 12 * 1024]).unwrap();
+                }
+            }
+            fixture.path()
+        };
+        let expected = serial_v2(root).unwrap();
+        assert_eq!(marker_v2(root).unwrap(), expected);
+        for round in 0..8 {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for parallel in order {
+                let start = Instant::now();
+                let actual = if parallel {
+                    marker_v2(root)
+                } else {
+                    serial_v2(root)
+                }
+                .unwrap();
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(actual, expected);
+                println!(
+                    "RIFTRI_INTEGRITY_PIPELINE {{\"round\":{round},\"parallel\":{parallel},\"milliseconds\":{elapsed}}}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v2_mixed_tree_matches_serial_bytes_and_detects_changes() {
+        let fixture = tempfile::tempdir().unwrap();
+        for directory in ["a", "b/nested", "empty", "z"] {
+            fs::create_dir_all(fixture.path().join(directory)).unwrap();
+        }
+        for i in 0..48 {
+            fs::write(fixture.path().join(format!("a/{i:03}")), [i as u8; 8192]).unwrap();
+        }
+        fs::write(fixture.path().join("b/nested/large"), vec![42; 1024 * 1024]).unwrap();
+        fs::write(fixture.path().join("z/newline-\n-unicode-λ"), b"payload").unwrap();
+        symlink("../a/000", fixture.path().join("z/link")).unwrap();
+        #[cfg(target_os = "linux")]
+        fs::write(
+            fixture
+                .path()
+                .join(std::ffi::OsString::from_vec(b"raw-\xff".to_vec())),
+            b"native",
+        )
+        .unwrap();
+        let original = serial_v2(fixture.path()).unwrap();
+        assert_eq!(marker_v2(fixture.path()).unwrap(), original);
+        let changed = fixture.path().join("a/007");
+        for content in [[1; 8192], [2; 8192]] {
+            fs::write(&changed, content).unwrap();
+            let expected = serial_v2(fixture.path()).unwrap();
+            assert_ne!(expected, original);
+            assert_eq!(marker_v2(fixture.path()).unwrap(), expected);
+        }
+        fs::set_permissions(&changed, fs::Permissions::from_mode(0o4755)).unwrap();
+        assert_eq!(
+            marker_v2(fixture.path()).unwrap(),
+            serial_v2(fixture.path()).unwrap()
+        );
+        #[cfg(target_os = "macos")]
+        let attribute = "com.riftri.pipeline";
+        #[cfg(not(target_os = "macos"))]
+        let attribute = "user.riftri.pipeline";
+        rustix::fs::setxattr(
+            &changed,
+            attribute,
+            b"binary\0\xff",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            marker_v2(fixture.path()).unwrap(),
+            serial_v2(fixture.path()).unwrap()
+        );
+        std::os::unix::net::UnixListener::bind(fixture.path().join("b/socket")).unwrap();
+        assert_eq!(
+            marker_v2(fixture.path()).unwrap_err().to_string(),
+            serial_v2(fixture.path()).unwrap_err().to_string()
+        );
+    }
 
     #[test]
     fn directory_walk_matches_legacy_path_sorting() {
