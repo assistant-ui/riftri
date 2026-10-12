@@ -3312,6 +3312,14 @@ fn signal_name(signal: i32) -> Option<&'static str> {
     })
 }
 
+#[cfg(all(test, unix))]
+#[path = "parser_hegel_tests.rs"]
+mod parser_hegel_tests;
+
+#[cfg(all(test, unix))]
+#[path = "exit_disposition_hegel_tests.rs"]
+mod exit_disposition_hegel_tests;
+
 #[cfg(test)]
 mod tests {
     #[test]
