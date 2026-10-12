@@ -11029,8 +11029,8 @@ fn verify_prune_safe(
     current_prune: Option<&str>,
 ) -> Result<(), WorktreeError> {
     let repository_info = git.inspect_repository(repository)?;
-    let repository_root = repository_info.root.ok_or_else(|| {
-        WorktreeError::InvalidRequest("prune journal references a bare repository".to_owned())
+    let repository_root = git_command_root(&repository_info).ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
     })?;
     if repository_root != repository {
         return Err(WorktreeError::InvalidRequest(format!(

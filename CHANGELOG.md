@@ -81,6 +81,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   refuses, such as one starting with `-C <path>` or `--no-pager`, still
   delegate to Git.
 
+- The Git shim guards managed worktrees from a bare repository's Git
+  directory. It took a repository without a working-tree root for no
+  repository, so in a bare repository enabled from one of its linked
+  worktrees, `git worktree remove --force <managed>` run from the bare
+  directory, or from outside it with `--git-dir`, reached real Git and deleted
+  the view outside the removal journal. Removals, moves, and prunes there are
+  now journaled or refused, and `git worktree add` is optimized as
+  `riftri worktree add` already was. `riftri worktree prune` no longer refuses
+  a bare repository.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed

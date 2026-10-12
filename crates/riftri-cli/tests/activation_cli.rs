@@ -2098,6 +2098,135 @@ fn git_directory_aliases_cannot_bypass_managed_removal_guard() {
     }
 }
 
+/// Riftri manages a bare repository's worktrees from its Git directory, but
+/// the shim took a repository without a working-tree root for no repository
+/// at all, so from there `git worktree remove --force <managed>` ran as
+/// ordinary Git and deleted the view outside the removal journal.
+#[cfg(target_os = "macos")]
+#[test]
+fn bare_repository_git_directory_cannot_bypass_managed_lifecycle_guards() {
+    let fixture = RepositoryFixture::new();
+    let root = fixture.directory.path();
+    let bare = root.join("bare.git");
+    assert!(
+        git(
+            root,
+            &["clone", "--quiet", "--bare", "repository", "bare.git"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(&bare, &["config", "core.autocrlf", "false"])
+            .status
+            .success()
+    );
+    // `riftri enable` needs a working tree, so opt in from a linked one.
+    assert!(
+        git(&bare, &["worktree", "add", "--quiet", "../linked"])
+            .status
+            .success()
+    );
+    assert!(riftri(&root.join("linked"), &["enable"]).status.success());
+    let shim = |directory: &Path, arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .expect("run Git through the shim")
+    };
+    let managed = || {
+        let listed = riftri(&bare, &["worktree", "list"]);
+        assert!(listed.status.success());
+        String::from_utf8(listed.stdout).expect("UTF-8 worktree list")
+    };
+
+    // An add from the bare directory is optimized, as `riftri worktree add`
+    // already is there, so the view is managed.
+    let added = shim(&bare, &["worktree", "add", "--detach", "../view"]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let view = root.join("view");
+    assert!(managed().contains(view.to_str().expect("UTF-8 fixture path")));
+    fs::write(view.join("untracked.txt"), "private\n").expect("dirty managed view");
+
+    // Git's own dirty-worktree refusal still applies.
+    assert!(
+        !shim(&bare, &["worktree", "remove", "../view"])
+            .status
+            .success()
+    );
+    assert!(view.join("untracked.txt").is_file());
+
+    // A move and a prune take their journals.
+    let moved = shim(&bare, &["worktree", "move", "../view", "../moved"]);
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let view = root.join("moved");
+    assert!(view.join("untracked.txt").is_file());
+    assert!(managed().contains(view.to_str().expect("UTF-8 fixture path")));
+    assert!(shim(&bare, &["worktree", "prune"]).status.success());
+    assert!(riftri(&bare, &["worktree", "prune"]).status.success());
+    assert!(view.join("untracked.txt").is_file());
+
+    // Forms the journal cannot reproduce are refused, from the bare
+    // directory and through `--git-dir` from outside it.
+    for (directory, arguments) in [
+        (
+            bare.as_path(),
+            &[
+                "-c",
+                "core.quotePath=false",
+                "worktree",
+                "remove",
+                "--force",
+                "../moved",
+            ][..],
+        ),
+        (
+            bare.as_path(),
+            &["worktree", "move", "--force", "../moved", "../again"][..],
+        ),
+        (
+            root,
+            &[
+                "--git-dir=bare.git",
+                "worktree",
+                "remove",
+                "--force",
+                "moved",
+            ][..],
+        ),
+    ] {
+        let refused = shim(directory, arguments);
+        assert!(!refused.status.success(), "{arguments:?} was not refused");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("managed Riftri worktree"),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(view.join("untracked.txt").is_file());
+    }
+
+    // A forced removal is journaled, so Riftri still knows what became of
+    // the view.
+    let removed = shim(&bare, &["worktree", "remove", "--force", "../moved"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!view.exists());
+    assert!(!managed().contains("outside Riftri"), "{}", managed());
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn exec_path_cannot_bypass_managed_lifecycle_guards() {

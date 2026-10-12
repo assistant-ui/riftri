@@ -16,7 +16,9 @@ use riftri_git::{Git, GitError};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::worktree::{managed_worktree_state_directory, repository_state_directories};
+use crate::worktree::{
+    git_command_root, managed_worktree_state_directory, repository_state_directories,
+};
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
     PruneWorktreesRequest, PruneWorktreesResult, RemoveWorktreeRequest, RemoveWorktreeResult,
@@ -261,7 +263,10 @@ fn plan_command_reading(
     };
     let (repository, proxy) = match root {
         Ok(root) => {
-            let repository = root.unwrap_or(context.repository);
+            // Without a live working tree to stand in for it, a repository
+            // named by `--git-dir` is planned from that directory, which is
+            // where Riftri runs Git for a bare repository.
+            let repository = root.or(context.git_directory).unwrap_or(context.repository);
             let proxy = activation_for_proxy(&repository)?;
             (repository, proxy)
         }
@@ -1151,7 +1156,9 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
         Ok(repository) => repository,
         Err(error) => return uninspected_for_proxy(&git, path, error),
     };
-    let Some(root) = repository.root else {
+    // A bare repository has no working-tree root, but Riftri manages its
+    // worktrees from its Git directory, so it is planned like any other.
+    let Some(root) = git_command_root(&repository).map(Path::to_path_buf) else {
         return Ok(ProxyRepository::Absent);
     };
     // Read the opt-in from the common Git directory, not from `root`:
@@ -4225,6 +4232,54 @@ mod tests {
             };
             assert_eq!(super::git_runs_alias_options(&words), git_runs, "`{body}`");
         }
+    }
+
+    /// A bare repository has no working-tree root, and the planner used to
+    /// read that as "no repository": from the bare directory every worktree
+    /// command, guarded or not, was ordinary Git. Riftri manages such a
+    /// repository from its Git directory, so the shim has to plan there too.
+    #[test]
+    fn an_enabled_bare_repository_plans_from_its_git_directory() {
+        let fixture = repository_fixture();
+        let parent = tempdir().expect("bare repository parent");
+        let bare = parent.path().join("bare.git");
+        git(
+            parent.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                fixture.path().to_str().expect("UTF-8 fixture path"),
+                "bare.git",
+            ],
+        );
+        let add = ["worktree", "add", "--detach", "../view"].map(OsString::from);
+
+        assert!(matches!(
+            plan_git_command(&bare, &add).expect("plan before opting in"),
+            GitProxyPlan::Passthrough
+        ));
+        // `riftri enable` needs a working tree, so it records the opt-in in
+        // this configuration from one of the repository's linked worktrees.
+        git(&bare, &["config", "riftri.enabled", "true"]);
+        assert!(matches!(
+            plan_git_command(&bare, &add).expect("plan from the bare directory"),
+            GitProxyPlan::OptimizedAdd { .. }
+        ));
+
+        // `--git-dir` names the same repository from outside it, with no
+        // linked worktree to stand in for it.
+        let selected = [
+            &[OsString::from("--git-dir"), bare.into_os_string()],
+            &add[..],
+        ]
+        .concat();
+        let error = plan_git_command(parent.path(), &selected)
+            .expect_err("an enabled bare repository must plan its own adds");
+        assert!(
+            error.to_string().contains("invocation-level configuration"),
+            "{error}"
+        );
     }
 
     /// IDE Git integrations pass `--no-optional-locks` on every invocation.
