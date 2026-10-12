@@ -12995,6 +12995,16 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> WorktreeE
     test,
     any(
         target_os = "macos",
+        all(feature = "native-cow-integration", target_os = "linux")
+    )
+))]
+#[path = "worktree_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
         all(
             feature = "native-cow-integration",
             any(target_os = "linux", target_os = "windows")
@@ -14066,7 +14076,7 @@ mod tests {
     #[cfg(unix)]
     use riftri_git::GitError;
 
-    fn git(path: &Path, arguments: &[&str]) {
+    pub(super) fn git(path: &Path, arguments: &[&str]) {
         let output = Command::new("git")
             .args(arguments)
             .current_dir(path)
@@ -18856,7 +18866,7 @@ mod tests {
         assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
     }
 
-    fn git_stdout(directory: &Path, arguments: &[&str]) -> String {
+    pub(super) fn git_stdout(directory: &Path, arguments: &[&str]) -> String {
         let output = Command::new("git")
             .args(arguments)
             .current_dir(directory)
