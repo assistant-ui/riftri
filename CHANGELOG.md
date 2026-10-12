@@ -5,6 +5,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- `riftri repair` no longer retires the add journal of a worktree whose move
+  or compaction was interrupted while its path was briefly empty. Repair
+  recorded a completed removal and then put the view back, leaving a registered
+  worktree that Riftri no longer managed and whose base `riftri gc` could
+  collect; after an interrupted compaction undo, every later repair and removal
+  failed. An add onto such a path is refused the same way.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
