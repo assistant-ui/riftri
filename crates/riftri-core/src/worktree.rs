@@ -2204,7 +2204,11 @@ fn garbage_collect_inner(
         );
         let journal_path = store.path_for(&journal.operation_id);
         let decoded = journal.clone().decode(journal_path.clone())?;
-        validate_new_collection_candidate(&state_directory, &decoded)?;
+        // The same checks the journaled steps repeat under the base lock. A
+        // marker whose base directory is gone is still collected: the plan
+        // lists it, and removing the marker is all that is left to do.
+        validate_collection_paths(&state_directory, &decoded)?;
+        validate_collectible_base(&decoded)?;
         let journal_path = store.persist(&journal)?;
         progress::emit(ProgressEvent::GcPhase {
             phase: journal.phase,
@@ -2785,36 +2789,6 @@ fn validate_collection_paths(
                 directory.display()
             )));
         }
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn validate_new_collection_candidate(
-    state_directory: &Path,
-    journal: &DecodedCollectionJournal,
-) -> Result<(), WorktreeError> {
-    validate_collection_paths(state_directory, journal)?;
-    let base_metadata = fs::symlink_metadata(&journal.base_path)
-        .map_err(|source| io("inspect collectible base", &journal.base_path, source))?;
-    if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "collectible base {} is not a real directory",
-            journal.base_path.display()
-        )));
-    }
-    let marker_metadata = fs::symlink_metadata(&journal.marker_path).map_err(|source| {
-        io(
-            "inspect collectible base marker",
-            &journal.marker_path,
-            source,
-        )
-    })?;
-    if !marker_metadata.is_file() || marker_metadata.file_type().is_symlink() {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "collectible base marker {} is not a real file",
-            journal.marker_path.display()
-        )));
     }
     Ok(())
 }
@@ -23370,6 +23344,38 @@ mod tests {
                 .contains("not explained by a completion marker or journal"),
             "unexpected diagnostic: {issue:?}"
         );
+    }
+
+    /// A completion marker whose base directory is gone is planned as a
+    /// zero-byte candidate, so applying the plan must collect it too instead
+    /// of failing on the missing base before it reaches the bases after it.
+    #[test]
+    fn garbage_collection_collects_a_completion_marker_without_a_base() {
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-marker-only");
+        // All zeros sorts before any real tree ID, so it is collected first.
+        let missing_base = base_path.with_file_name("0".repeat(40));
+        let orphan_marker = missing_base.with_extension("complete");
+        fs::write(&orphan_marker, "").expect("write marker without a base");
+
+        let plan = garbage_collect_inner(&state, false, None).expect("plan collection");
+        assert_eq!(
+            plan.candidates
+                .iter()
+                .map(|candidate| (candidate.base_path.clone(), candidate.logical_bytes > 0))
+                .collect::<Vec<_>>(),
+            [(missing_base.clone(), false), (base_path.clone(), true)]
+        );
+
+        let applied = garbage_collect_inner(&state, true, None).expect("apply collection");
+        assert_eq!(applied.collected, [missing_base, base_path.clone()]);
+        assert!(!orphan_marker.exists());
+        assert!(!base_path.exists());
+        let again = garbage_collect_inner(&state, true, None).expect("apply again");
+        assert!(again.candidates.is_empty(), "{again:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
     }
 
     #[test]
