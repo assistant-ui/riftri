@@ -10,14 +10,21 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use hegel::TestCase;
+use hegel::generators as gs;
+
 use super::tests::{git, git_stdout};
 use super::{AddWorktreeRequest, WorktreeMode};
 use crate::test_support::{WritableTempDir, writable_tempdir};
 
+#[path = "worktree_checkout_hegel_tests.rs"]
+mod checkout;
 #[path = "worktree_state_hegel_tests.rs"]
 mod state;
 
 pub(super) const REGULAR: u32 = 0o100644;
+pub(super) const EXECUTABLE: u32 = 0o100755;
+pub(super) const SYMLINK: u32 = 0o120000;
 
 /// One entry of a generated Git tree. `path` is raw bytes so a tree can hold
 /// names the filesystem under test cannot.
@@ -186,4 +193,59 @@ pub(super) fn snapshot(root: &Path) -> BTreeMap<Vec<u8>, Entry> {
         }
     }
     entries
+}
+
+/// Whether Git lists `path` as a worktree of `repository`.
+pub(super) fn registered(repository: &Path, path: &Path) -> bool {
+    riftri_git::Git::default()
+        .list_worktrees(repository)
+        .expect("list worktrees")
+        .iter()
+        .any(|worktree| worktree.path == path)
+}
+
+/// `git status` for a worktree, with untracked and ignored files included.
+pub(super) fn status(worktree: &Path) -> String {
+    git_stdout(
+        worktree,
+        &[
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+        ],
+    )
+}
+
+/// A path component that is valid on every filesystem under test but still
+/// exercises quoting: spaces, shell and Git metacharacters, and non-ASCII.
+pub(super) fn component(tc: &TestCase) -> String {
+    tc.draw(
+        gs::text()
+            .alphabet("abcXYZ019 _-+=,;'&$#@!()[]{}~^%\u{e9}\u{4e2d}\u{1f600}")
+            .min_size(1)
+            .max_size(6),
+    )
+}
+
+/// Paths of a tree that every supported filesystem can hold: distinct after
+/// ASCII lowercasing, with no entry that is both a file and a directory.
+pub(super) fn portable_paths(tc: &TestCase, maximum: usize) -> Vec<String> {
+    let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(maximum));
+    let mut paths: Vec<String> = Vec::new();
+    for index in 0..count {
+        let depth = tc.draw(gs::integers::<usize>().max_value(2));
+        // A unique lowercase leading component keeps generated names from
+        // aliasing each other or a `.git` entry on any filesystem.
+        let mut path = format!("p{index}");
+        for _ in 0..depth {
+            path.push('/');
+            path.push_str(component(tc).trim_matches(' '));
+            if path.ends_with('/') {
+                path.push('x');
+            }
+        }
+        paths.push(path);
+    }
+    paths
 }
