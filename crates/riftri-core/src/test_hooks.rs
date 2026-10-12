@@ -11,6 +11,7 @@ pub(crate) enum FilesystemRacePoint {
     ForceRemovalRevalidation,
     RemovalQuarantined,
     RollbackGitRemoval,
+    RollbackViewSetAside,
     JournalRetirementLocked,
     BaseReadMiss,
     BaseReuseAfterExclusiveWait,
