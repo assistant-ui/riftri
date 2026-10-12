@@ -74,6 +74,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `-c`, or read through `--config-env`. On Windows a worktree alias whose
   arguments are not valid UTF-8 is refused.
 
+- The Git shim reads an alias body the way Git does when the body starts with
+  global options. An alias such as `-p worktree remove --force` reached real
+  Git unclassified and removed a managed worktree outside the journal; it is
+  now planned or refused like the spelled-out command. Bodies Git itself
+  refuses, such as one starting with `-C <path>` or `--no-pager`, still
+  delegate to Git.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed

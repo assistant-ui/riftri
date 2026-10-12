@@ -1392,6 +1392,8 @@ fn expand_worktree_alias(
     // builtin, errors on an unknown name, or executes a shell alias that
     // re-enters the proxy on its own.
     let mut name = name.to_owned();
+    let mut invocation_aliases = context.invocation_aliases.clone();
+    let mut options: Vec<OsString> = Vec::new();
     let mut pending: Vec<Vec<u8>> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     loop {
@@ -1405,8 +1407,7 @@ fn expand_worktree_alias(
             return Ok(None);
         }
         let lowered = name.to_ascii_lowercase();
-        let value = if let Some((_, body)) = context
-            .invocation_aliases
+        let value = if let Some((_, body)) = invocation_aliases
             .iter()
             .rev()
             .find(|(alias, _)| *alias == lowered)
@@ -1430,11 +1431,40 @@ fn expand_worktree_alias(
         if value.starts_with(b"!") {
             return Ok(None);
         }
-        let Ok(words) = split_alias_words(&value) else {
+        let Ok(mut words) = split_alias_words(&value) else {
             // Git refuses the same body ("bad alias string"), so passthrough
             // dies in Git with nothing executed.
             return Ok(None);
         };
+        // Git runs its global option parser over the body before it reads
+        // the command, and that parser stops at the first word that does not
+        // start with `-`, so only such a body has options to find.
+        if words.first().is_some_and(|word| word.starts_with(b"-")) {
+            let mut body_options = words
+                .iter()
+                .cloned()
+                .map(alias_argument)
+                .collect::<Result<Vec<_>, _>>()?;
+            // Find the command the way the outer command line does. Git dies
+            // on an option it does not know, so the first reading is the only
+            // one, and with no command behind the options it dies as well.
+            let Some(body) = command_contexts(&context.repository, &body_options)
+                .into_iter()
+                .next()
+            else {
+                return Ok(None);
+            };
+            body_options.truncate(body.command_index);
+            if !git_runs_alias_options(&body_options) {
+                return Ok(None);
+            }
+            // The options stay in front of the command Git will run, where
+            // planning weighs them like any other global option, and a body
+            // can define the alias a later hop names.
+            options.append(&mut body_options);
+            invocation_aliases.extend(body.invocation_aliases);
+            words.drain(..body.command_index);
+        }
         let mut words = words.into_iter();
         let Some(first) = words.next() else {
             return Ok(None);
@@ -1454,6 +1484,7 @@ fn expand_worktree_alias(
                 return Ok(None);
             }
             let mut expanded = arguments[..context.command_index].to_vec();
+            expanded.append(&mut options);
             expanded.push(OsString::from(WORKTREE_SUBCOMMAND));
             for word in pending {
                 expanded.push(alias_argument(word)?);
@@ -1475,6 +1506,32 @@ fn expand_worktree_alias(
 /// and the bytes of Unicode spaces such as U+00A0 are ordinary word bytes.
 fn is_git_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Whether Git runs an alias whose body starts with these global options.
+///
+/// Verified against git 2.53.0: Git dies ("alias '<name>' changes environment
+/// variables") on every option that sets `envchanged` in its `handle_options`,
+/// and the remaining ones print usage or a path and exit, so only these reach
+/// the command behind them.
+fn git_runs_alias_options(options: &[OsString]) -> bool {
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        let runs = if option == "-p" || option == "--paginate" {
+            true
+        } else if option == "-c" || option == "--config-env" {
+            options.next().is_some()
+        } else if option == "-C" {
+            options.next().is_some_and(|directory| directory.is_empty())
+        } else {
+            let option = option.as_encoded_bytes();
+            option.starts_with(b"--exec-path=") || option.starts_with(b"--config-env=")
+        };
+        if !runs {
+            return false;
+        }
+    }
+    true
 }
 
 /// Split an alias body exactly the way Git's own `split_cmdline` does,
@@ -3965,6 +4022,209 @@ mod tests {
             error.to_string().contains("refusing `git worktree prune"),
             "{error}"
         );
+    }
+
+    /// Git runs its global option parser over an expanded alias body, so
+    /// `alias.pw = -p worktree remove --force` reaches the same lifecycle
+    /// command as the bare body. The planner used to read `-p` as the command
+    /// name and passed the removal to real Git unclassified.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn alias_bodies_with_global_options_cannot_bypass_the_lifecycle_guard() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("optioned-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/optioned")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let destination = destination.into_os_string();
+
+        // Stored aliases whose options leave the invocation unchanged plan as
+        // the journaled removal, alone and through a chain.
+        git(
+            fixture.path(),
+            &["config", "alias.pw", "-p worktree remove --force"],
+        );
+        git(fixture.path(), &["config", "alias.hop", "--paginate pw"]);
+        git(
+            fixture.path(),
+            &["config", "alias.here", "-C '' worktree remove --force"],
+        );
+        for name in ["pw", "hop", "here"] {
+            let arguments = [OsString::from(name), destination.clone()];
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan optioned alias"),
+                    GitProxyPlan::OptimizedForceRemove(_)
+                ),
+                "`git {name}` was not planned as the journaled removal"
+            );
+        }
+
+        // Options the outer command line treats as significant keep that
+        // meaning inside a body, so the managed-path guard refuses.
+        let refused = |arguments: &[OsString]| {
+            let error = plan_git_command(fixture.path(), arguments)
+                .expect_err("an alias body with global options must not bypass the guard");
+            assert!(
+                error.to_string().contains("managed Riftri worktree"),
+                "{arguments:?}: {error}"
+            );
+        };
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "alias.ep",
+                "--exec-path=/nonexistent worktree remove --force",
+            ],
+        );
+        // A body can define the alias its own command names.
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "alias.nested",
+                "-c 'alias.inner=-p worktree remove --force' inner",
+            ],
+        );
+        refused(&[OsString::from("ep"), destination.clone()]);
+        refused(&[OsString::from("nested"), destination.clone()]);
+        refused(&[
+            OsString::from("-c"),
+            OsString::from("alias.one=-p worktree remove --force"),
+            OsString::from("one"),
+            destination.clone(),
+        ]);
+        // SAFETY: test-only, and the variable name is unique to this test.
+        unsafe {
+            std::env::set_var(
+                "RIFTRI_TEST_OPTIONED_ALIAS",
+                "--paginate worktree remove --force",
+            );
+        }
+        refused(&[
+            OsString::from("--config-env=alias.ce=RIFTRI_TEST_OPTIONED_ALIAS"),
+            OsString::from("ce"),
+            destination.clone(),
+        ]);
+        // Git also accepts the spaced `--config-env <name>=<variable>` form,
+        // on the command line and at the start of a body.
+        refused(&[
+            OsString::from("--config-env"),
+            OsString::from("alias.ce=RIFTRI_TEST_OPTIONED_ALIAS"),
+            OsString::from("ce"),
+            destination.clone(),
+        ]);
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "alias.envhop",
+                "--config-env alias.viaenv=RIFTRI_TEST_OPTIONED_ALIAS viaenv",
+            ],
+        );
+        refused(&[OsString::from("envhop"), destination.clone()]);
+
+        // Git dies on a body whose options change its environment, so these
+        // still delegate and nothing executes.
+        for body in [
+            "-P worktree remove --force",
+            "-C . worktree remove --force",
+            "--no-optional-locks worktree remove --force",
+        ] {
+            git(fixture.path(), &["config", "alias.dies", body]);
+            assert!(
+                matches!(
+                    plan_git_command(
+                        fixture.path(),
+                        &[OsString::from("dies"), destination.clone()]
+                    )
+                    .expect("plan refused-by-git alias"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`{body}` was not delegated to Git"
+            );
+        }
+    }
+
+    /// Real Git is the reference for which global options an alias body may
+    /// start with: it must run a body exactly when the planner follows it.
+    #[test]
+    fn alias_body_options_match_what_git_accepts() {
+        let fixture = repository_fixture();
+        for options in [
+            "",
+            "-p",
+            "--paginate",
+            "-p --paginate",
+            "--exec-path=/nonexistent",
+            "-C ''",
+            "-c riftri.probe=1",
+            "--config-env=riftri.probe=PATH",
+            "--config-env riftri.probe=PATH",
+            "--attr-source HEAD",
+            "--shallow-file shallow",
+            "-P",
+            "--no-pager",
+            "-C .",
+            "--git-dir=.git",
+            "--git-dir .git",
+            "--work-tree=.",
+            "--work-tree .",
+            "--namespace=probe",
+            "--namespace probe",
+            "--bare",
+            "--no-optional-locks",
+            "--no-advice",
+            "--literal-pathspecs",
+            "--glob-pathspecs",
+            "--noglob-pathspecs",
+            "--icase-pathspecs",
+            "--no-replace-objects",
+            "--no-lazy-fetch",
+            "--attr-source=HEAD",
+            "--list-cmds=main",
+            "--exec-path",
+            "--help",
+            "--version",
+            "--unknown-option",
+            "-p -P",
+        ] {
+            let body = format!("{options} rev-parse --git-dir");
+            let body = body.trim_start();
+            let git_runs = std::process::Command::new("git")
+                .args(["-c", &format!("alias.probe={body}"), "probe"])
+                .current_dir(fixture.path())
+                .output()
+                .expect("run git");
+            let git_runs = git_runs.status.success() && git_runs.stdout == b".git\n";
+            let words: Vec<OsString> = if options.is_empty() {
+                Vec::new()
+            } else {
+                super::split_alias_words(options.as_bytes())
+                    .expect("split options")
+                    .into_iter()
+                    .map(|word| super::alias_argument(word).expect("UTF-8 option"))
+                    .collect()
+            };
+            assert_eq!(super::git_runs_alias_options(&words), git_runs, "`{body}`");
+        }
     }
 
     /// IDE Git integrations pass `--no-optional-locks` on every invocation.
