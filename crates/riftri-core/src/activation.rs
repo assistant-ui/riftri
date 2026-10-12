@@ -2280,6 +2280,14 @@ fn shell_error(message: impl Into<String>) -> ActivationError {
     ActivationError::Shell(message.into())
 }
 
+#[cfg(all(test, unix))]
+#[path = "activation_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(all(test, unix))]
+#[path = "activation_add_hegel_tests.rs"]
+mod add_hegel_tests;
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
@@ -3578,7 +3586,7 @@ mod tests {
         );
     }
 
-    fn repository_fixture() -> tempfile::TempDir {
+    pub(super) fn repository_fixture() -> tempfile::TempDir {
         let fixture = tempdir().expect("temporary directory");
         git(fixture.path(), &["init", "--quiet"]);
         git(fixture.path(), &["config", "user.name", "Riftri Tests"]);
@@ -3593,7 +3601,7 @@ mod tests {
         fixture
     }
 
-    fn git(path: &Path, arguments: &[&str]) {
+    pub(super) fn git(path: &Path, arguments: &[&str]) {
         let status = Command::new("git")
             .args(arguments)
             .current_dir(path)
