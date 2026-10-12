@@ -293,7 +293,7 @@ test("docs render the real adapter with matching styles and no errors", async ({
   const response = await page.goto("/docs");
   expect(response?.status()).toBe(200);
   await expect(page.locator('meta[name="generator"]')).toHaveAttribute("content", "@farming-labs/farmjs");
-  await expect(page.getByRole("heading", { name: "Riftri documentation", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: /^Riftri documentation\b/ })).toBeVisible();
   await expect(page.locator("#nd-page figure").first()).toHaveCSS("border-left-color", "rgb(240, 106, 58)");
   await expect(page.locator("#nd-page figure").first()).toHaveCSS("border-top-width", "0px");
   await expect(page.getByRole("button", { name: "Copy Text", exact: true }).first()).toHaveCSS("opacity", "1");
@@ -311,7 +311,7 @@ test("docs navigation works on desktop and mobile, including history", async ({ 
   await expect(page.locator("#nd-page h1")).toContainText(/install/i);
   await expect(page.getByRole("link", { name: /^edit on github$/i })).toHaveAttribute("href", "https://github.com/assistant-ui/riftri/blob/main/website/content/guides/installation.md");
   await page.goBack();
-  await expect(page.getByRole("heading", { name: "Riftri documentation", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: /^Riftri documentation\b/ })).toBeVisible();
 });
 
 test("docs search finds content and opens a result", async ({ page }) => {
@@ -341,7 +341,7 @@ test("homepage docs link opens the adapter and reference pages fit the viewport"
   await page.goto("/");
   await page.getByRole("link", { name: "Docs", exact: true }).click();
   await expect(page).toHaveURL(/\/docs$/);
-  await expect(page.getByRole("heading", { name: "Riftri documentation", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name: /^Riftri documentation\b/ })).toBeVisible();
   for (const url of ["/docs/cli", "/docs/windows-refs", "/docs/architecture"]) {
     await page.goto(url);
     await expect(page.locator("#nd-page h1")).toBeVisible();

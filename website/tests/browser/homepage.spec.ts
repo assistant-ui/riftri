@@ -16,6 +16,18 @@ test("footer stays compact with comfortable link targets", async ({ page }, test
   await footer.screenshot({ path: testInfo.outputPath(`footer-${testInfo.project.name}.png`) });
 });
 
+// The client router used to fetch /install.sh as if it were a page and keep
+// the app shell, so the script appeared as one unformatted block. The link
+// must open the plain-text script itself, line breaks intact.
+test("the installer link opens the plain-text script", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("link", { name: "Read the Bash installer" }).click();
+  await expect(page).toHaveURL(/\/install\.sh$/);
+  await expect.poll(() => page.evaluate(() => document.contentType)).toBe("text/plain");
+  const text = await page.evaluate(() => document.body.innerText);
+  expect(text.startsWith("#!/usr/bin/env bash\n# Standalone macOS/Linux installer.")).toBe(true);
+});
+
 test("install reference links expose comfortable touch targets", async ({ page }) => {
   await page.goto("/");
   const heights = await page.locator(".install-links a").evaluateAll((links) =>
