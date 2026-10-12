@@ -3191,6 +3191,10 @@ mod recovery_hegel_tests;
 mod storage_hegel_tests;
 
 #[cfg(test)]
+#[path = "doctor_hegel_tests.rs"]
+mod doctor_hegel_tests;
+
+#[cfg(test)]
 mod tests {
 
     #[test]

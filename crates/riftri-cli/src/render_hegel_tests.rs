@@ -97,6 +97,10 @@ fn render_spec_in_child() {
         "status" | "inventory" | "all-states" => {
             super::storage_hegel_tests::render_storage(&spec, json)
         }
+        "doctor" => {
+            super::print_doctor(&super::doctor_hegel_tests::report(&spec));
+            Ok(())
+        }
         other => panic!("unknown render kind {other}"),
     };
     machineln!("{END} {}", if result.is_ok() { "ok" } else { "failed" });

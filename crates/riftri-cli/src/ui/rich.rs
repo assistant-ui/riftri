@@ -740,6 +740,10 @@ fn draw_prompt(
 }
 
 #[cfg(test)]
+#[path = "rich_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
