@@ -3179,6 +3179,18 @@ mod hegel_tests;
 mod parse_hegel_tests;
 
 #[cfg(test)]
+#[path = "render_hegel_tests.rs"]
+mod render_hegel_tests;
+
+#[cfg(test)]
+#[path = "recovery_hegel_tests.rs"]
+mod recovery_hegel_tests;
+
+#[cfg(test)]
+#[path = "storage_hegel_tests.rs"]
+mod storage_hegel_tests;
+
+#[cfg(test)]
 mod tests {
 
     #[test]

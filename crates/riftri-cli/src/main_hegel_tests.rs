@@ -11,7 +11,7 @@ mod contract;
 pub(super) use contract::assert_receipt_keys;
 use contract::exit_code_for;
 pub(crate) use contract::process_cases;
-pub(super) use contract::{decode_hex, native_path, path_from_bytes};
+pub(super) use contract::{check_report_value, decode_hex, native_path, path_from_bytes};
 
 use super::{
     InvocationContext, display_byte_count, encode_hex, failure_exit_code, failure_receipt,

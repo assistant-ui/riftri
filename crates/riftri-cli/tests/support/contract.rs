@@ -107,3 +107,42 @@ pub(crate) fn path_from_bytes(bytes: Vec<u8>) -> PathBuf {
         .collect::<Vec<_>>();
     PathBuf::from(OsString::from_wide(&wide))
 }
+
+/// Check what every `--json` report promises: snake_case keys, and beside
+/// each lossy display string the exact bytes it stands for.
+pub(crate) fn check_report_value(value: &Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                assert!(
+                    key.bytes().all(|byte| byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || byte == b'_'),
+                    "report key {key} is not snake_case"
+                );
+                let twin = key
+                    .strip_suffix("_native_hex")
+                    .map(|display| (display, true))
+                    .or_else(|| key.strip_suffix("_hex").map(|display| (display, false)));
+                if let Some((display, is_path)) = twin {
+                    let display = map
+                        .get(display)
+                        .unwrap_or_else(|| panic!("{key} has no display twin"));
+                    assert_eq!(display.is_null(), nested.is_null(), "{key}");
+                    if let Some(hex) = nested.as_str() {
+                        let bytes = decode_hex(hex);
+                        let expected = if is_path {
+                            path_from_bytes(bytes).display().to_string()
+                        } else {
+                            String::from_utf8_lossy(&bytes).into_owned()
+                        };
+                        assert_eq!(display.as_str().expect("display string"), expected, "{key}");
+                    }
+                }
+                check_report_value(nested);
+            }
+        }
+        Value::Array(items) => items.iter().for_each(check_report_value),
+        _ => {}
+    }
+}
