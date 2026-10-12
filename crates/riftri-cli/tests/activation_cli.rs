@@ -1081,6 +1081,34 @@ fn exec_delegates_normal_git_to_the_real_executable() {
     assert_eq!(scoped_failure.stderr, direct_failure.stderr);
 }
 
+/// Where Git cannot enter `-C` or open `--git-dir`, the shim used to answer
+/// with Riftri's own inspection error and exit code instead of Git's.
+#[test]
+fn exec_leaves_unopenable_repositories_to_git() {
+    let directory = writable_tempdir().expect("fixture directory");
+    fs::write(directory.path().join("file"), "").expect("write regular file");
+
+    for arguments in [
+        &["-C", "missing", "rm", "x"][..],
+        &["-C", "missing", "mv", "a", "b"][..],
+        &["-C", "missing", "definitely-not-a-command"][..],
+        &["-C", "file", "rm", "x"][..],
+        &["--git-dir=missing", "worktree"][..],
+        &["--git-dir=missing", "worktree", "list"][..],
+        &["--git-dir=missing", "worktree", "add", "../view"][..],
+    ] {
+        let direct = git(directory.path(), arguments);
+        let scoped = riftri(
+            directory.path(),
+            &[&["exec", "--", "git"], arguments].concat(),
+        );
+        assert_eq!(direct.status.code(), Some(128), "{arguments:?}");
+        assert_eq!(scoped.status.code(), direct.status.code(), "{arguments:?}");
+        assert_eq!(scoped.stdout, direct.stdout, "{arguments:?}");
+        assert_eq!(scoped.stderr, direct.stderr, "{arguments:?}");
+    }
+}
+
 /// Regression test: evaluating shell deactivation inside a `riftri exec`
 /// session used to leave the process-scoped shim first on `PATH` with its
 /// delegation environment stripped, so `git --version` answered as Riftri and

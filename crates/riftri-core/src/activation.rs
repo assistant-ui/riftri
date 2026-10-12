@@ -209,21 +209,55 @@ fn plan_git_command_inner(
         .map(OsString::as_os_str)
         != Some(OsStr::new(WORKTREE_SUBCOMMAND))
     {
-        if expand_aliases && let Some(expanded) = expand_worktree_alias(&context, arguments)? {
+        if !expand_aliases {
+            return Ok(GitProxyPlan::Passthrough);
+        }
+        return match expand_worktree_alias(&context, arguments) {
             // Re-plan the command Git will actually run. Aliases are not
             // expanded recursively, so one pass is enough and terminates.
-            return plan_git_command_inner(current_directory, &expanded, false);
-        }
-        return Ok(GitProxyPlan::Passthrough);
+            Ok(Some(expanded)) => plan_git_command_inner(current_directory, &expanded, false),
+            Ok(None) => Ok(GitProxyPlan::Passthrough),
+            // An alias that cannot be resolved might run any worktree
+            // command, so only a repository that is provably absent or never
+            // opted in is left to Git, which then reports the failure itself.
+            Err(ActivationError::Git(error)) => {
+                match uninspected_for_proxy(&Git::default(), &context.repository, error)? {
+                    ProxyRepository::Unhealthy {
+                        enabled: true,
+                        error,
+                    } => Err(error.into()),
+                    _ => Ok(GitProxyPlan::Passthrough),
+                }
+            }
+            Err(error) => Err(error),
+        };
     }
 
-    let repository = match context.git_directory.as_deref() {
-        Some(git_directory) => Git::default()
-            .worktree_root_from_git_dir(git_directory)?
-            .unwrap_or(context.repository),
-        None => context.repository,
+    let git = Git::default();
+    let root = match context.git_directory.as_deref() {
+        Some(git_directory) => git
+            .worktree_root_from_git_dir(git_directory)
+            .map_err(|error| (git_directory, error)),
+        None => Ok(None),
     };
-    let activation = match activation_for_proxy(&repository)? {
+    let (repository, proxy) = match root {
+        Ok(root) => {
+            let repository = root.unwrap_or(context.repository);
+            let proxy = activation_for_proxy(&repository)?;
+            (repository, proxy)
+        }
+        Err((git_directory, error)) => {
+            // `--git-dir` may name a linked worktree's `.git` file, which
+            // sits in the worktree it belongs to.
+            let location = match git_directory.parent() {
+                Some(parent) if git_directory.is_file() => parent,
+                _ => git_directory,
+            };
+            let proxy = uninspected_for_proxy(&git, location, error)?;
+            (context.repository, proxy)
+        }
+    };
+    let activation = match proxy {
         ProxyRepository::Absent => return Ok(GitProxyPlan::Passthrough),
         ProxyRepository::Inspected(activation) => activation,
         ProxyRepository::Unhealthy { enabled, error } => {
@@ -1102,20 +1136,7 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
     let git = Git::default();
     let repository = match git.inspect_repository(path) {
         Ok(repository) => repository,
-        Err(error) => {
-            if git.repository_absent(path)? {
-                return Ok(ProxyRepository::Absent);
-            }
-            // Repository discovery works even over a damaged object store, so
-            // the opt-in flag is still readable; a repository that never
-            // enabled Riftri stays ordinary Git. When even the flag cannot be
-            // read, claim enablement: an unprovable opt-out fails closed.
-            let enabled = git
-                .local_config_bool(path, ENABLED_CONFIG_KEY)
-                .map(|enabled| enabled.unwrap_or(false))
-                .unwrap_or(true);
-            return Ok(ProxyRepository::Unhealthy { enabled, error });
-        }
+        Err(error) => return uninspected_for_proxy(&git, path, error),
     };
     let Some(root) = repository.root else {
         return Ok(ProxyRepository::Absent);
@@ -1123,14 +1144,42 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
     // Read the opt-in from the common Git directory, not from `root`:
     // `GIT_WORK_TREE` or `core.worktree` can place the working tree outside
     // the repository, even inside one that never enabled Riftri.
-    let enabled = git
-        .local_config_bool(&repository.identity.common_git_dir, ENABLED_CONFIG_KEY)?
-        .unwrap_or(false);
+    let enabled =
+        match git.local_config_bool(&repository.identity.common_git_dir, ENABLED_CONFIG_KEY) {
+            Ok(enabled) => enabled.unwrap_or(false),
+            // An unprovable opt-out fails closed here too.
+            Err(error) => {
+                return Ok(ProxyRepository::Unhealthy {
+                    enabled: true,
+                    error,
+                });
+            }
+        };
     Ok(ProxyRepository::Inspected(RepositoryActivation {
         repository: root,
         common_git_dir: repository.identity.common_git_dir,
         enabled,
     }))
+}
+
+/// Classify a location where a Git inspection failed with `error`.
+fn uninspected_for_proxy(
+    git: &Git,
+    path: &Path,
+    error: GitError,
+) -> Result<ProxyRepository, ActivationError> {
+    if git.repository_absent(path)? {
+        return Ok(ProxyRepository::Absent);
+    }
+    // Repository discovery works even over a damaged object store, so the
+    // opt-in flag is still readable; a repository that never enabled Riftri
+    // stays ordinary Git. When even the flag cannot be read, claim
+    // enablement: an unprovable opt-out fails closed.
+    let enabled = git
+        .local_config_bool(path, ENABLED_CONFIG_KEY)
+        .map(|enabled| enabled.unwrap_or(false))
+        .unwrap_or(true);
+    Ok(ProxyRepository::Unhealthy { enabled, error })
 }
 
 /// How the global Git options in front of `worktree` constrain optimization.
@@ -3173,6 +3222,117 @@ mod tests {
             .expect("plan outside a repository"),
             GitProxyPlan::Passthrough
         ));
+    }
+
+    /// Where Git cannot enter `-C` or open `--git-dir` there is nothing for
+    /// Riftri to guard, in an enabled repository or outside one. The planner
+    /// used to return its own inspection error instead of letting Git fail.
+    #[test]
+    fn repositories_git_cannot_open_stay_ordinary_git() {
+        let elsewhere = tempdir().expect("plain directory");
+        let enabled = repository_fixture();
+        enable_repository(enabled.path()).expect("enable repository");
+
+        for directory in [elsewhere.path(), enabled.path()] {
+            fs::write(directory.join("file"), "").expect("write regular file");
+            for arguments in [
+                &["-C", "missing", "rm", "x"][..],
+                &["-C", "missing", "definitely-not-a-command"][..],
+                &["-C", "file", "mv", "a", "b"][..],
+                &["--git-dir=missing", "worktree"][..],
+                &["--git-dir=missing", "worktree", "list"][..],
+                &["--git-dir", "missing", "worktree", "add", "../view"][..],
+            ] {
+                let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+                assert!(
+                    matches!(
+                        plan_git_command(directory, &arguments),
+                        Ok(GitProxyPlan::Passthrough)
+                    ),
+                    "{arguments:?}"
+                );
+            }
+        }
+    }
+
+    /// Letting Git answer for a repository it cannot open must not open the
+    /// lifecycle guard: an enabled repository that exists but cannot be read
+    /// still refuses, whether it is named by `--git-dir`, by a linked
+    /// worktree's `.git` file, or reached through an alias.
+    #[test]
+    fn unreadable_enabled_repositories_fail_closed_through_git_dir_and_aliases() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        git(fixture.path(), &["config", "alias.wtp", "worktree prune"]);
+        let linked = tempdir().expect("linked worktree parent");
+        let view = linked.path().join("view");
+        git(
+            fixture.path(),
+            &["worktree", "add", "--quiet", view.to_str().expect("view")],
+        );
+        let configuration = fixture.path().join(".git/config");
+        let mut contents = fs::read(&configuration).expect("read configuration");
+        contents.extend_from_slice(b"[broken\n");
+        fs::write(&configuration, contents).expect("corrupt configuration");
+        let plan = |arguments: &[&OsStr]| {
+            let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+            plan_git_command(fixture.path(), &arguments)
+        };
+        let git_file = view.join(".git");
+
+        plan(&[OsStr::new("wtp")]).expect_err("an unresolvable alias must not reach Git");
+        for git_directory in [OsStr::new(".git"), git_file.as_os_str()] {
+            let message = plan(&[
+                OsStr::new("--git-dir"),
+                git_directory,
+                OsStr::new("worktree"),
+                OsStr::new("prune"),
+            ])
+            .expect_err("an unreadable enabled repository must refuse lifecycle commands")
+            .to_string();
+            assert!(
+                message.contains("could not be inspected") && message.contains(BYPASS_ENV),
+                "{git_directory:?}: {message}"
+            );
+            assert!(
+                matches!(
+                    plan(&[
+                        OsStr::new("--git-dir"),
+                        git_directory,
+                        OsStr::new("worktree"),
+                        OsStr::new("list"),
+                    ]),
+                    Ok(GitProxyPlan::Passthrough)
+                ),
+                "{git_directory:?}: read-only worktree commands stay ordinary Git"
+            );
+        }
+    }
+
+    /// An enablement flag Git cannot parse is an unprovable opt-out, so
+    /// lifecycle commands refuse while read-only ones stay ordinary Git.
+    #[test]
+    fn an_unreadable_enablement_flag_fails_closed_only_for_lifecycle_commands() {
+        let fixture = repository_fixture();
+        git(fixture.path(), &["config", "riftri.enabled", "maybe"]);
+        let plan = |subcommand: &str| {
+            plan_git_command(
+                fixture.path(),
+                &[
+                    OsString::from(super::WORKTREE_SUBCOMMAND),
+                    OsString::from(subcommand),
+                ],
+            )
+        };
+
+        assert!(matches!(plan("list"), Ok(GitProxyPlan::Passthrough)));
+        let message = plan("prune")
+            .expect_err("an unreadable flag must refuse lifecycle commands")
+            .to_string();
+        assert!(
+            message.contains("could not be inspected") && message.contains(BYPASS_ENV),
+            "{message}"
+        );
     }
 
     /// Git's alias grammar accepts backslash escapes and chains alias to

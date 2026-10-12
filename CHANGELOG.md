@@ -22,6 +22,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   real Git outside the journal, and `riftri enable` and `riftri disable`
   changed the wrong repository.
 
+- The Git shim leaves a command to Git when Git cannot enter its `-C`
+  directory or open its `--git-dir`, so Git reports the failure with its own
+  message and exit code. An enabled repository that exists but cannot be
+  inspected still refuses worktree lifecycle commands, and an unreadable
+  `riftri.enabled` value no longer blocks read-only worktree commands.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
