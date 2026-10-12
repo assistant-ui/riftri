@@ -1733,6 +1733,18 @@ fn platform_capabilities(
     Vec::new()
 }
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "capability_hegel_tests.rs"]
+mod capability_hegel_tests;
+
+#[cfg(all(test, unix))]
+#[path = "umask_hegel_tests.rs"]
+mod umask_hegel_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "unsupported_backend_hegel_tests.rs"]
+mod unsupported_backend_hegel_tests;
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
