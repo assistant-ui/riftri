@@ -21,6 +21,10 @@ use crate::test_support::{WritableTempDir, writable_tempdir};
 mod add_state;
 #[path = "worktree_checkout_hegel_tests.rs"]
 mod checkout;
+#[path = "worktree_collection_state_hegel_tests.rs"]
+mod collection_state;
+#[path = "worktree_compaction_state_hegel_tests.rs"]
+mod compaction_state;
 #[path = "worktree_destination_hegel_tests.rs"]
 mod destination;
 #[path = "worktree_lfs_hegel_tests.rs"]
@@ -282,4 +286,13 @@ pub(super) fn edit_journal(journal: &Path, edit: impl FnOnce(&mut serde_json::Va
 /// A path as journals store it.
 pub(super) fn journal_path_value(path: &Path) -> serde_json::Value {
     serde_json::json!({ "encoding": "unix-bytes", "units": path.as_os_str().as_bytes() })
+}
+
+/// Identity of a directory that survives renames, so a test can tell which
+/// tree ended up where.
+pub(super) fn inode(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path)
+        .ok()
+        .map(|metadata| metadata.ino())
 }
