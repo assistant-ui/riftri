@@ -100,6 +100,69 @@ and do not infer a product speedup from supervisor tests. Stack sampling is not
 supported in this timing lane. Small real-APFS and cancellation tests run in
 the existing macOS benchmark-test CI step.
 
+### Inspecting startup costs without running another benchmark
+
+After a supervised startup run, analyze its existing `results.json` and sibling
+`git-ROUND-LABEL-WORKER.jsonl` traces:
+
+```sh
+node docs/benchmarks/startup-profile.mjs /path/to/benchmark-output/results.json
+```
+
+This read-only command prints JSON. It does not run Git or a recorded executable,
+read the recorded worktree paths, write into the fixture, or change the timing
+runner. It also works after downloading an artifact onto another operating
+system. Results and each trace get SHA-256 identities in the output.
+
+The breakdown reports whole-add milliseconds, Git process starts, and separate
+`reset` and `status` command times. Where Git provides them, it also reports
+each command's index `refresh`/`preload` elapsed time and `sum_scan`/`sum_lstat`
+counters. Command names come from Trace2 `cmd_name`, not substring matches in
+arguments (a directory can itself be named `status`). Sessions stay separate,
+including interleaved child Git processes. Trace2 semantics are documented in
+[Git's Trace2 API](https://git-scm.com/docs/api-trace2).
+
+Interpretation rules:
+
+- Regions are **included** in command time, and parent/child commands can
+  overlap. Do not add them together. The report does not subtract Git time
+  from total time and call the remainder cloning or integrity verification;
+  those Riftri costs are not isolated by this trace.
+- A missing or repeated metric is `null`, not zero. A scalar reset/status
+  metric requires exactly one successful top-level command of that name;
+  ambiguous commands and worker-thread counters are not summed. All commands
+  remain available for inspection.
+- Groups keep labels/binary hashes, fresh versus reused bases, and concurrency
+  separate. `p50` and `p95` use nearest-rank percentiles, not the arithmetic
+  middle-pair median. Four concurrent workers are not four independent
+  repetitions or a batch-latency measurement. Fresh-base creation does not
+  mean a cleared filesystem cache.
+- Every recorded attempt is retained. Missing attempts/traces, truncated or
+  malformed traces, unfinished commands, failed attempts and incomplete cleanup
+  prevent aggregate distributions and produce exit code 1. Missing optional
+  Git counters leave that metric's distribution `null`, with observation counts
+  and per-sample reasons. `complete: true` only means the profile's required
+  evidence was present, not that timing controls passed or an optimization won.
+
+The checked-in real-trace test fixture is the first cached **production** sample
+from [run 38295860743](https://github.com/assistant-ui/riftri/actions/runs/38295860743),
+`prefix-startup/candidate-cached/git-1-baseline-0.jsonl`, retained verbatim. It
+records 5,864 refresh scans during `reset`, and zero during the final `status`
+(which still performs a preload/stat pass). It is a parser regression fixture,
+not a performance comparison. The earlier prefix optimization did not qualify
+as a whole-creation improvement; this profiling tool does not change that result.
+
+Use this breakdown to locate costs, then require same-binary controls and a
+fully verified end-to-end comparison for any runtime proposal. Moving the
+initial Git content verification to a later command is not eliminating it.
+Neither the initial verification nor the final clean check may be skipped to
+make a number smaller. No runtime behavior or startup-speed improvement is
+claimed by this profiling follow-up.
+
+```sh
+node --test docs/benchmarks/startup-profile.test.mjs
+```
+
 The [October 10 location controls](benchmarks/apfs-location-controls-2026-10-10.md)
 found unstable unchanged-code timings on both host APFS and nested APFS images.
 Fourteen cases completed; one was interrupted and one never started. No runtime
