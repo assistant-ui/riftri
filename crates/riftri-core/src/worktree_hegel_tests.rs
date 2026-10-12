@@ -17,6 +17,8 @@ use super::tests::{git, git_stdout};
 use super::{AddWorktreeRequest, WorktreeMode};
 use crate::test_support::{WritableTempDir, writable_tempdir};
 
+#[path = "worktree_accounting_hegel_tests.rs"]
+mod accounting;
 #[path = "worktree_add_state_hegel_tests.rs"]
 mod add_state;
 #[path = "worktree_checkout_hegel_tests.rs"]
@@ -31,6 +33,8 @@ mod destination;
 mod lfs;
 #[path = "worktree_lifecycle_hegel_tests.rs"]
 mod lifecycle;
+#[path = "worktree_obstacle_hegel_tests.rs"]
+mod obstacle;
 #[path = "worktree_policy_hegel_tests.rs"]
 mod policy;
 #[path = "worktree_recovery_hegel_tests.rs"]
