@@ -144,6 +144,11 @@ Interpretation rules:
   and per-sample reasons. `complete: true` only means the profile's required
   evidence was present, not that timing controls passed or an optimization won.
 
+The trace's command arguments, exit times and exit codes must also match the
+runner's separately recorded command inventory. This detects traces cut exactly
+between commands and accidentally swapped files; hashes identify inputs but
+are not a substitute for retaining the original run and its provenance.
+
 The checked-in real-trace test fixture is the first cached **production** sample
 from [run 38295860743](https://github.com/assistant-ui/riftri/actions/runs/38295860743),
 `prefix-startup/candidate-cached/git-1-baseline-0.jsonl`, retained verbatim. It

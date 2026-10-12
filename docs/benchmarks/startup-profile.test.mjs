@@ -25,7 +25,10 @@ const jsonl = events => events.map(e => JSON.stringify(e)).join('\n') + '\n';
 const script = fileURLToPath(new URL('./startup-profile.mjs', import.meta.url));
 const sample = (round, label, worker = 0) => ({round, label, worker, reused: round > 0,
   started: true, settled: true, success: true, code: 0, signal: null, error: null,
-  timedOut: false, cancelled: false, milliseconds: 2000});
+  timedOut: false, cancelled: false, milliseconds: 2000, gitCommands: [
+    {argv: ['git', '-C', 'status', 'reset'], seconds: 0.8, code: 0},
+    {argv: ['git', '-C', 'status', 'status'], seconds: 0.04, code: 0},
+  ]});
 function report(concurrency = 1) {
   return {schemaVersion: 3, runner: 'supervised-startup-v1', complete: true,
     binarySha256: 'a'.repeat(64), candidateSha256: 'b'.repeat(64), candidate: '/unused/candidate',
@@ -169,6 +172,19 @@ test('failed, missing and duplicate attempts suppress all aggregate distribution
   assert.equal(result.complete, false);
   assert.equal(result.samples.length, 3);
   assert.ok(result.samples[1].issues.includes('missing trace'));
+});
+
+test('a trace cut between commands or taken from another attempt cannot look complete', () => {
+  const cut = profileStartup(report(), () => jsonl(command('reset', 'reset', 0.8, 5864)));
+  assert.equal(cut.complete, false);
+  assert.ok(cut.samples.every(s => s.issues.some(i => i.includes('receipt command inventory'))));
+  assert.ok(cut.groups.every(g => Object.values(g.metrics).every(m => m.distribution === null)));
+  const changed = trace();
+  changed.find(e => e.event === 'exit').t_abs = 0.7;
+  assert.equal(profileStartup(report(), () => jsonl(changed)).complete, false);
+  const r = report();
+  delete r.samples[0].gitCommands;
+  assert.equal(profile(r).complete, false);
 });
 
 test('read-only CLI uses local trace names, not recorded machine paths or executables', t => {

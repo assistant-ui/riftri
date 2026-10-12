@@ -126,6 +126,15 @@ export function profileStartup(report, readTrace) {
       traceSha256 = hash(text);
       trace = profileTrace(text);
       problems.push(...trace.issues);
+      if (s.success === true) {
+        // A file cut exactly between commands still has a newline and only
+        // complete sessions. Match the runner's separately recorded inventory
+        // before treating that prefix (or another attempt's trace) as complete.
+        assert.ok(Array.isArray(s.gitCommands), 'missing receipt command inventory');
+        assert.deepEqual(trace.commands.map(c => ({argv: c.argv, milliseconds: c.milliseconds, code: c.code})),
+          s.gitCommands.map(c => ({argv: c.argv, milliseconds: c.seconds * 1000, code: c.code})),
+          'trace differs from receipt command inventory');
+      }
     } catch (error) { problems.push(error.message); }
     return {key, round: s.round, label: s.label, worker: s.worker, reused: s.reused ?? null,
       concurrency: s.round === 0 ? 1 : report.concurrency, traceSha256, complete: problems.length === 0,
