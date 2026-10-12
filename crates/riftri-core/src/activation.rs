@@ -1389,11 +1389,12 @@ fn expand_worktree_alias(
             };
             value
         };
-        let value = value.trim();
+        // Git tests the first byte and splits the body untrimmed, so
+        // trimming here would plan a command Git never runs.
         if value.starts_with('!') {
             return Ok(None);
         }
-        let Ok(words) = split_alias_words(value) else {
+        let Ok(words) = split_alias_words(&value) else {
             // Git refuses the same body ("bad alias string"), so passthrough
             // dies in Git with nothing executed.
             return Ok(None);
@@ -1426,13 +1427,22 @@ fn expand_worktree_alias(
     }
 }
 
+/// Whether Git's locale-independent `isspace` accepts the character: space,
+/// tab, line feed, and carriage return, and nothing else. Vertical tab, form
+/// feed, and Unicode spaces such as U+00A0 are ordinary word characters.
+fn is_git_space(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\n' | '\r')
+}
+
 /// Split an alias body exactly the way Git's own `split_cmdline` does,
-/// verified against git 2.50.1: whitespace separates; single quotes are fully
-/// literal; inside double quotes and in the open, a backslash makes the next
-/// character literal (`l\og` is `log`, `"a\tb"` is `atb`). `Err` mirrors the
-/// inputs Git itself refuses — an unclosed quote or a trailing backslash — so
-/// the caller can pass the command through and let Git fail it identically,
-/// with no room for a parse that Git accepts and Riftri reads differently.
+/// verified against git 2.53.0: a run of Git whitespace ends one word and
+/// starts the next, so the body is never trimmed and a leading or trailing
+/// run yields an empty first or last word; single quotes are fully literal;
+/// inside double quotes and in the open, a backslash makes the next character
+/// literal (`l\og` is `log`, `"a\tb"` is `atb`). `Err` mirrors the inputs Git
+/// itself refuses (an unclosed quote or a trailing backslash) so the caller
+/// can pass the command through and let Git fail it identically, with no room
+/// for a parse that Git accepts and Riftri reads differently.
 fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
     #[derive(PartialEq)]
     enum State {
@@ -1443,8 +1453,7 @@ fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
     let mut state = State::Open;
     let mut words = Vec::new();
     let mut word = String::new();
-    let mut started = false;
-    let mut characters = value.chars();
+    let mut characters = value.chars().peekable();
     while let Some(character) = characters.next() {
         match state {
             State::SingleQuoted => match character {
@@ -1457,37 +1466,21 @@ fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
                 other => word.push(other),
             },
             State::Open => match character {
-                '\'' => {
-                    state = State::SingleQuoted;
-                    started = true;
+                '\'' => state = State::SingleQuoted,
+                '"' => state = State::DoubleQuoted,
+                '\\' => word.push(characters.next().ok_or(())?),
+                character if is_git_space(character) => {
+                    words.push(std::mem::take(&mut word));
+                    while characters.next_if(|next| is_git_space(*next)).is_some() {}
                 }
-                '"' => {
-                    state = State::DoubleQuoted;
-                    started = true;
-                }
-                '\\' => {
-                    word.push(characters.next().ok_or(())?);
-                    started = true;
-                }
-                character if character.is_whitespace() => {
-                    if started {
-                        words.push(std::mem::take(&mut word));
-                        started = false;
-                    }
-                }
-                other => {
-                    word.push(other);
-                    started = true;
-                }
+                other => word.push(other),
             },
         }
     }
     if state != State::Open {
         return Err(());
     }
-    if started {
-        words.push(word);
-    }
+    words.push(word);
     Ok(words)
 }
 
@@ -3614,7 +3607,9 @@ mod tests {
     fn alias_bodies_split_the_way_git_splits_them() {
         let split = |value: &str| super::split_alias_words(value).expect(value);
         assert_eq!(split("worktree prune -v"), ["worktree", "prune", "-v"]);
-        assert_eq!(split("  worktree   prune  "), ["worktree", "prune"]);
+        // A run of separators is one boundary, but Git does not trim: git
+        // 2.53.0 traces this body as `'' worktree prune ''`.
+        assert_eq!(split("  worktree   prune  "), ["", "worktree", "prune", ""]);
         assert_eq!(
             split("worktree 'remove' \"--force\""),
             ["worktree", "remove", "--force"]
@@ -3632,12 +3627,111 @@ mod tests {
             ["log", "atb", "a\"b", r"a\b"]
         );
         assert_eq!(split(r"log 'a\tb'"), ["log", r"a\tb"]);
-        assert!(split("   ").is_empty());
+        assert_eq!(split("   "), ["", ""]);
         // Git refuses these ("bad alias string"), so the caller passes them
         // through and Git fails them identically.
         assert!(super::split_alias_words("log 'oops").is_err());
         assert!(super::split_alias_words(r#"log "oops"#).is_err());
         assert!(super::split_alias_words(r"log ends\").is_err());
+    }
+
+    /// Git's alias splitter separates on its own `isspace` only: space, tab,
+    /// line feed, and carriage return. Rows probed against git 2.53.0 with
+    /// `GIT_TRACE=1 git -c alias.zz=<body> zz`, which prints the split words.
+    #[test]
+    fn alias_bodies_split_on_gits_whitespace_only() {
+        let split = |value: &str| super::split_alias_words(value).expect(value);
+        assert_eq!(
+            split("worktree\tremove\n--force\r\nview"),
+            ["worktree", "remove", "--force", "view"]
+        );
+        for not_a_separator in ['\u{b}', '\u{c}', '\u{85}', '\u{a0}', '\u{2003}'] {
+            let word = format!("no{not_a_separator}break");
+            assert_eq!(
+                split(&format!("worktree remove {word}")),
+                ["worktree", "remove", word.as_str()],
+                "{not_a_separator:?} separated an alias word"
+            );
+        }
+        // Git does not trim a body. A leading separator leaves an empty
+        // command, which Git refuses, and a trailing one adds an empty
+        // argument.
+        assert_eq!(split("worktree prune "), ["worktree", "prune", ""]);
+        assert_eq!(split(" worktree prune"), ["", "worktree", "prune"]);
+        assert_eq!(split("worktree '' prune"), ["worktree", "", "prune"]);
+    }
+
+    /// The planner has to guard the path Git will act on. Splitting a body on
+    /// Unicode whitespace turned a managed path containing U+00A0 into two
+    /// words, so the guard checked the wrong one and a forced removal reached
+    /// real Git. Trimming a body planned a lifecycle command where Git runs
+    /// none: Git reads a leading space as an empty command and refuses it.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn alias_whitespace_cannot_move_the_lifecycle_guard_off_the_managed_path() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("no\u{a0}break");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/no-break")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let destination = destination.to_str().expect("UTF-8 fixture path");
+
+        let error = plan_git_command(
+            fixture.path(),
+            &[
+                OsString::from("-c"),
+                OsString::from(format!("alias.wtrm=worktree remove --force {destination}")),
+                OsString::from("wtrm"),
+            ],
+        )
+        .expect_err("a no-break space in the managed path must not bypass the guard");
+        assert!(
+            error.to_string().contains("managed Riftri worktree"),
+            "{error}"
+        );
+
+        // Git runs `worktree prune ''` here and fails on the extra argument,
+        // so this must not become a journaled prune.
+        git(
+            fixture.path(),
+            &["config", "alias.trailing", "worktree prune "],
+        );
+        let error = plan_git_command(fixture.path(), &[OsString::from("trailing")])
+            .expect_err("a prune with an extra empty argument is not a bare prune");
+        assert!(error.to_string().contains("worktree prune"), "{error}");
+
+        // Git refuses the empty command, so nothing is removed.
+        git(
+            fixture.path(),
+            &["config", "alias.leading", " worktree remove --force"],
+        );
+        assert!(
+            matches!(
+                plan_git_command(
+                    fixture.path(),
+                    &[OsString::from("leading"), OsString::from(destination)],
+                )
+                .expect("plan an alias Git refuses"),
+                GitProxyPlan::Passthrough
+            ),
+            "a body Git refuses was planned as a lifecycle command"
+        );
     }
 
     /// Chained expansion follows Git: each inner body's arguments run before

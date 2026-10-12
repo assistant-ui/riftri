@@ -58,6 +58,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   named after a deprecated builtin such as `whatchanged`, which Git does run
   in place of the builtin, is still planned as the command it expands to.
 
+- Git alias bodies are split on the whitespace Git itself splits on (space,
+  tab, line feed, carriage return) and are no longer trimmed. The shim split on
+  any Unicode whitespace, so an alias such as `worktree remove --force
+  <managed>` whose path contained a no-break space was checked against the
+  wrong word and reached Git, which removed the managed worktree outside the
+  journal. An alias body with leading or trailing whitespace is now planned as
+  the command Git runs: Git refuses the first and passes an extra empty
+  argument for the second.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
