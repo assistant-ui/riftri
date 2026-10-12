@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {createHash} from 'node:crypto';
-import {execFileSync, spawnSync} from 'node:child_process';
+import {execFileSync} from 'node:child_process';
+import {createProcessScope} from './process-scope.mjs';
 
 const [checkoutArg, outputArg, manifestArg, mode] = process.argv.slice(2);
 const checkout = path.resolve(checkoutArg), output = path.resolve(outputArg);
@@ -85,15 +86,16 @@ const report = {complete: false, baselineCommit, referencePathsSha256, baselineS
     note: 'Phase-only screen, not creation-speed evidence. Fixed case order, every pair retained. No favorable retries.'}, cases: []};
 const save = () => fs.writeFileSync(path.join(output, 'results.json'), JSON.stringify(report, null, 2));
 save();
-const command = (program, args, options = {}) => {
-  const result = spawnSync(program, args, {encoding:'utf8', timeout:120000, maxBuffer:8 * 1024 ** 2, ...options});
-  return {status:result.status, signal:result.signal, error:result.error?.message ?? null, stdout:result.stdout, stderr:result.stderr};
+const scope = createProcessScope({budgetMs:12*60*1000, onCancel:reason=>{report.cancellation=reason;save();}});
+const command = async (program, args, options = {}) => {
+  const result = await scope.run(program, args, {timeoutMs:240000, maxBuffer:8 * 1024 ** 2, ...options});
+  return {...result, status:result.code};
 };
 try {
-  report.build = command('rustc', ['--edition=2024', '-C', 'opt-level=3', '--test', path.join(output, 'screen.rs'), '-o', path.join(output, 'screen')]); save();
+  report.build = await command('rustc', ['--edition=2024', '-C', 'opt-level=3', '--test', path.join(output, 'screen.rs'), '-o', path.join(output, 'screen')]); save();
   assert.equal(report.build.status, 0, report.build.stderr);
   report.binarySha256 = sha(fs.readFileSync(path.join(output, 'screen')));
-  report.tests = command(path.join(output, 'screen'), ['--skip', 'reports_prefix_latency']); save();
+  report.tests = await command(path.join(output, 'screen'), ['--skip', 'reports_prefix_latency']); save();
   assert.equal(report.tests.status, 0, report.tests.stdout + report.tests.stderr);
   if (mode !== 'test-only') {
     const median = xs => { const a=xs.toSorted((a,b)=>a-b); return (a[5]+a[6])/2; };
@@ -101,9 +103,17 @@ try {
       const env = {...process.env, PREFIX_FIXTURE: path.join(output, `${name}.paths`)};
       delete env.PREFIX_CONTROL;
       if (control) env.PREFIX_CONTROL = '1';
-      const item = {name, control, host:{load:os.loadavg(), freeMemory:os.freemem()}, process: command(path.join(output, 'screen'), ['reports_prefix_latency', '--exact', '--ignored', '--nocapture'], {env})};
+      const item = {name, control, startedAt:new Date().toISOString(), host:{load:os.loadavg(), freeMemory:os.freemem()}};
       report.cases.push(item); save();
+      const log = fs.openSync(path.join(output, `${control?'control':'candidate'}-${name}.log`), 'wx');
+      try {
+        item.process = await command(path.join(output, 'screen'), ['reports_prefix_latency', '--exact', '--ignored', '--nocapture'],
+          {env, onStdout:bytes=>fs.writeSync(log,bytes), onStderr:bytes=>fs.writeSync(log,bytes)});
+      } finally {fs.closeSync(log); save();}
       assert.equal(item.process.status, 0, item.process.stdout + item.process.stderr);
+      assert.equal(item.process.error, null);
+      assert.equal(item.process.timedOut, false);
+      assert.equal(item.process.cancelled, false);
       item.samples = [...item.process.stdout.matchAll(/PREFIX_SAMPLE (\d+) ([AB]) ([\d.e+-]+)/g)].map(m => ({round:Number(m[1]),label:m[2],ms:Number(m[3])}));
       assert.equal(item.samples.length, 24);
       const pairs = Array.from({length:12}, (_,round) => {
@@ -119,5 +129,6 @@ try {
     }
     report.phaseQualified = report.cases.every(c=>c.evaluation.passed);
   }
-  report.complete = true; save();
+  scope.check(); report.complete = true; save();
 } catch(error) { report.failure=error.stack; save(); throw error; }
+finally {await scope.close();}

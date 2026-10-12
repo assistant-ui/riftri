@@ -54,4 +54,5 @@ jobs:
             ${{ runner.temp }}/prefix-screen/results.json
             ${{ runner.temp }}/prefix-screen/screen.rs
             ${{ runner.temp }}/prefix-screen/*.paths
+            ${{ runner.temp }}/prefix-screen/*.log
           if-no-files-found: error
