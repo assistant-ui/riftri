@@ -312,6 +312,27 @@ paired cached-add timings and the LFS version are saved. macOS CI runs one pair
 per boundary against the same binary as a correctness gate, not a speedup claim;
 manual comparisons default to three alternating pairs per boundary.
 
+For cold-base LFS expansion, use the supervised comparison (32 checkout paths,
+2 MiB each, eight alternating pairs by default):
+
+```sh
+node docs/benchmarks/cold-lfs.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory 32 2097152 8 1800000
+```
+
+This uses real local Git LFS without fetching or changing user configuration.
+Each timed add must create a new immutable base; the OS page cache is not
+cleared. It checks SHA-256 contents, executable bits, HEAD, Git cleanliness,
+private-write isolation from the base and local object store, safe corruption
+and missing-object refusal, removal, repair and empty state after GC. A shared
+process supervisor bounds every command and the entire run. Failures retain
+the fixture, attempts, command logs and raw Git traces. Success also retains
+raw samples and binary/runner hashes. Run independent same-binary controls
+before and after a comparison; `speedupClaim` stays false in the raw receipt.
+Do not infer cached-add speedups from this workload or count CI smoke-test
+timings as performance evidence. macOS CI exercises a four-file pair and a
+budget-expiry receipt with the release binary.
+
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:
 
