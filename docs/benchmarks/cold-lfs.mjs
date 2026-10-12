@@ -46,8 +46,16 @@ async function execute(command, args, {cwd = repo, extraEnv = {}, allowFailure =
   try {
     result = await scope.run(command, args, {cwd, env: {...env, ...extraEnv}, timeoutMs: 120000,
       onStderr(chunk) { fs.writeSync(log, chunk); onStderr?.(chunk); }});
+  } catch (error) {
+    // scope.run checks its deadline again before spawning. The attempt was
+    // already retained above, so record this pre-admission rejection rather
+    // than leaving a command that never started looking alive.
+    Object.assign(receipt, {settled: true, started: false, cancelled: scope.signal.aborted,
+      error: error.message});
+    save();
+    throw error;
   } finally { fs.closeSync(log); }
-  Object.assign(receipt, {settled: true, code: result.code, signal: result.signal, timedOut: result.timedOut,
+  Object.assign(receipt, {settled: true, started: result.started, code: result.code, signal: result.signal, timedOut: result.timedOut,
     cancelled: result.cancelled, error: result.error?.message});
   fs.writeFileSync(path.join(root, `command-${receipt.index}.stdout`), result.stdout);
   save();
