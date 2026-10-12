@@ -1,0 +1,35 @@
+name: Cross-directory regression
+
+on:
+  push:
+    branches: [perf/integrity-cross-directory]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Compile the unchanged prototype and new regression
+        run: cargo test --locked -p riftri-core --lib --no-run
+      - name: Prove the existing directory drain fails the bounded regression
+        run: |
+          set +e
+          cargo test --locked -p riftri-core --lib base_integrity::pipeline::tests::readers_overlap_across_directory_boundaries -- --exact --nocapture > "$RUNNER_TEMP/cross-directory-red.log" 2>&1
+          result=$?
+          set -e
+          test "$result" = 101
+          grep -F 'directory boundary drained before readers overlapped' "$RUNNER_TEMP/cross-directory-red.log"
+          grep -F '0 passed; 1 failed;' "$RUNNER_TEMP/cross-directory-red.log"
+      - name: Retain regression output
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cross-directory-red
+          path: ${{ runner.temp }}/cross-directory-red.log
+          if-no-files-found: error
