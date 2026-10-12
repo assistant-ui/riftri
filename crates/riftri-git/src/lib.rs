@@ -2558,6 +2558,31 @@ impl Git {
         self.output_os(path, &arguments)
     }
 
+    /// Every command name Git runs before it looks for an alias of that name:
+    /// its builtins and the `git-<name>` programs in its exec-path and on
+    /// `PATH`, without the deprecated builtins, which Git lets an alias
+    /// replace. Git prints one name per line; the groups overlap, and callers
+    /// only test membership.
+    pub fn commands_run_before_aliases(&self) -> Result<Vec<String>, GitError> {
+        let listed = |output: &Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        // A Git too old to know the `deprecated` listing refuses it, and
+        // such a Git never lets an alias replace a builtin.
+        let deprecated = self.output(None, &["--list-cmds=deprecated"])?;
+        let deprecated = if deprecated.status.success() {
+            listed(&deprecated)
+        } else {
+            Vec::new()
+        };
+        let mut commands = listed(&self.run(None, &["--list-cmds=builtins,main,others"])?);
+        commands.retain(|command| !deprecated.contains(command));
+        Ok(commands)
+    }
+
     /// Whether `path` lies outside any Git repository, as opposed to inside
     /// an unhealthy one. `rev-parse --git-dir` needs repository discovery but
     /// no object reads, so it succeeds in a repository whose object store is

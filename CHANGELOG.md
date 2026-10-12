@@ -48,6 +48,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   at a fixed depth and passed it to Git, which follows a chain of any length,
   so a managed worktree could be removed outside the journal.
 
+- A Git alias named after a command Git runs itself is no longer expanded by
+  the shim. Git never looks up an alias for a builtin or for a `git-<name>`
+  program, but the shim exempted only a short list of common builtins, so with
+  `alias.gc = worktree remove --force`, `git gc <managed>` was planned as a
+  forced removal of a worktree the user never asked to remove. The shim now
+  asks Git for its command list before it acts on an alias that resolves to a
+  worktree command; other invocations start no extra Git process. An alias
+  named after a deprecated builtin such as `whatchanged`, which Git does run
+  in place of the builtin, is still planned as the command it expands to.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed

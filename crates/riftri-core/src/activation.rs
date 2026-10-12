@@ -1289,8 +1289,10 @@ fn record_environment_alias(aliases: &mut Vec<(String, String)>, assignment: &Os
 
 /// Git commands common enough that resolving an alias for them would add a
 /// configuration read to the hot path. Git never lets an alias shadow a
-/// built-in command, so skipping the lookup for these is correct as well as
-/// cheap; a built-in missing from this list only costs one harmless read.
+/// built-in command that is not deprecated, and none of these is, so skipping
+/// the lookup for them is correct as well as cheap. This is a shortcut, not the full set: a built-in missing from the
+/// list costs that one read, and [`expand_worktree_alias`] asks Git for the
+/// real set before it trusts an alias that leads to a worktree command.
 const COMMON_GIT_BUILTINS: &[&str] = &[
     "add",
     "branch",
@@ -1357,10 +1359,13 @@ fn expand_worktree_alias(
         if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name.as_str()) {
             return Ok(None);
         }
-        let lowered = name.to_ascii_lowercase();
-        if !seen.insert(lowered.clone()) {
+        // Git detects a loop by exact name, and the shadowing check below
+        // needs the names as typed. Alias lookup ignores case, so a name
+        // that differs only in case resolves to the same body and repeats.
+        if !seen.insert(name.clone()) {
             return Ok(None);
         }
+        let lowered = name.to_ascii_lowercase();
         let value = if let Some((_, body)) = context
             .invocation_aliases
             .iter()
@@ -1401,6 +1406,16 @@ fn expand_worktree_alias(
         tail.append(&mut pending);
         pending = tail;
         if first == WORKTREE_SUBCOMMAND {
+            // Git runs a builtin or a `git-<name>` program before it looks
+            // for an alias of that name, so a chain that passes through one
+            // never reaches this worktree command. A deprecated builtin is
+            // the exception: Git prefers its alias, so it is not in the set. Only Git knows the full
+            // set, and asking costs a process, so the question waits until
+            // here, the one outcome it can change.
+            let commands = Git::default().commands_run_before_aliases()?;
+            if commands.iter().any(|command| seen.contains(command)) {
+                return Ok(None);
+            }
             let mut expanded = arguments[..context.command_index].to_vec();
             expanded.push(OsString::from(WORKTREE_SUBCOMMAND));
             expanded.extend(pending.into_iter().map(OsString::from));
@@ -3023,6 +3038,104 @@ mod tests {
             ),
             "arguments after the alias name were not applied"
         );
+    }
+
+    /// Git looks for an alias only when the name is neither a builtin nor a
+    /// `git-<name>` program, so an alias with such a name never runs. The
+    /// planner used to expand it anyway: with `alias.gc = worktree remove
+    /// --force`, `git gc <managed>` was planned as a forced removal of a
+    /// worktree the user never asked to remove, while real Git runs `gc`.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn aliases_cannot_shadow_the_commands_git_runs_first() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("shadowed-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/shadowed")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let destination = destination.to_str().expect("UTF-8 fixture path");
+
+        let force_remove = "worktree remove --force";
+        git(fixture.path(), &["config", "alias.gc", force_remove]);
+        git(fixture.path(), &["config", "alias.prune", "worktree prune"]);
+        // `git-submodule` is a program in Git's exec-path, not a builtin.
+        git(fixture.path(), &["config", "alias.submodule", force_remove]);
+        // A chain stops at the first name Git runs itself.
+        git(fixture.path(), &["config", "alias.viagc", "gc"]);
+        for arguments in [
+            vec!["gc", destination],
+            vec!["prune"],
+            vec!["submodule", destination],
+            vec!["viagc", destination],
+            vec![
+                "-c",
+                "alias.fsck=worktree remove --force",
+                "fsck",
+                destination,
+            ],
+        ] {
+            let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan shadowed alias"),
+                    GitProxyPlan::Passthrough
+                ),
+                "{arguments:?} was planned as the alias Git never runs"
+            );
+        }
+
+        // Git lets an alias replace a deprecated builtin, so these are
+        // aliases too: probed on git 2.53.0, `git -c alias.whatchanged='worktree
+        // list' whatchanged` lists worktrees.
+        let deprecated = Command::new("git")
+            .arg("--list-cmds=deprecated")
+            .output()
+            .expect("list deprecated commands");
+        let deprecated = String::from_utf8(deprecated.stdout).expect("UTF-8 command names");
+        for name in deprecated.lines() {
+            git(
+                fixture.path(),
+                &["config", &format!("alias.{name}"), force_remove],
+            );
+            assert!(
+                matches!(
+                    plan_git_command(
+                        fixture.path(),
+                        &[OsString::from(name), OsString::from(destination)],
+                    )
+                    .expect("plan alias of a deprecated builtin"),
+                    GitProxyPlan::OptimizedForceRemove(_)
+                ),
+                "`git {name}` runs its alias, which was not planned"
+            );
+        }
+
+        // A name Git does not run itself is still an alias.
+        git(fixture.path(), &["config", "alias.wtrm", force_remove]);
+        assert!(matches!(
+            plan_git_command(
+                fixture.path(),
+                &[OsString::from("wtrm"), OsString::from(destination)],
+            )
+            .expect("plan alias"),
+            GitProxyPlan::OptimizedForceRemove(_)
+        ));
     }
 
     /// Alias resolution must not capture anything else. A shell alias spawns a
