@@ -5,6 +5,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Tree modes, single blob sizes, and Git version components with a leading
+  `+` are rejected as invalid Git output instead of being parsed as numbers.
+  Git does not print signed values here, so ordinary repositories are
+  unaffected.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
