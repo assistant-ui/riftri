@@ -14,6 +14,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   into ordinary Git, so `git --work-tree=<elsewhere> worktree remove --force
   <managed>` deleted a managed view outside the removal journal.
 
+- Read and write `riftri.enabled` and `riftri.stateDirectory` in the
+  repository Git opens instead of at the working-tree root. With
+  `GIT_WORK_TREE` or a persisted `core.worktree` naming another repository,
+  the shim consulted that repository's settings and passed
+  `git worktree remove --force` and `git worktree prune` for a managed view to
+  real Git outside the journal, and `riftri enable` and `riftri disable`
+  changed the wrong repository.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed

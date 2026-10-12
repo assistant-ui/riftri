@@ -117,8 +117,12 @@ pub enum ActivationError {
 pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let git = Git::default();
     let status = repository_identity_with_git(&git, path)?;
-    git.set_local_config(&status.repository, ENABLED_CONFIG_KEY, OsStr::new("true"))?;
-    protect_worktrees_from_git_prune(&git, &status.repository)?;
+    git.set_local_config(
+        &status.common_git_dir,
+        ENABLED_CONFIG_KEY,
+        OsStr::new("true"),
+    )?;
+    protect_worktrees_from_git_prune(&git, &status.common_git_dir)?;
     Ok(RepositoryActivation {
         enabled: true,
         ..status
@@ -128,8 +132,8 @@ pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, Activation
 pub fn disable_repository(path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let git = Git::default();
     let status = repository_identity_with_git(&git, path)?;
-    git.unset_local_config(&status.repository, ENABLED_CONFIG_KEY)?;
-    release_worktree_prune_protection(&git, &status.repository)?;
+    git.unset_local_config(&status.common_git_dir, ENABLED_CONFIG_KEY)?;
+    release_worktree_prune_protection(&git, &status.common_git_dir)?;
     Ok(RepositoryActivation {
         enabled: false,
         ..status
@@ -1060,7 +1064,7 @@ fn powershell_quote_path(path: &Path) -> Result<String, ActivationError> {
 fn activation_with_git(git: &Git, path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let mut activation = repository_identity_with_git(git, path)?;
     activation.enabled = git
-        .local_config_bool(&activation.repository, ENABLED_CONFIG_KEY)?
+        .local_config_bool(&activation.common_git_dir, ENABLED_CONFIG_KEY)?
         .unwrap_or(false);
     Ok(activation)
 }
@@ -1116,11 +1120,11 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
     let Some(root) = repository.root else {
         return Ok(ProxyRepository::Absent);
     };
-    // Read the opt-in from `path`, where Git found this repository, not from
-    // `root`: `GIT_WORK_TREE` or `core.worktree` can place the working tree
-    // outside the repository, even inside one that never enabled Riftri.
+    // Read the opt-in from the common Git directory, not from `root`:
+    // `GIT_WORK_TREE` or `core.worktree` can place the working tree outside
+    // the repository, even inside one that never enabled Riftri.
     let enabled = git
-        .local_config_bool(path, ENABLED_CONFIG_KEY)?
+        .local_config_bool(&repository.identity.common_git_dir, ENABLED_CONFIG_KEY)?
         .unwrap_or(false);
     Ok(ProxyRepository::Inspected(RepositoryActivation {
         repository: root,

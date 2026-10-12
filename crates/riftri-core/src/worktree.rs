@@ -766,6 +766,11 @@ fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
 /// or the Git directory of a bare repository. Git's worktree, ref, and config
 /// commands work from either, and no lifecycle operation needs a main working
 /// tree, so a bare repository with linked worktrees is managed like any other.
+///
+/// Repository-local configuration is read and written from the common Git
+/// directory instead: `GIT_WORK_TREE` or `core.worktree` can place the
+/// working-tree root inside another repository, whose settings Git would then
+/// answer with.
 pub(crate) fn git_command_root(repository: &riftri_git::RepositoryInfo) -> Option<&Path> {
     repository.root.as_deref().or_else(|| {
         repository
@@ -821,10 +826,7 @@ pub fn forget_missing_state_directory(
 ) -> Result<PathBuf, WorktreeError> {
     validate_lifecycle_git_environment()?;
     let git = Git::default();
-    let repository = git.inspect_repository(repository)?;
-    let repository_root = git_command_root(&repository).ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
-    })?;
+    let common_git_dir = git.inspect_repository(repository)?.identity.common_git_dir;
     let state_directory = absolute_path(state_directory)?;
     match fs::symlink_metadata(&state_directory) {
         Ok(_) => {
@@ -844,9 +846,9 @@ pub fn forget_missing_state_directory(
     }
 
     let candidates = managed_destination_candidates(&state_directory)?;
-    let _lock = acquire_state_directory_locator_lock(&repository.identity.common_git_dir)?;
+    let _lock = acquire_state_directory_locator_lock(&common_git_dir)?;
     let registered = git
-        .local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?
+        .local_config_paths(&common_git_dir, STATE_DIRECTORY_CONFIG_KEY)?
         .into_iter()
         .find(|registered| {
             candidates
@@ -860,7 +862,7 @@ pub fn forget_missing_state_directory(
             ))
         })?;
     git.unset_local_config_value(
-        repository_root,
+        &common_git_dir,
         STATE_DIRECTORY_CONFIG_KEY,
         registered.as_os_str(),
     )?;
@@ -1070,12 +1072,13 @@ fn repository_state_directories_with_git(
     let repository_root = git_command_root(repository).ok_or_else(|| {
         WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
     })?;
-    let default = repository.identity.common_git_dir.join("riftri");
+    let common_git_dir = &repository.identity.common_git_dir;
+    let default = common_git_dir.join("riftri");
     let mut directories = Vec::new();
     if let Some(default) = resolve_real_state_directory_if_present(&default)? {
         directories.push(default);
     }
-    for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
+    for configured in git.local_config_paths(common_git_dir, STATE_DIRECTORY_CONFIG_KEY)? {
         directories.push(resolve_registered_state_directory(
             repository_root,
             &configured,
@@ -1196,7 +1199,7 @@ pub fn worktree_inventory_across_states(
         }),
     }
 
-    for configured in git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)? {
+    for configured in git.local_config_paths(&query_identity, STATE_DIRECTORY_CONFIG_KEY)? {
         if !configured.is_absolute() {
             inventory.registration_issues.push(StateDiagnosticIssue {
                 path: configured,
@@ -1327,8 +1330,9 @@ fn register_state_directory(
     if resolve_real_state_directory_if_present(&default)?.as_deref() == Some(state_directory) {
         return Ok(());
     }
-    let _lock = acquire_state_directory_locator_lock(&repository.identity.common_git_dir)?;
-    let registered = git.local_config_paths(repository_root, STATE_DIRECTORY_CONFIG_KEY)?;
+    let common_git_dir = &repository.identity.common_git_dir;
+    let _lock = acquire_state_directory_locator_lock(common_git_dir)?;
+    let registered = git.local_config_paths(common_git_dir, STATE_DIRECTORY_CONFIG_KEY)?;
     for registered in registered {
         if registered == state_directory
             || resolve_registered_state_directory(repository_root, &registered)? == state_directory
@@ -1336,7 +1340,7 @@ fn register_state_directory(
             return Ok(());
         }
     }
-    git.add_local_config_path(repository_root, STATE_DIRECTORY_CONFIG_KEY, state_directory)?;
+    git.add_local_config_path(common_git_dir, STATE_DIRECTORY_CONFIG_KEY, state_directory)?;
     Ok(())
 }
 

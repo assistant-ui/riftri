@@ -157,6 +157,36 @@ fn enable_and_disable_change_only_repository_local_config() {
 }
 
 #[test]
+fn activation_addresses_the_repository_git_opens_under_a_work_tree_override() {
+    let fixture = RepositoryFixture::new();
+    let other = RepositoryFixture::new();
+    let enabled = |repository: &Path| {
+        git(
+            repository,
+            &["config", "--local", "--get", "riftri.enabled"],
+        )
+        .stdout
+    };
+    let overridden = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(arguments)
+            .env("GIT_WORK_TREE", &other.repository)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("run Riftri CLI under GIT_WORK_TREE")
+    };
+
+    assert!(overridden(&["enable"]).status.success());
+    assert_eq!(enabled(&fixture.repository), b"true\n");
+    assert!(enabled(&other.repository).is_empty());
+
+    assert!(riftri(&other.repository, &["enable"]).status.success());
+    assert!(overridden(&["disable"]).status.success());
+    assert!(enabled(&fixture.repository).is_empty());
+    assert_eq!(enabled(&other.repository), b"true\n");
+}
+
+#[test]
 fn state_unregister_accepts_missing_relative_parent_paths() {
     let fixture = RepositoryFixture::new();
     let directory = fs::canonicalize(fixture.directory.path()).expect("resolve fixture directory");
@@ -2137,6 +2167,115 @@ fn linked_worktree_git_directory_cannot_bypass_managed_removal_guard() {
             .stdout
             .is_empty()
     );
+}
+
+#[cfg(target_os = "macos")]
+fn add_dirty_custom_state_view(fixture: &RepositoryFixture, name: &str) -> PathBuf {
+    let destination = fixture.directory.path().join(name);
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach", "--state-dir"])
+        .arg(fixture.directory.path().join("custom-state"))
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add worktree with custom state");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::write(destination.join("untracked.txt"), "private\n").expect("dirty managed view");
+    destination
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn work_tree_environment_cannot_hide_the_repository_from_lifecycle_guards() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let destination = add_dirty_custom_state_view(&fixture, "work-tree-environment-view");
+
+    // Git opens the repository it finds from the current directory; the work
+    // tree only says where its files are. Neither another repository's
+    // missing opt-in nor its empty state registrations may answer for this one.
+    let unenabled = RepositoryFixture::new();
+    let enabled = RepositoryFixture::new();
+    assert!(riftri(&enabled.repository, &["enable"]).status.success());
+    for work_tree in [&unenabled.repository, &enabled.repository] {
+        let listed = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "list", "--all-states"])
+            .env("GIT_WORK_TREE", work_tree)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("list managed worktrees under GIT_WORK_TREE");
+        assert!(
+            String::from_utf8_lossy(&listed.stdout).contains("work-tree-environment-view"),
+            "{}",
+            String::from_utf8_lossy(&listed.stdout)
+        );
+        for arguments in [&["remove", "--force"][..], &["prune"][..]] {
+            let guarded = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .args(["exec", "--", "git", "worktree"])
+                .args(arguments)
+                .args((arguments[0] == "remove").then_some(&destination))
+                .env("GIT_WORK_TREE", work_tree)
+                .current_dir(&fixture.repository)
+                .output()
+                .expect("guard lifecycle command under GIT_WORK_TREE");
+
+            assert!(
+                !guarded.status.success(),
+                "GIT_WORK_TREE let `git worktree {arguments:?}` bypass the journal"
+            );
+            assert!(
+                String::from_utf8_lossy(&guarded.stderr).contains("GIT_WORK_TREE is set"),
+                "{}",
+                String::from_utf8_lossy(&guarded.stderr)
+            );
+            assert!(destination.join("untracked.txt").is_file());
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn configured_work_tree_cannot_hide_the_repository_from_the_removal_guard() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let destination = add_dirty_custom_state_view(&fixture, "configured-work-tree-view");
+    let other = RepositoryFixture::new();
+    let other_root = other.repository.to_str().expect("UTF-8 fixture path");
+
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "-c"])
+        .arg(format!("core.worktree={other_root}"))
+        .args(["worktree", "remove", "--force"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard removal under -c core.worktree");
+    assert!(!removal.status.success());
+    assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+    assert!(destination.join("untracked.txt").is_file());
+
+    assert!(
+        git(
+            &fixture.repository,
+            &["config", "core.worktree", other_root]
+        )
+        .status
+        .success()
+    );
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove", "--force"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard removal under a persisted core.worktree");
+    // Lifecycle commands still run Git from the working-tree root, which is
+    // now another repository, so the journaled removal refuses instead.
+    assert!(!removal.status.success());
+    assert!(destination.join("untracked.txt").is_file());
 }
 
 #[cfg(target_os = "macos")]
