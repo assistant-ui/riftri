@@ -24,6 +24,14 @@ $ npm test
 $ npm run pack:check
 ```
 
+Property tests use [Hegel](https://hegel.dev) and run with `cargo test`. A
+failing case prints a `#[hegel::reproduce_failure(...)]` attribute that replays
+it. To measure line coverage, install `cargo-llvm-cov` and run:
+
+```console
+$ cargo llvm-cov --workspace --locked --summary-only
+```
+
 The root `package.json` defines the public npm package. The `package/` directory
 contains only its launcher, platform manifests, release scripts, and tests.
 Product behavior belongs in the Rust crates, following their documented
