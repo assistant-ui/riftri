@@ -5113,15 +5113,30 @@ fn needs_destination_path_probe(paths: &[PathBuf]) -> bool {
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn has_ascii_case_alias(paths: &[PathBuf]) -> bool {
+    has_ascii_case_alias_with(paths, ascii_lowercase_path)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn has_ascii_case_alias_with(paths: &[PathBuf], mut fold: impl FnMut(&Path) -> PathBuf) -> bool {
     let mut seen = BTreeMap::new();
+    let mut previous = Path::new("");
     for path in paths {
+        let mut previous_components = previous.components();
+        let mut shared_prefix = true;
         let mut prefix = PathBuf::new();
         for component in path.components() {
             let Component::Normal(name) = component else {
                 continue;
             };
             prefix.push(name);
-            let folded = ascii_lowercase_path(&prefix);
+            // An exactly equal adjacent prefix was already checked. Keep the
+            // map for different spellings and non-adjacent paths, so arbitrary
+            // input order and directory/file aliases retain the same result.
+            shared_prefix = shared_prefix && previous_components.next() == Some(component);
+            if shared_prefix {
+                continue;
+            }
+            let folded = fold(&prefix);
             match seen.entry(folded) {
                 std::collections::btree_map::Entry::Occupied(previous) => {
                     if previous.get() != &prefix {
@@ -5134,6 +5149,7 @@ fn has_ascii_case_alias(paths: &[PathBuf]) -> bool {
                 }
             }
         }
+        previous = path;
     }
     false
 }
@@ -16045,6 +16061,76 @@ mod tests {
             PathBuf::from("docs/one.txt"),
             PathBuf::from("docs/two.txt"),
         ]));
+    }
+
+    #[test]
+    fn ascii_case_alias_scan_reuses_exact_adjacent_prefixes() {
+        let paths = (0..1024)
+            .map(|i| PathBuf::from(format!("packages/shared/src/file-{i}")))
+            .collect::<Vec<_>>();
+        let mut folded = 0;
+        assert!(!super::has_ascii_case_alias_with(&paths, |path| {
+            folded += 1;
+            super::ascii_lowercase_path(path)
+        }));
+        assert_eq!(folded, 1027, "three shared directories plus each leaf");
+    }
+
+    #[test]
+    fn ascii_case_alias_scan_reuse_matches_original_for_arbitrary_orders() {
+        fn reference(paths: &[PathBuf]) -> bool {
+            let mut seen = std::collections::BTreeMap::new();
+            for path in paths {
+                let mut prefix = PathBuf::new();
+                for component in path.components() {
+                    if let std::path::Component::Normal(name) = component {
+                        prefix.push(name);
+                        if let Some(previous) =
+                            seen.insert(super::ascii_lowercase_path(&prefix), prefix.clone())
+                            && previous != prefix
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+        let choices = vec![
+            PathBuf::from("a/shared/one"),
+            PathBuf::from("a/shared/two"),
+            PathBuf::from("a/shared"),
+            PathBuf::from("A/other"),
+            PathBuf::from("a/SHARED/one"),
+            PathBuf::from("a/shared/ONE"),
+            PathBuf::from("a/other/one"),
+            PathBuf::from("b/one"),
+            PathBuf::from(""),
+        ];
+        #[cfg(unix)]
+        let choices = {
+            let mut choices = choices;
+            choices.extend([
+                PathBuf::from(OsString::from_vec(b"raw-\xff/one".to_vec())),
+                PathBuf::from(OsString::from_vec(b"RAW-\xff/two".to_vec())),
+            ]);
+            choices
+        };
+        // Include duplicates and repeated prefixes separated by unrelated paths.
+        for a in &choices {
+            for b in &choices {
+                for c in &choices {
+                    for d in &choices {
+                        let fixture = [a.clone(), b.clone(), c.clone(), d.clone()];
+                        assert_eq!(
+                            has_ascii_case_alias(&fixture),
+                            reference(&fixture),
+                            "{fixture:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
