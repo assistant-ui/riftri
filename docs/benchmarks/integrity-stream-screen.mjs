@@ -6,6 +6,7 @@ import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {createProcessScope} from './process-scope.mjs';
+import {assertStreamComparisonIdentity} from './integrity-stream-identity.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const median = values => { const sorted = [...values].sort((a, b) => a - b); return (sorted[(sorted.length - 1) >> 1] + sorted[sorted.length >> 1]) / 2; };
@@ -16,11 +17,16 @@ if (mode === 'freeze') {
   const tests = artifacts.filter(a => a.executable && a.target?.name === 'riftri_core' && a.profile?.test);
   assert.equal(tests.length, 1);
   assert.equal(tests[0].profile.opt_level, '3');
+  assert.equal(tests[0].fresh, false, 'isolated build must compile riftri_core, not reuse an executable');
+  assert.equal(tests[0].manifest_path, path.resolve(checkout, 'crates/riftri-core/Cargo.toml'));
   fs.copyFileSync(tests[0].executable, output, fs.constants.COPYFILE_EXCL);
+  const testList = execFileSync(output, ['--list'], {encoding: 'utf8', timeout: 10000});
   fs.writeFileSync(`${output}.json`, JSON.stringify({
     commit: execFileSync('git', ['rev-parse', 'HEAD'], {cwd: checkout, encoding: 'utf8'}).trim(),
     binarySha256: sha(fs.readFileSync(output)),
     rustc: execFileSync('rustc', ['-Vv'], {encoding: 'utf8'}),
+    compiledFresh: true,
+    hasStreamingRegression: testList.includes('base_integrity::pipeline::tests::large_regular_files_are_assigned_to_a_worker: test'),
   }, null, 2), {flag: 'wx'});
 } else {
   assert.equal(mode, 'measure');
@@ -44,9 +50,9 @@ if (mode === 'freeze') {
   };
   const report = {complete: false, kind: 'integrity-only screen; not adoption evidence', plan,
     startedAt: new Date().toISOString(), previous: identity(previous), candidate: identity(candidate),
-    sources: Object.fromEntries(['integrity-stream-screen.mjs', 'process-scope.mjs', 'timed-process.mjs'].map(name => [name, sha(fs.readFileSync(new URL(name, import.meta.url)))])),
+    sources: Object.fromEntries(['integrity-stream-screen.mjs', 'integrity-stream-identity.mjs', 'process-scope.mjs', 'timed-process.mjs'].map(name => [name, sha(fs.readFileSync(new URL(name, import.meta.url)))])),
     host: {release: os.release(), cpu: os.cpus()[0].model, memory: os.totalmem()}, cases: []};
-  assert.equal(report.previous.commit, 'e3ce4c20d73dd68fa6ac6533b34167022cd2a6a6');
+  assertStreamComparisonIdentity(report.previous, report.candidate);
   const save = () => { fs.writeFileSync(`${output}/results.tmp`, JSON.stringify(report, null, 2)); fs.renameSync(`${output}/results.tmp`, `${output}/results.json`); };
   save();
   const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('GIT_') && !k.startsWith('RIFTRI_')));

@@ -66,8 +66,6 @@ jobs:
     defaults:
       run:
         working-directory: candidate
-    env:
-      CARGO_TARGET_DIR: ${{ github.workspace }}/stream-build
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,10 +85,14 @@ jobs:
           node-version: 24
       - name: Build and freeze previous prototype
         working-directory: previous
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/previous-build
         run: |
           cargo test --locked --release -p riftri-core --lib --no-run --message-format=json > "$RUNNER_TEMP/previous-build.jsonl"
           node ../candidate/docs/benchmarks/integrity-stream-screen.mjs freeze "$RUNNER_TEMP/previous-build.jsonl" "$RUNNER_TEMP/previous-test" "$PWD"
       - name: Build and freeze candidate
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/candidate-build
         run: |
           cargo test --locked --release -p riftri-core --lib --no-run --message-format=json > "$RUNNER_TEMP/candidate-build.jsonl"
           node docs/benchmarks/integrity-stream-screen.mjs freeze "$RUNNER_TEMP/candidate-build.jsonl" "$RUNNER_TEMP/candidate-test" "$PWD"
