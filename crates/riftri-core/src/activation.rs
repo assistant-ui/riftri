@@ -1341,18 +1341,19 @@ fn expand_worktree_alias(
     let Some(name) = token.to_str() else {
         return Ok(None);
     };
-    // Git chains alias-to-alias expansions itself (with its own loop
-    // detection), and each inner body's arguments run before the outer
-    // body's remainder. Follow the chain the same way; on a cycle or an
-    // implausible depth, pass through — Git fatals on the loop itself, so
-    // nothing reaches a worktree command. Every stop that is not the
+    // Git chains alias-to-alias expansions itself, to any depth, and stops
+    // only on a loop. Each inner body's arguments run before the outer
+    // body's remainder. Follow the chain the same way; on a cycle, pass
+    // through: Git fatals on the loop itself, so nothing reaches a worktree
+    // command. `seen` also bounds this loop, because every further hop needs
+    // an alias name that has not been expanded yet. Every stop that is not the
     // `worktree` token is equally safe to pass through: Git either runs a
     // builtin, errors on an unknown name, or executes a shell alias that
     // re-enters the proxy on its own.
     let mut name = name.to_owned();
     let mut pending: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for _ in 0..24 {
+    loop {
         if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name.as_str()) {
             return Ok(None);
         }
@@ -1408,7 +1409,6 @@ fn expand_worktree_alias(
         }
         name = first;
     }
-    Ok(None)
 }
 
 /// Split an alias body exactly the way Git's own `split_cmdline` does,
@@ -3557,6 +3557,34 @@ mod tests {
         assert_eq!(
             super::expand_worktree_alias(&context, &arguments).expect("expand"),
             None
+        );
+    }
+
+    /// Git follows an alias chain of any length and stops only on a loop, so
+    /// a long chain must still be planned as the worktree command it ends in.
+    /// A fixed hop limit used to pass anything longer to real Git unclassified.
+    #[test]
+    fn alias_chains_are_followed_as_far_as_git_follows_them() {
+        const HOPS: usize = 64;
+        let mut invocation_aliases: Vec<(String, String)> = (1..HOPS)
+            .map(|hop| (format!("hop{hop}"), format!("hop{}", hop + 1)))
+            .collect();
+        invocation_aliases.push((format!("hop{HOPS}"), "worktree remove --force".to_owned()));
+        let context = super::CommandContext {
+            repository: std::path::PathBuf::from("."),
+            git_directory: None,
+            command_index: 0,
+            global_options: super::GlobalOptionScope::Significant,
+            invocation_aliases,
+        };
+        let arguments = [OsString::from("hop1"), OsString::from("view")];
+        assert_eq!(
+            super::expand_worktree_alias(&context, &arguments).expect("expand"),
+            Some(
+                ["worktree", "remove", "--force", "view"]
+                    .map(OsString::from)
+                    .to_vec()
+            )
         );
     }
 

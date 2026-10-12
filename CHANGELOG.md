@@ -43,6 +43,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   option the shim does not know, the next word is checked both as the option's
   value and as the command.
 
+- A chain of Git aliases longer than 24 hops that ends in a worktree lifecycle
+  command is now planned as that command. The shim stopped following the chain
+  at a fixed depth and passed it to Git, which follows a chain of any length,
+  so a managed worktree could be removed outside the journal.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
