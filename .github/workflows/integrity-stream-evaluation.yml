@@ -1,0 +1,21 @@
+name: Integrity stream evaluation
+
+on:
+  push:
+    branches: [perf/integrity-large-stream]
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    name: Large-file worker regression
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify that large files use workers
+        run: >-
+          cargo test --locked -p riftri-core --lib
+          base_integrity::pipeline::tests::large_regular_files_are_assigned_to_a_worker
+          -- --exact --nocapture

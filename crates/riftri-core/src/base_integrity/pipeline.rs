@@ -230,6 +230,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn large_regular_files_are_assigned_to_a_worker() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("large");
+        fs::write(&path, vec![7; MAX_FILE_BYTES as usize * 3 + 17]).unwrap();
+        assert!(
+            encode_leaf(&path, OsStr::new("large"), &mut HashScratch::new())
+                .unwrap()
+                .is_some(),
+            "large regular files must not fall back to coordinator reads"
+        );
+    }
+
+    #[test]
     fn encoded_bytes_are_strictly_bounded() {
         use sha2::digest::Update;
         let mut encoded = EntryBytes::default();
