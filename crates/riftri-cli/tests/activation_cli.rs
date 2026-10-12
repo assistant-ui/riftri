@@ -2041,6 +2041,65 @@ fn work_tree_outside_the_repository_cannot_bypass_managed_lifecycle_guards() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn git_directory_aliases_cannot_bypass_managed_removal_guard() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("git-dir-alias-guarded-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::write(destination.join("untracked.txt"), "private\n").expect("dirty managed view");
+    assert!(
+        git(
+            &fixture.repository,
+            &["config", "alias.wtrm", "worktree remove --force"],
+        )
+        .status
+        .success()
+    );
+
+    // Git reads the alias from the repository `--git-dir` names, wherever the
+    // command runs, so the lookup must not stop at the current directory.
+    // `--work-tree` moves the checked-out files, never the repository, so it
+    // must not hide the alias either.
+    for options in [
+        &["--git-dir=repository/.git"][..],
+        &["--git-dir", "repository/.git"][..],
+        &["--git-dir=repository/.git", "--work-tree=."][..],
+        &["--git-dir", "repository/.git", "--work-tree", "."][..],
+    ] {
+        let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(options)
+            .arg("wtrm")
+            .arg(&destination)
+            .current_dir(fixture.directory.path())
+            .output()
+            .expect("guard aliased removal through --git-dir");
+
+        assert!(
+            !removal.status.success(),
+            "{options:?} hid the alias from the managed removal guard"
+        );
+        assert!(
+            String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"),
+            "{}",
+            String::from_utf8_lossy(&removal.stderr)
+        );
+        assert!(destination.join("untracked.txt").is_file());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn exec_path_cannot_bypass_managed_lifecycle_guards() {
     let fixture = RepositoryFixture::new();
     let destination = fixture.directory.path().join("exec-path-view");

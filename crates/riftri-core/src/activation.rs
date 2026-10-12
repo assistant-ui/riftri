@@ -221,7 +221,11 @@ fn plan_git_command_inner(
             // command, so only a repository that is provably absent or never
             // opted in is left to Git, which then reports the failure itself.
             Err(ActivationError::Git(error)) => {
-                match uninspected_for_proxy(&Git::default(), &context.repository, error)? {
+                let location = context
+                    .git_directory
+                    .as_deref()
+                    .map_or(context.repository.as_path(), git_directory_location);
+                match uninspected_for_proxy(&Git::default(), location, error)? {
                     ProxyRepository::Unhealthy {
                         enabled: true,
                         error,
@@ -247,13 +251,7 @@ fn plan_git_command_inner(
             (repository, proxy)
         }
         Err((git_directory, error)) => {
-            // `--git-dir` may name a linked worktree's `.git` file, which
-            // sits in the worktree it belongs to.
-            let location = match git_directory.parent() {
-                Some(parent) if git_directory.is_file() => parent,
-                _ => git_directory,
-            };
-            let proxy = uninspected_for_proxy(&git, location, error)?;
+            let proxy = uninspected_for_proxy(&git, git_directory_location(git_directory), error)?;
             (context.repository, proxy)
         }
     };
@@ -1162,6 +1160,15 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
     }))
 }
 
+/// A directory inside the repository `--git-dir` names. The option may name
+/// a linked worktree's `.git` file, which sits in the worktree it belongs to.
+fn git_directory_location(git_directory: &Path) -> &Path {
+    match git_directory.parent() {
+        Some(parent) if git_directory.is_file() => parent,
+        _ => git_directory,
+    }
+}
+
 /// Classify a location where a Git inspection failed with `error`.
 fn uninspected_for_proxy(
     git: &Git,
@@ -1333,8 +1340,13 @@ fn expand_worktree_alias(
         {
             body.clone()
         } else {
-            let Some(value) =
-                Git::default().config_value(&context.repository, &format!("alias.{name}"))?
+            // Git reads the alias from the repository it opens, so an explicit
+            // `--git-dir` outranks the directory the command runs in.
+            let Some(value) = Git::default().config_value_in(
+                &context.repository,
+                context.git_directory.as_deref(),
+                &format!("alias.{name}"),
+            )?
             else {
                 return Ok(None);
             };
@@ -2999,6 +3011,35 @@ mod tests {
         }
     }
 
+    /// Git reads an alias from the repository `--git-dir` selects, not from
+    /// the directory the command runs in.
+    #[test]
+    fn alias_lookup_follows_an_explicit_git_directory() {
+        let fixture = repository_fixture();
+        git(
+            fixture.path(),
+            &["config", "alias.wtrm", "worktree remove --force"],
+        );
+        let outside = tempdir().expect("directory outside the repository");
+        let selection = [
+            OsString::from("--git-dir"),
+            fixture.path().join(".git").into_os_string(),
+        ];
+        let arguments = [&selection[..], &["wtrm".into(), "view".into()]].concat();
+        let context = super::command_context(outside.path(), &arguments).expect("command context");
+
+        assert_eq!(
+            super::expand_worktree_alias(&context, &arguments).expect("expand alias"),
+            Some(
+                [
+                    &selection[..],
+                    &["worktree", "remove", "--force", "view"].map(OsString::from),
+                ]
+                .concat()
+            )
+        );
+    }
+
     /// `record_invocation_alias` mirrors what Git accepts: entries Git would
     /// refuse at lookup are skipped so passthrough stays safe, and key case
     /// never matters.
@@ -3281,6 +3322,19 @@ mod tests {
         let git_file = view.join(".git");
 
         plan(&[OsStr::new("wtp")]).expect_err("an unresolvable alias must not reach Git");
+        // The alias lives in the repository `--git-dir` names, so that is the
+        // repository whose opt-in decides, wherever the command runs.
+        let outside = tempdir().expect("directory outside the repository");
+        let git_directory = fixture.path().join(".git");
+        plan_git_command(
+            outside.path(),
+            &[
+                OsString::from("--git-dir"),
+                git_directory.into_os_string(),
+                OsString::from("wtp"),
+            ],
+        )
+        .expect_err("an unresolvable alias behind --git-dir must not reach Git");
         for git_directory in [OsStr::new(".git"), git_file.as_os_str()] {
             let message = plan(&[
                 OsStr::new("--git-dir"),

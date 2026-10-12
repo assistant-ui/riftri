@@ -1096,12 +1096,23 @@ impl Git {
 
     /// Read one repository configuration value as raw Git bytes.
     pub fn config_value(&self, path: &Path, key: &str) -> Result<Option<Vec<u8>>, GitError> {
-        let arguments = [
-            OsString::from("config"),
-            OsString::from("--null"),
-            OsString::from("--get"),
-            OsString::from(key),
-        ];
+        self.config_value_in(path, None, key)
+    }
+
+    /// [`Self::config_value`] for the repository Git opens from `path` under
+    /// an optional explicit `--git-dir`, which takes precedence over
+    /// discovery from `path` just as it does for the caller's own command.
+    pub fn config_value_in(
+        &self,
+        path: &Path,
+        git_dir: Option<&Path>,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, GitError> {
+        let mut arguments = Vec::new();
+        if let Some(git_dir) = git_dir {
+            arguments.extend([OsString::from("--git-dir"), git_path_argument(git_dir)]);
+        }
+        arguments.extend(["config", "--null", "--get", key].map(OsString::from));
         let output = self.output_os(Some(path), &arguments)?;
         if output.status.success() {
             Ok(Some(

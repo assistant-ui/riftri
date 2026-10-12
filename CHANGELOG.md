@@ -28,6 +28,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   inspected still refuses worktree lifecycle commands, and an unreadable
   `riftri.enabled` value no longer blocks read-only worktree commands.
 
+- Look up a Git alias in the repository `--git-dir` selects. The shim asked
+  for the alias in the current directory, so from outside the repository
+  `git --git-dir=<repository>/.git <alias>` for an alias of
+  `worktree remove --force` reached real Git unclassified and deleted a
+  managed view outside the journal.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
