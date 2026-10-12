@@ -17,6 +17,8 @@ use super::tests::{git, git_stdout};
 use super::{AddWorktreeRequest, WorktreeMode};
 use crate::test_support::{WritableTempDir, writable_tempdir};
 
+#[path = "worktree_add_state_hegel_tests.rs"]
+mod add_state;
 #[path = "worktree_checkout_hegel_tests.rs"]
 mod checkout;
 #[path = "worktree_destination_hegel_tests.rs"]
@@ -31,6 +33,8 @@ mod policy;
 mod recovery;
 #[path = "worktree_refusal_hegel_tests.rs"]
 mod refusal;
+#[path = "worktree_removal_state_hegel_tests.rs"]
+mod removal_state;
 #[path = "worktree_state_hegel_tests.rs"]
 mod state;
 
@@ -260,4 +264,22 @@ pub(super) fn portable_paths(tc: &TestCase, maximum: usize) -> Vec<String> {
         paths.push(path);
     }
     paths
+}
+
+/// Rewrite one durable journal in place, the way a kill between two steps or
+/// an older Riftri would have left it.
+pub(super) fn edit_journal(journal: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let mut value =
+        serde_json::from_slice(&fs::read(journal).expect("read journal")).expect("journal is JSON");
+    edit(&mut value);
+    fs::write(
+        journal,
+        serde_json::to_vec_pretty(&value).expect("encode journal"),
+    )
+    .expect("write journal");
+}
+
+/// A path as journals store it.
+pub(super) fn journal_path_value(path: &Path) -> serde_json::Value {
+    serde_json::json!({ "encoding": "unix-bytes", "units": path.as_os_str().as_bytes() })
 }
