@@ -2288,6 +2288,21 @@ mod hegel_tests;
 #[path = "activation_add_hegel_tests.rs"]
 mod add_hegel_tests;
 
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[path = "activation_shim_hegel_tests.rs"]
+mod shim_hegel_tests;
+
+// Creating a managed worktree needs a native copy-on-write backend.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(feature = "native-cow-integration", target_os = "linux")
+    )
+))]
+#[path = "activation_lifecycle_hegel_tests.rs"]
+mod lifecycle_hegel_tests;
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
