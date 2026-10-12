@@ -274,6 +274,17 @@ impl Kind {
         }
     }
 
+    pub(super) fn create_store(self, state: &Path) -> Result<(), JournalError> {
+        match self {
+            Self::Add => JournalStore::create(state).map(drop),
+            Self::Removal => RemovalJournalStore::create(state).map(drop),
+            Self::Move => MoveJournalStore::create(state).map(drop),
+            Self::Compact => CompactJournalStore::create(state).map(drop),
+            Self::Prune => PruneJournalStore::create(state).map(drop),
+            Self::Collection => CollectionJournalStore::create(state).map(drop),
+        }
+    }
+
     /// Every loadable journal as its operation ID and full decoded form.
     pub(super) fn load_all(self, state: &Path) -> Result<Vec<(String, String)>, JournalError> {
         with_store!(self, state, |store| store.load_all().map(|journals| {
