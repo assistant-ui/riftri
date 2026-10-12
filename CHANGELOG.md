@@ -5,6 +5,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- On macOS, a worktree path given with a trailing or repeated separator now
+  matches its registration when the two also differ in Unicode normalization.
+  Each difference was already tolerated alone, but not both together.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
