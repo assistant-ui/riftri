@@ -13990,7 +13990,7 @@ mod tests {
         assert!(inventory.find(Path::new("/not-registered")).is_none());
     }
 
-    fn inventory_entry(path: PathBuf) -> riftri_git::WorktreeInfo {
+    pub(super) fn inventory_entry(path: PathBuf) -> riftri_git::WorktreeInfo {
         riftri_git::WorktreeInfo {
             path,
             head: None,
