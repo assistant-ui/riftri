@@ -4515,80 +4515,118 @@ fn materialize_git_lfs_objects(
     base_staging: &Path,
     objects: &[GitLfsObject],
 ) -> Result<(), WorktreeError> {
+    lfs_workers::run(
+        objects.len(),
+        lfs_materialization_workers(objects),
+        |index| materialize_git_lfs_object(base_staging, &objects[index]),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn lfs_materialization_workers(objects: &[GitLfsObject]) -> usize {
+    // Small/no-LFS checkouts keep the inline path. Larger cold bases use at
+    // most four 64-KiB buffers and eight file handles; cached bases never call
+    // materialization. This overlaps independent private destinations only.
+    let bytes = objects.iter().fold(0_u64, |total, object| {
+        total.saturating_add(object.pointer.size)
+    });
+    if objects.len() < 4 || bytes < 8 * 1024 * 1024 {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(4)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn materialize_git_lfs_object(
+    base_staging: &Path,
+    object: &GitLfsObject,
+) -> Result<(), WorktreeError> {
     use std::io::{Read, Write};
 
-    for object in objects {
-        let destination = base_staging.join(&object.checkout_path);
-        let mut source_options = OpenOptions::new();
-        source_options.read(true);
-        #[cfg(unix)]
-        source_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-        #[cfg(target_os = "windows")]
-        source_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        let mut source = source_options.open(&object.source_path).map_err(|error| {
-            WorktreeError::Unsupported(format!(
-                "could not open local Git LFS object {} for {}: {error}",
-                object.pointer.oid,
-                object.checkout_path.display()
-            ))
+    let destination = base_staging.join(&object.checkout_path);
+    let mut source_options = OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    source_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    #[cfg(target_os = "windows")]
+    source_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut source = source_options.open(&object.source_path).map_err(|error| {
+        WorktreeError::Unsupported(format!(
+            "could not open local Git LFS object {} for {}: {error}",
+            object.pointer.oid,
+            object.checkout_path.display()
+        ))
+    })?;
+    validate_opened_git_lfs_file(&source, &object.source_path, "local Git LFS object")?;
+    let source_size = source
+        .metadata()
+        .map_err(|error| io("inspect opened Git LFS object", &object.source_path, error))?
+        .len();
+    if source_size != object.pointer.size {
+        return Err(WorktreeError::Unsupported(format!(
+            "local Git LFS object {} changed size before materialization; expected {}, found {source_size}",
+            object.pointer.oid, object.pointer.size
+        )));
+    }
+
+    let mut destination_options = OpenOptions::new();
+    destination_options.write(true).truncate(true);
+    #[cfg(unix)]
+    destination_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    #[cfg(target_os = "windows")]
+    destination_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut output = destination_options
+        .open(&destination)
+        .map_err(|error| io("open Git LFS checkout destination", &destination, error))?;
+    validate_opened_git_lfs_file(&output, &destination, "Git LFS checkout destination")?;
+
+    let mut digest = Sha256::new();
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = source
+            .read(&mut buffer)
+            .map_err(|error| io("read local Git LFS object", &object.source_path, error))?;
+        if count == 0 {
+            break;
+        }
+        copied = copied.checked_add(count as u64).ok_or_else(|| {
+            WorktreeError::Unsupported("Git LFS object size overflowed u64".to_owned())
         })?;
-        validate_opened_git_lfs_file(&source, &object.source_path, "local Git LFS object")?;
-        let source_size = source
-            .metadata()
-            .map_err(|error| io("inspect opened Git LFS object", &object.source_path, error))?
-            .len();
-        if source_size != object.pointer.size {
-            return Err(WorktreeError::Unsupported(format!(
-                "local Git LFS object {} changed size before materialization; expected {}, found {source_size}",
-                object.pointer.oid, object.pointer.size
-            )));
-        }
-
-        let mut destination_options = OpenOptions::new();
-        destination_options.write(true).truncate(true);
-        #[cfg(unix)]
-        destination_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-        #[cfg(target_os = "windows")]
-        destination_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        let mut output = destination_options
-            .open(&destination)
-            .map_err(|error| io("open Git LFS checkout destination", &destination, error))?;
-        validate_opened_git_lfs_file(&output, &destination, "Git LFS checkout destination")?;
-
-        let mut digest = Sha256::new();
-        let mut copied = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = source
-                .read(&mut buffer)
-                .map_err(|error| io("read local Git LFS object", &object.source_path, error))?;
-            if count == 0 {
-                break;
-            }
-            copied = copied.checked_add(count as u64).ok_or_else(|| {
-                WorktreeError::Unsupported("Git LFS object size overflowed u64".to_owned())
-            })?;
-            digest.update(&buffer[..count]);
-            output
-                .write_all(&buffer[..count])
-                .map_err(|error| io("write expanded Git LFS object", &destination, error))?;
-        }
-        if copied != object.pointer.size {
-            return Err(WorktreeError::Unsupported(format!(
-                "local Git LFS object {} changed while it was read; expected {} bytes, read {copied}",
-                object.pointer.oid, object.pointer.size
-            )));
-        }
-        let actual_oid = crate::base_integrity::hex_lower(digest.finalize());
-        if actual_oid != object.pointer.oid {
-            return Err(WorktreeError::Unsupported(format!(
-                "local Git LFS object {} failed SHA-256 verification; found {actual_oid}",
-                object.pointer.oid
-            )));
-        }
+        digest.update(&buffer[..count]);
+        output
+            .write_all(&buffer[..count])
+            .map_err(|error| io("write expanded Git LFS object", &destination, error))?;
+    }
+    if copied != object.pointer.size {
+        return Err(WorktreeError::Unsupported(format!(
+            "local Git LFS object {} changed while it was read; expected {} bytes, read {copied}",
+            object.pointer.oid, object.pointer.size
+        )));
+    }
+    let actual_oid = crate::base_integrity::hex_lower(digest.finalize());
+    if actual_oid != object.pointer.oid {
+        return Err(WorktreeError::Unsupported(format!(
+            "local Git LFS object {} failed SHA-256 verification; found {actual_oid}",
+            object.pointer.oid
+        )));
     }
     Ok(())
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[path = "lfs_workers.rs"]
+mod lfs_workers;
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[path = "lfs_materialization_tests.rs"]
+mod lfs_materialization_tests;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_opened_git_lfs_file(
