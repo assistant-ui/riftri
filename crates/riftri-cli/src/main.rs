@@ -3171,6 +3171,14 @@ fn retained_base_state(reference_count: usize, counts_are_complete: bool) -> &'s
 }
 
 #[cfg(test)]
+#[path = "main_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(test)]
+#[path = "parse_hegel_tests.rs"]
+mod parse_hegel_tests;
+
+#[cfg(test)]
 mod tests {
 
     #[test]
