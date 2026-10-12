@@ -14,6 +14,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Check Clippy
@@ -24,6 +27,11 @@ jobs:
         env:
           RUST_TEST_THREADS: 2
         run: cargo test --workspace --locked
+      - name: Verify package and benchmark supervisor tests
+        run: |
+          npm ci --ignore-scripts --omit=optional
+          npm test
+          node --test --test-concurrency=1 docs/benchmarks/*.test.mjs
       - name: Create isolated APFS safety volume
         run: |
           hdiutil create -size 512m -fs APFS -volname RiftriStreamSafety -type SPARSEBUNDLE "$RUNNER_TEMP/stream-safety"
@@ -49,3 +57,59 @@ jobs:
           name: integrity-stream-safety
           path: ${{ runner.temp }}/allocation.json
           if-no-files-found: warn
+
+  screen:
+    name: Isolated large-file streaming screen
+    needs: quality
+    runs-on: macos-15
+    timeout-minutes: 22
+    defaults:
+      run:
+        working-directory: candidate
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/stream-build
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e3ce4c20d73dd68fa6ac6533b34167022cd2a6a6
+          path: previous
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: assistant-ui/assistant-ui
+          ref: 038cd9f82b418afe9e6d0080648738f78586fbca
+          path: reference
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Build and freeze previous prototype
+        working-directory: previous
+        run: |
+          cargo test --locked --release -p riftri-core --lib --no-run --message-format=json > "$RUNNER_TEMP/previous-build.jsonl"
+          node ../candidate/docs/benchmarks/integrity-stream-screen.mjs freeze "$RUNNER_TEMP/previous-build.jsonl" "$RUNNER_TEMP/previous-test" "$PWD"
+      - name: Build and freeze candidate
+        run: |
+          cargo test --locked --release -p riftri-core --lib --no-run --message-format=json > "$RUNNER_TEMP/candidate-build.jsonl"
+          node docs/benchmarks/integrity-stream-screen.mjs freeze "$RUNNER_TEMP/candidate-build.jsonl" "$RUNNER_TEMP/candidate-test" "$PWD"
+      - name: Run prospective phase screen without concurrent builds
+        timeout-minutes: 14
+        run: >-
+          node docs/benchmarks/integrity-stream-screen.mjs measure
+          "$RUNNER_TEMP/previous-test" "$RUNNER_TEMP/candidate-test"
+          "$GITHUB_WORKSPACE/reference" "$RUNNER_TEMP/stream-results"
+      - name: Retain every sample and binary identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integrity-stream-screen
+          path: |
+            ${{ runner.temp }}/stream-results/*.json
+            ${{ runner.temp }}/stream-results/*.log
+            ${{ runner.temp }}/previous-test.json
+            ${{ runner.temp }}/candidate-test.json
+            ${{ runner.temp }}/previous-build.jsonl
+            ${{ runner.temp }}/candidate-build.jsonl
+          if-no-files-found: error
