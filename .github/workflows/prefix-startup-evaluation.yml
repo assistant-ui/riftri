@@ -1,0 +1,75 @@
+name: Prefix startup evaluation
+
+on:
+  push:
+    branches: [perf/checkout-prefix-reuse]
+    paths:
+      - .github/workflows/prefix-startup-evaluation.yml
+      - docs/benchmarks/prefix-startup*
+
+permissions:
+  contents: read
+
+jobs:
+  startup:
+    name: Production versus prefix-only full creation
+    runs-on: macos-15
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: fa6dfeddc6a8b9ae47d5f140fcaa2fdbad690860
+          path: baseline
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: assistant-ui/assistant-ui
+          ref: 038cd9f82b418afe9e6d0080648738f78586fbca
+          path: reference
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Build production in its own output directory
+        working-directory: baseline
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/baseline-build
+        run: |
+          git rev-parse HEAD
+          cargo build --locked --release -p riftri-cli --bin riftri --message-format=json > "$RUNNER_TEMP/baseline-build.jsonl"
+          shasum -a 256 "$CARGO_TARGET_DIR/release/riftri"
+      - name: Build prefix-only candidate in a separate output directory
+        working-directory: candidate
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/candidate-build
+        run: |
+          git rev-parse HEAD
+          cargo build --locked --release -p riftri-cli --bin riftri --message-format=json > "$RUNNER_TEMP/candidate-build.jsonl"
+          shasum -a 256 "$CARGO_TARGET_DIR/release/riftri"
+      - name: Check comparison gate and benchmark ownership tests
+        working-directory: candidate
+        run: node --test --test-concurrency=1 docs/benchmarks/*.test.mjs
+      - name: Measure all planned pairs without concurrent builds
+        timeout-minutes: 42
+        working-directory: candidate
+        run: >-
+          node docs/benchmarks/prefix-startup.mjs
+          "$GITHUB_WORKSPACE/baseline-build/release/riftri"
+          "$GITHUB_WORKSPACE/candidate-build/release/riftri"
+          "$GITHUB_WORKSPACE/reference" "$RUNNER_TEMP/prefix-startup"
+      - name: Retain every result and Git trace, including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: prefix-startup
+          path: |
+            ${{ runner.temp }}/prefix-startup/evaluation.json
+            ${{ runner.temp }}/prefix-startup/*.log
+            ${{ runner.temp }}/prefix-startup/*/results.json
+            ${{ runner.temp }}/prefix-startup/*/add-*.log
+            ${{ runner.temp }}/prefix-startup/*/git-*.jsonl
+            ${{ runner.temp }}/baseline-build.jsonl
+            ${{ runner.temp }}/candidate-build.jsonl
+          if-no-files-found: error

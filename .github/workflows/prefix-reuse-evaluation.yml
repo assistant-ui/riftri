@@ -1,8 +1,6 @@
 name: Prefix reuse evaluation
 
-on:
-  push:
-    branches: [perf/checkout-prefix-reuse]
+on: workflow_dispatch
 
 permissions:
   contents: read
