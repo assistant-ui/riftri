@@ -902,6 +902,11 @@ pub fn backends(destination: &Path) -> Vec<BackendCapability> {
     probe_backends(destination)
 }
 
+// The OverlayFS helper adds Linux-only blockers and commands to the verdict.
+#[cfg(all(test, unix, not(target_os = "linux")))]
+#[path = "lib_hegel_tests.rs"]
+mod hegel_tests;
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
