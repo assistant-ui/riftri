@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 use crate::StorageError;
 use crate::parallel::{file_clone_parallelism, try_for_each_bounded};
 
+#[cfg(test)]
+#[path = "native_directory_tests.rs"]
+mod directory_tests;
+
 struct FileClone {
     source: PathBuf,
     destination: PathBuf,
@@ -80,7 +84,8 @@ fn prepare_clone_directory(
 ) -> Result<(), StorageError> {
     fs::create_dir(destination)
         .map_err(|source_error| io("create clone directory", destination, source_error))?;
-    fs::set_permissions(destination, fs::Permissions::from_mode(final_mode | 0o700))
+    let prepared_mode = final_mode | 0o700;
+    fs::set_permissions(destination, fs::Permissions::from_mode(prepared_mode))
         .map_err(|source_error| io("prepare clone directory mode", destination, source_error))?;
 
     let final_mode = if let Some(writable_bits) = writable_bits {
@@ -93,7 +98,11 @@ fn prepare_clone_directory(
     } else {
         final_mode
     };
-    directories.push((destination.to_path_buf(), final_mode));
+    // Child creation does not change ordinary directory access bits. Keep the
+    // postorder write when permissions differ or special-bit semantics apply.
+    if final_mode != prepared_mode || final_mode & 0o7000 != 0 {
+        directories.push((destination.to_path_buf(), final_mode));
+    }
 
     // Retain names and cached types, never DirEntry or ReadDir handles,
     // while descending. Preserve enumeration and per-entry error order.
