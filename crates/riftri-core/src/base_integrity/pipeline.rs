@@ -254,7 +254,10 @@ impl Pipeline<'_> {
     }
 
     fn enqueue(&mut self, path: &Path, name: OsString) -> io::Result<()> {
-        if self.pending.len() == MAX_PENDING {
+        // A streaming worker may block until its first result is consumed.
+        // Permit only its active job and one queued job; a third send would
+        // otherwise block this coordinator before it can drain any results.
+        if self.pending.len() == MAX_PENDING.min(2 * self.senders.len()) {
             self.flush_one()?;
         }
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -430,6 +433,33 @@ mod tests {
             drop(receiver);
             worker.join().unwrap();
         });
+    }
+
+    #[test]
+    fn narrow_worker_pools_finish_large_file_queues() {
+        let fixture = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            fs::write(
+                fixture.path().join(format!("{i:03}")),
+                vec![i as u8; MAX_FILE_BYTES as usize + 17],
+            )
+            .unwrap();
+        }
+        let mut expected = Sha256::new();
+        hash_entry(
+            fixture.path(),
+            &mut expected,
+            MarkerVersion::V2,
+            SpecialEntries::Refuse,
+            &mut HashScratch::new(),
+        )
+        .unwrap();
+        let expected = expected.finalize();
+        for workers in 1..=4 {
+            let mut actual = Sha256::new();
+            hash_with_encoder(fixture.path(), &mut actual, workers, &encode_leaf).unwrap();
+            assert_eq!(actual.finalize(), expected);
+        }
     }
 
     #[test]
