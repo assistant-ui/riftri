@@ -1519,6 +1519,8 @@ fn an_invalid_exec_worktree_binding_is_a_policy_refusal() {
         fixture.path().join("missing"),
         file,
         not_repository,
+        repository.join(".git"),
+        repository.join(".git/objects"),
     ] {
         let binding_arg = binding.to_str().unwrap();
         let arguments = [
