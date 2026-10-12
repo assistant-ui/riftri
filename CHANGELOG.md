@@ -67,6 +67,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   the command Git runs: Git refuses the first and passes an extra empty
   argument for the second.
 
+- The Git shim reads alias bodies as bytes. On Unix an alias whose body is not
+  valid UTF-8, for example because it names a path with arbitrary bytes, used
+  to be skipped and reached real Git unclassified; it is now planned or
+  refused like the spelled-out command, whether it is stored, passed with
+  `-c`, or read through `--config-env`. On Windows a worktree alias whose
+  arguments are not valid UTF-8 is refused.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed

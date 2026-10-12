@@ -1246,22 +1246,21 @@ struct CommandContext {
     /// repository's stored configuration never sees them — which let
     /// `git -c 'alias.x=worktree remove --force' x <managed>` reach real Git
     /// unclassified. Names are lowercased (configuration keys are
-    /// ASCII-case-insensitive) and later entries win at lookup time.
-    invocation_aliases: Vec<(String, String)>,
+    /// ASCII-case-insensitive) and later entries win at lookup time. Bodies
+    /// stay in the platform's argument encoding because Git runs them whether
+    /// or not they are UTF-8.
+    invocation_aliases: Vec<(String, Vec<u8>)>,
 }
 
 /// Record a `key=value` invocation-configuration assignment when the key
 /// names an alias. Entries Git would refuse to use — a missing `=`, an empty
 /// name, an empty body — are skipped: Git errors on them at lookup, so
 /// passthrough stays safe.
-fn record_invocation_alias(aliases: &mut Vec<(String, String)>, assignment: &OsStr) {
-    let Some(text) = assignment.to_str() else {
+fn record_invocation_alias(aliases: &mut Vec<(String, Vec<u8>)>, assignment: &OsStr) {
+    let Some((key, body)) = split_assignment(assignment) else {
         return;
     };
-    let Some((key, body)) = text.split_once('=') else {
-        return;
-    };
-    let key = key.as_bytes();
+    let (key, body) = (key.as_encoded_bytes(), body.as_encoded_bytes());
     if key.len() <= 6 || !key[..6].eq_ignore_ascii_case(b"alias.") {
         return;
     }
@@ -1271,28 +1270,68 @@ fn record_invocation_alias(aliases: &mut Vec<(String, String)>, assignment: &OsS
     if name.is_empty() || body.is_empty() {
         return;
     }
-    aliases.push((name.to_ascii_lowercase(), body.to_owned()));
+    aliases.push((name.to_ascii_lowercase(), body.to_vec()));
+}
+
+/// Split a `key=value` argument at its first `=` without requiring either
+/// side to be UTF-8.
+fn split_assignment(assignment: &OsStr) -> Option<(&OsStr, &OsStr)> {
+    let encoded = assignment.as_encoded_bytes();
+    let separator = encoded.iter().position(|byte| *byte == b'=')?;
+    // SAFETY: both splits border the ASCII `=`, which is a valid boundary in
+    // the platform-independent encoded representation.
+    Some(unsafe {
+        (
+            OsStr::from_encoded_bytes_unchecked(&encoded[..separator]),
+            OsStr::from_encoded_bytes_unchecked(&encoded[separator + 1..]),
+        )
+    })
+}
+
+/// An alias word as the argument Git passes to the command it runs. Unix
+/// arguments are bytes, so every word converts and the planner checks the
+/// exact path Git will see.
+#[cfg(unix)]
+fn alias_argument(word: Vec<u8>) -> Result<OsString, ActivationError> {
+    use std::os::unix::ffi::OsStringExt;
+
+    Ok(OsString::from_vec(word))
+}
+
+/// An alias word as the argument Git passes to the command it runs. Windows
+/// arguments are UTF-16 and Git for Windows applies its own conversion to
+/// bytes that are not UTF-8, so the path it would touch cannot be known here
+/// and a worktree alias carrying such a word is refused.
+#[cfg(not(unix))]
+fn alias_argument(word: Vec<u8>) -> Result<OsString, ActivationError> {
+    String::from_utf8(word).map(OsString::from).map_err(|_| {
+        unsupported(format!(
+            "refusing a Git alias for `git worktree` whose arguments are not valid UTF-8 because the path Git would use cannot be determined; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+        ))
+    })
 }
 
 /// Record a `--config-env` `<name>=<variable>` assignment when the name is an
-/// alias, taking the body from the named environment variable. An unset or
-/// unparseable variable is skipped: Git itself errors on it at lookup.
-fn record_environment_alias(aliases: &mut Vec<(String, String)>, assignment: &OsStr) {
-    if let Some((key, variable)) = assignment
-        .to_str()
-        .and_then(|assignment| assignment.split_once('='))
-        && let Ok(body) = std::env::var(variable)
+/// alias, taking the body from the named environment variable. An unset
+/// variable is skipped: Git itself errors on it at lookup.
+fn record_environment_alias(aliases: &mut Vec<(String, Vec<u8>)>, assignment: &OsStr) {
+    if let Some((key, variable)) = split_assignment(assignment)
+        && let Some(body) = env::var_os(variable)
     {
-        record_invocation_alias(aliases, OsStr::new(&format!("{key}={body}")));
+        let mut assignment = key.to_os_string();
+        assignment.push("=");
+        assignment.push(body);
+        record_invocation_alias(aliases, &assignment);
     }
 }
 
 /// Git commands common enough that resolving an alias for them would add a
 /// configuration read to the hot path. Git never lets an alias shadow a
 /// built-in command that is not deprecated, and none of these is, so skipping
-/// the lookup for them is correct as well as cheap. This is a shortcut, not the full set: a built-in missing from the
-/// list costs that one read, and [`expand_worktree_alias`] asks Git for the
-/// real set before it trusts an alias that leads to a worktree command.
+/// the lookup for them is correct as well as cheap. This is a shortcut, not
+/// the full set: a built-in missing from the list costs that one read, and
+/// [`expand_worktree_alias`] asks Git for the real set before it trusts an
+/// alias that leads to a worktree command.
 const COMMON_GIT_BUILTINS: &[&str] = &[
     "add",
     "branch",
@@ -1353,7 +1392,7 @@ fn expand_worktree_alias(
     // builtin, errors on an unknown name, or executes a shell alias that
     // re-enters the proxy on its own.
     let mut name = name.to_owned();
-    let mut pending: Vec<String> = Vec::new();
+    let mut pending: Vec<Vec<u8>> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     loop {
         if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name.as_str()) {
@@ -1384,14 +1423,11 @@ fn expand_worktree_alias(
             else {
                 return Ok(None);
             };
-            let Ok(value) = String::from_utf8(value) else {
-                return Ok(None);
-            };
             value
         };
         // Git tests the first byte and splits the body untrimmed, so
         // trimming here would plan a command Git never runs.
-        if value.starts_with('!') {
+        if value.starts_with(b"!") {
             return Ok(None);
         }
         let Ok(words) = split_alias_words(&value) else {
@@ -1403,47 +1439,55 @@ fn expand_worktree_alias(
         let Some(first) = words.next() else {
             return Ok(None);
         };
-        let mut tail: Vec<String> = words.collect();
+        let mut tail: Vec<Vec<u8>> = words.collect();
         tail.append(&mut pending);
         pending = tail;
-        if first == WORKTREE_SUBCOMMAND {
+        if first == WORKTREE_SUBCOMMAND.as_bytes() {
             // Git runs a builtin or a `git-<name>` program before it looks
             // for an alias of that name, so a chain that passes through one
             // never reaches this worktree command. A deprecated builtin is
-            // the exception: Git prefers its alias, so it is not in the set. Only Git knows the full
-            // set, and asking costs a process, so the question waits until
-            // here, the one outcome it can change.
+            // the exception: Git prefers its alias, so it is not in the set.
+            // Only Git knows the full set, and asking costs a process, so the
+            // question waits until here, the one outcome it can change.
             let commands = Git::default().commands_run_before_aliases()?;
             if commands.iter().any(|command| seen.contains(command)) {
                 return Ok(None);
             }
             let mut expanded = arguments[..context.command_index].to_vec();
             expanded.push(OsString::from(WORKTREE_SUBCOMMAND));
-            expanded.extend(pending.into_iter().map(OsString::from));
+            for word in pending {
+                expanded.push(alias_argument(word)?);
+            }
             expanded.extend_from_slice(&arguments[context.command_index + 1..]);
             return Ok(Some(expanded));
         }
+        // Git rejects an alias key with a byte outside ASCII, so a command
+        // word that is not UTF-8 cannot name another alias.
+        let Ok(first) = String::from_utf8(first) else {
+            return Ok(None);
+        };
         name = first;
     }
 }
 
-/// Whether Git's locale-independent `isspace` accepts the character: space,
-/// tab, line feed, and carriage return, and nothing else. Vertical tab, form
-/// feed, and Unicode spaces such as U+00A0 are ordinary word characters.
-fn is_git_space(character: char) -> bool {
-    matches!(character, ' ' | '\t' | '\n' | '\r')
+/// Whether Git's locale-independent `isspace` accepts the byte: space, tab,
+/// line feed, and carriage return, and nothing else. Vertical tab, form feed,
+/// and the bytes of Unicode spaces such as U+00A0 are ordinary word bytes.
+fn is_git_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 /// Split an alias body exactly the way Git's own `split_cmdline` does,
-/// verified against git 2.53.0: a run of Git whitespace ends one word and
-/// starts the next, so the body is never trimmed and a leading or trailing
-/// run yields an empty first or last word; single quotes are fully literal;
-/// inside double quotes and in the open, a backslash makes the next character
-/// literal (`l\og` is `log`, `"a\tb"` is `atb`). `Err` mirrors the inputs Git
-/// itself refuses (an unclosed quote or a trailing backslash) so the caller
-/// can pass the command through and let Git fail it identically, with no room
-/// for a parse that Git accepts and Riftri reads differently.
-fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
+/// verified against git 2.53.0: Git splits bytes, so the words are bytes too;
+/// a run of Git whitespace ends one word and starts the next, so the body is
+/// never trimmed and a leading or trailing run yields an empty first or last
+/// word; single quotes are fully literal; inside double quotes and in the
+/// open, a backslash makes the next byte literal (`l\og` is `log`, `"a\tb"`
+/// is `atb`). `Err` mirrors the inputs Git itself refuses (an unclosed quote
+/// or a trailing backslash) so the caller can pass the command through and
+/// let Git fail it identically, with no room for a parse that Git accepts and
+/// Riftri reads differently.
+fn split_alias_words(value: &[u8]) -> Result<Vec<Vec<u8>>, ()> {
     #[derive(PartialEq)]
     enum State {
         Open,
@@ -1452,26 +1496,26 @@ fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
     }
     let mut state = State::Open;
     let mut words = Vec::new();
-    let mut word = String::new();
-    let mut characters = value.chars().peekable();
-    while let Some(character) = characters.next() {
+    let mut word = Vec::new();
+    let mut bytes = value.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
         match state {
-            State::SingleQuoted => match character {
-                '\'' => state = State::Open,
+            State::SingleQuoted => match byte {
+                b'\'' => state = State::Open,
                 other => word.push(other),
             },
-            State::DoubleQuoted => match character {
-                '"' => state = State::Open,
-                '\\' => word.push(characters.next().ok_or(())?),
+            State::DoubleQuoted => match byte {
+                b'"' => state = State::Open,
+                b'\\' => word.push(bytes.next().ok_or(())?),
                 other => word.push(other),
             },
-            State::Open => match character {
-                '\'' => state = State::SingleQuoted,
-                '"' => state = State::DoubleQuoted,
-                '\\' => word.push(characters.next().ok_or(())?),
-                character if is_git_space(character) => {
+            State::Open => match byte {
+                b'\'' => state = State::SingleQuoted,
+                b'"' => state = State::DoubleQuoted,
+                b'\\' => word.push(bytes.next().ok_or(())?),
+                byte if is_git_space(byte) => {
                     words.push(std::mem::take(&mut word));
-                    while characters.next_if(|next| is_git_space(*next)).is_some() {}
+                    while bytes.next_if(|next| is_git_space(*next)).is_some() {}
                 }
                 other => word.push(other),
             },
@@ -3210,8 +3254,8 @@ mod tests {
         assert_eq!(
             aliases,
             [
-                ("wtrm".to_owned(), "worktree remove".to_owned()),
-                ("keep".to_owned(), "log --oneline".to_owned()),
+                ("wtrm".to_owned(), b"worktree remove".to_vec()),
+                ("keep".to_owned(), b"log --oneline".to_vec()),
             ]
         );
     }
@@ -3605,7 +3649,13 @@ mod tests {
     /// parsed word verbatim), not derived from documentation.
     #[test]
     fn alias_bodies_split_the_way_git_splits_them() {
-        let split = |value: &str| super::split_alias_words(value).expect(value);
+        let split = |value: &str| {
+            super::split_alias_words(value.as_bytes())
+                .expect(value)
+                .into_iter()
+                .map(|word| String::from_utf8(word).expect(value))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(split("worktree prune -v"), ["worktree", "prune", "-v"]);
         // A run of separators is one boundary, but Git does not trim: git
         // 2.53.0 traces this body as `'' worktree prune ''`.
@@ -3630,9 +3680,9 @@ mod tests {
         assert_eq!(split("   "), ["", ""]);
         // Git refuses these ("bad alias string"), so the caller passes them
         // through and Git fails them identically.
-        assert!(super::split_alias_words("log 'oops").is_err());
-        assert!(super::split_alias_words(r#"log "oops"#).is_err());
-        assert!(super::split_alias_words(r"log ends\").is_err());
+        assert!(super::split_alias_words(b"log 'oops").is_err());
+        assert!(super::split_alias_words(br#"log "oops"#).is_err());
+        assert!(super::split_alias_words(br"log ends\").is_err());
     }
 
     /// Git's alias splitter separates on its own `isspace` only: space, tab,
@@ -3640,7 +3690,13 @@ mod tests {
     /// `GIT_TRACE=1 git -c alias.zz=<body> zz`, which prints the split words.
     #[test]
     fn alias_bodies_split_on_gits_whitespace_only() {
-        let split = |value: &str| super::split_alias_words(value).expect(value);
+        let split = |value: &str| {
+            super::split_alias_words(value.as_bytes())
+                .expect(value)
+                .into_iter()
+                .map(|word| String::from_utf8(word).expect(value))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
             split("worktree\tremove\n--force\r\nview"),
             ["worktree", "remove", "--force", "view"]
@@ -3659,6 +3715,16 @@ mod tests {
         assert_eq!(split("worktree prune "), ["worktree", "prune", ""]);
         assert_eq!(split(" worktree prune"), ["", "worktree", "prune"]);
         assert_eq!(split("worktree '' prune"), ["worktree", "", "prune"]);
+        // The split is over bytes: a byte that is not UTF-8 stays in its
+        // word, and no byte above ASCII is a separator.
+        assert_eq!(
+            super::split_alias_words(b"worktree remove a\xffb\x85c\xa0d\x0be\x0cf"),
+            Ok(vec![
+                b"worktree".to_vec(),
+                b"remove".to_vec(),
+                b"a\xffb\x85c\xa0d\x0be\x0cf".to_vec(),
+            ])
+        );
     }
 
     /// The planner has to guard the path Git will act on. Splitting a body on
@@ -3745,10 +3811,10 @@ mod tests {
             command_index: 0,
             global_options: super::GlobalOptionScope::Significant,
             invocation_aliases: vec![
-                ("inner".to_owned(), "worktree remove".to_owned()),
-                ("outer".to_owned(), "inner --force".to_owned()),
-                ("loop1".to_owned(), "loop2".to_owned()),
-                ("loop2".to_owned(), "loop1".to_owned()),
+                ("inner".to_owned(), "worktree remove".into()),
+                ("outer".to_owned(), "inner --force".into()),
+                ("loop1".to_owned(), "loop2".into()),
+                ("loop2".to_owned(), "loop1".into()),
             ],
         };
         let arguments = [OsString::from("outer"), OsString::from("view")];
@@ -3773,10 +3839,10 @@ mod tests {
     #[test]
     fn alias_chains_are_followed_as_far_as_git_follows_them() {
         const HOPS: usize = 64;
-        let mut invocation_aliases: Vec<(String, String)> = (1..HOPS)
-            .map(|hop| (format!("hop{hop}"), format!("hop{}", hop + 1)))
+        let mut invocation_aliases: Vec<(String, Vec<u8>)> = (1..HOPS)
+            .map(|hop| (format!("hop{hop}"), format!("hop{}", hop + 1).into_bytes()))
             .collect();
-        invocation_aliases.push((format!("hop{HOPS}"), "worktree remove --force".to_owned()));
+        invocation_aliases.push((format!("hop{HOPS}"), "worktree remove --force".into()));
         let context = super::CommandContext {
             repository: std::path::PathBuf::from("."),
             git_directory: None,
@@ -3792,6 +3858,112 @@ mod tests {
                     .map(OsString::from)
                     .to_vec()
             )
+        );
+    }
+
+    /// A Unix alias body is bytes, and Git runs it whether or not they are
+    /// UTF-8. The planner used to give up on such a body and pass the command
+    /// through, so the expansion has to carry the exact bytes Git will see,
+    /// from every place an alias can be defined.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_alias_bodies_expand_to_the_bytes_git_runs() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let fixture = repository_fixture();
+        let body = OsStr::from_bytes(b"worktree remove --force ../vi\xffew");
+        let status = Command::new("git")
+            .args([OsStr::new("config"), OsStr::new("alias.stored"), body])
+            .current_dir(fixture.path())
+            .status()
+            .expect("store alias");
+        assert!(status.success());
+        let variable = OsStr::from_bytes(b"RIFTRI_TEST_NON_UTF8_ALIAS_\xff");
+        // SAFETY: test-only, and the variable name is unique to this test.
+        unsafe {
+            std::env::set_var(variable, body);
+        }
+        let assignment = |key: &str, value: &OsStr| {
+            let mut assignment = OsString::from(key);
+            assignment.push(value);
+            assignment
+        };
+
+        for arguments in [
+            vec![OsString::from("stored")],
+            vec![
+                OsString::from("-c"),
+                assignment("alias.one=", body),
+                OsString::from("one"),
+            ],
+            vec![
+                assignment("--config-env=alias.env=", variable),
+                OsString::from("env"),
+            ],
+            vec![
+                OsString::from("--config-env"),
+                assignment("alias.spaced=", variable),
+                OsString::from("spaced"),
+            ],
+        ] {
+            let context = super::command_contexts(fixture.path(), &arguments)
+                .into_iter()
+                .next()
+                .expect("command context");
+            let expanded = super::expand_worktree_alias(&context, &arguments)
+                .expect("expand")
+                .unwrap_or_else(|| panic!("{arguments:?} was not expanded"));
+            assert_eq!(
+                expanded[context.command_index..],
+                [
+                    OsString::from("worktree"),
+                    OsString::from("remove"),
+                    OsString::from("--force"),
+                    OsString::from_vec(b"../vi\xffew".to_vec()),
+                ],
+                "{arguments:?}"
+            );
+        }
+    }
+
+    /// macOS cannot create a non-UTF-8 path, so the end-to-end case uses a
+    /// non-UTF-8 option value: real Git accepts `--expire=now\xff` and prunes.
+    #[cfg(unix)]
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(feature = "native-cow-integration", target_os = "linux")
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn non_utf8_aliases_cannot_bypass_the_lifecycle_guard() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: fixture.path().join("bytes-view"),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/bytes")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+
+        let error = plan_git_command(
+            fixture.path(),
+            &[
+                OsString::from("-c"),
+                OsString::from_vec(b"alias.px=worktree prune --expire=now\xff".to_vec()),
+                OsString::from("px"),
+            ],
+        )
+        .expect_err("a non-UTF-8 worktree alias must not bypass the guard");
+        assert!(
+            error.to_string().contains("refusing `git worktree prune"),
+            "{error}"
         );
     }
 
