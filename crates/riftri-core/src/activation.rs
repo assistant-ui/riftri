@@ -201,9 +201,24 @@ fn plan_git_command_inner(
     arguments: &[OsString],
     expand_aliases: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
-    let Some(context) = command_context(current_directory, arguments) else {
-        return Ok(GitProxyPlan::Passthrough);
-    };
+    // More than one reading exists only behind an unrecognized global option,
+    // which already rules out the optimized paths, so the first reading that
+    // is not ordinary Git is a refusal and decides the plan.
+    for context in command_contexts(current_directory, arguments) {
+        let plan = plan_command_reading(current_directory, arguments, context, expand_aliases)?;
+        if !matches!(plan, GitProxyPlan::Passthrough) {
+            return Ok(plan);
+        }
+    }
+    Ok(GitProxyPlan::Passthrough)
+}
+
+fn plan_command_reading(
+    current_directory: &Path,
+    arguments: &[OsString],
+    context: CommandContext,
+    expand_aliases: bool,
+) -> Result<GitProxyPlan, ActivationError> {
     if arguments
         .get(context.command_index)
         .map(OsString::as_os_str)
@@ -1226,7 +1241,7 @@ struct CommandContext {
     command_index: usize,
     global_options: GlobalOptionScope,
     /// Aliases defined for this one invocation via `-c alias.<name>=<body>`
-    /// or `--config-env=alias.<name>=<variable>`. Git gives these the highest
+    /// or `--config-env alias.<name>=<variable>`. Git gives these the highest
     /// configuration precedence, so an alias planner that only reads the
     /// repository's stored configuration never sees them — which let
     /// `git -c 'alias.x=worktree remove --force' x <managed>` reach real Git
@@ -1257,6 +1272,19 @@ fn record_invocation_alias(aliases: &mut Vec<(String, String)>, assignment: &OsS
         return;
     }
     aliases.push((name.to_ascii_lowercase(), body.to_owned()));
+}
+
+/// Record a `--config-env` `<name>=<variable>` assignment when the name is an
+/// alias, taking the body from the named environment variable. An unset or
+/// unparseable variable is skipped: Git itself errors on it at lookup.
+fn record_environment_alias(aliases: &mut Vec<(String, String)>, assignment: &OsStr) {
+    if let Some((key, variable)) = assignment
+        .to_str()
+        .and_then(|assignment| assignment.split_once('='))
+        && let Ok(body) = std::env::var(variable)
+    {
+        record_invocation_alias(aliases, OsStr::new(&format!("{key}={body}")));
+    }
 }
 
 /// Git commands common enough that resolving an alias for them would add a
@@ -1448,16 +1476,25 @@ fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
     Ok(words)
 }
 
-fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
+/// Every reading of where the global options end and the command begins.
+///
+/// There is one reading unless the word after an unrecognized global option
+/// could be that option's separate value; then that word is the command in
+/// one reading and the scan continues past it for the other. A global option
+/// that is missing its value ends the scan: Git refuses the invocation.
+fn command_contexts(current_directory: &Path, arguments: &[OsString]) -> Vec<CommandContext> {
+    let mut contexts = Vec::new();
     let mut repository = current_directory.to_path_buf();
     let mut git_directory = None;
     let mut global_options = GlobalOptionScope::None;
     let mut invocation_aliases = Vec::new();
-    let mut unrecognized_global_option = false;
+    let mut possible_value_index = None;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "-C" {
-            let directory = arguments.get(index + 1)?;
+            let Some(directory) = arguments.get(index + 1) else {
+                break;
+            };
             let directory = Path::new(directory);
             repository = if directory.is_absolute() {
                 directory.to_path_buf()
@@ -1466,7 +1503,9 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             };
             index += 2;
         } else if argument == "--git-dir" || argument == "--work-tree" {
-            let value = arguments.get(index + 1)?;
+            let Some(value) = arguments.get(index + 1) else {
+                break;
+            };
             if argument == "--git-dir" {
                 git_directory = Some(value.clone());
             }
@@ -1483,29 +1522,32 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
         {
             index += 1;
         } else if argument == "-c" {
-            let assignment = arguments.get(index + 1)?;
+            let Some(assignment) = arguments.get(index + 1) else {
+                break;
+            };
             record_invocation_alias(&mut invocation_aliases, assignment);
             global_options.observe(GlobalOptionScope::Significant);
             index += 2;
-        } else if argument.to_string_lossy().starts_with("--config-env=") {
-            // `--config-env=alias.<name>=<variable>` takes the alias body from
-            // the named environment variable. An unset or unparseable variable
-            // is skipped: Git itself errors on it at lookup.
-            if let Some(assignment) = argument
-                .to_str()
-                .and_then(|argument| argument.strip_prefix("--config-env="))
-                && let Some((key, variable)) = assignment.split_once('=')
-                && let Ok(body) = std::env::var(variable)
-            {
-                record_invocation_alias(
-                    &mut invocation_aliases,
-                    OsStr::new(&format!("{key}={body}")),
-                );
-            }
+        } else if argument == "--config-env" {
+            let Some(assignment) = arguments.get(index + 1) else {
+                break;
+            };
+            record_environment_alias(&mut invocation_aliases, assignment);
+            global_options.observe(GlobalOptionScope::Significant);
+            index += 2;
+        } else if let Some(assignment) = option_value(argument, "--config-env=") {
+            record_environment_alias(&mut invocation_aliases, &assignment);
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
-        } else if argument == "--namespace" {
-            arguments.get(index + 1)?;
+        } else if argument == "--namespace"
+            || argument == "--attr-source"
+            || argument == "--shallow-file"
+        {
+            // Git takes the next word as this option's value, whatever it
+            // spells, so it must never be read as the command.
+            if arguments.get(index + 1).is_none() {
+                break;
+            }
             global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if argument == "--no-optional-locks"
@@ -1520,6 +1562,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             global_options.observe(GlobalOptionScope::CheckoutNeutral);
             index += 1;
         } else if argument.to_string_lossy().starts_with("--namespace=")
+            || argument.as_encoded_bytes().starts_with(b"--attr-source=")
             || argument.as_encoded_bytes().starts_with(b"--exec-path=")
             || argument.as_encoded_bytes().starts_with(b"--work-tree=")
             || argument == "--no-replace-objects"
@@ -1533,41 +1576,37 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             index += 1;
         } else if argument.to_string_lossy().starts_with('-') {
             // An option this parser does not know. Treating it as "not our
-            // business" would fail *open*: `git --attr-source=HEAD worktree
+            // business" would fail *open*: `git --future-option worktree
             // remove <managed>` would reach real Git with no lifecycle guard,
-            // even though the same command without the option is refused. Note
-            // the asymmetry that used to exist — an unrecognized *subcommand*
-            // option already fails closed. Record it as significant, which
-            // disqualifies the optimized paths and leaves the managed-path
-            // guard in charge, and keep scanning for the subcommand.
-            unrecognized_global_option = true;
+            // even though the same command without the option is refused, and
+            // an unrecognized *subcommand* option already fails closed. Record
+            // it as significant, which disqualifies the optimized paths and
+            // leaves the managed-path guard in charge, and keep scanning. Its
+            // arity is unknown, so unless a value is attached with `=` the
+            // next word may be its value.
+            if !argument.as_encoded_bytes().contains(&b'=') {
+                possible_value_index = Some(index + 1);
+            }
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else {
-            // The option above may have taken a separate value, in which case
-            // the token here is that value rather than the subcommand. Rather
-            // than guess its arity, look for the subcommand Riftri actually
-            // claims; anything else still resolves to this token and falls
-            // through to passthrough as before.
-            if unrecognized_global_option
-                && argument != WORKTREE_SUBCOMMAND
-                && let Some(offset) = arguments[index..]
-                    .iter()
-                    .position(|argument| argument == WORKTREE_SUBCOMMAND)
-            {
-                index += offset;
-            }
-            let git_directory = git_directory.map(|path| resolve_command_path(&repository, &path));
-            return Some(CommandContext {
-                repository,
+            let git_directory = git_directory
+                .as_deref()
+                .map(|path| resolve_command_path(&repository, path));
+            contexts.push(CommandContext {
+                repository: repository.clone(),
                 git_directory,
                 command_index: index,
                 global_options,
-                invocation_aliases,
+                invocation_aliases: invocation_aliases.clone(),
             });
+            if possible_value_index != Some(index) {
+                break;
+            }
+            index += 1;
         }
     }
-    None
+    contexts
 }
 
 fn resolve_command_path(base: &Path, value: &OsStr) -> PathBuf {
@@ -3026,7 +3065,10 @@ mod tests {
             fixture.path().join(".git").into_os_string(),
         ];
         let arguments = [&selection[..], &["wtrm".into(), "view".into()]].concat();
-        let context = super::command_context(outside.path(), &arguments).expect("command context");
+        let context = super::command_contexts(outside.path(), &arguments)
+            .into_iter()
+            .next()
+            .expect("command context");
 
         assert_eq!(
             super::expand_worktree_alias(&context, &arguments).expect("expand alias"),
@@ -3548,10 +3590,10 @@ mod tests {
     /// A global option this parser does not know must not fail *open*. It used
     /// to: the parse bailed out and the command reached real Git with no
     /// lifecycle guard, so `git --attr-source=HEAD worktree remove <managed>`
-    /// removed a managed worktree that the same command without the option
-    /// refuses. Every future Git global option inherits that hole, so the
-    /// unknown-token policy has to match the subcommand parser's, which
-    /// already fails closed.
+    /// (an option the parser did not know then) removed a managed worktree
+    /// that the same command without the option refuses. Every future Git
+    /// global option inherits that hole, so the unknown-token policy has to
+    /// match the subcommand parser's, which already fails closed.
     // Creating a managed worktree needs a native copy-on-write backend, so
     // this runs where `worktree.rs`'s own tests run.
     #[cfg_attr(
@@ -3584,6 +3626,8 @@ mod tests {
         for option in [
             vec![OsString::from("--attr-source=HEAD")],
             vec![OsString::from("--attr-source"), OsString::from("HEAD")],
+            vec![OsString::from("--riftri-unknown=HEAD")],
+            vec![OsString::from("--riftri-unknown"), OsString::from("HEAD")],
         ] {
             let mut arguments = option.clone();
             arguments.extend([
@@ -3597,6 +3641,107 @@ mod tests {
             assert!(
                 error.to_string().contains("managed Riftri worktree"),
                 "{option:?}: {error}"
+            );
+        }
+    }
+
+    /// Git reads the word after `--attr-source`, `--config-env`, or
+    /// `--shallow-file` as that option's value, and more options may follow
+    /// it. The planner used to take the value for the command, so
+    /// `git --attr-source HEAD -c 'alias.wtrm=worktree remove --force' wtrm
+    /// <managed>` reached real Git unclassified. An option the planner does
+    /// not know may or may not take a value, so both readings are guarded.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn spaced_global_option_values_are_not_read_as_the_command() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("spaced-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/spaced")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        git(
+            fixture.path(),
+            &["config", "alias.stored", "worktree remove --force"],
+        );
+        // SAFETY: test-only, and the variable name is unique to this test.
+        unsafe {
+            std::env::set_var("RIFTRI_TEST_SPACED_ALIAS", "worktree remove --force");
+        }
+
+        let one_shot = "alias.wtrm=worktree remove --force";
+        for prefix in [
+            vec!["--attr-source", "HEAD", "-c", one_shot, "wtrm"],
+            vec!["--attr-source", "HEAD", "stored"],
+            vec!["--attr-source", "worktree", "worktree", "remove", "--force"],
+            vec![
+                "--config-env",
+                "alias.wtrm=RIFTRI_TEST_SPACED_ALIAS",
+                "wtrm",
+            ],
+            vec![
+                "--config-env",
+                "core.quotePath=RIFTRI_TEST_SPACED_ALIAS",
+                "-c",
+                one_shot,
+                "wtrm",
+            ],
+            vec!["--shallow-file", "shallow", "-c", one_shot, "wtrm"],
+            // Not a Git option today: the next word is its value in one
+            // reading and the command in the other.
+            vec!["--riftri-unknown", "value", "-c", one_shot, "wtrm"],
+            vec!["--riftri-unknown", "value", "stored"],
+            vec!["--riftri-unknown", "stored"],
+            vec![
+                "--riftri-unknown",
+                "worktree",
+                "worktree",
+                "remove",
+                "--force",
+            ],
+            vec!["--riftri-unknown", "worktree", "remove", "--force"],
+            vec!["-X", "value", "--riftri-unknown", "value", "stored"],
+        ] {
+            let mut arguments: Vec<OsString> = prefix.iter().map(OsString::from).collect();
+            arguments.push(destination.clone().into_os_string());
+
+            let error = plan_git_command(fixture.path(), &arguments)
+                .expect_err("a spaced global option value must not bypass the guard");
+            assert!(
+                error.to_string().contains("managed Riftri worktree"),
+                "{prefix:?}: {error}"
+            );
+        }
+
+        // The guard stays narrow: a value that merely spells `worktree`, or a
+        // later argument that does, is not a lifecycle command.
+        for arguments in [
+            vec!["--attr-source", "worktree", "log"],
+            vec!["--riftri-unknown", "worktree", "list"],
+            vec!["--riftri-unknown", "value", "log", "--grep", "worktree"],
+        ] {
+            let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan ordinary command"),
+                    GitProxyPlan::Passthrough
+                ),
+                "{arguments:?} was not delegated to Git"
             );
         }
     }

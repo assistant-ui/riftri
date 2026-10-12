@@ -34,6 +34,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `worktree remove --force` reached real Git unclassified and deleted a
   managed view outside the journal.
 
+- A Git global option written with a separate value no longer hides a worktree
+  lifecycle command from the shim. The value of `--attr-source <value>`,
+  `--config-env <name>=<envvar>`, or `--shallow-file <file>` was read as the
+  command, so `git --attr-source HEAD -c 'alias.wtrm=worktree remove --force'
+  wtrm <managed>` reached Git and removed a managed worktree outside the
+  journal. Those forms are now parsed as Git parses them, and for a global
+  option the shim does not know, the next word is checked both as the option's
+  value and as the command.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
