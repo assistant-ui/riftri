@@ -939,7 +939,8 @@ fn requests_git_would_reject_are_refused_as_policy_before_anything_is_written() 
     let unborn = fixture.path().join("unborn");
     repository_fixture(&unborn, false);
 
-    let cases: [(&str, &std::path::Path, &[&str], &str); 4] = [
+    let absent_object_id = "1".repeat(40);
+    let cases: [(&str, &std::path::Path, &[&str], &str); 5] = [
         (
             "branch-exists",
             &repository,
@@ -950,6 +951,12 @@ fn requests_git_would_reject_are_refused_as_policy_before_anything_is_written() 
             "missing-revision",
             &repository,
             &["-b", "fresh", "no-such-revision"],
+            "does not name a commit",
+        ),
+        (
+            "absent-object-id",
+            &repository,
+            &["--detach", &absent_object_id],
             "does not name a commit",
         ),
         ("no-commits", &unborn, &["-b", "fresh"], "no commits yet"),
