@@ -19,8 +19,14 @@ use crate::test_support::{WritableTempDir, writable_tempdir};
 
 #[path = "worktree_checkout_hegel_tests.rs"]
 mod checkout;
+#[path = "worktree_destination_hegel_tests.rs"]
+mod destination;
+#[path = "worktree_lfs_hegel_tests.rs"]
+mod lfs;
 #[path = "worktree_policy_hegel_tests.rs"]
 mod policy;
+#[path = "worktree_refusal_hegel_tests.rs"]
+mod refusal;
 #[path = "worktree_state_hegel_tests.rs"]
 mod state;
 
