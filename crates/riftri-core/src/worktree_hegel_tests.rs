@@ -23,8 +23,12 @@ mod checkout;
 mod destination;
 #[path = "worktree_lfs_hegel_tests.rs"]
 mod lfs;
+#[path = "worktree_lifecycle_hegel_tests.rs"]
+mod lifecycle;
 #[path = "worktree_policy_hegel_tests.rs"]
 mod policy;
+#[path = "worktree_recovery_hegel_tests.rs"]
+mod recovery;
 #[path = "worktree_refusal_hegel_tests.rs"]
 mod refusal;
 #[path = "worktree_state_hegel_tests.rs"]
