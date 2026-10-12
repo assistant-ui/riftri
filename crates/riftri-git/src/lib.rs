@@ -797,12 +797,17 @@ impl Git {
     }
 
     /// Resolve Git's unique path suffix before falling back to a filesystem path.
+    ///
+    /// `repository` is where the worktree inventory is read. `directory` is
+    /// the directory the caller's Git command runs in, which is where Git
+    /// resolves a relative path; under `--git-dir` the two differ.
     pub fn resolve_worktree_path(
         &self,
         repository: &Path,
+        directory: &Path,
         selector: &OsStr,
     ) -> Result<PathBuf, GitError> {
-        let path = repository.join(selector);
+        let path = directory.join(selector);
         let suffix = selector.as_encoded_bytes();
         if suffix.is_empty() {
             return Ok(path);

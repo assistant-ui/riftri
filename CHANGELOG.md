@@ -91,6 +91,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `riftri worktree add` already was. `riftri worktree prune` no longer refuses
   a bare repository.
 
+- The Git shim resolves a relative worktree path in the directory Git runs
+  in. Under `--git-dir` it used the worktree root it derived from the Git
+  directory instead, so from another directory
+  `git --git-dir=<repository>/.git worktree remove --force ./view` was checked
+  against a path that is not a worktree and reached real Git, which deleted
+  the managed view outside the removal journal. The same held for
+  `git worktree move` and for a bare repository named by `--git-dir`.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed

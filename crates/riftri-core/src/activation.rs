@@ -266,15 +266,24 @@ fn plan_command_reading(
             // Without a live working tree to stand in for it, a repository
             // named by `--git-dir` is planned from that directory, which is
             // where Riftri runs Git for a bare repository.
-            let repository = root.or(context.git_directory).unwrap_or(context.repository);
+            let repository = root
+                .or(context.git_directory)
+                .unwrap_or_else(|| context.repository.clone());
             let proxy = activation_for_proxy(&repository)?;
             (repository, proxy)
         }
         Err((git_directory, error)) => {
             let proxy = uninspected_for_proxy(&git, git_directory_location(git_directory), error)?;
-            (context.repository, proxy)
+            (context.repository.clone(), proxy)
         }
     };
+    // Two directories from here on. `repository` is inside the repository
+    // Git opens and is where Riftri runs its own Git commands. `directory`
+    // is where the caller's Git runs, and Git resolves relative worktree
+    // paths there. They differ under `--git-dir`: keying path arguments on
+    // `repository` let `git --git-dir=<repository>/.git worktree remove
+    // --force ./view` from elsewhere be checked against the wrong path.
+    let directory = context.repository.as_path();
     let activation = match proxy {
         ProxyRepository::Absent => return Ok(GitProxyPlan::Passthrough),
         ProxyRepository::Inspected(activation) => activation,
@@ -303,16 +312,19 @@ fn plan_command_reading(
     match subcommand.to_string_lossy().as_ref() {
         "add" => plan_enabled_add(
             &repository,
+            directory,
             &arguments[context.command_index + 2..],
             context.global_options,
         ),
         "remove" => plan_enabled_remove(
             &repository,
+            directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
         ),
         "move" => plan_enabled_move(
             &repository,
+            directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
         ),
@@ -1755,6 +1767,7 @@ fn requests_git_help(arguments: &[OsString]) -> bool {
 
 fn plan_enabled_add(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
@@ -1771,13 +1784,14 @@ fn plan_enabled_add(
         // Nothing about the request is unreproducible, but Riftri also gains
         // nothing by claiming the option: ordinary Git honors it exactly.
         GlobalOptionScope::CheckoutNeutral => Ok(GitProxyPlan::Passthrough),
-        GlobalOptionScope::None => parse_enabled_add(repository, arguments)
+        GlobalOptionScope::None => parse_enabled_add(repository, directory, arguments)
             .map(|(request, quiet)| GitProxyPlan::OptimizedAdd { request, quiet }),
     }
 }
 
 fn parse_enabled_add(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
 ) -> Result<(AddWorktreeRequest, bool), ActivationError> {
     let mut mode = None;
@@ -1905,12 +1919,7 @@ fn parse_enabled_add(
         }
     };
 
-    let destination = PathBuf::from(&positional[0]);
-    let destination = if destination.is_absolute() {
-        destination
-    } else {
-        repository.join(destination)
-    };
+    let destination = resolve_command_path(directory, &positional[0]);
 
     Ok((
         AddWorktreeRequest {
@@ -1935,6 +1944,7 @@ fn is_short_option_cluster(argument: &OsStr) -> bool {
 
 fn parse_enabled_remove(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<(RemoveWorktreeRequest, bool)>, ActivationError> {
     let mut force = false;
@@ -1954,7 +1964,7 @@ fn parse_enabled_remove(
     let [path] = positional.as_slice() else {
         return Ok(None);
     };
-    let destination = Git::default().resolve_worktree_path(repository, path)?;
+    let destination = Git::default().resolve_worktree_path(repository, directory, path)?;
     let Some(state_directory) = managed_worktree_state_directory(repository, &destination)? else {
         return Ok(None);
     };
@@ -1970,11 +1980,12 @@ fn parse_enabled_remove(
 
 fn plan_enabled_remove(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
     if optimization_compatible
-        && let Some((request, force)) = parse_enabled_remove(repository, arguments)?
+        && let Some((request, force)) = parse_enabled_remove(repository, directory, arguments)?
     {
         return Ok(if force {
             GitProxyPlan::OptimizedForceRemove(request)
@@ -1982,12 +1993,13 @@ fn plan_enabled_remove(
             GitProxyPlan::OptimizedRemove(request)
         });
     }
-    guard_managed_path_lifecycle(repository, arguments, "remove")?;
+    guard_managed_path_lifecycle(repository, directory, arguments, "remove")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
 fn parse_enabled_move(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<MoveWorktreeRequest>, ActivationError> {
     let (source, destination) = match arguments {
@@ -1995,27 +2007,30 @@ fn parse_enabled_move(
         [separator, source, destination] if separator == "--" => (source, destination),
         _ => return Ok(None),
     };
-    let source = Git::default().resolve_worktree_path(repository, source)?;
+    let source = Git::default().resolve_worktree_path(repository, directory, source)?;
     let Some(state_directory) = managed_worktree_state_directory(repository, &source)? else {
         return Ok(None);
     };
     Ok(Some(MoveWorktreeRequest {
         repository: repository.to_path_buf(),
         source,
-        destination: resolve_command_path(repository, destination),
+        destination: resolve_command_path(directory, destination),
         state_dir: Some(state_directory),
     }))
 }
 
 fn plan_enabled_move(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
-    if optimization_compatible && let Some(request) = parse_enabled_move(repository, arguments)? {
+    if optimization_compatible
+        && let Some(request) = parse_enabled_move(repository, directory, arguments)?
+    {
         return Ok(GitProxyPlan::OptimizedMove(request));
     }
-    guard_managed_path_lifecycle(repository, arguments, "move")?;
+    guard_managed_path_lifecycle(repository, directory, arguments, "move")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
@@ -2127,13 +2142,14 @@ fn plan_enabled_prune(
 
 fn guard_managed_path_lifecycle(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     operation: &str,
 ) -> Result<(), ActivationError> {
     let Some(path) = positional_paths(arguments).first().copied() else {
         return Ok(());
     };
-    let path = Git::default().resolve_worktree_path(repository, path)?;
+    let path = Git::default().resolve_worktree_path(repository, directory, path)?;
     if managed_worktree_state_directory(repository, &path)?.is_some() {
         return Err(unsupported(format!(
             "refusing `git worktree {operation}` options that would bypass the journal for managed Riftri worktree {}; use a supported Riftri lifecycle command instead",
@@ -4278,6 +4294,89 @@ mod tests {
             .expect_err("an enabled bare repository must plan its own adds");
         assert!(
             error.to_string().contains("invocation-level configuration"),
+            "{error}"
+        );
+    }
+
+    /// The planner keeps two directories apart: the repository, where Riftri
+    /// runs its own Git commands, and the directory the caller's Git runs
+    /// in, where Git resolves relative worktree paths. Every path argument
+    /// of a planned request has to come from the second.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn worktree_path_arguments_resolve_in_the_directory_git_runs_in() {
+        let parent = tempdir().expect("fixture parent");
+        let parent = fs::canonicalize(parent.path()).expect("canonical fixture parent");
+        let repository = parent.join("repository");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write fixture");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        enable_repository(&repository).expect("enable repository");
+        let view = parent.join("view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: view.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::Detached,
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let arguments = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+
+        // From the repository root `./view` is not a worktree at all.
+        assert!(
+            super::parse_enabled_remove(&repository, &repository, &arguments(&["./view"]))
+                .expect("parse removal from the repository root")
+                .is_none()
+        );
+        let (removal, _) =
+            super::parse_enabled_remove(&repository, &parent, &arguments(&["./view"]))
+                .expect("parse removal")
+                .expect("the managed view, named from its parent directory");
+        assert_eq!(removal.repository, repository);
+        assert_eq!(removal.destination, parent.join("./view"));
+
+        let relocation =
+            super::parse_enabled_move(&repository, &parent, &arguments(&["./view", "./moved"]))
+                .expect("parse move")
+                .expect("the managed view, named from its parent directory");
+        assert_eq!(relocation.repository, repository);
+        assert_eq!(relocation.source, parent.join("./view"));
+        assert_eq!(relocation.destination, parent.join("./moved"));
+
+        let (addition, _) =
+            super::parse_enabled_add(&repository, &parent, &arguments(&["--detach", "./new"]))
+                .expect("parse add");
+        assert_eq!(addition.repository, repository);
+        assert_eq!(addition.destination, parent.join("./new"));
+
+        let error = super::guard_managed_path_lifecycle(
+            &repository,
+            &parent,
+            &arguments(&["--force", "./view"]),
+            "remove",
+        )
+        .expect_err("the guard must check the path Git acts on");
+        assert!(
+            error.to_string().contains("managed Riftri worktree"),
             "{error}"
         );
     }

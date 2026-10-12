@@ -2098,6 +2098,137 @@ fn git_directory_aliases_cannot_bypass_managed_removal_guard() {
     }
 }
 
+/// Under `--git-dir` Git resolves a relative worktree path against the
+/// directory it runs in. The shim resolved it against the worktree root it
+/// derived from the Git directory, so from the parent directory
+/// `git --git-dir=repository/.git worktree remove --force ./view` was checked
+/// against a path that is not a worktree and reached real Git, which deleted
+/// the managed view. Real Git is the oracle here: `git worktree lock` resolves
+/// its argument exactly like `remove` and `move`, and changes no files.
+#[cfg(target_os = "macos")]
+#[test]
+fn relative_worktree_paths_are_guarded_where_git_resolves_them() {
+    let fixture = RepositoryFixture::new();
+    let root = fixture.directory.path();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let managed = root.join("view");
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach"])
+        .arg(&managed)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::write(managed.join("untracked.txt"), "private\n").expect("dirty managed view");
+    // An ordinary worktree with the same basename, so no unique suffix
+    // decides and both Git and the shim fall back to the literal path.
+    let ordinary = root.join("sub/view");
+    fs::create_dir_all(root.join("sub/deep")).expect("create nested directories");
+    assert!(
+        git(
+            &fixture.repository,
+            &["worktree", "add", "--quiet", "--detach", "../sub/view"]
+        )
+        .status
+        .success()
+    );
+
+    let git_resolves = |directory: &Path, globals: &[&str], selector: &str| {
+        let lock = [globals, &["worktree", "lock", selector]].concat();
+        assert!(git(directory, &lock).status.success(), "{lock:?}");
+        let listing = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
+        let listing = String::from_utf8(listing.stdout).expect("UTF-8 worktree list");
+        let locked = listing
+            .split("\n\n")
+            .find(|entry| entry.lines().any(|line| line.starts_with("locked")))
+            .and_then(|entry| entry.lines().next())
+            .and_then(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .expect("one locked worktree");
+        let unlock = [globals, &["worktree", "unlock", selector]].concat();
+        assert!(git(directory, &unlock).status.success(), "{unlock:?}");
+        fs::canonicalize(locked).expect("canonical worktree path")
+    };
+    let shim = |directory: &Path, globals: &[&str], command: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(globals)
+            .args(command)
+            .current_dir(directory)
+            .output()
+            .expect("run Git through the shim")
+    };
+    let managed_canonical = fs::canonicalize(&managed).expect("canonical managed view");
+
+    for (directory, globals, selector) in [
+        (root, &["--git-dir=repository/.git"][..], "./view"),
+        (root, &["--git-dir", "repository/.git"][..], "sub/../view"),
+        (
+            root,
+            &["--git-dir=repository/.git", "--work-tree=repository"][..],
+            "./view",
+        ),
+        (
+            fixture.repository.as_path(),
+            &["-C", "..", "--git-dir=repository/.git"][..],
+            "./view",
+        ),
+        (
+            root.join("sub").as_path(),
+            &["--git-dir=../repository/.git"][..],
+            "../view",
+        ),
+    ] {
+        assert_eq!(
+            git_resolves(directory, globals, selector),
+            managed_canonical,
+            "{globals:?} {selector}: Git does not resolve this to the managed view"
+        );
+        for command in [
+            &["worktree", "remove", "--force", selector][..],
+            &["worktree", "move", selector, "./moved"][..],
+        ] {
+            let refused = shim(directory, globals, command);
+            assert!(
+                !refused.status.success(),
+                "{globals:?} {command:?} reached Git"
+            );
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("managed Riftri worktree"),
+                "{globals:?} {command:?}: {}",
+                String::from_utf8_lossy(&refused.stderr)
+            );
+            assert!(managed.join("untracked.txt").is_file());
+        }
+    }
+
+    // The same spelling from another directory names the ordinary worktree,
+    // which stays ordinary Git, although from the repository root it would
+    // name the managed view.
+    let deep = root.join("sub/deep");
+    let globals = &["--git-dir=../../repository/.git"][..];
+    assert_eq!(
+        git_resolves(&deep, globals, "../view"),
+        fs::canonicalize(&ordinary).expect("canonical ordinary worktree")
+    );
+    let removed = shim(
+        &deep,
+        globals,
+        &["worktree", "remove", "--force", "../view"],
+    );
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!ordinary.exists());
+    assert!(managed.join("untracked.txt").is_file());
+}
+
 /// Riftri manages a bare repository's worktrees from its Git directory, but
 /// the shim took a repository without a working-tree root for no repository
 /// at all, so from there `git worktree remove --force <managed>` ran as
@@ -2202,6 +2333,16 @@ fn bare_repository_git_directory_cannot_bypass_managed_lifecycle_guards() {
                 "remove",
                 "--force",
                 "moved",
+            ][..],
+        ),
+        (
+            root,
+            &[
+                "--git-dir=bare.git",
+                "worktree",
+                "remove",
+                "--force",
+                "./moved",
             ][..],
         ),
     ] {
