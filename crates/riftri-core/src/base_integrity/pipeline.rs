@@ -32,18 +32,35 @@ impl sha2::digest::Update for EntryBytes {
     }
 }
 
-type Encoded = io::Result<Option<Vec<u8>>>;
+#[derive(Debug)]
+enum EncodedLeaf {
+    Buffered(Vec<u8>),
+    Stream {
+        header: Vec<u8>,
+        file: File,
+        length: u64,
+    },
+}
+
+type Encoded = io::Result<Option<EncodedLeaf>>;
+
+enum Chunk {
+    Complete(Vec<u8>),
+    Bytes(Vec<u8>),
+    End,
+    Serial,
+}
 
 struct Job {
     path: PathBuf,
     name: OsString,
-    result: SyncSender<Encoded>,
+    result: SyncSender<io::Result<Chunk>>,
 }
 
 struct Pending {
     path: PathBuf,
     name: OsString,
-    result: Receiver<Encoded>,
+    result: Receiver<io::Result<Chunk>>,
 }
 
 struct Pipeline<'a> {
@@ -57,13 +74,25 @@ struct Pipeline<'a> {
 
 fn encode_leaf(path: &Path, name: &OsStr, scratch: &mut HashScratch) -> Encoded {
     let metadata = fs::symlink_metadata(path)?;
-    // Large files keep the original streaming path. A directory replacing an
-    // enumerated leaf also goes through the original complete traversal.
-    if metadata.is_dir() || (metadata.is_file() && metadata.len() > MAX_FILE_BYTES) {
+    // A directory replacing an enumerated leaf still uses the original walk.
+    if metadata.is_dir() {
         return Ok(None);
     }
     let mut encoded = EntryBytes::default();
     hash_native(name, &mut encoded);
+    if metadata.is_file() && metadata.len() > MAX_FILE_BYTES {
+        hash_v2_metadata(path, &metadata, &mut encoded, scratch)?;
+        sha2::digest::Update::update(&mut encoded, b"file");
+        sha2::digest::Update::update(&mut encoded, &metadata.len().to_le_bytes());
+        if encoded.overflow {
+            return Ok(None);
+        }
+        return Ok(Some(EncodedLeaf::Stream {
+            header: encoded.bytes,
+            file: open_regular(path)?,
+            length: metadata.len(),
+        }));
+    }
     hash_entry_with_metadata(
         path,
         metadata,
@@ -74,7 +103,62 @@ fn encode_leaf(path: &Path, name: &OsStr, scratch: &mut HashScratch) -> Encoded 
     )?;
     // Large xattr sets cannot make the queue unbounded. Re-read them serially;
     // an overflow is never accepted as a truncated integrity observation.
-    Ok((!encoded.overflow).then_some(encoded.bytes))
+    Ok((!encoded.overflow).then_some(EncodedLeaf::Buffered(encoded.bytes)))
+}
+
+fn stream_reader(
+    mut reader: impl Read,
+    expected_length: u64,
+    buffer: &mut [u8],
+    mut emit: impl FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    let mut length = 0;
+    loop {
+        let count = reader.read(buffer)?;
+        if count == 0 {
+            break;
+        }
+        length += count as u64;
+        // A dropped consumer stops reading at this chunk, rather than draining
+        // a potentially huge file while the scoped owner waits for its worker.
+        emit(&buffer[..count])?;
+    }
+    if length != expected_length {
+        return Err(io::Error::other(ChangedWhileReading));
+    }
+    Ok(())
+}
+
+fn send_encoded(
+    encoded: Encoded,
+    sender: &SyncSender<io::Result<Chunk>>,
+    scratch: &mut HashScratch,
+) {
+    let (header, file, length) = match encoded {
+        Ok(Some(EncodedLeaf::Stream {
+            header,
+            file,
+            length,
+        })) => (header, file, length),
+        other => {
+            let message = other.map(|entry| match entry {
+                Some(EncodedLeaf::Buffered(bytes)) => Chunk::Complete(bytes),
+                None => Chunk::Serial,
+                Some(EncodedLeaf::Stream { .. }) => unreachable!(),
+            });
+            let _ = sender.send(message);
+            return;
+        }
+    };
+    if sender.send(Ok(Chunk::Bytes(header))).is_err() {
+        return;
+    }
+    let result = stream_reader(file, length, &mut scratch.file_bytes, |bytes| {
+        sender
+            .send(Ok(Chunk::Bytes(bytes.to_vec())))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "integrity consumer stopped"))
+    });
+    let _ = sender.send(result.map(|()| Chunk::End));
 }
 
 pub(super) fn hash(root: &Path, digest: &mut Sha256) -> io::Result<()> {
@@ -108,9 +192,10 @@ fn hash_with_encoder(
                 let mut scratch = HashScratch::new();
                 while let Ok(job) = receiver.recv() {
                     let result = encode(&job.path, &job.name, &mut scratch);
-                    // Each job has a one-slot response queue, so dropping the
-                    // owner on any error never strands a worker on a send.
-                    let _ = job.result.send(result);
+                    // Large files use the same one-slot queue as small leaves.
+                    // Each payload is at most 64 KiB; an entry header is at most
+                    // 512 KiB. Dropping pending receivers releases blocked sends.
+                    send_encoded(result, &job.result, &mut scratch);
                 }
             })?;
             senders.push(sender);
@@ -193,14 +278,19 @@ impl Pipeline<'_> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(());
         };
-        let result = (|| {
-            let bytes = pending
+        let result = (|| loop {
+            let chunk = pending
                 .result
                 .recv()
                 .map_err(|_| io::Error::other("integrity reader stopped"))??;
-            match bytes {
-                Some(bytes) => self.digest.update(bytes),
-                None => {
+            match chunk {
+                Chunk::Complete(bytes) => {
+                    self.digest.update(bytes);
+                    break Ok(());
+                }
+                Chunk::Bytes(bytes) => self.digest.update(bytes),
+                Chunk::End => break Ok(()),
+                Chunk::Serial => {
                     hash_native(&pending.name, self.digest);
                     hash_entry(
                         &pending.path,
@@ -209,9 +299,9 @@ impl Pipeline<'_> {
                         SpecialEntries::Refuse,
                         &mut self.scratch,
                     )?;
+                    break Ok(());
                 }
             }
-            Ok(())
         })();
         self.failed |= result.is_err();
         result
@@ -243,6 +333,106 @@ mod tests {
     }
 
     #[test]
+    fn streamed_chunks_are_bounded_and_match_the_serial_entry() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("large");
+        fs::write(&path, vec![7; MAX_FILE_BYTES as usize * 5 + 17]).unwrap();
+        let name = OsStr::new("large");
+        let mut expected = Sha256::new();
+        hash_native(name, &mut expected);
+        hash_entry(
+            &path,
+            &mut expected,
+            MarkerVersion::V2,
+            SpecialEntries::Refuse,
+            &mut HashScratch::new(),
+        )
+        .unwrap();
+        let mut actual = Sha256::new();
+        let mut chunks = 0;
+        std::thread::scope(|scope| {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let path = &path;
+            scope.spawn(move || {
+                let mut scratch = HashScratch::new();
+                let encoded = encode_leaf(path, name, &mut scratch);
+                send_encoded(encoded, &sender, &mut scratch);
+            });
+            loop {
+                match receiver.recv().unwrap().unwrap() {
+                    Chunk::Bytes(bytes) => {
+                        assert!(bytes.len() <= MAX_FILE_BYTES as usize);
+                        chunks += 1;
+                        actual.update(bytes);
+                    }
+                    Chunk::End => break,
+                    _ => panic!("large input did not stream"),
+                }
+            }
+        });
+        assert!(chunks >= 7, "header plus at least six content chunks");
+        assert_eq!(actual.finalize(), expected.finalize());
+    }
+
+    #[test]
+    fn stream_length_changes_and_read_errors_fail_closed() {
+        for expected_length in [2, 4] {
+            let error =
+                stream_reader(&b"abc"[..], expected_length, &mut [0; 2], |_| Ok(())).unwrap_err();
+            assert!(error.get_ref().unwrap().is::<ChangedWhileReading>());
+        }
+        struct FailedReader;
+        impl Read for FailedReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+        }
+        assert_eq!(
+            stream_reader(FailedReader, 1, &mut [0; 2], |_| Ok(()))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn consumer_failure_stops_before_another_read() {
+        struct CountingReader<'a>(&'a std::cell::Cell<usize>);
+        impl Read for CountingReader<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                self.0.set(self.0.get() + 1);
+                bytes.fill(1);
+                Ok(bytes.len())
+            }
+        }
+        let reads = std::cell::Cell::new(0);
+        let error = stream_reader(CountingReader(&reads), 100, &mut [0; 16], |_| {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn dropping_a_stream_receiver_releases_its_producer() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("large");
+        fs::write(&path, vec![1; MAX_FILE_BYTES as usize * 8]).unwrap();
+        std::thread::scope(|scope| {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            let worker = scope.spawn(move || {
+                let mut scratch = HashScratch::new();
+                let encoded = encode_leaf(&path, OsStr::new("large"), &mut scratch);
+                send_encoded(encoded, &sender, &mut scratch);
+            });
+            assert!(matches!(receiver.recv().unwrap().unwrap(), Chunk::Bytes(_)));
+            drop(receiver);
+            worker.join().unwrap();
+        });
+    }
+
+    #[test]
     fn encoded_bytes_are_strictly_bounded() {
         use sha2::digest::Update;
         let mut encoded = EntryBytes::default();
@@ -256,15 +446,14 @@ mod tests {
     }
 
     #[test]
-    fn large_files_use_serial_fallback_and_missing_files_fail() {
+    fn large_files_stream_and_missing_files_fail() {
         let fixture = tempfile::tempdir().unwrap();
         let path = fixture.path().join("large");
         fs::write(&path, vec![1; MAX_FILE_BYTES as usize + 1]).unwrap();
-        assert!(
-            encode_leaf(&path, OsStr::new("large"), &mut HashScratch::new())
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            encode_leaf(&path, OsStr::new("large"), &mut HashScratch::new()).unwrap(),
+            Some(EncodedLeaf::Stream { .. })
+        ));
         fs::remove_file(&path).unwrap();
         assert_eq!(
             encode_leaf(&path, OsStr::new("large"), &mut HashScratch::new())
@@ -315,7 +504,11 @@ mod tests {
         };
         let fixture = tempfile::tempdir().unwrap();
         for i in 0..12 {
-            fs::write(fixture.path().join(format!("{i:03}")), b"payload").unwrap();
+            fs::write(
+                fixture.path().join(format!("{i:03}")),
+                vec![1; MAX_FILE_BYTES as usize * 3],
+            )
+            .unwrap();
         }
         let barrier = Barrier::new(4);
         let started = AtomicUsize::new(0);

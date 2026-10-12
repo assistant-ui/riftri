@@ -8,14 +8,44 @@ permissions:
   contents: read
 
 jobs:
-  regression:
-    name: Large-file worker regression
+  quality:
+    name: Large-file stream safety
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Verify that large files use workers
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Check Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Verify integrity reads and cancellation
+        run: cargo test --locked -p riftri-core --lib base_integrity -- --nocapture
+      - name: Run workspace tests
+        env:
+          RUST_TEST_THREADS: 2
+        run: cargo test --workspace --locked
+      - name: Create isolated APFS safety volume
+        run: |
+          hdiutil create -size 512m -fs APFS -volname RiftriStreamSafety -type SPARSEBUNDLE "$RUNNER_TEMP/stream-safety"
+          mkdir "$RUNNER_TEMP/stream-apfs"
+          hdiutil attach "$RUNNER_TEMP/stream-safety.sparsebundle" -mountpoint "$RUNNER_TEMP/stream-apfs" -nobrowse
+      - name: Verify allocation and private writes
+        env:
+          TMPDIR: ${{ runner.temp }}/stream-apfs
+          RIFTRI_BENCHMARK_OUTPUT: ${{ runner.temp }}/allocation.json
         run: >-
-          cargo test --locked -p riftri-core --lib
-          base_integrity::pipeline::tests::large_regular_files_are_assigned_to_a_worker
-          -- --exact --nocapture
+          cargo test --locked -p riftri-core --test native_cow_benchmark
+          reports_cold_cached_and_private_write_costs -- --ignored --exact --nocapture
+      - name: Detach safety volume
+        if: always()
+        run: |
+          if mount | grep -F " on $RUNNER_TEMP/stream-apfs ("; then
+            hdiutil detach "$RUNNER_TEMP/stream-apfs"
+          fi
+      - name: Retain allocation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: integrity-stream-safety
+          path: ${{ runner.temp }}/allocation.json
+          if-no-files-found: warn
