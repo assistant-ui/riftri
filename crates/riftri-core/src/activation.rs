@@ -262,7 +262,6 @@ fn plan_git_command_inner(
         ),
         "prune" => plan_enabled_prune(
             &repository,
-            &activation,
             &arguments[context.command_index + 2..],
             context.global_options,
         ),
@@ -1117,8 +1116,11 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
     let Some(root) = repository.root else {
         return Ok(ProxyRepository::Absent);
     };
+    // Read the opt-in from `path`, where Git found this repository, not from
+    // `root`: `GIT_WORK_TREE` or `core.worktree` can place the working tree
+    // outside the repository, even inside one that never enabled Riftri.
     let enabled = git
-        .local_config_bool(&root, ENABLED_CONFIG_KEY)?
+        .local_config_bool(path, ENABLED_CONFIG_KEY)?
         .unwrap_or(false);
     Ok(ProxyRepository::Inspected(RepositoryActivation {
         repository: root,
@@ -1156,6 +1158,9 @@ impl GlobalOptionScope {
 }
 
 struct CommandContext {
+    /// The directory Git runs in after every `-C`, which is where it looks for
+    /// the repository unless `--git-dir` names one. `--work-tree` is absent on
+    /// purpose: it moves the checked-out files, never the repository.
     repository: PathBuf,
     git_directory: Option<PathBuf>,
     command_index: usize,
@@ -1380,7 +1385,6 @@ fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
 
 fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
     let mut repository = current_directory.to_path_buf();
-    let mut work_tree = None;
     let mut git_directory = None;
     let mut global_options = GlobalOptionScope::None;
     let mut invocation_aliases = Vec::new();
@@ -1398,19 +1402,13 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             index += 2;
         } else if argument == "--git-dir" || argument == "--work-tree" {
             let value = arguments.get(index + 1)?;
-            if argument == "--work-tree" {
-                work_tree = Some(value.clone());
-            } else {
+            if argument == "--git-dir" {
                 git_directory = Some(value.clone());
             }
             global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if let Some(value) = option_value(argument, "--git-dir=") {
             git_directory = Some(value);
-            global_options.observe(GlobalOptionScope::Significant);
-            index += 1;
-        } else if let Some(value) = option_value(argument, "--work-tree=") {
-            work_tree = Some(value);
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument == "--no-pager"
@@ -1458,6 +1456,7 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             index += 1;
         } else if argument.to_string_lossy().starts_with("--namespace=")
             || argument.as_encoded_bytes().starts_with(b"--exec-path=")
+            || argument.as_encoded_bytes().starts_with(b"--work-tree=")
             || argument == "--no-replace-objects"
             || argument == "--no-lazy-fetch"
             || argument == "--glob-pathspecs"
@@ -1493,11 +1492,9 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             {
                 index += offset;
             }
-            let work_tree = work_tree.map(|path| resolve_command_path(&repository, &path));
             let git_directory = git_directory.map(|path| resolve_command_path(&repository, &path));
-            let git_directory = work_tree.is_none().then_some(git_directory).flatten();
             return Some(CommandContext {
-                repository: work_tree.unwrap_or(repository),
+                repository,
                 git_directory,
                 command_index: index,
                 global_options,
@@ -1838,7 +1835,6 @@ fn is_recognized_prune_argument(argument: &OsString) -> bool {
 
 fn plan_enabled_prune(
     repository: &Path,
-    activation: &RepositoryActivation,
     arguments: &[OsString],
     global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
@@ -1869,7 +1865,7 @@ fn plan_enabled_prune(
     }
 
     let mut managed_states = Vec::new();
-    for state_directory in repository_state_directories(&activation.repository)? {
+    for state_directory in repository_state_directories(repository)? {
         let status = storage_accounting(&state_directory)?;
         if status.active_views > 0
             || status.pending_adds > 0
@@ -2658,6 +2654,130 @@ mod tests {
             plan_git_command(current, &arguments).expect("plan -C Git command"),
             GitProxyPlan::OptimizedAdd { .. }
         ));
+    }
+
+    /// `--work-tree` changes where Git looks for checked-out files, never
+    /// which repository it opens: that is still found from the current
+    /// directory. The planner used to key on the option's value instead, so
+    /// naming any path outside the enabled repository turned its commands
+    /// into ordinary Git.
+    #[test]
+    fn work_tree_options_do_not_select_the_planned_repository() {
+        let enabled = repository_fixture();
+        enable_repository(enabled.path()).expect("enable repository");
+        let unenabled = repository_fixture();
+        let add = [
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("--detach"),
+            OsString::from("../detached-view"),
+        ];
+        let with_work_tree = |work_tree: &Path, attached: bool| {
+            let mut arguments = if attached {
+                let mut option = OsString::from("--work-tree=");
+                option.push(work_tree);
+                vec![option]
+            } else {
+                vec![OsString::from("--work-tree"), work_tree.into()]
+            };
+            arguments.extend(add.iter().cloned());
+            arguments
+        };
+
+        for attached in [true, false] {
+            for work_tree in [
+                unenabled.path().to_path_buf(),
+                unenabled.path().join("tracked.txt"),
+                unenabled.path().join("missing"),
+            ] {
+                let error = plan_git_command(enabled.path(), &with_work_tree(&work_tree, attached))
+                    .expect_err("an enabled repository must keep planning its own adds");
+                assert!(
+                    error.to_string().contains("invocation-level configuration"),
+                    "{}: {error}",
+                    work_tree.display()
+                );
+            }
+            assert!(
+                matches!(
+                    plan_git_command(unenabled.path(), &with_work_tree(enabled.path(), attached))
+                        .expect("plan in the repository that never opted in"),
+                    GitProxyPlan::Passthrough
+                ),
+                "a work tree elsewhere must not opt the current repository in"
+            );
+        }
+    }
+
+    /// The lifecycle half of the same rule: with the planner keyed on the
+    /// `--work-tree` value, `git --work-tree=<anything else> worktree remove
+    /// --force <managed>` reached real Git, which deleted the view outside
+    /// the removal journal.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn work_tree_options_cannot_bypass_the_managed_lifecycle_guard() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        git(
+            fixture.path(),
+            &["config", "alias.drop", "worktree remove --force"],
+        );
+        let destination = fixture.path().join("guarded-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/guarded")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let other = repository_fixture();
+
+        for work_tree in [
+            other.path().to_path_buf(),
+            other.path().join("tracked.txt"),
+            other.path().join("missing"),
+        ] {
+            let mut option = OsString::from("--work-tree=");
+            option.push(&work_tree);
+            for (command, refusal) in [
+                (
+                    &["worktree", "remove", "--force", "guarded-view"][..],
+                    "managed Riftri worktree",
+                ),
+                (
+                    &["worktree", "move", "guarded-view", "moved-view"][..],
+                    "managed Riftri worktree",
+                ),
+                (&["drop", "guarded-view"][..], "managed Riftri worktree"),
+                (&["worktree", "prune"][..], "managed Riftri state"),
+            ] {
+                for git_directory in [None, Some("--git-dir=.git")] {
+                    let arguments = git_directory
+                        .map(OsString::from)
+                        .into_iter()
+                        .chain([option.clone()])
+                        .chain(command.iter().map(OsString::from))
+                        .collect::<Vec<_>>();
+                    let error = plan_git_command(fixture.path(), &arguments)
+                        .expect_err("a work tree elsewhere must not bypass the guard");
+                    assert!(
+                        error.to_string().contains(refusal),
+                        "{arguments:?}: {error}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

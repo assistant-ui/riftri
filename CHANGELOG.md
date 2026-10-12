@@ -5,6 +5,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- The Git shim plans `git worktree` commands against the repository Git opens,
+  not the directory `--work-tree` or `GIT_WORK_TREE` names. A work tree outside
+  the enabled repository (a missing path, a file, a plain directory, or another
+  repository) used to turn `git worktree add`, `remove`, `move`, and `prune`
+  into ordinary Git, so `git --work-tree=<elsewhere> worktree remove --force
+  <managed>` deleted a managed view outside the removal journal.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed
