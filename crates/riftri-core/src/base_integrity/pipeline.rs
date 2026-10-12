@@ -40,10 +40,15 @@ struct Job {
     result: SyncSender<Encoded>,
 }
 
-struct Pending {
+struct PendingLeaf {
     path: PathBuf,
     name: OsString,
     result: Receiver<Encoded>,
+}
+
+enum Pending {
+    Header(Vec<u8>),
+    Leaf(PendingLeaf),
 }
 
 struct Pipeline<'a> {
@@ -123,7 +128,7 @@ fn hash_with_encoder(
             next: 0,
             failed: false,
         };
-        let walked = pipeline.walk(root);
+        let walked = pipeline.walk(root, None);
         if pipeline.failed {
             return walked;
         }
@@ -134,9 +139,15 @@ fn hash_with_encoder(
 }
 
 impl Pipeline<'_> {
-    fn walk(&mut self, path: &Path) -> io::Result<()> {
+    fn walk(&mut self, path: &Path, name: Option<&OsStr>) -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.is_dir() {
+            // A directory may have changed kind since enumeration. Keep the
+            // serial fallback and ordered earlier errors, without following it.
+            self.flush()?;
+            if let Some(name) = name {
+                hash_native(name, self.digest);
+            }
             return hash_entry_with_metadata(
                 path,
                 metadata,
@@ -146,26 +157,46 @@ impl Pipeline<'_> {
                 &mut self.scratch,
             );
         }
-        hash_v2_metadata(path, &metadata, self.digest, &mut self.scratch)?;
-        self.digest.update(b"directory");
+        let mut header = EntryBytes::default();
+        if let Some(name) = name {
+            hash_native(name, &mut header);
+        }
+        hash_v2_metadata(path, &metadata, &mut header, &mut self.scratch)?;
+        sha2::digest::Update::update(&mut header, b"directory");
         let mut entries = fs::read_dir(path)?
             .map(|entry| entry.map(|entry| (entry.file_name(), entry.file_type())))
             .collect::<io::Result<Vec<_>>>()?;
         entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-        self.digest.update((entries.len() as u64).to_le_bytes());
+        sha2::digest::Update::update(&mut header, &(entries.len() as u64).to_le_bytes());
+        if header.overflow {
+            // A directory's xattrs have the same bound as leaf metadata. Never
+            // hash a truncated header: drain and re-read it in original order.
+            self.flush()?;
+            if let Some(name) = name {
+                hash_native(name, self.digest);
+            }
+            hash_v2_metadata(path, &metadata, self.digest, &mut self.scratch)?;
+            self.digest.update(b"directory");
+            self.digest.update((entries.len() as u64).to_le_bytes());
+        } else {
+            if self.pending.len() == MAX_PENDING {
+                self.flush_one()?;
+            }
+            self.pending.push_back(Pending::Header(header.bytes));
+        }
         let mut child = path.to_path_buf();
         for (name, kind) in entries {
             child.push(&name);
             if kind?.is_dir() {
-                self.flush()?;
-                hash_native(&name, self.digest);
-                self.walk(&child)?;
+                self.walk(&child, Some(&name))?;
             } else {
                 self.enqueue(&child, name)?;
             }
             child.pop();
         }
-        self.flush()
+        // Headers and leaves share the bounded ordered queue. The caller
+        // drains it once at completion instead of stopping at every folder.
+        Ok(())
     }
 
     fn enqueue(&mut self, path: &Path, name: OsString) -> io::Result<()> {
@@ -181,17 +212,24 @@ impl Pipeline<'_> {
             })
             .map_err(|_| io::Error::other("integrity reader stopped"))?;
         self.next = (self.next + 1) % self.senders.len();
-        self.pending.push_back(Pending {
+        self.pending.push_back(Pending::Leaf(PendingLeaf {
             path: path.to_path_buf(),
             name,
             result: receiver,
-        });
+        }));
         Ok(())
     }
 
     fn flush_one(&mut self) -> io::Result<()> {
         let Some(pending) = self.pending.pop_front() else {
             return Ok(());
+        };
+        let pending = match pending {
+            Pending::Header(bytes) => {
+                self.digest.update(bytes);
+                return Ok(());
+            }
+            Pending::Leaf(leaf) => leaf,
         };
         let result = (|| {
             let bytes = pending
@@ -268,6 +306,90 @@ mod tests {
         )
         .unwrap();
         assert_eq!(actual.finalize(), expected.finalize());
+    }
+
+    #[test]
+    fn queued_headers_preserve_serial_bytes_with_one_two_and_four_readers() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let fixture = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            let directory = fixture.path().join(format!("directory-{i:02}/nested"));
+            fs::create_dir_all(directory.join("empty")).unwrap();
+            fs::write(directory.join("small"), [i; 1024]).unwrap();
+            fs::write(
+                directory.join("large"),
+                vec![i; MAX_FILE_BYTES as usize + 1],
+            )
+            .unwrap();
+            symlink("small", directory.join("link-λ")).unwrap();
+        }
+        let special = fixture.path().join("directory-03");
+        fs::set_permissions(&special, fs::Permissions::from_mode(0o1755)).unwrap();
+        // Overflow a directory header, not a leaf. All metadata must still be
+        // re-read and hashed in order, never silently dropped from the digest.
+        for i in 0..3 {
+            rustix::fs::setxattr(
+                &special,
+                format!("com.riftri.directory-{i}").as_str(),
+                &vec![i; 192 * 1024],
+                rustix::fs::XattrFlags::empty(),
+            )
+            .unwrap();
+        }
+        let mut expected = Sha256::new();
+        hash_entry(
+            fixture.path(),
+            &mut expected,
+            MarkerVersion::V2,
+            SpecialEntries::Refuse,
+            &mut HashScratch::new(),
+        )
+        .unwrap();
+        let expected = expected.finalize();
+        for workers in [1, 2, 4] {
+            let mut actual = Sha256::new();
+            hash_with_encoder(fixture.path(), &mut actual, workers, &encode_leaf).unwrap();
+            assert_eq!(actual.finalize(), expected, "{workers} readers");
+        }
+    }
+
+    #[test]
+    fn errors_across_directories_remain_ordered_and_readers_settle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fixture = tempfile::tempdir().unwrap();
+        for i in 0..12 {
+            let directory = fixture.path().join(format!("{i:02}"));
+            fs::create_dir(&directory).unwrap();
+            fs::write(directory.join("leaf"), b"data").unwrap();
+        }
+        let started = AtomicUsize::new(0);
+        let finished = AtomicUsize::new(0);
+        let error = hash_with_encoder(
+            fixture.path(),
+            &mut Sha256::new(),
+            4,
+            &|path, name, scratch| {
+                started.fetch_add(1, Ordering::SeqCst);
+                let directory = path.parent().unwrap().file_name().unwrap();
+                let result = if directory == "00" {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    Err(io::Error::other("first directory"))
+                } else if directory == "01" {
+                    Err(io::Error::other("later directory"))
+                } else {
+                    encode_leaf(path, name, scratch)
+                };
+                finished.fetch_add(1, Ordering::SeqCst);
+                result
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "first directory");
+        assert!(started.load(Ordering::SeqCst) >= 2);
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            finished.load(Ordering::SeqCst)
+        );
     }
 
     #[test]

@@ -1,0 +1,128 @@
+name: Cross-directory evaluation
+
+on:
+  push:
+    branches: [perf/integrity-cross-directory]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  quality:
+    name: Ordered integrity safety (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Check formatting and Clippy
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: Run all workspace tests
+        env:
+          RUST_TEST_THREADS: 2
+        run: cargo test --workspace --locked
+      - name: Verify package and benchmark owners
+        if: matrix.os == 'macos-15'
+        run: |
+          npm ci --ignore-scripts --omit=optional
+          npm test
+          node --test --test-concurrency=1 docs/benchmarks/*.test.mjs
+      - name: Create isolated APFS safety volume
+        if: matrix.os == 'macos-15'
+        run: |
+          hdiutil create -size 512m -fs APFS -volname RiftriDirectorySafety -type SPARSEBUNDLE "$RUNNER_TEMP/directory-safety"
+          mkdir "$RUNNER_TEMP/directory-apfs"
+          hdiutil attach "$RUNNER_TEMP/directory-safety.sparsebundle" -mountpoint "$RUNNER_TEMP/directory-apfs" -nobrowse
+      - name: Verify allocation and private writes
+        if: matrix.os == 'macos-15'
+        env:
+          TMPDIR: ${{ runner.temp }}/directory-apfs
+          RIFTRI_BENCHMARK_OUTPUT: ${{ runner.temp }}/allocation.json
+        run: >-
+          cargo test --locked -p riftri-core --test native_cow_benchmark
+          reports_cold_cached_and_private_write_costs -- --ignored --exact --nocapture
+      - name: Detach safety volume
+        if: always() && matrix.os == 'macos-15'
+        run: |
+          if mount | grep -F " on $RUNNER_TEMP/directory-apfs ("; then
+            hdiutil detach "$RUNNER_TEMP/directory-apfs"
+          fi
+      - name: Retain allocation evidence
+        if: always() && matrix.os == 'macos-15'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cross-directory-safety
+          path: ${{ runner.temp }}/allocation.json
+          if-no-files-found: warn
+
+  screen:
+    name: Isolated cross-directory phase comparison
+    needs: quality
+    runs-on: macos-15
+    timeout-minutes: 55
+    defaults:
+      run:
+        working-directory: candidate
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidate
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e3ce4c20d73dd68fa6ac6533b34167022cd2a6a6
+          path: previous
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: assistant-ui/assistant-ui
+          ref: 038cd9f82b418afe9e6d0080648738f78586fbca
+          path: reference
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Build and freeze previous prototype
+        working-directory: previous
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/previous-build
+        run: |
+          cargo test --locked --release -p riftri-core --lib --no-run --message-format=json > "$RUNNER_TEMP/previous-build.jsonl"
+          node ../candidate/docs/benchmarks/integrity-cross-directory.mjs freeze "$RUNNER_TEMP/previous-build.jsonl" "$RUNNER_TEMP/previous-test" "$PWD"
+      - name: Build and freeze cross-directory candidate
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/candidate-build
+        run: |
+          cargo test --locked --release -p riftri-core --lib --no-run --message-format=json > "$RUNNER_TEMP/candidate-build.jsonl"
+          node docs/benchmarks/integrity-cross-directory.mjs freeze "$RUNNER_TEMP/candidate-build.jsonl" "$RUNNER_TEMP/candidate-test" "$PWD"
+      - name: Wait for the first candidate's timing run to settle
+        timeout-minutes: 25
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run watch 38295860743 --repo assistant-ui/riftri --interval 30
+      - name: Measure the fixed phase plan without concurrent builds
+        timeout-minutes: 22
+        run: >-
+          node docs/benchmarks/integrity-cross-directory.mjs measure
+          "$RUNNER_TEMP/previous-test" "$RUNNER_TEMP/candidate-test"
+          "$GITHUB_WORKSPACE/reference" "$RUNNER_TEMP/directory-results"
+      - name: Retain every sample and binary identity
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cross-directory-screen
+          path: |
+            ${{ runner.temp }}/directory-results/*.json
+            ${{ runner.temp }}/directory-results/*.log
+            ${{ runner.temp }}/previous-test.json
+            ${{ runner.temp }}/candidate-test.json
+            ${{ runner.temp }}/previous-build.jsonl
+            ${{ runner.temp }}/candidate-build.jsonl
+          if-no-files-found: error

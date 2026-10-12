@@ -1,8 +1,6 @@
 name: Cross-directory regression
 
-on:
-  push:
-    branches: [perf/integrity-cross-directory]
+on: workflow_dispatch
 
 permissions:
   contents: read
