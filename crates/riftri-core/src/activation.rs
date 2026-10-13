@@ -615,16 +615,30 @@ fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError
     }
 
     let git = Git::default();
-    // Only "not a repository" is about the requested path; any other Git
-    // failure (a missing or broken Git) is operational and stays one.
-    let repository = git
-        .inspect_repository(&canonical)
-        .map_err(|error| match error {
-            GitError::RepositoryAbsent { .. } => {
-                worktree_binding_error(format!("inspect {}: {error}", canonical.display()))
+    // Only "not a repository" and "inside a Git directory" are about the
+    // requested path; any other Git failure (a missing or broken Git) is
+    // operational and stays one. Git has no worktree root to report from
+    // inside a non-bare repository's Git directory and fails the inspection
+    // there, so that case is identified on the failure path, where the extra
+    // Git process costs a valid binding nothing.
+    let repository = match git.inspect_repository(&canonical) {
+        Ok(repository) => repository,
+        Err(error @ GitError::RepositoryAbsent { .. }) => {
+            return Err(worktree_binding_error(format!(
+                "inspect {}: {error}",
+                canonical.display()
+            )));
+        }
+        Err(error) => {
+            if git.inside_git_directory(&canonical).unwrap_or(false) {
+                return Err(worktree_binding_error(format!(
+                    "{} is inside a Git directory, not a worktree",
+                    canonical.display()
+                )));
             }
-            error => ActivationError::Git(error),
-        })?;
+            return Err(ActivationError::Git(error));
+        }
+    };
     let root = repository.root.ok_or_else(|| {
         worktree_binding_error(format!("{} is a bare repository", canonical.display()))
     })?;
@@ -3916,6 +3930,23 @@ mod tests {
             super::expand_worktree_alias(&context, &arguments).expect("expand"),
             None
         );
+    }
+
+    /// A path inside a repository's Git directory is never a worktree root,
+    /// so binding to it is the caller's mistake like any other wrong path. Git
+    /// answers the root query there with a plain command failure, which used
+    /// to surface as an operational Git error.
+    #[test]
+    fn a_worktree_binding_inside_a_git_directory_is_a_binding_refusal() {
+        let fixture = repository_fixture();
+        for inside in [".git", ".git/objects"] {
+            let error = super::resolve_worktree_binding(&fixture.path().join(inside))
+                .expect_err("a Git directory is not a worktree root");
+            assert!(
+                matches!(error, super::ActivationError::WorktreeBinding(_)),
+                "{inside}: {error:?}"
+            );
+        }
     }
 
     /// Git follows an alias chain of any length and stops only on a loop, so

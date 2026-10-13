@@ -1,0 +1,13 @@
+# Cargo sets these for everything it runs, so every test binary and every
+# `git` or `riftri` process a test spawns sees the same Git configuration
+# whatever the developer's own looks like. A leaked `includeIf`, alias,
+# `core.hooksPath`, or global attributes file otherwise turns fixtures into
+# checkout-compatibility blockers. `force` is needed because a developer may
+# already export these. Tests that exercise global configuration still set
+# their own values on the child command, which wins over the inherited ones.
+[env]
+GIT_CONFIG_GLOBAL = { value = ".cargo/test-config/git/config", relative = true, force = true }
+GIT_CONFIG_NOSYSTEM = { value = "1", force = true }
+GIT_ATTR_NOSYSTEM = { value = "1", force = true }
+# Git also reads `git/attributes` and `git/ignore` from here.
+XDG_CONFIG_HOME = { value = ".cargo/test-config", relative = true, force = true }

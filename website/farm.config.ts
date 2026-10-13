@@ -42,12 +42,13 @@ export default withDocs(defineConfig({
       enforce: "pre",
       transform(code: string, id: string) {
         if (!id.split("?")[0].replace(/\\/g, "/").endsWith("/@farming-labs/farmjs/dist/react.js")) return null;
-        // Adapter 0.2.115 eagerly imports every Markdown file in the project.
-        // Only staged public guides belong in the UI; the full-reference `.md`
-        // companions under public/docs stay raw assets, not adapter pages.
-        const broadGlob = 'import.meta.glob("/**/*.{md,mdx}",';
+        // Adapter 0.2.120 globs every Markdown file in the project, one lazy
+        // chunk per file. Only staged public guides belong in the UI; the
+        // full-reference `.md` companions under public/docs stay raw assets,
+        // not adapter pages.
+        const broadGlob = 'import.meta.glob("/**/*.{md,mdx}")';
         if (!code.includes(broadGlob)) throw new Error("Review the docs adapter Markdown glob before upgrading it.");
-        const narrowed = code.replace(broadGlob, 'import.meta.glob("/src/app/docs/**/*.{md,mdx}",');
+        const narrowed = code.replace(broadGlob, 'import.meta.glob("/src/app/docs/**/*.{md,mdx}")');
         // The docs adapter is the pages' client hydration entry, so appending a
         // one-time delegated listener here upgrades the injected "Copy .md" link
         // (see stage-website-docs.mjs) into a real clipboard copy without any UI

@@ -379,7 +379,9 @@ Repair also reconciles active journals against Git's own worktree registry:
   probes` (`reaped_probe_roots`). A probe root any mount still covers is
   preserved and reported (`preserved_probe_mounts`) instead of being touched.
 
-Nothing is retired while its directory still exists or still has content.
+Nothing is retired while its directory still exists or still has content, or
+while an unfinished removal, move, or compaction still names the operation: an
+interrupted move or compaction can leave the path empty until repair resumes it.
 
 ### `riftri gc [OPTIONS] [REPOSITORY]`
 
