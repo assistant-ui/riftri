@@ -359,7 +359,7 @@ the fixture, attempts, command logs and raw Git traces. Success also retains
 raw samples and binary/runner hashes. Run independent same-binary controls
 before and after a comparison; `speedupClaim` stays false in the raw receipt.
 Do not infer cached-add speedups from this workload or count CI smoke-test
-timings as performance evidence. macOS CI exercises a four-file pair and a
+timings as performance evidence. macOS CI exercises a four-file, 8-MiB-per-file pair and a
 budget-expiry receipt with the release binary.
 
 Compare the three retained lanes with
