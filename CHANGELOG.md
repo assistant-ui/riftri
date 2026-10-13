@@ -7,6 +7,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Tree modes, single blob sizes, and Git version components with a leading
+  `+` are rejected as invalid Git output instead of being parsed as numbers.
+  Git does not print signed values here, so ordinary repositories are
+  unaffected.
 - `worktree add` refuses a full-length hexadecimal object ID that names no
   object as an `invalid-request` policy failure (exit 3), like any other
   revision that names no commit. It was reported as a Git command failure,
