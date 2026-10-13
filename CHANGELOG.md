@@ -7,6 +7,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- On macOS, a worktree path given with a trailing or repeated separator now
+  matches its registration when the two also differ in Unicode normalization.
+  Each difference was already tolerated alone, but not both together.
 - `riftri gc --apply` collects a completion marker whose base directory is
   missing, as its preview already listed. It used to stop on the missing base
   before reaching later candidates and fail the same way on every run.
