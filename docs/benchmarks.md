@@ -122,6 +122,35 @@ arguments (a directory can itself be named `status`). Sessions stay separate,
 including interleaved child Git processes. Trace2 semantics are documented in
 [Git's Trace2 API](https://git-scm.com/docs/api-trace2).
 
+The report also exposes `resetLfsFilterStarts` / `statusLfsFilterStarts` and
+`resetLfsFilterMs` / `statusLfsFilterMs`. These recognize only the canonical
+`git-lfs filter-process` child command, paired by child ID within its owning
+Git session. The scalar lifetime is present only for one successfully exited
+filter; multiple lifetimes remain separate under `commands[].children` and are
+never added. A filter lifetime includes startup, processing, and potentially
+idle time. It overlaps the owning Git command and does **not** measure bytes
+hashed, useful CPU work, or startup alone. Zero starts means no canonical
+long-running filter was observed, not that no other LFS command ran.
+
+In particular, `refresh/sum_scan=0` does not prove absence of LFS filter work.
+The LFS regression fixture retains the complete top-level reset/status sessions
+(their lines unchanged) from `candidate/git-1-before.jsonl` in
+[run 38319750916](https://github.com/assistant-ui/riftri/actions/runs/38319750916).
+That production-baseline sample launched a filter in both commands despite zero
+status refresh scans. The fixture excludes other Git sessions; it is evidence
+for parsing, not a speedup claim. Unfinished or failed recognized filters prevent
+complete profiles and aggregate distributions.
+
+For individual retained traces, including the cold-LFS runner's files:
+
+```sh
+node docs/benchmarks/startup-profile.mjs --trace /path/to/git-1-before.jsonl
+```
+
+This mode remains read-only and reports a trace hash, but does not validate a
+benchmark receipt, attempt inventory, cleanup, or timing controls. Use the
+full-results mode above when evaluating a startup benchmark.
+
 Interpretation rules:
 
 - Regions are **included** in command time, and parent/child commands can

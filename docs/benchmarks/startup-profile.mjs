@@ -15,6 +15,11 @@ const indexCounters = new Map([
   ['refresh/sum_scan', 'RefreshScan'],
 ]);
 const indexRegions = new Map([['preload', 'PreloadMs'], ['refresh', 'RefreshMs']]);
+// Recognize only the canonical filter command, never a shell substring or a
+// path named "git-lfs". These are observed launches, not a byte/work counter.
+const isLfsFilter = child => child.childClass === 'subprocess' && (
+  (child.useShell === true && child.argv.length === 1 && child.argv[0] === 'git-lfs filter-process') ||
+  (child.useShell === false && child.argv.length === 2 && child.argv[0] === 'git-lfs' && child.argv[1] === 'filter-process'));
 const counter = value => {
   assert.ok((typeof value === 'string' && /^\d+$/.test(value)) ||
     (typeof value === 'number' && value >= 0), 'invalid Trace2 counter');
@@ -27,11 +32,12 @@ export function profileTrace(text) {
   assert.equal(typeof text, 'string');
   assert.ok(text === '' || text.endsWith('\n'), 'Trace2 must end with a newline; possible truncation');
   const sessions = new Map();
+  const issues = [];
   for (const line of text.split('\n').filter(line => line.trim())) {
     const e = JSON.parse(line);
     assert.ok(e && typeof e.event === 'string' && typeof e.sid === 'string' && e.sid, 'invalid Trace2 event');
     if (!sessions.has(e.sid)) sessions.set(e.sid, {sid: e.sid, argv: null, name: null,
-      milliseconds: null, code: null, regions: [], counters: []});
+      milliseconds: null, code: null, regions: [], counters: [], children: []});
     const c = sessions.get(e.sid);
     if (e.event === 'start') {
       assert.equal(c.argv, null, `duplicate start: ${e.sid}`);
@@ -52,16 +58,36 @@ export function profileTrace(text) {
       c.regions.push({thread: e.thread, label: e.label, nesting: e.nesting, milliseconds: e.t_rel * 1000});
     } else if (e.event === 'data' && e.category === 'index' && indexCounters.has(e.key)) {
       c.counters.push({thread: e.thread, key: e.key, value: counter(e.value)});
+    } else if (e.event === 'child_start') {
+      assert.ok(Number.isSafeInteger(e.child_id) && e.child_id >= 0, 'invalid child id');
+      assert.ok(!c.children.some(child => child.id === e.child_id), `duplicate child start: ${e.sid}/${e.child_id}`);
+      assert.ok(Array.isArray(e.argv) && e.argv.length && e.argv.every(a => typeof a === 'string'), 'invalid child argv');
+      c.children.push({id: e.child_id, argv: e.argv, childClass: e.child_class ?? null,
+        useShell: e.use_shell ?? null, milliseconds: null, code: null});
+    } else if (e.event === 'child_exit') {
+      assert.ok(Number.isSafeInteger(e.child_id) && e.child_id >= 0, 'invalid child id');
+      const child = c.children.find(child => child.id === e.child_id);
+      if (!child) {
+        issues.push(`child exit without start: ${e.sid}/${e.child_id}`);
+        continue;
+      }
+      assert.equal(child.milliseconds, null, `duplicate child exit: ${e.sid}/${e.child_id}`);
+      assert.ok(duration(e.t_rel), 'invalid child duration');
+      assert.ok(Number.isInteger(e.code), 'invalid child exit code');
+      child.milliseconds = e.t_rel * 1000;
+      child.code = e.code;
     }
   }
   const commands = [...sessions.values()];
-  const issues = [];
   if (!commands.length) issues.push('no Git sessions');
   for (const c of commands) {
     // Slash-separated sid ancestry, not event order: children can interleave.
     const slash = c.sid.lastIndexOf('/');
     c.parentSid = slash < 0 ? null : c.sid.slice(0, slash);
     if (!c.argv || c.milliseconds === null || !c.name) issues.push(`incomplete Git session: ${c.sid}`);
+    for (const child of c.children.filter(isLfsFilter)) {
+      if (child.milliseconds === null || child.code !== 0) issues.push(`unfinished or failed LFS filter: ${c.sid}/${child.id}`);
+    }
   }
   const metrics = {gitStarts: commands.filter(c => c.argv).length}, unavailable = {};
   function unique(metric, values) {
@@ -76,6 +102,12 @@ export function profileTrace(text) {
       c ? c.regions.filter(r => r.thread === 'main' && r.label === label).map(r => r.milliseconds) : []);
     for (const [key, suffix] of indexCounters) unique(`${name}${suffix}`,
       c ? c.counters.filter(r => r.thread === 'main' && r.key === key).map(r => r.value) : []);
+    const filters = c?.children.filter(isLfsFilter) ?? [];
+    unique(`${name}LfsFilterStarts`, c ? [filters.length] : []);
+    // Multiple children may overlap. Keep each lifetime on the command, and
+    // only expose a scalar when there is exactly one successfully exited child.
+    unique(`${name}LfsFilterMs`, filters.length === 1 && filters[0].code === 0 && filters[0].milliseconds !== null
+      ? [filters[0].milliseconds] : []);
     if (matches.length !== 1 || !c) unavailable[`${name}Ms`] = `expected one successful top-level ${name}, found ${matches.length} commands`;
   }
   return {complete: issues.length === 0, issues, commands, metrics, unavailable};
@@ -177,8 +209,12 @@ export function readStartupProfile(file) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   try {
-    assert.equal(process.argv.length, 3, 'usage: node startup-profile.mjs /path/to/results.json');
-    const result = readStartupProfile(process.argv[2]);
+    const raw = process.argv.length === 4 && process.argv[2] === '--trace';
+    assert.ok(raw || process.argv.length === 3, 'usage: node startup-profile.mjs [--trace] /path/to/results.json-or-trace.jsonl');
+    const text = raw ? readRegular(process.argv[3]) : null;
+    const result = raw ? {schemaVersion: 1, inputSha256: hash(text), speedupClaim: false,
+      note: 'Raw trace observations only, not a verified benchmark receipt. Child lifetimes overlap parent time; do not add them or infer bytes processed.',
+      ...profileTrace(text)} : readStartupProfile(process.argv[2]);
     console.log(JSON.stringify(result, null, 2));
     if (!result.complete) process.exitCode = 1;
   } catch (error) {
