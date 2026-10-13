@@ -188,6 +188,9 @@ mod apfs;
 #[cfg(target_os = "macos")]
 mod macos_acl;
 
+#[cfg(target_os = "macos")]
+pub mod checkout_clone;
+
 /// Inspect the entry's extended macOS ACL without following symlinks.
 /// Errors are returned rather than interpreting unreadable ACLs as absent.
 #[cfg(target_os = "macos")]
@@ -1732,6 +1735,18 @@ fn platform_capabilities(
 ) -> Vec<BackendCapability> {
     Vec::new()
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "capability_hegel_tests.rs"]
+mod capability_hegel_tests;
+
+#[cfg(all(test, unix))]
+#[path = "umask_hegel_tests.rs"]
+mod umask_hegel_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "unsupported_backend_hegel_tests.rs"]
+mod unsupported_backend_hegel_tests;
 
 #[cfg(test)]
 mod tests {

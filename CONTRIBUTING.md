@@ -24,6 +24,11 @@ $ npm test
 $ npm run pack:check
 ```
 
+`.cargo/config.toml` gives every Cargo-run process the repository's own
+global Git configuration and no system one, so your own Git settings cannot
+change test results. A test binary started without Cargo does not get that
+isolation.
+
 Property tests use [Hegel](https://hegel.dev) and run with `cargo test`. A
 failing case prints a `#[hegel::reproduce_failure(...)]` attribute that replays
 it. To measure line coverage, install `cargo-llvm-cov` and run:
