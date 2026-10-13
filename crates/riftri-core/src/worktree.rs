@@ -2494,10 +2494,6 @@ fn garbage_collection_candidates(
     state_directory: &Path,
 ) -> Result<(Vec<GarbageCollectionCandidate>, Vec<ProtectedBase>), WorktreeError> {
     let protections = protected_bases(state_directory)?;
-    let protected = protections
-        .iter()
-        .map(|protection| protection.base_path.clone())
-        .collect::<HashSet<_>>();
     let pending = CollectionJournalStore::open(state_directory)
         .load_all()?
         .into_iter()
@@ -2507,34 +2503,15 @@ fn garbage_collection_candidates(
                 GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
             )
         })
-        .map(|journal| (journal.base_path, journal.operation_id))
-        .collect::<Vec<_>>();
-    let pending_paths = pending
-        .iter()
-        .map(|(base_path, _)| base_path.clone())
-        .collect::<HashSet<_>>();
+        .map(|journal| (journal.base_path, journal.operation_id));
+    let mut protected = index_gc_protections(protections, pending);
     let mut candidates = Vec::new();
     // A base skipped here is storage the user cannot reclaim, so name every
     // skip and the journal responsible for it instead of silently dropping it.
     let mut skipped = Vec::new();
     for base_path in retained_base_paths(state_directory, UnsafeBaseInventory::Reject)? {
-        if protected.contains(&base_path) || pending_paths.contains(&base_path) {
-            skipped.extend(
-                protections
-                    .iter()
-                    .filter(|protection| protection.base_path == base_path)
-                    .cloned(),
-            );
-            skipped.extend(pending.iter().filter(|(path, _)| path == &base_path).map(
-                |(path, operation_id)| {
-                    ProtectedBase {
-                        base_path: path.clone(),
-                        operation_id: operation_id.clone(),
-                        reason: "an unfinished garbage-collection journal already claims this base"
-                            .to_owned(),
-                    }
-                },
-            ));
+        if let Some(reasons) = protected.remove(&base_path) {
+            skipped.extend(reasons);
             continue;
         }
         let (logical_bytes, allocated_bytes) = if base_path.is_dir() {
@@ -2554,6 +2531,39 @@ fn garbage_collection_candidates(
     skipped.dedup();
     Ok((candidates, skipped))
 }
+
+/// Group only this GC plan's reporting snapshot. Collection still re-reads
+/// protections under its base lock through `protected_base_paths`.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn index_gc_protections(
+    protections: Vec<ProtectedBase>,
+    pending: impl IntoIterator<Item = (PathBuf, String)>,
+) -> HashMap<PathBuf, Vec<ProtectedBase>> {
+    let mut by_base: HashMap<PathBuf, Vec<ProtectedBase>> = HashMap::new();
+    let pending = pending
+        .into_iter()
+        .map(|(base_path, operation_id)| ProtectedBase {
+            base_path,
+            operation_id,
+            reason: "an unfinished garbage-collection journal already claims this base".to_owned(),
+        });
+    for protection in protections.into_iter().chain(pending) {
+        // Preserve native Path equality and the old per-base ordering: all
+        // add/compaction reasons first, then pending collection reasons.
+        by_base
+            .entry(protection.base_path.clone())
+            .or_default()
+            .push(protection);
+    }
+    by_base
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[path = "gc_protection_tests.rs"]
+mod gc_protection_tests;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn protected_base_paths(state_directory: &Path) -> Result<HashSet<PathBuf>, WorktreeError> {
@@ -21189,6 +21199,69 @@ mod tests {
     /// dropped from the plan. (Moved from the integration suite: racing adds
     /// no longer leave such a journal behind (#469), so an add interrupted
     /// once its base is ready provides it instead.)
+    #[test]
+    fn gc_reports_every_live_and_pending_claim_without_collecting_the_base() {
+        use crate::journal::{
+            CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore,
+        };
+
+        let (fixture, repository, destination, state) = same_destination_fixture();
+        let first = add_worktree_inner(
+            detached_add_request(&repository, &destination, &state),
+            None,
+            true,
+        )
+        .unwrap();
+        let sibling = fixture.path().join("sibling");
+        let second = add_worktree_inner(
+            detached_add_request(&repository, &sibling, &state),
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(first.base_path, second.base_path);
+        let mut expected = super::protected_bases(&state).unwrap();
+        assert_eq!(expected.len(), 2);
+        let operation_id = "gc-pending-report";
+        let quarantine = first
+            .base_path
+            .parent()
+            .unwrap()
+            .join(format!(".riftri-gc-{operation_id}"));
+        CollectionJournalStore::create(&state)
+            .unwrap()
+            .persist(&CollectionJournalRecord::new(
+                operation_id.to_owned(),
+                CollectionJournalPaths {
+                    base_path: &first.base_path,
+                    quarantine_path: &quarantine,
+                    marker_path: &first.base_path.with_extension("complete"),
+                },
+            ))
+            .unwrap();
+        expected.push(super::ProtectedBase {
+            base_path: first.base_path.clone(),
+            operation_id: operation_id.to_owned(),
+            reason: "an unfinished garbage-collection journal already claims this base".to_owned(),
+        });
+        expected.sort_unstable_by(|left, right| {
+            (&left.base_path, &left.operation_id).cmp(&(&right.base_path, &right.operation_id))
+        });
+        assert_eq!(
+            garbage_collect_inner(&state, false, None).unwrap(),
+            super::GarbageCollectionReport {
+                skipped_protected: expected,
+                ..Default::default()
+            }
+        );
+        let applied = garbage_collect_inner(&state, true, None).unwrap();
+        assert!(applied.collected.is_empty());
+        assert_eq!(applied.skipped_protected.len(), 2);
+        for root in [&destination, &sibling, &first.base_path] {
+            assert_eq!(fs::read(root.join("file-0.txt")).unwrap(), b"tracked\n");
+        }
+    }
+
     #[test]
     fn collection_names_the_journal_that_protects_an_unreferenced_base() {
         let (_fixture, repository, destination, state) = same_destination_fixture();
