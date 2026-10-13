@@ -18,6 +18,7 @@ pub(crate) enum FilesystemRacePoint {
     AddIntentPersist,
     AddCleanCheck,
     ReconciliationInventoryLoaded,
+    LfsReadReady,
     #[cfg(target_os = "macos")]
     LfsClonePrepared,
 }

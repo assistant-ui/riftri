@@ -4606,12 +4606,29 @@ fn materialize_git_lfs_object(
     #[cfg(not(target_os = "macos"))]
     let reader = &mut source;
 
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::LfsReadReady,
+        &object.source_path,
+    );
+
     let mut digest = Sha256::new();
     let mut copied = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
+    let changed_size = |copied| {
+        WorktreeError::Unsupported(format!(
+            "local Git LFS object {} changed while it was read; expected {} bytes, read {copied}",
+            object.pointer.oid, object.pointer.size
+        ))
+    };
     loop {
+        // Read at most one byte beyond the pointer's size, then refuse before
+        // hashing/writing the oversized chunk or publishing a native clone.
+        let limit = (object.pointer.size - copied)
+            .saturating_add(1)
+            .min(buffer.len() as u64) as usize;
         let count = reader
-            .read(&mut buffer)
+            .read(&mut buffer[..limit])
             .map_err(|error| io("read local Git LFS object", &object.source_path, error))?;
         if count == 0 {
             break;
@@ -4619,6 +4636,9 @@ fn materialize_git_lfs_object(
         copied = copied.checked_add(count as u64).ok_or_else(|| {
             WorktreeError::Unsupported("Git LFS object size overflowed u64".to_owned())
         })?;
+        if copied > object.pointer.size {
+            return Err(changed_size(copied));
+        }
         digest.update(&buffer[..count]);
         if !cloned {
             output
@@ -4627,10 +4647,7 @@ fn materialize_git_lfs_object(
         }
     }
     if copied != object.pointer.size {
-        return Err(WorktreeError::Unsupported(format!(
-            "local Git LFS object {} changed while it was read; expected {} bytes, read {copied}",
-            object.pointer.oid, object.pointer.size
-        )));
+        return Err(changed_size(copied));
     }
     let actual_oid = crate::base_integrity::hex_lower(digest.finalize());
     if actual_oid != object.pointer.oid {
