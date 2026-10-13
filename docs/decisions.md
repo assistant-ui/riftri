@@ -253,6 +253,14 @@ the versioned checkout profile. This gives common local Git LFS repositories a
 deterministic path without authorizing arbitrary filter execution while shared
 bases are built.
 
+APFS cold expansion may prepare a descriptor-bound native clone for local
+objects of at least 8 MiB, but only for same-volume, caller-owned, single-link
+files with matching ownership and no private metadata. The private clone is
+fully SHA-256 verified before replacing its unchanged staging pointer. Other
+cases keep verified streaming. Clone failures do not silently copy, no
+verification cache is introduced, and no live worktree file is replaced by
+this optimization. Staging remains owned by the existing add journal.
+
 Custom filters, pointer extensions, custom LFS storage, working-tree encodings,
 ident substitution, legacy or unknown attributes, and any effective
 repository-local, global, or system attribute source remain fail-closed. The

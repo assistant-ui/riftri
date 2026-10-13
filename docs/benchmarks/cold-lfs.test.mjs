@@ -13,11 +13,14 @@ test('cold real-LFS comparison verifies new bases, isolation, refusals and clean
   const output = path.join(root, 'results');
   const binary = path.resolve(process.env.RIFTRI_BENCH_TEST_BINARY);
   const result = await timedProcess(process.execPath, [
-    fileURLToPath(new URL('./cold-lfs.mjs', import.meta.url)), binary, binary, output, '4', '2097152', '1', '500000',
+    // Cross the native-expansion threshold so CI checks the new path with a
+    // real filter, not just the smaller objects that retain streamed expansion.
+    fileURLToPath(new URL('./cold-lfs.mjs', import.meta.url)), binary, binary, output, '4', '8388608', '1', '500000',
   ], {env: process.env, timeoutMs: 550000});
   assert.equal(result.code, 0, `${result.error ?? ''}\n${result.stderr}\nFixture retained at ${root}`);
   const report = JSON.parse(fs.readFileSync(path.join(output, 'results.json')));
   assert.equal(report.complete, true);
+  assert.equal(report.bytes, 8388608);
   assert.equal(report.speedupClaim, false);
   assert.equal(report.binarySha256.before, report.binarySha256.after);
   assert.equal(report.samples.length, 2);

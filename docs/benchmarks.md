@@ -359,7 +359,7 @@ the fixture, attempts, command logs and raw Git traces. Success also retains
 raw samples and binary/runner hashes. Run independent same-binary controls
 before and after a comparison; `speedupClaim` stays false in the raw receipt.
 Do not infer cached-add speedups from this workload or count CI smoke-test
-timings as performance evidence. macOS CI exercises a four-file pair and a
+timings as performance evidence. macOS CI exercises a four-file, 8-MiB-per-file pair and a
 budget-expiry receipt with the release binary.
 
 Compare the three retained lanes with
@@ -377,9 +377,29 @@ without worsening p95 by more than 5%. An optional build-provenance JSON path
 as the second argument also checks `baseline.sha256` and `candidate.sha256`
 against the recorded binaries.
 
-Cold LFS cloning is still an investigation, not an enabled optimization. The
-current materializer verifies SHA-256 while streaming into the Git-created
-checkout file, keeping that destination's mode, ACL and extended attributes.
+The opt-in **Cold LFS qualification** workflow runs the same comparison on a
+dedicated `macos-15` runner. It runs for PRs changing the hosted study, or by
+manual dispatch with an explicit baseline revision and selected candidate ref.
+It resolves both commits, records a plan before timing, and builds independent
+uncached release binaries with verified Cargo receipts. Three sequential lanes
+use 16 × 8-MiB objects and 20 alternating pairs each (120 verified adds total).
+The existing thresholds are unchanged; the larger fixed sample size does not
+remove outliers, retry a noisy lane, or guarantee low host noise.
+
+The job fails if the comparison does not qualify, independently of the ordinary
+correctness CI. Its 90-day artifact retains the plan, build provenance, all
+receipts, command output and raw Trace2 files even on failure; fixture
+repositories and build directories are not uploaded. The summary verifies
+every trace offline and binds the workload and measured binaries to the plan.
+After downloading the artifact, reproduce it with
+`node docs/benchmarks/cold-lfs-ci.mjs evaluate /path/to/evidence` from the
+recorded candidate source (move the existing `summary.json` aside first; the
+tool refuses to overwrite evidence). Earlier local or hosted failures remain
+part of the evidence and must not be replaced by a later favorable run.
+
+Cold LFS cloning must be evaluated separately from cached worktree creation.
+The verified streaming materializer keeps the Git-created checkout file's
+mode, ACL and extended attributes.
 Two checkout paths for the same object may have different metadata. The core
 `lfs_materialization_tests` now make this contract explicit, including source
 attributes that must not appear in the checkout.
@@ -396,13 +416,17 @@ See Apple's [copyfile contract](https://github.com/apple-oss-distributions/copyf
 for the metadata flags; the clone flags for `copyfile` are not proof that an
 `fcopyfile` call shared data blocks.
 
-A production candidate still needs descriptor-safe source validation,
-exclusive staging and cleanup, exact destination-metadata behavior (including
-ownership, inherited ACLs and file flags), same-volume eligibility, full
-SHA-256 verification before publication, and lifecycle failure/recovery tests.
-Only then should the cold-LFS comparison above determine whether avoided
-writes outweigh the extra clone, metadata and verification work. Do not bypass
-hashing, use hardlinks, or infer that this changes the cached-base path.
+The narrowly scoped APFS runtime candidate handles objects of at least 8 MiB
+only when source and destination are same-volume, single-link, caller-owned
+ordinary files with matching ownership and no ACLs, xattrs, special modes or
+file flags. Other cases retain verified streaming. Descriptor-based cloning,
+private staging, complete SHA-256 verification and pre-publication identity
+checks protect the new path; a subprocess-exit regression leaves a real clone
+behind and proves that add-journal recovery removes it without touching the
+object store. No timing claim follows from these correctness tests. Use the
+cold-LFS comparison above with `16 8388608 8` to exercise the candidate (128 MiB
+per fresh base), including both same-binary control lanes. Do not bypass hashing,
+use hardlinks, or infer that this changes the cached-base path.
 
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:

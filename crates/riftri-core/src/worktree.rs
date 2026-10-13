@@ -4525,7 +4525,7 @@ fn materialize_git_lfs_objects(
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn lfs_materialization_workers(objects: &[GitLfsObject]) -> usize {
     // Small/no-LFS checkouts keep the inline path. Larger cold bases use at
-    // most four 64-KiB buffers and eight file handles; cached bases never call
+    // most four 64-KiB buffers and sixteen file handles; cached bases never call
     // materialization. This overlaps independent private destinations only.
     let bytes = objects.iter().fold(0_u64, |total, object| {
         total.saturating_add(object.pointer.size)
@@ -4572,8 +4572,9 @@ fn materialize_git_lfs_object(
         )));
     }
 
+    let try_native = cfg!(target_os = "macos") && object.pointer.size >= 8 * 1024 * 1024;
     let mut destination_options = OpenOptions::new();
-    destination_options.write(true).truncate(true);
+    destination_options.write(true).truncate(!try_native);
     #[cfg(unix)]
     destination_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
     #[cfg(target_os = "windows")]
@@ -4583,11 +4584,41 @@ fn materialize_git_lfs_object(
         .map_err(|error| io("open Git LFS checkout destination", &destination, error))?;
     validate_opened_git_lfs_file(&output, &destination, "Git LFS checkout destination")?;
 
+    #[cfg(target_os = "macos")]
+    let mut prepared = if try_native {
+        riftri_storage::checkout_clone::prepare(&source, &output, &destination)
+            .map_err(|error| io("prepare native Git LFS expansion", &destination, error))?
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let cloned = prepared.is_some();
+    #[cfg(not(target_os = "macos"))]
+    let cloned = false;
+    #[cfg(all(test, target_os = "macos"))]
+    if let Some(prepared) = &prepared {
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::LfsClonePrepared,
+            &prepared.path(),
+        );
+    }
+    if !cloned && try_native {
+        output
+            .set_len(0)
+            .map_err(|error| io("truncate Git LFS checkout destination", &destination, error))?;
+    }
+    #[cfg(target_os = "macos")]
+    let reader = prepared
+        .as_mut()
+        .map_or(&mut source, |clone| clone.file_mut());
+    #[cfg(not(target_os = "macos"))]
+    let reader = &mut source;
+
     let mut digest = Sha256::new();
     let mut copied = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let count = source
+        let count = reader
             .read(&mut buffer)
             .map_err(|error| io("read local Git LFS object", &object.source_path, error))?;
         if count == 0 {
@@ -4597,9 +4628,11 @@ fn materialize_git_lfs_object(
             WorktreeError::Unsupported("Git LFS object size overflowed u64".to_owned())
         })?;
         digest.update(&buffer[..count]);
-        output
-            .write_all(&buffer[..count])
-            .map_err(|error| io("write expanded Git LFS object", &destination, error))?;
+        if !cloned {
+            output
+                .write_all(&buffer[..count])
+                .map_err(|error| io("write expanded Git LFS object", &destination, error))?;
+        }
     }
     if copied != object.pointer.size {
         return Err(WorktreeError::Unsupported(format!(
@@ -4613,6 +4646,12 @@ fn materialize_git_lfs_object(
             "local Git LFS object {} failed SHA-256 verification; found {actual_oid}",
             object.pointer.oid
         )));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(prepared) = prepared {
+        prepared
+            .publish(&output)
+            .map_err(|error| io("publish verified Git LFS expansion", &destination, error))?;
     }
     Ok(())
 }
