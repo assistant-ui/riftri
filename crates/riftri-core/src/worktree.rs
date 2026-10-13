@@ -5715,17 +5715,26 @@ fn analyze_resolved_repository_compatibility(
     if config.has_conditional_includes
         && !git.conditional_config_has_only(
             repository,
+            // Identity, signing, and SSH transport keys: none of them can
+            // change the bytes a checkout writes.
             &[
                 "user.name",
                 "user.email",
                 "user.signingkey",
                 "user.useconfigonly",
+                "commit.gpgsign",
+                "tag.gpgsign",
+                "gpg.format",
+                "gpg.program",
+                "gpg.ssh.program",
+                "gpg.ssh.allowedsignersfile",
+                "core.sshcommand",
             ],
         )?
     {
         blockers.push(RepositoryCompatibilityBlocker {
             kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
-            explanation: "conditional Git configuration includes must contain only identity settings (user.name, user.email, user.signingKey, user.useConfigOnly); other keys, nested includes, and unreadable targets are not supported"
+            explanation: "conditional Git configuration includes must contain only identity, signing, and SSH settings (user.name, user.email, user.signingKey, user.useConfigOnly, commit.gpgSign, tag.gpgSign, gpg.format, gpg.program, gpg.ssh.program, gpg.ssh.allowedSignersFile, core.sshCommand); other keys, nested includes, and unreadable targets are not supported"
                 .to_owned(),
         });
     }

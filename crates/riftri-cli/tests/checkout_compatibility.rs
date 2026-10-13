@@ -699,14 +699,21 @@ fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
             format!("[includeIf \"{condition}\"]\n path = identity-config\n"),
         )
         .expect("write global configuration");
-        for (contents, compatible) in [
+        for (case, (contents, compatible)) in [
             (
                 "[user]\n name = Work User\n email = work@example.invalid\n",
                 true,
             ),
+            (
+                "[user]\n signingKey = key\n[commit]\n gpgSign = false\n[tag]\n gpgSign = false\n[gpg]\n format = ssh\n program = gpg\n[gpg \"ssh\"]\n program = ssh-keygen\n allowedSignersFile = signers\n[core]\n sshCommand = ssh -i work-key\n",
+                true,
+            ),
             ("[core]\n eol = crlf\n", false),
             ("[include]\n path = hidden-config\n", false),
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             fs::write(&included, contents).expect("write included configuration");
             let doctor = Command::new(env!("CARGO_BIN_EXE_riftri"))
                 .args(["doctor", "--json"])
@@ -724,15 +731,14 @@ fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
             );
             #[cfg(target_os = "macos")]
             if compatible {
-                let destination =
-                    fixture
-                        ._directory
-                        .path()
-                        .join(if condition.contains("worktrees") {
-                            "destination-identity"
-                        } else {
-                            "source-identity"
-                        });
+                let destination = fixture._directory.path().join(format!(
+                    "{}-identity-{case}",
+                    if condition.contains("worktrees") {
+                        "destination"
+                    } else {
+                        "source"
+                    }
+                ));
                 let state = fixture._directory.path().join("state");
                 let add = Command::new(env!("CARGO_BIN_EXE_riftri"))
                     .args(["worktree", "add"])
