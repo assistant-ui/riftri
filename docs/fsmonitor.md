@@ -92,6 +92,12 @@ opt-in or stop Git-owned watchers. Before retiring a watched worktree, opt it
 out and stop its watcher, then use normal Riftri removal. Dirty-worktree
 protection remains unchanged.
 
+Git's watcher exits on its own when its worktree root is renamed or replaced,
+as a move (`riftri worktree move` or plain `git worktree move`) or
+`riftri worktree compact` does. A Git command that reaches the exiting watcher
+can print `error: could not read IPC response`. It then falls back to a full
+scan, so its result is still correct, and a later command starts a new watcher.
+
 For a one-command comparison or troubleshooting without FSMonitor and the
 untracked cache:
 
@@ -110,9 +116,10 @@ The macOS integration test covers explicit/intercepted creation, edits,
 deletions, renames, modes, symlinks, untracked files, watcher restart, isolation,
 dirty-removal refusal, and opt-out. It also warms the watcher before explicit
 and intercepted managed moves and before native-COW compaction replaces the
-root inode, then checks tracked and nested untracked edits with the untracked
-cache both off and on. Dirty removal/compaction must refuse, peers and bases
-must remain unchanged, and final removal/GC must leave no managed state.
+root inode, waits for that watcher to exit, then checks tracked and nested
+untracked edits under a new watcher with the untracked cache both off and on.
+Dirty removal/compaction must refuse, peers and bases must remain unchanged,
+and final removal/GC must leave no managed state.
 This coverage does not certify every Git version or platform.
 [Git's FSMonitor manual](https://git-scm.com/docs/git-fsmonitor--daemon) describes
 the daemon and filesystem limitations.
