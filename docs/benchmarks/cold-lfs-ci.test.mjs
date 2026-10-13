@@ -92,6 +92,8 @@ test('hosted qualification binds all lanes to the predeclared plan and fresh bui
 test('hosted workflow is read-only, uncached, bounded, sequential and retains failed evidence', () => {
   const workflow = fs.readFileSync(new URL('../../.github/workflows/cold-lfs.yml', import.meta.url), 'utf8');
   assert.match(workflow, /contents: read/);
+  assert.match(workflow, /COLD_LFS_ROOT: \$\{\{ github\.workspace \}\}\/cold-lfs-evidence/);
+  assert.match(workflow, /df -P "\$COLD_LFS_ROOT"/);
   assert.doesNotMatch(workflow, /pull_request_target|secrets\.|continue-on-error|cancel-in-progress: true/);
   assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 2);
   assert.equal((workflow.match(/cargo build --release --locked/g) ?? []).length, 2);

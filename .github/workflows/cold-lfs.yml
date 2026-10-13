@@ -25,7 +25,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_RELEASE_DEBUG: 0
-      COLD_LFS_ROOT: ${{ runner.temp }}/cold-lfs-evidence
+      COLD_LFS_ROOT: ${{ github.workspace }}/cold-lfs-evidence
     defaults:
       run:
         shell: bash
@@ -60,7 +60,7 @@ jobs:
           rustc -Vv > "$COLD_LFS_ROOT/rustc.txt"
           cargo -V > "$COLD_LFS_ROOT/cargo.txt"
           sw_vers > "$COLD_LFS_ROOT/macos.txt"
-          volume_device="$(df -P "$RUNNER_TEMP" | awk 'NR == 2 { print $1 }')"
+          volume_device="$(df -P "$COLD_LFS_ROOT" | awk 'NR == 2 { print $1 }')"
           diskutil info -plist "$volume_device" > "$COLD_LFS_ROOT/volume.plist"
           test "$(plutil -extract FilesystemType raw "$COLD_LFS_ROOT/volume.plist")" = apfs
           if ! command -v git-lfs >/dev/null; then
@@ -113,11 +113,11 @@ jobs:
           if-no-files-found: error
           # No multi-hundred-MiB fixture repositories or build directories.
           path: |
-            ${{ runner.temp }}/cold-lfs-evidence/*.json
-            ${{ runner.temp }}/cold-lfs-evidence/*.jsonl
-            ${{ runner.temp }}/cold-lfs-evidence/*.txt
-            ${{ runner.temp }}/cold-lfs-evidence/*.plist
-            ${{ runner.temp }}/cold-lfs-evidence/*/results.json
-            ${{ runner.temp }}/cold-lfs-evidence/*/git-*.jsonl
-            ${{ runner.temp }}/cold-lfs-evidence/*/command-*.log
-            ${{ runner.temp }}/cold-lfs-evidence/*/command-*.stdout
+            ${{ env.COLD_LFS_ROOT }}/*.json
+            ${{ env.COLD_LFS_ROOT }}/*.jsonl
+            ${{ env.COLD_LFS_ROOT }}/*.txt
+            ${{ env.COLD_LFS_ROOT }}/*.plist
+            ${{ env.COLD_LFS_ROOT }}/*/results.json
+            ${{ env.COLD_LFS_ROOT }}/*/git-*.jsonl
+            ${{ env.COLD_LFS_ROOT }}/*/command-*.log
+            ${{ env.COLD_LFS_ROOT }}/*/command-*.stdout
