@@ -2062,6 +2062,22 @@ impl Git {
         Ok(())
     }
 
+    /// Populate the index without running checkout-to-index content filters.
+    /// The caller must run `worktree_is_clean` before accepting the view: this
+    /// establishes HEAD's index entries, but deliberately leaves stat/content
+    /// validation to that final check. In particular, an LFS add need not run
+    /// the clean filter during reset and then again during a racy refresh.
+    pub fn synchronize_worktree_index_deferred_refresh(
+        &self,
+        worktree: &Path,
+    ) -> Result<(), GitError> {
+        self.run(
+            Some(worktree),
+            &["reset", "--mixed", "--quiet", "--no-refresh", "HEAD"],
+        )?;
+        Ok(())
+    }
+
     /// Enable per-worktree cone sparse checkout for the listed directories and
     /// populate the linked worktree index from HEAD. `sparse-checkout set`
     /// stores the sparse configuration in the worktree-scoped Git
@@ -5300,6 +5316,90 @@ mod tests {
                 .expect("check removed branch"),
             None
         );
+    }
+
+    #[test]
+    fn deferred_index_refresh_preserves_head_and_final_dirty_detection() {
+        for change in ["clean", "same-size", "missing", "untracked"] {
+            let fixture = RepositoryFixture::committed();
+            let linked_parent = tempdir().unwrap();
+            let linked = linked_parent.path().join("deferred");
+            let handle = Git::default();
+            handle
+                .add_worktree_no_checkout(
+                    fixture.path(),
+                    &linked,
+                    OsStr::new("HEAD"),
+                    WorktreeHead::Detached,
+                )
+                .unwrap();
+            fs::write(linked.join("tracked.txt"), "tracked\n").unwrap();
+            match change {
+                "same-size" => fs::write(linked.join("tracked.txt"), "altered\n").unwrap(),
+                "missing" => fs::remove_file(linked.join("tracked.txt")).unwrap(),
+                "untracked" => fs::write(linked.join("private.txt"), "private\n").unwrap(),
+                _ => {}
+            }
+            let before = handle.process_attempts();
+            handle
+                .synchronize_worktree_index_deferred_refresh(&linked)
+                .unwrap();
+            assert_eq!(handle.process_attempts() - before, 1);
+            // Deferred refresh must not stage the changed checkout bytes.
+            assert!(
+                handle
+                    .run(Some(&linked), &["diff", "--cached", "--exit-code"])
+                    .is_ok()
+            );
+            assert_eq!(
+                handle.worktree_is_clean(&linked).unwrap(),
+                change == "clean",
+                "{change}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deferred_index_refresh_does_not_hide_required_filter_failure() {
+        let fixture = RepositoryFixture::committed();
+        fs::write(
+            fixture.path().join(".gitattributes"),
+            "*.txt filter=broken\n",
+        )
+        .unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "-m", "filter fixture"],
+        );
+        git(fixture.path(), &["config", "filter.broken.clean", "exit 1"]);
+        git(
+            fixture.path(),
+            &["config", "filter.broken.required", "true"],
+        );
+        let parent = tempdir().unwrap();
+        let linked = parent.path().join("deferred");
+        let handle = Git::default();
+        handle
+            .add_worktree_no_checkout(
+                fixture.path(),
+                &linked,
+                OsStr::new("HEAD"),
+                WorktreeHead::Detached,
+            )
+            .unwrap();
+        fs::write(linked.join("tracked.txt"), "tracked\n").unwrap();
+        fs::copy(
+            fixture.path().join(".gitattributes"),
+            linked.join(".gitattributes"),
+        )
+        .unwrap();
+        handle
+            .synchronize_worktree_index_deferred_refresh(&linked)
+            .unwrap();
+        assert!(handle.worktree_is_clean(&linked).is_err());
+        assert_eq!(fs::read(linked.join("tracked.txt")).unwrap(), b"tracked\n");
     }
 
     #[test]

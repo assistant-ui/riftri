@@ -4150,7 +4150,14 @@ fn perform_add(
     }
 
     if sparse_directories.is_empty() {
-        git.synchronize_worktree_index(destination)?;
+        if lfs_objects.is_empty() {
+            git.synchronize_worktree_index(destination)?;
+        } else {
+            // The mandatory status below is the first content refresh. Avoid
+            // starting LFS once during reset and again during a racy status.
+            // All ordinary and sparse index paths retain their existing policy.
+            git.synchronize_worktree_index_deferred_refresh(destination)?;
+        }
     } else {
         git.synchronize_sparse_worktree_index(destination, sparse_directories)?;
     }
