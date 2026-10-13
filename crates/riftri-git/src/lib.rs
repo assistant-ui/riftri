@@ -810,12 +810,17 @@ impl Git {
     }
 
     /// Resolve Git's unique path suffix before falling back to a filesystem path.
+    ///
+    /// `repository` is where the worktree inventory is read. `directory` is
+    /// the directory the caller's Git command runs in, which is where Git
+    /// resolves a relative path; under `--git-dir` the two differ.
     pub fn resolve_worktree_path(
         &self,
         repository: &Path,
+        directory: &Path,
         selector: &OsStr,
     ) -> Result<PathBuf, GitError> {
-        let path = repository.join(selector);
+        let path = directory.join(selector);
         let suffix = selector.as_encoded_bytes();
         if suffix.is_empty() {
             return Ok(path);
@@ -1108,12 +1113,23 @@ impl Git {
 
     /// Read one repository configuration value as raw Git bytes.
     pub fn config_value(&self, path: &Path, key: &str) -> Result<Option<Vec<u8>>, GitError> {
-        let arguments = [
-            OsString::from("config"),
-            OsString::from("--null"),
-            OsString::from("--get"),
-            OsString::from(key),
-        ];
+        self.config_value_in(path, None, key)
+    }
+
+    /// [`Self::config_value`] for the repository Git opens from `path` under
+    /// an optional explicit `--git-dir`, which takes precedence over
+    /// discovery from `path` just as it does for the caller's own command.
+    pub fn config_value_in(
+        &self,
+        path: &Path,
+        git_dir: Option<&Path>,
+        key: &str,
+    ) -> Result<Option<Vec<u8>>, GitError> {
+        let mut arguments = Vec::new();
+        if let Some(git_dir) = git_dir {
+            arguments.extend([OsString::from("--git-dir"), git_path_argument(git_dir)]);
+        }
+        arguments.extend(["config", "--null", "--get", key].map(OsString::from));
         let output = self.output_os(Some(path), &arguments)?;
         if output.status.success() {
             Ok(Some(
@@ -2557,6 +2573,31 @@ impl Git {
     fn output(&self, path: Option<&Path>, arguments: &[&str]) -> Result<Output, GitError> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
         self.output_os(path, &arguments)
+    }
+
+    /// Every command name Git runs before it looks for an alias of that name:
+    /// its builtins and the `git-<name>` programs in its exec-path and on
+    /// `PATH`, without the deprecated builtins, which Git lets an alias
+    /// replace. Git prints one name per line; the groups overlap, and callers
+    /// only test membership.
+    pub fn commands_run_before_aliases(&self) -> Result<Vec<String>, GitError> {
+        let listed = |output: &Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        // A Git too old to know the `deprecated` listing refuses it, and
+        // such a Git never lets an alias replace a builtin.
+        let deprecated = self.output(None, &["--list-cmds=deprecated"])?;
+        let deprecated = if deprecated.status.success() {
+            listed(&deprecated)
+        } else {
+            Vec::new()
+        };
+        let mut commands = listed(&self.run(None, &["--list-cmds=builtins,main,others"])?);
+        commands.retain(|command| !deprecated.contains(command));
+        Ok(commands)
     }
 
     /// Whether `path` lies outside any Git repository, as opposed to inside
