@@ -5,6 +5,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Conditional Git includes (`includeIf`) that set commit signing or SSH
+  transport keys (`commit.gpgSign`, `tag.gpgSign`, `gpg.format`, `gpg.program`,
+  `gpg.ssh.program`, `gpg.ssh.allowedSignersFile`, `core.sshCommand`) no longer
+  block a repository. Per-identity includes usually carry these next to
+  `user.email`, and none of them change checkout bytes.
+
 ## [0.6.5] - 2026-10-13
 
 ### Changed

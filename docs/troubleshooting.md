@@ -101,9 +101,12 @@ the floor. If you downloaded an archive by hand, take the
 
 ### Conditional Git configuration is rejected
 
-Riftri accepts conditional includes that contain only `user.name`, `user.email`,
-`user.signingKey`, and `user.useConfigOnly`. This includes identity files from
-system, global, and repository configuration.
+Riftri accepts conditional includes that contain only identity, signing, and SSH
+settings, none of which change checkout bytes: `user.name`, `user.email`,
+`user.signingKey`, `user.useConfigOnly`, `commit.gpgSign`, `tag.gpgSign`,
+`gpg.format`, `gpg.program`, `gpg.ssh.program`, `gpg.ssh.allowedSignersFile`,
+and `core.sshCommand`. This includes identity files from system, global, and
+repository configuration.
 
 Riftri reads each conditional target even when its condition does not match the
 source worktree. Other keys, nested includes, and unreadable targets remain
