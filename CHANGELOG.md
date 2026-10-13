@@ -32,6 +32,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   an ID from one whose object a damaged repository lost and calls both an
   invalid reference; a branch or tag whose object is unreadable stays an
   operational failure.
+- Tree modes, single blob sizes, and Git version components with a leading
+  `+` are rejected as invalid Git output instead of being parsed as numbers.
+  Git does not print signed values here, so ordinary repositories are
+  unaffected.
 
 
 ## [0.6.4] - 2026-10-08

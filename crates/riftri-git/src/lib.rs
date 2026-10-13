@@ -46,10 +46,10 @@ impl GitInfo {
         else {
             return false;
         };
-        let (Ok(major), Ok(minor), Ok(_patch)) = (
-            major.parse::<u32>(),
-            minor.parse::<u32>(),
-            patch.parse::<u32>(),
+        let (Some(major), Some(minor), Some(_patch)) = (
+            parse_unsigned(major, 10),
+            parse_unsigned(minor, 10),
+            parse_unsigned(patch, 10),
         ) else {
             return false;
         };
@@ -905,11 +905,10 @@ impl Git {
             &["cat-file", "-s", object.as_str()],
             "blob size",
         )?;
-        size.parse::<u64>()
-            .map_err(|error| GitError::InvalidOutput {
-                context: "blob size",
-                detail: error.to_string(),
-            })
+        parse_unsigned(&size, 10).ok_or_else(|| GitError::InvalidOutput {
+            context: "blob size",
+            detail: format!("expected an unsigned decimal size, got {size:?}"),
+        })
     }
 
     /// Read the exact bytes of one blob object without consulting checkout
@@ -2764,15 +2763,20 @@ fn parse_blob_size_line(line: &str, object: &ObjectId) -> Result<u64, GitError> 
     let (Some(id), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
         return Err(invalid_blob_sizes());
     };
-    if fields.next().is_some()
-        || id != object.as_str()
-        || kind != "blob"
-        || size.is_empty()
-        || !size.bytes().all(|byte| byte.is_ascii_digit())
-    {
+    if fields.next().is_some() || id != object.as_str() || kind != "blob" {
         return Err(invalid_blob_sizes());
     }
-    size.parse().map_err(|_| invalid_blob_sizes())
+    parse_unsigned(size, 10).ok_or_else(invalid_blob_sizes)
+}
+
+/// Parse a number Git printed as bare digits in `radix`. Rust's integer
+/// parsers also accept a leading `+`, which Git never prints, so anything
+/// but digits is refused.
+fn parse_unsigned(text: &str, radix: u32) -> Option<u64> {
+    if !text.bytes().all(|byte| char::from(byte).is_digit(radix)) {
+        return None;
+    }
+    u64::from_str_radix(text, radix).ok()
 }
 
 fn parse_blob_sizes(bytes: &[u8], objects: &[ObjectId]) -> Result<Vec<u64>, GitError> {
@@ -3053,10 +3057,12 @@ pub fn parse_tree_entries(input: &[u8]) -> Result<Vec<TreeEntry>, GitError> {
                 context: "tree mode",
                 detail: error.to_string(),
             })?;
-        let mode = u32::from_str_radix(mode_text, 8).map_err(|error| GitError::InvalidOutput {
-            context: "tree mode",
-            detail: error.to_string(),
-        })?;
+        let mode = parse_unsigned(mode_text, 8)
+            .and_then(|mode| u32::try_from(mode).ok())
+            .ok_or_else(|| GitError::InvalidOutput {
+                context: "tree mode",
+                detail: format!("expected an octal mode, got {mode_text:?}"),
+            })?;
         if path.is_empty() {
             return Err(GitError::InvalidOutput {
                 context: "tree entry",
@@ -6411,6 +6417,9 @@ mod tests {
             ("git version 2.47.1.windows.1", true),
             ("git version 2.43.0.rc0", false),
             ("git version 2.43", false),
+            ("git version +2.43.0", false),
+            ("git version 2.+43.0", false),
+            ("git version 2.43.+0", false),
             ("unknown", false),
         ] {
             let info = super::GitInfo {
@@ -7243,5 +7252,51 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].mode, 0o100644);
         assert_eq!(entries[0].path.as_os_str().as_bytes(), b"name-\xff");
+    }
+
+    #[test]
+    fn tree_parser_rejects_a_mode_that_is_not_octal_digits() {
+        // `from_str_radix` accepts a leading `+`, which Git never prints.
+        for mode in ["+0", "+100644", "-100644", "100648", "0x1ff"] {
+            let input = format!("{mode} blob {}\tpath\0", "a".repeat(40));
+            assert!(
+                matches!(
+                    super::parse_tree_entries(input.as_bytes()),
+                    Err(super::GitError::InvalidOutput {
+                        context: "tree mode",
+                        ..
+                    })
+                ),
+                "{mode}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_size_rejects_output_that_is_not_decimal_digits() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let script = fixture.path().join("git-size");
+        let id = super::ObjectId::parse("a".repeat(40)).unwrap();
+        for (size, expected) in [("12", Some(12)), ("+12", None), ("-12", None), ("", None)] {
+            fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{size}'\n")).unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            let git = Git::new(&script);
+            let parsed = retry_while_wrapper_is_busy(|| git.blob_size(fixture.path(), &id));
+            match expected {
+                Some(expected) => assert_eq!(parsed.unwrap(), expected),
+                None => assert!(
+                    matches!(
+                        parsed,
+                        Err(super::GitError::InvalidOutput {
+                            context: "blob size",
+                            ..
+                        })
+                    ),
+                    "{size:?}"
+                ),
+            }
+        }
     }
 }
