@@ -2020,11 +2020,8 @@ impl WorktreeInventory {
 // aliases and lossless non-UTF-8 paths. It is scoped to one status snapshot.
 fn inventory_path_key(path: &Path) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
-    {
-        use unicode_normalization::UnicodeNormalization;
-        if let Some(text) = path.to_str() {
-            return Some(text.nfc().collect::<String>().into_bytes());
-        }
+    if let Some(text) = path.to_str() {
+        return Some(composed_path(text).collect::<String>().into_bytes());
     }
     #[cfg(target_os = "windows")]
     {
@@ -6665,13 +6662,26 @@ fn paths_match(left: &Path, right: &Path) -> bool {
 /// compared exactly.
 #[cfg(target_os = "macos")]
 fn paths_match(left: &Path, right: &Path) -> bool {
-    use unicode_normalization::UnicodeNormalization;
-
     left == right
         || matches!(
             (left.to_str(), right.to_str()),
-            (Some(left), Some(right)) if left.nfc().eq(right.nfc())
+            (Some(left), Some(right)) if composed_path(left).eq(composed_path(right))
         )
+}
+
+/// The composed (NFC) form of a path, one component at a time. `Path` equality
+/// ignores a trailing or repeated separator, so the composed form must too:
+/// compared as raw text, one spelling could match two paths that do not match
+/// each other.
+#[cfg(target_os = "macos")]
+fn composed_path(path: &str) -> impl Iterator<Item = char> + '_ {
+    use unicode_normalization::UnicodeNormalization;
+
+    Path::new(path).components().flat_map(|component| {
+        // Every component of a UTF-8 path is UTF-8.
+        let component = component.as_os_str().to_str().unwrap_or_default();
+        component.nfc().chain(std::iter::once('/'))
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -14006,6 +14016,7 @@ mod tests {
             std::path::PathBuf::from("/work/caf\u{00e9}"),
             std::path::PathBuf::from("/work/cafe\u{0301}"),
             std::path::PathBuf::from("/work/./caf\u{00e9}"),
+            std::path::PathBuf::from("/work//cafe\u{0301}/"),
             std::path::PathBuf::from("/WORK/PLAIN"),
             std::path::PathBuf::from(r"C:\work\plain"),
             std::path::PathBuf::from(r"\\?\C:\work\plain"),
@@ -14042,6 +14053,33 @@ mod tests {
             assert_eq!(inventory.find(path), expected);
         }
         assert!(inventory.find(Path::new("/not-registered")).is_none());
+    }
+
+    /// `Path` equality ignores redundant separators, so the normalization
+    /// alias has to ignore them too, or one spelling matches two paths that
+    /// do not match each other.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn normalization_aliases_ignore_redundant_separators() {
+        let composed = Path::new("/work/caf\u{00e9}");
+        for decomposed in [
+            "/work/cafe\u{0301}",
+            "/work/cafe\u{0301}/",
+            "/work//cafe\u{0301}",
+            "/work/./cafe\u{0301}",
+        ] {
+            let decomposed = Path::new(decomposed);
+            assert!(super::paths_match(composed, decomposed), "{decomposed:?}");
+            assert!(super::paths_match(decomposed, composed), "{decomposed:?}");
+        }
+        assert!(!super::paths_match(
+            composed,
+            Path::new("/work/cafe\u{0301}/nested")
+        ));
+        assert!(!super::paths_match(
+            composed,
+            Path::new("/workcafe\u{0301}")
+        ));
     }
 
     fn inventory_entry(path: PathBuf) -> riftri_git::WorktreeInfo {
