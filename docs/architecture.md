@@ -249,6 +249,15 @@ per-file probe I/O. Non-ASCII trees incur the name-only probe because filesystem
 Unicode comparison rules cannot safely be approximated by language-level case
 folding or normalization. Unix names are never decoded lossily.
 
+On Unix, ordinary-path probes retain every sibling in a directory containing a
+non-ASCII name or an ASCII case-alias pair. A representative leaf below each
+directory recreates its complete ancestor chain, so directory aliases and
+file/directory conflicts still reach the real filesystem. Other all-ASCII,
+case-distinct sibling groups need no replay, just as in the existing ASCII-only
+fast path. Unusual ASCII names, excessive path/component lengths, duplicate or
+structurally inconsistent inputs, and Windows keep the complete probe. This is
+operation-local selection, never a cache of filesystem comparison rules.
+
 Calls that mutate Git's shared linked-worktree administration are serialized by
 a repository-local Riftri lock. Base construction and native view cloning stay
 outside that critical section, so parallel adds share immutable preparation

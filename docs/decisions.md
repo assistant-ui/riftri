@@ -471,6 +471,13 @@ international path sets rather than risk a false negative from an approximate
 Unicode folding table. Native Unix bytes remain intact; ASCII-only trees with
 no case alias retain their existing fast path.
 
+Unix probes may omit ordinary ASCII-only, case-distinct sibling groups. Every
+name in a potentially ambiguous group is still replayed, including ASCII
+siblings of non-ASCII names; representative descendant paths recreate directory
+names and their parents. Unusual ASCII spellings, long paths/components, invalid
+tree shapes, and Windows retain full-tree replay. No Unicode folding table or
+persistent probe cache decides whether two names coexist.
+
 ### D036: forced removal binds consent to an exact content snapshot
 
 `riftri worktree remove --force` and an enabled ordinary
