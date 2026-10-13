@@ -10,6 +10,19 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - `riftri gc --apply` collects a completion marker whose base directory is
   missing, as its preview already listed. It used to stop on the missing base
   before reaching later candidates and fail the same way on every run.
+- `riftri repair` no longer retires the add journal of a worktree whose move
+  or compaction was interrupted while its path was briefly empty. Repair
+  recorded a completed removal and then put the view back, leaving a registered
+  worktree that Riftri no longer managed and whose base `riftri gc` could
+  collect; after an interrupted compaction undo, every later repair and removal
+  failed. An add onto such a path is refused the same way.
+- A refused add of a tree that Git itself checks out dirty, such as a blob
+  stored with CRLF under `text eol=crlf`, is now rolled back completely.
+  Rollback read Git's dirty verdict as a change, kept the untouched view
+  registered, and left the add pending with `riftri repair` failing the same
+  way every time. A view that still equals its immutable base and has nothing
+  staged is now removed, and a write that races the removal is still kept.
+
 
 ## [0.6.4] - 2026-10-08
 

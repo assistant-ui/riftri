@@ -6,6 +6,7 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import test from 'node:test';
+import {readStartupProfile} from './startup-profile.mjs';
 
 const binary = process.env.RIFTRI_BENCH_TEST_BINARY;
 const integration = {skip: process.platform !== 'darwin' || !binary, timeout: 120000};
@@ -46,6 +47,14 @@ test('supervised startup still verifies real APFS creation, isolation and full c
   assert.equal(report.final.operations.active_views, 0);
   assert.deepEqual(report.final.bases, []);
   assert.deepEqual(report.final.diagnostic_issues, []);
+  const profile = readStartupProfile(path.join(output, 'results.json'));
+  assert.equal(profile.complete, true);
+  assert.equal(profile.samples.length, 9);
+  assert.deepEqual(profile.groups.map(g => [g.label, g.reused, g.samples]), [
+    ['baseline', false, 1], ['baseline', true, 4], ['advice', true, 4],
+  ]);
+  assert.ok(profile.groups.every(g => g.metrics.resetMs.distribution?.samples === g.samples));
+  assert.ok(profile.groups.every(g => g.metrics.statusMs.distribution?.samples === g.samples));
   const archivedOutput = path.join(root, 'archived-result');
   const archived = await start(t, [binary, archivedOutput, '32', '1', binary, '128', path.join(output, 'repository'), '1', '90000']).done;
   assert.equal(archived.code, 0, archived.log);
@@ -55,6 +64,7 @@ test('supervised startup still verifies real APFS creation, isolation and full c
   assert.equal(archivedReport.tree, report.tree);
   assert.equal(archivedReport.samples.length, 3);
   assert.ok(archivedReport.samples.every(s => s.success));
+  assert.equal(readStartupProfile(path.join(archivedOutput, 'results.json')).complete, true);
   fs.rmSync(root, {recursive: true}); // Only this successful, fully removed fixture.
 });
 
@@ -90,6 +100,10 @@ for (const stage of ['create', 'remove']) test(`SIGTERM during ${stage} retains 
   assert.equal(report.samples.filter(s => s.cancelled).length, stage === 'create' ? 4 : 0);
   for (const worker of ready()) assert.equal(exists(worker.pid), false, `worker ${worker.pid} survived`);
   assert.ok(report.retained.length > 0);
+  const profile = readStartupProfile(path.join(output, 'results.json'));
+  assert.equal(profile.complete, false);
+  assert.equal(profile.samples.length, report.samples.length);
+  assert.ok(profile.groups.every(g => Object.values(g.metrics).every(m => m.distribution === null)));
   assert.ok(fs.existsSync(report.samples[0].base), 'interruption must not force-delete the base');
   if (stage === 'create') {
     for (const s of report.samples.filter(s => s.cancelled)) {
