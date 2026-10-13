@@ -59,6 +59,43 @@ fn stop_monitor(directory: &Path) {
     assert_eq!(monitor_status(directory).status.code(), Some(1));
 }
 
+fn monitor_socket(directory: &Path) -> PathBuf {
+    // On a local volume Git binds the watcher's socket in the worktree's Git
+    // directory, which neither a managed move nor compaction renames.
+    let path = git(
+        directory,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "fsmonitor--daemon.ipc",
+        ],
+    );
+    PathBuf::from(String::from_utf8(path).unwrap().trim_end())
+}
+
+fn wait_for_monitor_exit(directory: &Path, socket: &Path, stale_inode: u64) {
+    // Git's watcher shuts itself down once its worktree root is renamed or
+    // replaced, but its socket stays connectable until the process exits. A
+    // command that connects in that window gets no reply, falls back to a full
+    // scan, and does not start a replacement. Wait until that watcher is gone,
+    // so the next watched command deterministically finds or starts a live
+    // one. A replacement binds a new socket inode; `status` alone cannot tell
+    // it from the exiting watcher.
+    let started = Instant::now();
+    loop {
+        let replaced = fs::metadata(socket).map_or(true, |socket| socket.ino() != stale_inode);
+        if replaced || monitor_status(directory).status.code() == Some(1) {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "watcher for the previous worktree root did not exit"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 struct Fixture {
     root: support::WritableTempDir,
     // Use a short, disposable socket directory, not Git's HOME fallback.
@@ -452,6 +489,8 @@ fn fsmonitor_tracks_private_edits_after_managed_move_and_compaction() {
             assert!(status(&view, false).is_empty());
             assert!(status(&view, false).is_empty());
             assert!(monitor_status(&view).status.success());
+            let socket = monitor_socket(&view);
+            let stale_inode = fs::metadata(&socket).unwrap().ino();
             if compact {
                 let old_inode = fs::metadata(&view).unwrap().ino();
                 success(
@@ -481,6 +520,7 @@ fn fsmonitor_tracks_private_edits_after_managed_move_and_compaction() {
                 assert!(!view.exists());
                 view = moved;
             }
+            wait_for_monitor_exit(&view, &socket, stale_inode);
             assert_eq!(git(&view, &["rev-parse", "HEAD"]), head);
             assert!(status(&view, false).is_empty());
             assert!(status(&view, true).is_empty());
