@@ -40,6 +40,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `<repository>/.git`, is now an `invalid-worktree-binding` policy refusal
   (exit 3) like every other path that is not a worktree root. It was reported
   as an operational `command-failed` receipt.
+- `riftri shell status` reports a repository it could not inspect as
+  `Repository: unavailable (<reason>)` with an unknown opt-in state, and a bare
+  repository as `Repository: bare`. Every inspection failure used to be
+  reported as `Repository: none`, which now means only that the path is not
+  inside a repository.
 
 
 ## [0.6.4] - 2026-10-08
