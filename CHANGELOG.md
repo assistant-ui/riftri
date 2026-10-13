@@ -25,6 +25,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - On macOS, a worktree path given with a trailing or repeated separator now
   matches its registration when the two also differ in Unicode normalization.
   Each difference was already tolerated alone, but not both together.
+- `worktree add` refuses a full-length hexadecimal object ID that names no
+  object as an `invalid-request` policy failure (exit 3), like any other
+  revision that names no commit. It was reported as a Git command failure,
+  operational with unknown cleanup. Git's own `worktree add` cannot tell such
+  an ID from one whose object a damaged repository lost and calls both an
+  invalid reference; a branch or tag whose object is unreadable stays an
+  operational failure.
 
 
 ## [0.6.4] - 2026-10-08
