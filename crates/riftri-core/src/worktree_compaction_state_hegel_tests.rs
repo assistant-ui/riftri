@@ -403,7 +403,6 @@ enum Swap {
     derandomize = true,
     suppress_health_check = [HealthCheck::TooSlow]
 )]
-#[ignore = "bug: repair retires the add journal of a view whose compaction was killed between its two renames"]
 fn a_compaction_killed_between_its_renames_stays_managed(tc: TestCase) {
     let swap = tc.draw(gs::sampled_from(vec![Swap::Activating, Swap::Restoring]));
     let status_first = tc.draw(gs::booleans());
