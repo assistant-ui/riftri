@@ -5,6 +5,36 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.5] - 2026-10-13
+
+### Changed
+
+- Bound cold Git LFS expansion, clone eligible large LFS objects on APFS before
+  verification, and defer the redundant initial LFS index refresh. Every object
+  still requires full verification before publication; custom filters and
+  unsupported LFS configurations remain fail-closed (#700, #702).
+- Scope Unix checkout path probes to ambiguous sibling groups and avoid
+  restoring directory permissions when they are already correct (#699, #721).
+- Index live worktree registrations during repair and base-protection reports
+  during garbage collection, and reject unrelated relocation candidates before
+  scanning claimed paths. Fresh Git snapshots, native-path matching, and
+  conservative cleanup checks are unchanged (#727, #728, #730).
+- Stop integrity and LFS reads after at most one byte beyond the expected size,
+  rejecting growing inputs before hashing or writing the oversized chunk. Valid
+  files still receive full digest verification (#731).
+- Document tested, opt-in Git FSMonitor configuration and add retained-trace
+  startup profiling and stricter cold-LFS benchmark comparisons. These results
+  do not establish a general worktree-creation speedup (#690, #697, #701, #722).
+
+### Tests
+
+- Add property coverage for storage, Git parsing and signal forwarding, CLI
+  behavior, activation, journals, and worktree lifecycle recovery (#715–#720).
+- Isolate fixtures from inherited Git/Riftri configuration, wait for old
+  FSMonitor watchers during lifecycle tests, and bound signal-test subprocess
+  waits and cleanup without changing production signal handling (#691, #712,
+  #713, #732).
+
 ### Fixed
 
 - A refused add of a tree that Git itself checks out dirty, such as a blob
