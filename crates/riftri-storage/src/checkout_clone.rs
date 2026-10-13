@@ -376,4 +376,46 @@ mod tests {
         assert_eq!(fs::read(&source).unwrap(), b"foreign");
         assert_eq!(fs::read(&destination).unwrap(), b"payload");
     }
+
+    #[test]
+    #[ignore = "manual APFS volume-delta allocation probe; keep the host quiet"]
+    fn reports_native_lfs_clone_allocation() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let destination = root.path().join("checkout");
+        let chunk = vec![0x5a; 1024 * 1024];
+        let mut original = File::create(&source).unwrap();
+        for _ in 0..256 {
+            original.write_all(&chunk).unwrap();
+        }
+        original.sync_all().unwrap();
+        fs::write(&destination, b"pointer\n").unwrap();
+        let checkout = File::open(&destination).unwrap();
+        let before_clone = fs2::available_space(root.path()).unwrap();
+        let prepared = prepare(&File::open(&source).unwrap(), &checkout, &destination)
+            .unwrap()
+            .unwrap();
+        prepared.file.sync_all().unwrap();
+        prepared.publish(&checkout).unwrap();
+        let after_clone = fs2::available_space(root.path()).unwrap();
+        let mut streamed = File::create(root.path().join("streamed")).unwrap();
+        let before_stream = fs2::available_space(root.path()).unwrap();
+        for _ in 0..256 {
+            streamed.write_all(&chunk).unwrap();
+        }
+        streamed.sync_all().unwrap();
+        let after_stream = fs2::available_space(root.path()).unwrap();
+        let clone_bytes = before_clone.saturating_sub(after_clone);
+        let streamed_bytes = before_stream.saturating_sub(after_stream);
+        println!(
+            "{}",
+            serde_json::json!({
+                "logicalBytes": 256 * 1024 * 1024_u64, "cloneVolumeDeltaBytes": clone_bytes,
+                "streamedVolumeDeltaBytes": streamed_bytes,
+                "materiallyLower": streamed_bytes >= 128 * 1024 * 1024 && clone_bytes < streamed_bytes / 4,
+                "speedupClaim": false, "method": "same-volume free-space deltas after file sync; other host writes can affect the result"
+            })
+        );
+    }
 }
