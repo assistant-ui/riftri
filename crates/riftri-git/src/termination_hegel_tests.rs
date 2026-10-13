@@ -13,6 +13,9 @@ use hegel::generators as gs;
 use super::TerminationError;
 use super::forwarding::ForwardingGuard;
 
+#[path = "termination_test_supervision.rs"]
+mod supervision;
+
 /// Names the property a re-invoked test binary should run; unset in a plain
 /// run of the suite, where the properties below return immediately.
 const HELPER_ENV: &str = "RIFTRI_TERMINATION_HEGEL_HELPER";
@@ -34,10 +37,11 @@ fn runs_in_helper(property: &str) -> bool {
 
 fn run_in_helper(property: &str) {
     let executable = std::env::current_exe().expect("locate the test executable");
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(["--exact", &format!("termination::hegel_tests::{property}")])
-        .env(HELPER_ENV, property)
-        .output()
+        .env(HELPER_ENV, property);
+    let output = supervision::output(&mut command, std::time::Duration::from_secs(30))
         .expect("run the forwarding helper subprocess");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -150,6 +154,7 @@ fn a_signal_reaches_the_child_whether_it_lands_before_or_after_arming_property(t
         return;
     }
     let signal = tc.draw(gs::sampled_from(CATCHABLE[..5].to_vec()));
+    supervision::disable_core_dumps();
     let lands_before_arming = tc.draw(gs::booleans());
     // SAFETY: signal(2) only replaces this helper's disposition; the child
     // must not inherit an ignore left behind by an earlier case.
@@ -158,11 +163,13 @@ fn a_signal_reaches_the_child_whether_it_lands_before_or_after_arming_property(t
     }
     let guard = ForwardingGuard::install(&[signal], &[]).expect("install forwarding");
     // `cat` blocks on its open standard input until a signal ends it.
-    let mut child = Command::new("cat")
+    let mut command = Command::new("cat");
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .spawn()
-        .expect("start the forwarding target");
+        .stderr(Stdio::null());
+    let mut child =
+        supervision::TestChild::spawn(&mut command, false).expect("start the forwarding target");
     let target = i32::try_from(child.id()).expect("child PID fits i32");
 
     let raise = || {
@@ -180,8 +187,12 @@ fn a_signal_reaches_the_child_whether_it_lands_before_or_after_arming_property(t
         raise();
     }
 
-    let status = child.wait().expect("reap the forwarding target");
+    let status = child.wait(std::time::Duration::from_secs(5));
     guard.disarm();
     drop(guard);
+    let status = match status {
+        Ok(status) => status,
+        Err(error) => supervision::fail_wait(child, error),
+    };
     assert_eq!(status.signal(), Some(signal), "{status:?}");
 }
