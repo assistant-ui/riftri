@@ -438,6 +438,25 @@ fn canonical_local_git_lfs_object_creates_and_compacts_a_clean_isolated_worktree
                 .is_some_and(|args| args.iter().any(|arg| arg == "--batch"))
         })
         .count();
+    let resets = starts
+        .iter()
+        .filter_map(|event| event["argv"].as_array())
+        .filter(|args| args.iter().any(|arg| arg == "reset"))
+        .collect::<Vec<_>>();
+    assert_eq!(resets.len(), 1, "LFS add establishes exactly one index");
+    assert!(
+        resets[0].iter().any(|arg| arg == "--no-refresh"),
+        "LFS add must defer content conversion to the mandatory final clean check"
+    );
+    assert_eq!(
+        starts
+            .iter()
+            .filter_map(|event| event["argv"].as_array())
+            .filter(|args| args.iter().any(|arg| arg == "status"))
+            .count(),
+        1,
+        "deferring refresh must preserve the final Git clean check"
+    );
     let identity_queries = starts
         .iter()
         .filter(|event| {

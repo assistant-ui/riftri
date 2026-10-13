@@ -136,6 +136,7 @@ try {
       for (const asset of assets) assert.equal(hash(fs.readFileSync(asset.object)), asset.oid);
       const first = assets[0];
       fs.writeFileSync(path.join(view, first.name), 'private edit');
+      assert.notEqual(await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], view), '', 'real LFS must detect the first private edit');
       assert.equal(hash(fs.readFileSync(path.join(sample.base, first.name))), first.oid);
       assert.equal(hash(fs.readFileSync(first.object)), first.oid);
       fs.writeFileSync(path.join(view, first.name), payload(first.identity));
