@@ -68,8 +68,10 @@ pub fn prepare(
         || original.gid() != source_metadata.gid()
         // SAFETY: geteuid has no arguments or side effects.
         || original.uid() != unsafe { libc::geteuid() }
-        || has_private_metadata(source)?
-        || has_private_metadata(checkout)?
+        // Failure to prove eligibility is not a new checkout-policy refusal:
+        // verified streaming never imports this metadata and remains safe.
+        || has_private_metadata(source).unwrap_or(true)
+        || has_private_metadata(checkout).unwrap_or(true)
     {
         return Ok(None);
     }
@@ -85,7 +87,7 @@ pub fn prepare(
         .open(directory.path())?;
     // Inherited ACLs/attributes on the temporary directory could alter the new
     // inode. Decline before cloning; the original streaming path remains valid.
-    if has_private_metadata(&parent_file)? {
+    if has_private_metadata(&parent_file).unwrap_or(true) {
         directory.close()?;
         return Ok(None);
     }
@@ -261,7 +263,14 @@ mod tests {
     #[test]
     fn private_metadata_declines_before_mutating_the_checkout() {
         for target in ["source", "checkout"] {
-            for kind in ["xattr", "acl", "special-mode", "hardlink", "flags"] {
+            for kind in [
+                "xattr",
+                "acl",
+                "restricted-acl",
+                "special-mode",
+                "hardlink",
+                "flags",
+            ] {
                 let root = tempfile::tempdir().unwrap();
                 let source = root.path().join("source");
                 let destination = root.path().join("checkout");
@@ -280,6 +289,14 @@ mod tests {
                     "acl" => assert!(
                         std::process::Command::new("/bin/chmod")
                             .args(["+a", "everyone allow read"])
+                            .arg(&path)
+                            .status()
+                            .unwrap()
+                            .success()
+                    ),
+                    "restricted-acl" => assert!(
+                        std::process::Command::new("/bin/chmod")
+                            .args(["+a", "everyone deny readextattr"])
                             .arg(&path)
                             .status()
                             .unwrap()
@@ -304,7 +321,7 @@ mod tests {
                         &File::open(&destination).unwrap(),
                         &destination
                     )
-                    .unwrap()
+                    .unwrap_or_else(|error| panic!("{target} {kind}: {error}"))
                     .is_none(),
                     "{target} {kind}"
                 );

@@ -173,7 +173,9 @@ the pointer's length and SHA-256 before atomically replacing the unchanged
 pointer file. Identity and modification metadata are revalidated at publication.
 These checks assume the existing trusted-process, exclusively owned staging
 boundary; they are not an atomic compare-and-swap against hostile writers.
-Native clone errors fail the transaction. Ineligible files, smaller objects and
+Native clone errors fail the transaction. Unreadable optional ACL/xattr metadata
+declines the optimization before cloning, rather than adding a checkout refusal.
+Ineligible files, smaller objects and
 other platforms retain the existing verified streaming materialization; this
 does not add a byte-copy fallback to native worktree-view cloning. Temporary
 clones remain under the add journal's existing staging ownership, so interrupted
