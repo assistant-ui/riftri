@@ -8682,6 +8682,50 @@ fn retire_vanished_add_journal(
     Ok(())
 }
 
+/// Add operations whose fate a lifecycle journal owns: every removal, finished
+/// or not, and every unfinished move or compaction.
+///
+/// `None` when a lifecycle journal is unreadable: without all of them,
+/// "nothing else is pending" is unknown.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn add_operations_claimed_by_lifecycle_journals(
+    state_directory: &Path,
+) -> Result<Option<HashSet<String>>, WorktreeError> {
+    let removals = RemovalJournalStore::open(state_directory).load_all_for_status()?;
+    let moves = MoveJournalStore::open(state_directory).load_all_for_status()?;
+    let compactions = CompactJournalStore::open(state_directory).load_all_for_status()?;
+    if !removals.issues.is_empty() || !moves.issues.is_empty() || !compactions.issues.is_empty() {
+        return Ok(None);
+    }
+    let mut claimed = HashSet::new();
+    claimed.extend(
+        removals
+            .journals
+            .into_iter()
+            .map(|removal| removal.source_add_operation_id),
+    );
+    claimed.extend(
+        moves
+            .journals
+            .into_iter()
+            .filter(|journal| !journal.phase.is_finished())
+            .map(|journal| journal.source_add_operation_id),
+    );
+    claimed.extend(
+        compactions
+            .journals
+            .into_iter()
+            .filter(|journal| {
+                !matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+            })
+            .map(|journal| journal.source_add_operation_id),
+    );
+    Ok(Some(claimed))
+}
+
 /// Re-home active add journals whose recorded repository no longer exists.
 ///
 /// An older Riftri recorded the worktree an add ran in, which can be a linked
@@ -8697,39 +8741,9 @@ fn rehome_stranded_add_journals(
 ) -> Result<(usize, Vec<String>), WorktreeError> {
     let store = JournalStore::open(state_directory);
     let journals = store.load_all_reconciling()?.journals;
-    let removals = RemovalJournalStore::open(state_directory).load_all_for_status()?;
-    let moves = MoveJournalStore::open(state_directory).load_all_for_status()?;
-    let compactions = CompactJournalStore::open(state_directory).load_all_for_status()?;
-    if !removals.issues.is_empty() || !moves.issues.is_empty() || !compactions.issues.is_empty() {
-        // Without every lifecycle journal, "nothing else is pending" is unknown.
+    let Some(claimed) = add_operations_claimed_by_lifecycle_journals(state_directory)? else {
         return Ok((0, Vec::new()));
-    }
-    let mut claimed = HashSet::new();
-    claimed.extend(
-        removals
-            .journals
-            .iter()
-            .map(|removal| removal.source_add_operation_id.as_str()),
-    );
-    claimed.extend(
-        moves
-            .journals
-            .iter()
-            .filter(|journal| !journal.phase.is_finished())
-            .map(|journal| journal.source_add_operation_id.as_str()),
-    );
-    claimed.extend(
-        compactions
-            .journals
-            .iter()
-            .filter(|journal| {
-                !matches!(
-                    journal.phase,
-                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
-                )
-            })
-            .map(|journal| journal.source_add_operation_id.as_str()),
-    );
+    };
     let mut rehomed = 0;
     let mut errors = Vec::new();
     for journal in &journals {
@@ -8819,24 +8833,14 @@ fn reconcile_active_add_journals(
     // reporting of invalid journals.
     let journals = store.load_all_reconciling()?.journals;
     let claimed = claimed_destinations(&journals);
-    let removal_load = RemovalJournalStore::open(state_directory).load_all_for_status()?;
-    if !removal_load.issues.is_empty() {
-        // With any removal journal unreadable, no add journal's "already
-        // removed / removal pending" standing can be trusted. Do nothing this
-        // pass rather than risk retiring on stale knowledge.
+    let Some(lifecycle_owned) = add_operations_claimed_by_lifecycle_journals(state_directory)?
+    else {
+        // With any lifecycle journal unreadable, no add journal's "already
+        // removed / still being removed, moved, or compacted" standing can be
+        // trusted. Do nothing this pass rather than risk retiring on stale
+        // knowledge.
         return Ok((0, Vec::new(), Vec::new()));
-    }
-    let removals = removal_load.journals;
-    let completed = removals
-        .iter()
-        .filter(|removal| removal.phase == RemoveWorktreePhase::Complete)
-        .map(|removal| removal.source_add_operation_id.as_str())
-        .collect::<HashSet<_>>();
-    let pending_removals = removals
-        .iter()
-        .filter(|removal| removal.phase != RemoveWorktreePhase::Complete)
-        .map(|removal| removal.source_add_operation_id.as_str())
-        .collect::<HashSet<_>>();
+    };
     // One listing per repository, taken on first use, confirms every journal
     // whose worktree Git still registers: those need nothing. Anything else is
     // decided on a fresh listing under that journal's lock, as before. A
@@ -8849,9 +8853,11 @@ fn reconcile_active_add_journals(
     let mut errors = Vec::new();
     for journal in &journals {
         if journal.phase != AddWorktreePhase::Active
-            || completed.contains(journal.operation_id.as_str())
-            // A pending removal already owns this add journal's fate.
-            || pending_removals.contains(journal.operation_id.as_str())
+            // Already retired, or a pending removal, move, or compaction owns
+            // this add journal's fate. Moves and compaction swaps rename the
+            // view in two steps, so one killed in between leaves its path
+            // empty for the moment; resuming it puts the view back.
+            || lifecycle_owned.contains(journal.operation_id.as_str())
             || only_destination.is_some_and(|destination| !paths_match(&journal.destination, destination))
         {
             continue;
@@ -15103,6 +15109,129 @@ mod tests {
         assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
         assert_eq!(accounting.cancelled_compactions, 1, "{accounting:?}");
         assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// A compaction killed between the two renames of its swap: the view
+    /// waits in its quarantine and nothing is at the worktree's path.
+    fn compaction_killed_mid_swap() -> (crate::test_support::WritableTempDir, PathBuf, PathBuf) {
+        let (fixture, destination, state) =
+            stopped_compaction(CompactWorktreePhase::ReplacementReady);
+        let quarantine = crate::journal::CompactJournalStore::open(&state)
+            .load_all()
+            .expect("load compaction")
+            .remove(0)
+            .quarantine;
+        fs::rename(&destination, &quarantine).expect("quarantine the view");
+        forget_caller_worktree(fixture.path());
+        (fixture, destination, state)
+    }
+
+    /// Reconciliation takes any detached worktree at a journal's commit for
+    /// its relocated view and holds back. Without the fixture's caller
+    /// worktree, an empty path reads as a view deleted by hand.
+    fn forget_caller_worktree(fixture: &Path) {
+        git(
+            &fixture.join("repository"),
+            &[
+                "worktree",
+                "remove",
+                fixture.join("caller").to_str().unwrap(),
+            ],
+        );
+    }
+
+    /// Repair took the path a killed swap left empty for a worktree deleted
+    /// by hand and retired its add journal, then put the view back: registered
+    /// with Git, but no longer managed, and its base collectible.
+    #[test]
+    fn repair_keeps_a_view_managed_when_its_compaction_was_killed_mid_swap() {
+        let (fixture, destination, state) = compaction_killed_mid_swap();
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.retired_adds, 0, "{report:?}");
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+        assert_eq!(accounting.cancelled_compactions, 1, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: fixture.path().join("repository"),
+            destination,
+            state_dir: Some(state),
+        })
+        .expect("the view is still managed");
+    }
+
+    /// The swap that undoes a compaction leaves the same gap. Repair retired
+    /// the add journal there too, then retargeted its base, and every later
+    /// repair and removal refused the mismatched retirement record.
+    #[test]
+    fn repair_keeps_a_view_managed_when_its_restore_was_killed_mid_swap() {
+        let (fixture, destination, state, old_view) = compaction_awaiting_quarantine_cleanup();
+        fs::write(old_view.join("new.txt"), "new\n").unwrap();
+        git(&old_view, &["add", "new.txt"]);
+        git(&old_view, &["commit", "--quiet", "-m", "during compaction"]);
+        let store = crate::journal::CompactJournalStore::open(&fs::canonicalize(&state).unwrap());
+        let journal = store.load_all().unwrap().remove(0);
+        let mut record = store.reload(&journal).unwrap();
+        record
+            .transition(CompactWorktreePhase::RestoringOriginal)
+            .unwrap();
+        store.persist(&record).unwrap();
+        fs::rename(&destination, &journal.replacement).expect("set the compacted view aside");
+        forget_caller_worktree(fixture.path());
+
+        for _ in 0..2 {
+            let report = recover_incomplete_operations(&state).expect("repair");
+            assert!(report.errors.is_empty(), "{report:?}");
+            assert_eq!(report.retired_adds, 0, "{report:?}");
+        }
+        assert_eq!(fs::read(destination.join("new.txt")).unwrap(), b"new\n");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: fixture.path().join("repository"),
+            destination,
+            state_dir: Some(state),
+        })
+        .expect("the view is still managed");
+    }
+
+    /// An add reconciles its destination the same way before claiming it.
+    /// Git's stale registration normally refuses the add first, but not once
+    /// it is pruned: the add then retired the journal and built a second view
+    /// on the path, orphaning the one in quarantine.
+    #[test]
+    fn add_refuses_the_path_of_a_view_killed_mid_swap() {
+        let (fixture, destination, state) = compaction_killed_mid_swap();
+        let repository = fixture.path().join("repository");
+        git(&repository, &["worktree", "prune"]);
+
+        let error = add_worktree_inner(
+            AddWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect_err("the path belongs to the view being compacted");
+
+        assert!(
+            error.to_string().contains("already claimed by active"),
+            "{error}"
+        );
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -21941,6 +22070,56 @@ mod tests {
         assert!(source.is_dir() && !root.join("moved").exists());
         let second = recover_incomplete_operations(&state).expect("second repair");
         assert!(second.errors.is_empty(), "{second:?}");
+    }
+
+    /// `git worktree move` renames the directory before it rewrites the
+    /// registration. Killed in between, Git marks the old path prunable, and
+    /// repair retired the add journal of a view that only sat at its new path.
+    #[test]
+    fn repair_keeps_a_view_managed_when_git_was_killed_mid_move() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let source = root.join("source");
+        let moved = root.join("moved");
+        add_with_state(&repository, &source, &state).expect("add");
+        move_worktree_inner(
+            move_request(&repository, &source, &moved, &state),
+            Some(MoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("stop after the move intent");
+        fs::rename(&source, &moved).expect("rename as Git does first");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert_eq!(report.retired_adds, 0, "{report:?}");
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(report.errors[0].contains("both paths were preserved"));
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert!(
+            accounting
+                .bases
+                .iter()
+                .all(|base| base.reference_count == 1),
+            "the view still holds its base: {accounting:?}"
+        );
+
+        // Finishing Git's half of the move lets repair finish the rest.
+        git(
+            &repository,
+            &["worktree", "repair", moved.to_str().unwrap()],
+        );
+        let report = recover_incomplete_operations(&state).expect("second repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.recovered_moves, 1, "{report:?}");
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: moved,
+            state_dir: Some(state),
+        })
+        .expect("the moved view is still managed");
     }
 
     /// Moving a worktree into itself is refused before anything is recorded.
