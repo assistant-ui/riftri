@@ -46,10 +46,10 @@ impl GitInfo {
         else {
             return false;
         };
-        let (Ok(major), Ok(minor), Ok(_patch)) = (
-            major.parse::<u32>(),
-            minor.parse::<u32>(),
-            patch.parse::<u32>(),
+        let (Some(major), Some(minor), Some(_patch)) = (
+            parse_unsigned(major, 10),
+            parse_unsigned(minor, 10),
+            parse_unsigned(patch, 10),
         ) else {
             return false;
         };
@@ -699,6 +699,12 @@ impl Git {
     /// its object is unreadable in a damaged store — and the original error is
     /// kept, so corruption is never reported as a caller mistake.
     ///
+    /// A full-length hex object ID is the exception: `--verify` echoes it
+    /// without looking the object up, so it is probed as `<id>^{object}`. No
+    /// ref vouches for a bare ID, which leaves one that was never in the
+    /// repository indistinguishable from one lost to damage; Git's own
+    /// `worktree add` calls both an invalid reference, and so does this.
+    ///
     /// Only for revisions the caller supplied. `HEAD` inside an existing
     /// worktree failing to resolve is a crash shape, not a typo, and keeps
     /// going through `resolve_revision`.
@@ -715,12 +721,19 @@ impl Git {
         match self.resolve_revision(path, revision) {
             Ok(resolved) => Ok(Some(resolved)),
             Err(error @ GitError::CommandFailed { .. }) => {
+                let mut probed = revision.to_os_string();
+                let is_object_id = revision
+                    .to_str()
+                    .is_some_and(|revision| ObjectId::parse(revision).is_ok());
+                if is_object_id {
+                    probed.push("^{object}");
+                }
                 let arguments = [
                     OsString::from("rev-parse"),
                     OsString::from("--verify"),
                     OsString::from("--quiet"),
                     OsString::from("--end-of-options"),
-                    revision.to_os_string(),
+                    probed,
                 ];
                 let probe = self.output_os(Some(path), &arguments)?;
                 if probe.status.code() == Some(1) || self.names_a_non_commit(path, revision)? {
@@ -892,11 +905,10 @@ impl Git {
             &["cat-file", "-s", object.as_str()],
             "blob size",
         )?;
-        size.parse::<u64>()
-            .map_err(|error| GitError::InvalidOutput {
-                context: "blob size",
-                detail: error.to_string(),
-            })
+        parse_unsigned(&size, 10).ok_or_else(|| GitError::InvalidOutput {
+            context: "blob size",
+            detail: format!("expected an unsigned decimal size, got {size:?}"),
+        })
     }
 
     /// Read the exact bytes of one blob object without consulting checkout
@@ -2575,6 +2587,14 @@ impl Git {
             && String::from_utf8_lossy(&output.stderr).contains("not a git repository"))
     }
 
+    /// Whether `path` lies inside a repository's Git directory rather than
+    /// one of its work trees. Git answers with a fixed `true` or `false`
+    /// line, so nothing depends on translated error text.
+    pub fn inside_git_directory(&self, path: &Path) -> Result<bool, GitError> {
+        let output = self.output(Some(path), &["rev-parse", "--is-inside-git-dir"])?;
+        Ok(output.status.success() && trim_line_endings(&output.stdout) == b"true")
+    }
+
     fn output_os(&self, path: Option<&Path>, arguments: &[OsString]) -> Result<Output, GitError> {
         self.output_os_with_env(path, arguments, &[])
     }
@@ -2751,15 +2771,20 @@ fn parse_blob_size_line(line: &str, object: &ObjectId) -> Result<u64, GitError> 
     let (Some(id), Some(kind), Some(size)) = (fields.next(), fields.next(), fields.next()) else {
         return Err(invalid_blob_sizes());
     };
-    if fields.next().is_some()
-        || id != object.as_str()
-        || kind != "blob"
-        || size.is_empty()
-        || !size.bytes().all(|byte| byte.is_ascii_digit())
-    {
+    if fields.next().is_some() || id != object.as_str() || kind != "blob" {
         return Err(invalid_blob_sizes());
     }
-    size.parse().map_err(|_| invalid_blob_sizes())
+    parse_unsigned(size, 10).ok_or_else(invalid_blob_sizes)
+}
+
+/// Parse a number Git printed as bare digits in `radix`. Rust's integer
+/// parsers also accept a leading `+`, which Git never prints, so anything
+/// but digits is refused.
+fn parse_unsigned(text: &str, radix: u32) -> Option<u64> {
+    if !text.bytes().all(|byte| char::from(byte).is_digit(radix)) {
+        return None;
+    }
+    u64::from_str_radix(text, radix).ok()
 }
 
 fn parse_blob_sizes(bytes: &[u8], objects: &[ObjectId]) -> Result<Vec<u64>, GitError> {
@@ -3040,10 +3065,12 @@ pub fn parse_tree_entries(input: &[u8]) -> Result<Vec<TreeEntry>, GitError> {
                 context: "tree mode",
                 detail: error.to_string(),
             })?;
-        let mode = u32::from_str_radix(mode_text, 8).map_err(|error| GitError::InvalidOutput {
-            context: "tree mode",
-            detail: error.to_string(),
-        })?;
+        let mode = parse_unsigned(mode_text, 8)
+            .and_then(|mode| u32::try_from(mode).ok())
+            .ok_or_else(|| GitError::InvalidOutput {
+                context: "tree mode",
+                detail: format!("expected an octal mode, got {mode_text:?}"),
+            })?;
         if path.is_empty() {
             return Err(GitError::InvalidOutput {
                 context: "tree entry",
@@ -5295,6 +5322,52 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_full_length_object_id_names_no_commit() {
+        // `rev-parse --verify` echoes a full-length hex ID without looking the
+        // object up, so the probe took an absent ID for a name that resolves
+        // and kept Git's "bad revision" failure. Git's own `worktree add`
+        // calls it an invalid reference, the same as a misspelled branch.
+        let git_runner = Git::default();
+        let sha256 = RepositoryFixture {
+            directory: tempdir().expect("temporary directory"),
+        };
+        git(
+            sha256.path(),
+            &["init", "--quiet", "--object-format=sha256"],
+        );
+        let committed = RepositoryFixture::committed();
+        for (fixture, length) in [
+            (&RepositoryFixture::unborn(), 40),
+            (&committed, 40),
+            (&sha256, 64),
+        ] {
+            for digit in ["1", "A"] {
+                assert_eq!(
+                    git_runner
+                        .resolve_requested_revision(
+                            fixture.path(),
+                            OsStr::new(&digit.repeat(length))
+                        )
+                        .expect("classify an absent object ID"),
+                    None
+                );
+            }
+        }
+
+        // A branch records that its commit once existed, so a missing object
+        // there is damage rather than a typo and keeps Git's error.
+        git(committed.path(), &["branch", "saved"]);
+        let head = git_runner
+            .resolve_revision(committed.path(), OsStr::new("HEAD"))
+            .expect("resolve HEAD");
+        delete_loose_object(committed.path(), head.commit.as_str());
+        assert!(matches!(
+            git_runner.resolve_requested_revision(committed.path(), OsStr::new("saved")),
+            Err(super::GitError::CommandFailed { .. })
+        ));
+    }
+
+    #[test]
     fn local_branch_lookup_ignores_refs_that_only_end_with_the_branch_ref() {
         // show-ref patterns match ref-name suffixes, so these matched
         // `refs/heads/topic`: an absent branch read as present, and a present
@@ -6352,6 +6425,9 @@ mod tests {
             ("git version 2.47.1.windows.1", true),
             ("git version 2.43.0.rc0", false),
             ("git version 2.43", false),
+            ("git version +2.43.0", false),
+            ("git version 2.+43.0", false),
+            ("git version 2.43.+0", false),
             ("unknown", false),
         ] {
             let info = super::GitInfo {
@@ -6421,6 +6497,77 @@ mod tests {
             1,
             "do not retry a failed source query through a different path"
         );
+    }
+
+    #[test]
+    fn attributed_tree_queries_reject_a_missing_unqueried_subtree() {
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        for format in ["sha1", "sha256"] {
+            let fixture = tempdir().unwrap();
+            git(
+                fixture.path(),
+                &[
+                    "init",
+                    "--quiet",
+                    "--bare",
+                    &format!("--object-format={format}"),
+                ],
+            );
+            let blob = |bytes: &[u8]| {
+                let output = handle
+                    .run_os_with_input(
+                        Some(fixture.path()),
+                        &["hash-object".into(), "-w".into(), "--stdin".into()],
+                        &[],
+                        bytes,
+                    )
+                    .unwrap();
+                super::parse_object_output(&output.stdout).unwrap()
+            };
+            let attributes = blob(b"*.txt text eol=lf\n");
+            let contents = blob(b"tracked\n");
+            let missing = "f".repeat(contents.as_str().len());
+            assert!(
+                handle
+                    .run(Some(fixture.path()), &["cat-file", "-e", &missing])
+                    .is_err()
+            );
+            // The queried file and its attribute blob are valid. Only a
+            // different subtree is missing. A direct --source lookup can
+            // answer this path successfully without reading that subtree;
+            // replacing the private-index path must not lose its refusal.
+            let records = format!(
+                "100644 blob {}\t.gitattributes\n040000 tree {missing}\tabsent\n100644 blob {}\ttracked.txt\n",
+                attributes.as_str(),
+                contents.as_str(),
+            );
+            let output = handle
+                .run_os_with_input(
+                    Some(fixture.path()),
+                    &["mktree".into(), "--missing".into()],
+                    &[],
+                    records.as_bytes(),
+                )
+                .unwrap();
+            let tree = super::parse_object_output(&output.stdout).unwrap();
+            // Core's recursive preflight also refuses this tree. Keep the
+            // low-level attribute API fail-closed independently of that scan.
+            assert!(handle.list_tree(fixture.path(), &tree).is_err());
+            assert!(
+                matches!(
+                    handle.attribute_pair_for_tree(
+                        fixture.path(),
+                        &tree,
+                        &[PathBuf::from("tracked.txt")],
+                        true,
+                        &info,
+                    ),
+                    Err(super::GitError::CommandFailed { .. })
+                ),
+                "{format}: a broken unqueried subtree must not look supported"
+            );
+        }
     }
 
     #[test]
@@ -7113,5 +7260,51 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].mode, 0o100644);
         assert_eq!(entries[0].path.as_os_str().as_bytes(), b"name-\xff");
+    }
+
+    #[test]
+    fn tree_parser_rejects_a_mode_that_is_not_octal_digits() {
+        // `from_str_radix` accepts a leading `+`, which Git never prints.
+        for mode in ["+0", "+100644", "-100644", "100648", "0x1ff"] {
+            let input = format!("{mode} blob {}\tpath\0", "a".repeat(40));
+            assert!(
+                matches!(
+                    super::parse_tree_entries(input.as_bytes()),
+                    Err(super::GitError::InvalidOutput {
+                        context: "tree mode",
+                        ..
+                    })
+                ),
+                "{mode}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn blob_size_rejects_output_that_is_not_decimal_digits() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = tempfile::tempdir().unwrap();
+        let script = fixture.path().join("git-size");
+        let id = super::ObjectId::parse("a".repeat(40)).unwrap();
+        for (size, expected) in [("12", Some(12)), ("+12", None), ("-12", None), ("", None)] {
+            fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{size}'\n")).unwrap();
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+            let git = Git::new(&script);
+            let parsed = retry_while_wrapper_is_busy(|| git.blob_size(fixture.path(), &id));
+            match expected {
+                Some(expected) => assert_eq!(parsed.unwrap(), expected),
+                None => assert!(
+                    matches!(
+                        parsed,
+                        Err(super::GitError::InvalidOutput {
+                            context: "blob size",
+                            ..
+                        })
+                    ),
+                    "{size:?}"
+                ),
+            }
+        }
     }
 }

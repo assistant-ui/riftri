@@ -152,7 +152,8 @@ can fix them:
   yet for an add to create.
 - `invalid-worktree-binding` — `riftri exec --worktree` did not name the
   exact root of a registered Git worktree (a subdirectory, a missing path, a
-  file, or a directory outside any repository). The command was not started.
+  file, a path inside a Git directory, or a directory outside any
+  repository). The command was not started.
 
 With `--json-errors`, the failure arrives as one receipt on stderr:
 

@@ -11,11 +11,14 @@ pub(crate) enum FilesystemRacePoint {
     ForceRemovalRevalidation,
     RemovalQuarantined,
     RollbackGitRemoval,
+    RollbackViewSetAside,
     JournalRetirementLocked,
     BaseReadMiss,
     BaseReuseAfterExclusiveWait,
     AddIntentPersist,
     AddCleanCheck,
+    #[cfg(target_os = "macos")]
+    LfsClonePrepared,
 }
 
 type Hook = Box<dyn FnOnce(&Path)>;
