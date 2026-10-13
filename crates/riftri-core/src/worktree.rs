@@ -15286,8 +15286,7 @@ mod tests {
 
     #[test]
     fn reconciliation_cache_miss_rechecks_git_before_classifying_a_view() {
-        let fixture = tempdir().unwrap();
-        let (repository, destination, state) = committed_repository(fixture.path());
+        let (fixture, repository, destination, state) = same_destination_fixture();
         add_worktree_inner(
             AddWorktreeRequest {
                 repository: repository.clone(),
@@ -15335,7 +15334,7 @@ mod tests {
             "a stale miss must re-list Git: {relocated:?}"
         );
         assert!(errors.is_empty(), "{errors:?}");
-        assert!(destination.join("tracked.txt").is_file());
+        assert!(destination.join("file-0.txt").is_file());
         let report = recover_incomplete_operations(&state).unwrap();
         assert!(report.errors.is_empty(), "{report:?}");
         assert_eq!(report.active, 1);
