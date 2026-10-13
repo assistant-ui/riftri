@@ -727,7 +727,7 @@ fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
                 serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
             assert_eq!(
                 report["repository_compatibility"]["value"]["compatible"], compatible,
-                "condition {condition}, configuration {contents}, report {report}",
+                "case {case}, condition {condition}, configuration {contents}, report {report}",
             );
             #[cfg(target_os = "macos")]
             if compatible {
