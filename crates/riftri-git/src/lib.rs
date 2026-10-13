@@ -2587,6 +2587,14 @@ impl Git {
             && String::from_utf8_lossy(&output.stderr).contains("not a git repository"))
     }
 
+    /// Whether `path` lies inside a repository's Git directory rather than
+    /// one of its work trees. Git answers with a fixed `true` or `false`
+    /// line, so nothing depends on translated error text.
+    pub fn inside_git_directory(&self, path: &Path) -> Result<bool, GitError> {
+        let output = self.output(Some(path), &["rev-parse", "--is-inside-git-dir"])?;
+        Ok(output.status.success() && trim_line_endings(&output.stdout) == b"true")
+    }
+
     fn output_os(&self, path: Option<&Path>, arguments: &[OsString]) -> Result<Output, GitError> {
         self.output_os_with_env(path, arguments, &[])
     }

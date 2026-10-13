@@ -7,6 +7,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri exec --worktree` naming a path inside a Git directory, such as
+  `<repository>/.git`, is now an `invalid-worktree-binding` policy refusal
+  (exit 3) like every other path that is not a worktree root. It was reported
+  as an operational `command-failed` receipt.
 - Tree modes, single blob sizes, and Git version components with a leading
   `+` are rejected as invalid Git output instead of being parsed as numbers.
   Git does not print signed values here, so ordinary repositories are
