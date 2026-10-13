@@ -6,16 +6,21 @@
 
 use std::ffi::OsString;
 use std::fs;
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
 
 use hegel::generators as gs;
 use hegel::{HealthCheck, TestCase};
 
+#[cfg(target_os = "macos")]
 use super::super::{
-    CompactWorktreeRequest, MoveWorktreeRequest, RemoveWorktreeRequest, WorktreeError,
-    WorktreeMode, add_worktree_inner, compact_worktree_inner, force_remove_worktree_inner,
-    inspect_managed_worktrees, managed_worktree_state_directory, move_worktree_inner,
-    recover_incomplete_operations, remove_worktree_inner, storage_accounting,
+    CompactWorktreeRequest, MoveWorktreeRequest, compact_worktree_inner,
+    force_remove_worktree_inner, inspect_managed_worktrees, move_worktree_inner,
+};
+use super::super::{
+    RemoveWorktreeRequest, WorktreeError, WorktreeMode, add_worktree_inner,
+    managed_worktree_state_directory, recover_incomplete_operations, remove_worktree_inner,
+    storage_accounting,
 };
 use super::recovery::{Scene, injected};
 use super::{edit_journal, journal_path_value, registered, snapshot, status};
@@ -291,6 +296,7 @@ per_variant!(lost_destination, 5;
     a_second_active_journal_never_costs_the_winner_its_view => AddWorktreePhase::Active,
 );
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayoutRoot {
     Absent,
@@ -300,6 +306,7 @@ enum LayoutRoot {
     Misplaced,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Status,
@@ -311,6 +318,7 @@ enum Verb {
     Repair,
 }
 
+#[cfg(target_os = "macos")]
 fn typed(error: &WorktreeError) -> bool {
     matches!(
         error,
@@ -321,7 +329,9 @@ fn typed(error: &WorktreeError) -> bool {
 }
 
 /// A state directory carried over from Linux holds OverlayFS journals. On a
-/// platform without OverlayFS every verb reports or refuses them.
+/// platform without OverlayFS every verb reports or refuses them. Linux, the
+/// other platform these tests run on, can run OverlayFS.
+#[cfg(target_os = "macos")]
 fn overlayfs_journal(tc: TestCase, verb: Verb) {
     let phase = tc.draw(gs::sampled_from(vec![
         AddWorktreePhase::Active,
@@ -499,6 +509,7 @@ fn overlayfs_journal(tc: TestCase, verb: Verb) {
     );
 }
 
+#[cfg(target_os = "macos")]
 per_variant!(overlayfs_journal, 6;
     status_reports_an_overlayfs_journal_where_overlayfs_cannot_run => Verb::Status,
     inspection_reports_an_overlayfs_journal_where_overlayfs_cannot_run => Verb::Inspect,

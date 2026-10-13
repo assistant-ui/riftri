@@ -724,7 +724,18 @@ fn lfs_paths_materialize_only_from_strict_pointers_and_verified_objects(tc: Test
         LfsHazard::Config(key, value) => {
             match value {
                 Some(value) => git(&fixture.repository, &["config", key, value]),
-                None => git(&fixture.repository, &["config", "--unset", key]),
+                None => {
+                    git(&fixture.repository, &["config", "--unset", key]);
+                    // A value inherited from global or system configuration
+                    // outlives the local unset, so the key cannot be made
+                    // absent on this machine.
+                    let inherited = Command::new("git")
+                        .args(["config", "--get", key])
+                        .current_dir(&fixture.repository)
+                        .output()
+                        .expect("run Git");
+                    tc.assume(inherited.status.code() == Some(1));
+                }
             }
             // The long-running process filter is optional, and booleans are
             // compared as Git compares them.

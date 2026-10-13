@@ -11,8 +11,8 @@ use hegel::TestCase;
 use hegel::generators as gs;
 
 use super::super::{
-    WorktreeError, garbage_collect, garbage_collect_inner, recover_incomplete_operations,
-    storage_accounting, verify_existing_base,
+    WorktreeError, garbage_collect, garbage_collect_inner, make_directory_owner_writable,
+    recover_incomplete_operations, storage_accounting, verify_existing_base,
 };
 use super::state::{BaseShape, MarkerShape, SyntheticState};
 use super::{edit_journal, journal_path_value, snapshot};
@@ -119,7 +119,12 @@ fn collection_state(tc: TestCase, phase: GarbageCollectionPhase) {
     };
     match quarantine {
         Quarantine::Absent => {}
-        Quarantine::HoldsBase => fs::rename(&base, &journal.quarantine_path).unwrap(),
+        Quarantine::HoldsBase => {
+            // As collection does: some platforms refuse to move a directory
+            // its owner cannot write.
+            make_directory_owner_writable(&base).unwrap();
+            fs::rename(&base, &journal.quarantine_path).unwrap();
+        }
         Quarantine::EmptyDirectory => fs::create_dir(&journal.quarantine_path).unwrap(),
         Quarantine::File => fs::write(&journal.quarantine_path, b"").unwrap(),
     }

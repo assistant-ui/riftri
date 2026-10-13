@@ -12,14 +12,17 @@ use hegel::TestCase;
 use hegel::generators as gs;
 use riftri_git::{GitAttribute, ObjectId, TreeEntry};
 
+#[cfg(target_os = "macos")]
 use super::super::tests::inventory_entry;
 use super::super::{
-    WorktreeError, WorktreeInventory, canonicalize_sparse_directories, classify_in_tree_attributes,
+    WorktreeError, canonicalize_sparse_directories, classify_in_tree_attributes,
     has_ascii_case_alias, interrupted_journal_temporary_owner, journal_identifier_like,
-    needs_destination_path_probe, next_operation_id, parse_git_lfs_pointer, paths_match,
-    repository_cache_id, select_lfs_tree_entries, validate_destination_path_semantics,
+    needs_destination_path_probe, next_operation_id, parse_git_lfs_pointer, repository_cache_id,
+    select_lfs_tree_entries, validate_destination_path_semantics,
     validate_sparse_directories_in_tree,
 };
+#[cfg(target_os = "macos")]
+use super::super::{WorktreeInventory, paths_match};
 use super::snapshot;
 
 fn canonical_pointer(oid: &str, size: u64) -> Vec<u8> {
