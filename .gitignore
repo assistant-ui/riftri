@@ -13,6 +13,7 @@
 /website/public/install.ps1
 /package/platforms/*/bin/
 *.tgz
+.hegel/
 .DS_Store
 *.swp
 *.swo
