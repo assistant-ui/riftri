@@ -11,6 +11,36 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   `<repository>/.git`, is now an `invalid-worktree-binding` policy refusal
   (exit 3) like every other path that is not a worktree root. It was reported
   as an operational `command-failed` receipt.
+- Tree modes, single blob sizes, and Git version components with a leading
+  `+` are rejected as invalid Git output instead of being parsed as numbers.
+  Git does not print signed values here, so ordinary repositories are
+  unaffected.
+- `worktree add` refuses a full-length hexadecimal object ID that names no
+  object as an `invalid-request` policy failure (exit 3), like any other
+  revision that names no commit. It was reported as a Git command failure,
+  operational with unknown cleanup. Git's own `worktree add` cannot tell such
+  an ID from one whose object a damaged repository lost and calls both an
+  invalid reference; a branch or tag whose object is unreadable stays an
+  operational failure.
+- On macOS, a worktree path given with a trailing or repeated separator now
+  matches its registration when the two also differ in Unicode normalization.
+  Each difference was already tolerated alone, but not both together.
+- `riftri gc --apply` collects a completion marker whose base directory is
+  missing, as its preview already listed. It used to stop on the missing base
+  before reaching later candidates and fail the same way on every run.
+- `riftri repair` no longer retires the add journal of a worktree whose move
+  or compaction was interrupted while its path was briefly empty. Repair
+  recorded a completed removal and then put the view back, leaving a registered
+  worktree that Riftri no longer managed and whose base `riftri gc` could
+  collect; after an interrupted compaction undo, every later repair and removal
+  failed. An add onto such a path is refused the same way.
+- A refused add of a tree that Git itself checks out dirty, such as a blob
+  stored with CRLF under `text eol=crlf`, is now rolled back completely.
+  Rollback read Git's dirty verdict as a change, kept the untouched view
+  registered, and left the add pending with `riftri repair` failing the same
+  way every time. A view that still equals its immutable base and has nothing
+  staged is now removed, and a write that races the removal is still kept.
+
 
 ## [0.6.4] - 2026-10-08
 

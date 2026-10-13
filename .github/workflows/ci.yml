@@ -48,6 +48,9 @@ jobs:
       - name: Install npm metadata only
         run: npm ci --ignore-scripts --omit=optional
 
+      - name: Test offline startup profiling
+        run: node --test docs/benchmarks/startup-profile.test.mjs
+
       - name: Check formatting
         run: cargo fmt --all --check
 

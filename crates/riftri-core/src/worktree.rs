@@ -2020,11 +2020,8 @@ impl WorktreeInventory {
 // aliases and lossless non-UTF-8 paths. It is scoped to one status snapshot.
 fn inventory_path_key(path: &Path) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
-    {
-        use unicode_normalization::UnicodeNormalization;
-        if let Some(text) = path.to_str() {
-            return Some(text.nfc().collect::<String>().into_bytes());
-        }
+    if let Some(text) = path.to_str() {
+        return Some(composed_path(text).collect::<String>().into_bytes());
     }
     #[cfg(target_os = "windows")]
     {
@@ -2204,7 +2201,11 @@ fn garbage_collect_inner(
         );
         let journal_path = store.path_for(&journal.operation_id);
         let decoded = journal.clone().decode(journal_path.clone())?;
-        validate_new_collection_candidate(&state_directory, &decoded)?;
+        // The same checks the journaled steps repeat under the base lock. A
+        // marker whose base directory is gone is still collected: the plan
+        // lists it, and removing the marker is all that is left to do.
+        validate_collection_paths(&state_directory, &decoded)?;
+        validate_collectible_base(&decoded)?;
         let journal_path = store.persist(&journal)?;
         progress::emit(ProgressEvent::GcPhase {
             phase: journal.phase,
@@ -2785,36 +2786,6 @@ fn validate_collection_paths(
                 directory.display()
             )));
         }
-    }
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn validate_new_collection_candidate(
-    state_directory: &Path,
-    journal: &DecodedCollectionJournal,
-) -> Result<(), WorktreeError> {
-    validate_collection_paths(state_directory, journal)?;
-    let base_metadata = fs::symlink_metadata(&journal.base_path)
-        .map_err(|source| io("inspect collectible base", &journal.base_path, source))?;
-    if !base_metadata.is_dir() || base_metadata.file_type().is_symlink() {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "collectible base {} is not a real directory",
-            journal.base_path.display()
-        )));
-    }
-    let marker_metadata = fs::symlink_metadata(&journal.marker_path).map_err(|source| {
-        io(
-            "inspect collectible base marker",
-            &journal.marker_path,
-            source,
-        )
-    })?;
-    if !marker_metadata.is_file() || marker_metadata.file_type().is_symlink() {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "collectible base marker {} is not a real file",
-            journal.marker_path.display()
-        )));
     }
     Ok(())
 }
@@ -4515,80 +4486,157 @@ fn materialize_git_lfs_objects(
     base_staging: &Path,
     objects: &[GitLfsObject],
 ) -> Result<(), WorktreeError> {
+    lfs_workers::run(
+        objects.len(),
+        lfs_materialization_workers(objects),
+        |index| materialize_git_lfs_object(base_staging, &objects[index]),
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn lfs_materialization_workers(objects: &[GitLfsObject]) -> usize {
+    // Small/no-LFS checkouts keep the inline path. Larger cold bases use at
+    // most four 64-KiB buffers and sixteen file handles; cached bases never call
+    // materialization. This overlaps independent private destinations only.
+    let bytes = objects.iter().fold(0_u64, |total, object| {
+        total.saturating_add(object.pointer.size)
+    });
+    if objects.len() < 4 || bytes < 8 * 1024 * 1024 {
+        return 1;
+    }
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(4)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn materialize_git_lfs_object(
+    base_staging: &Path,
+    object: &GitLfsObject,
+) -> Result<(), WorktreeError> {
     use std::io::{Read, Write};
 
-    for object in objects {
-        let destination = base_staging.join(&object.checkout_path);
-        let mut source_options = OpenOptions::new();
-        source_options.read(true);
-        #[cfg(unix)]
-        source_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-        #[cfg(target_os = "windows")]
-        source_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        let mut source = source_options.open(&object.source_path).map_err(|error| {
-            WorktreeError::Unsupported(format!(
-                "could not open local Git LFS object {} for {}: {error}",
-                object.pointer.oid,
-                object.checkout_path.display()
-            ))
-        })?;
-        validate_opened_git_lfs_file(&source, &object.source_path, "local Git LFS object")?;
-        let source_size = source
-            .metadata()
-            .map_err(|error| io("inspect opened Git LFS object", &object.source_path, error))?
-            .len();
-        if source_size != object.pointer.size {
-            return Err(WorktreeError::Unsupported(format!(
-                "local Git LFS object {} changed size before materialization; expected {}, found {source_size}",
-                object.pointer.oid, object.pointer.size
-            )));
+    let destination = base_staging.join(&object.checkout_path);
+    let mut source_options = OpenOptions::new();
+    source_options.read(true);
+    #[cfg(unix)]
+    source_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    #[cfg(target_os = "windows")]
+    source_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut source = source_options.open(&object.source_path).map_err(|error| {
+        WorktreeError::Unsupported(format!(
+            "could not open local Git LFS object {} for {}: {error}",
+            object.pointer.oid,
+            object.checkout_path.display()
+        ))
+    })?;
+    validate_opened_git_lfs_file(&source, &object.source_path, "local Git LFS object")?;
+    let source_size = source
+        .metadata()
+        .map_err(|error| io("inspect opened Git LFS object", &object.source_path, error))?
+        .len();
+    if source_size != object.pointer.size {
+        return Err(WorktreeError::Unsupported(format!(
+            "local Git LFS object {} changed size before materialization; expected {}, found {source_size}",
+            object.pointer.oid, object.pointer.size
+        )));
+    }
+
+    let try_native = cfg!(target_os = "macos") && object.pointer.size >= 8 * 1024 * 1024;
+    let mut destination_options = OpenOptions::new();
+    destination_options.write(true).truncate(!try_native);
+    #[cfg(unix)]
+    destination_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    #[cfg(target_os = "windows")]
+    destination_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    let mut output = destination_options
+        .open(&destination)
+        .map_err(|error| io("open Git LFS checkout destination", &destination, error))?;
+    validate_opened_git_lfs_file(&output, &destination, "Git LFS checkout destination")?;
+
+    #[cfg(target_os = "macos")]
+    let mut prepared = if try_native {
+        riftri_storage::checkout_clone::prepare(&source, &output, &destination)
+            .map_err(|error| io("prepare native Git LFS expansion", &destination, error))?
+    } else {
+        None
+    };
+    #[cfg(target_os = "macos")]
+    let cloned = prepared.is_some();
+    #[cfg(not(target_os = "macos"))]
+    let cloned = false;
+    #[cfg(all(test, target_os = "macos"))]
+    if let Some(prepared) = &prepared {
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::LfsClonePrepared,
+            &prepared.path(),
+        );
+    }
+    if !cloned && try_native {
+        output
+            .set_len(0)
+            .map_err(|error| io("truncate Git LFS checkout destination", &destination, error))?;
+    }
+    #[cfg(target_os = "macos")]
+    let reader = prepared
+        .as_mut()
+        .map_or(&mut source, |clone| clone.file_mut());
+    #[cfg(not(target_os = "macos"))]
+    let reader = &mut source;
+
+    let mut digest = Sha256::new();
+    let mut copied = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .map_err(|error| io("read local Git LFS object", &object.source_path, error))?;
+        if count == 0 {
+            break;
         }
-
-        let mut destination_options = OpenOptions::new();
-        destination_options.write(true).truncate(true);
-        #[cfg(unix)]
-        destination_options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
-        #[cfg(target_os = "windows")]
-        destination_options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-        let mut output = destination_options
-            .open(&destination)
-            .map_err(|error| io("open Git LFS checkout destination", &destination, error))?;
-        validate_opened_git_lfs_file(&output, &destination, "Git LFS checkout destination")?;
-
-        let mut digest = Sha256::new();
-        let mut copied = 0_u64;
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = source
-                .read(&mut buffer)
-                .map_err(|error| io("read local Git LFS object", &object.source_path, error))?;
-            if count == 0 {
-                break;
-            }
-            copied = copied.checked_add(count as u64).ok_or_else(|| {
-                WorktreeError::Unsupported("Git LFS object size overflowed u64".to_owned())
-            })?;
-            digest.update(&buffer[..count]);
+        copied = copied.checked_add(count as u64).ok_or_else(|| {
+            WorktreeError::Unsupported("Git LFS object size overflowed u64".to_owned())
+        })?;
+        digest.update(&buffer[..count]);
+        if !cloned {
             output
                 .write_all(&buffer[..count])
                 .map_err(|error| io("write expanded Git LFS object", &destination, error))?;
         }
-        if copied != object.pointer.size {
-            return Err(WorktreeError::Unsupported(format!(
-                "local Git LFS object {} changed while it was read; expected {} bytes, read {copied}",
-                object.pointer.oid, object.pointer.size
-            )));
-        }
-        let actual_oid = crate::base_integrity::hex_lower(digest.finalize());
-        if actual_oid != object.pointer.oid {
-            return Err(WorktreeError::Unsupported(format!(
-                "local Git LFS object {} failed SHA-256 verification; found {actual_oid}",
-                object.pointer.oid
-            )));
-        }
+    }
+    if copied != object.pointer.size {
+        return Err(WorktreeError::Unsupported(format!(
+            "local Git LFS object {} changed while it was read; expected {} bytes, read {copied}",
+            object.pointer.oid, object.pointer.size
+        )));
+    }
+    let actual_oid = crate::base_integrity::hex_lower(digest.finalize());
+    if actual_oid != object.pointer.oid {
+        return Err(WorktreeError::Unsupported(format!(
+            "local Git LFS object {} failed SHA-256 verification; found {actual_oid}",
+            object.pointer.oid
+        )));
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(prepared) = prepared {
+        prepared
+            .publish(&output)
+            .map_err(|error| io("publish verified Git LFS expansion", &destination, error))?;
     }
     Ok(())
 }
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+#[path = "lfs_workers.rs"]
+mod lfs_workers;
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[path = "lfs_materialization_tests.rs"]
+mod lfs_materialization_tests;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn validate_opened_git_lfs_file(
@@ -5050,6 +5098,7 @@ fn validate_destination_path_semantics(
         .tempdir_in(parent)
         .map_err(|source| io("create destination path-semantics probe", parent, source))?;
     let probe_path = probe.path().to_path_buf();
+    let paths = path_probe::select(paths, &probe_path);
     let mut directories = HashSet::new();
 
     let validation = (|| {
@@ -5099,6 +5148,9 @@ fn validate_destination_path_semantics(
     })?;
     validation
 }
+
+#[path = "path_probe.rs"]
+mod path_probe;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn needs_destination_path_probe(paths: &[PathBuf]) -> bool {
@@ -6649,13 +6701,26 @@ fn paths_match(left: &Path, right: &Path) -> bool {
 /// compared exactly.
 #[cfg(target_os = "macos")]
 fn paths_match(left: &Path, right: &Path) -> bool {
-    use unicode_normalization::UnicodeNormalization;
-
     left == right
         || matches!(
             (left.to_str(), right.to_str()),
-            (Some(left), Some(right)) if left.nfc().eq(right.nfc())
+            (Some(left), Some(right)) if composed_path(left).eq(composed_path(right))
         )
+}
+
+/// The composed (NFC) form of a path, one component at a time. `Path` equality
+/// ignores a trailing or repeated separator, so the composed form must too:
+/// compared as raw text, one spelling could match two paths that do not match
+/// each other.
+#[cfg(target_os = "macos")]
+fn composed_path(path: &str) -> impl Iterator<Item = char> + '_ {
+    use unicode_normalization::UnicodeNormalization;
+
+    Path::new(path).components().flat_map(|component| {
+        // Every component of a UTF-8 path is UTF-8.
+        let component = component.as_os_str().to_str().unwrap_or_default();
+        component.nfc().chain(std::iter::once('/'))
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -8601,6 +8666,50 @@ fn retire_vanished_add_journal(
     Ok(())
 }
 
+/// Add operations whose fate a lifecycle journal owns: every removal, finished
+/// or not, and every unfinished move or compaction.
+///
+/// `None` when a lifecycle journal is unreadable: without all of them,
+/// "nothing else is pending" is unknown.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn add_operations_claimed_by_lifecycle_journals(
+    state_directory: &Path,
+) -> Result<Option<HashSet<String>>, WorktreeError> {
+    let removals = RemovalJournalStore::open(state_directory).load_all_for_status()?;
+    let moves = MoveJournalStore::open(state_directory).load_all_for_status()?;
+    let compactions = CompactJournalStore::open(state_directory).load_all_for_status()?;
+    if !removals.issues.is_empty() || !moves.issues.is_empty() || !compactions.issues.is_empty() {
+        return Ok(None);
+    }
+    let mut claimed = HashSet::new();
+    claimed.extend(
+        removals
+            .journals
+            .into_iter()
+            .map(|removal| removal.source_add_operation_id),
+    );
+    claimed.extend(
+        moves
+            .journals
+            .into_iter()
+            .filter(|journal| !journal.phase.is_finished())
+            .map(|journal| journal.source_add_operation_id),
+    );
+    claimed.extend(
+        compactions
+            .journals
+            .into_iter()
+            .filter(|journal| {
+                !matches!(
+                    journal.phase,
+                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
+                )
+            })
+            .map(|journal| journal.source_add_operation_id),
+    );
+    Ok(Some(claimed))
+}
+
 /// Re-home active add journals whose recorded repository no longer exists.
 ///
 /// An older Riftri recorded the worktree an add ran in, which can be a linked
@@ -8616,39 +8725,9 @@ fn rehome_stranded_add_journals(
 ) -> Result<(usize, Vec<String>), WorktreeError> {
     let store = JournalStore::open(state_directory);
     let journals = store.load_all_reconciling()?.journals;
-    let removals = RemovalJournalStore::open(state_directory).load_all_for_status()?;
-    let moves = MoveJournalStore::open(state_directory).load_all_for_status()?;
-    let compactions = CompactJournalStore::open(state_directory).load_all_for_status()?;
-    if !removals.issues.is_empty() || !moves.issues.is_empty() || !compactions.issues.is_empty() {
-        // Without every lifecycle journal, "nothing else is pending" is unknown.
+    let Some(claimed) = add_operations_claimed_by_lifecycle_journals(state_directory)? else {
         return Ok((0, Vec::new()));
-    }
-    let mut claimed = HashSet::new();
-    claimed.extend(
-        removals
-            .journals
-            .iter()
-            .map(|removal| removal.source_add_operation_id.as_str()),
-    );
-    claimed.extend(
-        moves
-            .journals
-            .iter()
-            .filter(|journal| !journal.phase.is_finished())
-            .map(|journal| journal.source_add_operation_id.as_str()),
-    );
-    claimed.extend(
-        compactions
-            .journals
-            .iter()
-            .filter(|journal| {
-                !matches!(
-                    journal.phase,
-                    CompactWorktreePhase::Complete | CompactWorktreePhase::Cancelled
-                )
-            })
-            .map(|journal| journal.source_add_operation_id.as_str()),
-    );
+    };
     let mut rehomed = 0;
     let mut errors = Vec::new();
     for journal in &journals {
@@ -8738,24 +8817,14 @@ fn reconcile_active_add_journals(
     // reporting of invalid journals.
     let journals = store.load_all_reconciling()?.journals;
     let claimed = claimed_destinations(&journals);
-    let removal_load = RemovalJournalStore::open(state_directory).load_all_for_status()?;
-    if !removal_load.issues.is_empty() {
-        // With any removal journal unreadable, no add journal's "already
-        // removed / removal pending" standing can be trusted. Do nothing this
-        // pass rather than risk retiring on stale knowledge.
+    let Some(lifecycle_owned) = add_operations_claimed_by_lifecycle_journals(state_directory)?
+    else {
+        // With any lifecycle journal unreadable, no add journal's "already
+        // removed / still being removed, moved, or compacted" standing can be
+        // trusted. Do nothing this pass rather than risk retiring on stale
+        // knowledge.
         return Ok((0, Vec::new(), Vec::new()));
-    }
-    let removals = removal_load.journals;
-    let completed = removals
-        .iter()
-        .filter(|removal| removal.phase == RemoveWorktreePhase::Complete)
-        .map(|removal| removal.source_add_operation_id.as_str())
-        .collect::<HashSet<_>>();
-    let pending_removals = removals
-        .iter()
-        .filter(|removal| removal.phase != RemoveWorktreePhase::Complete)
-        .map(|removal| removal.source_add_operation_id.as_str())
-        .collect::<HashSet<_>>();
+    };
     // One listing per repository, taken on first use, confirms every journal
     // whose worktree Git still registers: those need nothing. Anything else is
     // decided on a fresh listing under that journal's lock, as before. A
@@ -8768,9 +8837,11 @@ fn reconcile_active_add_journals(
     let mut errors = Vec::new();
     for journal in &journals {
         if journal.phase != AddWorktreePhase::Active
-            || completed.contains(journal.operation_id.as_str())
-            // A pending removal already owns this add journal's fate.
-            || pending_removals.contains(journal.operation_id.as_str())
+            // Already retired, or a pending removal, move, or compaction owns
+            // this add journal's fate. Moves and compaction swaps rename the
+            // view in two steps, so one killed in between leaves its path
+            // empty for the moment; resuming it puts the view back.
+            || lifecycle_owned.contains(journal.operation_id.as_str())
             || only_destination.is_some_and(|destination| !paths_match(&journal.destination, destination))
         {
             continue;
@@ -12176,22 +12247,64 @@ fn remove_registered_worktree_for_rollback(
             Some(&journal.base_path),
         )?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
-        if !git
-            .initialize_missing_worktree_index(&journal.destination, &journal.sparse_directories)?
-        {
-            return Err(changed_rollback_worktree(journal));
+        git.initialize_missing_worktree_index(&journal.destination, &journal.sparse_directories)?;
+        if git.worktree_is_clean(&journal.destination)? {
+            remove_worktree_for_rollback(
+                git,
+                &journal.repository,
+                &journal.destination,
+                Some(&journal.base_path),
+            )?;
+        } else {
+            remove_unchanged_view_git_calls_dirty(git, journal)?;
         }
-        if !git.worktree_is_clean(&journal.destination)? {
-            return Err(changed_rollback_worktree(journal));
-        }
-        remove_worktree_for_rollback(
-            git,
-            &journal.repository,
-            &journal.destination,
-            Some(&journal.base_path),
-        )?;
     } else {
         return Err(changed_rollback_worktree(journal));
+    }
+    Ok(())
+}
+
+/// Remove a view that equals its immutable base and has nothing staged, yet
+/// Git reports dirty.
+///
+/// Some exact trees check out dirty: under `text eol=crlf`, Git writes a blob
+/// that already holds CRLF unchanged, and cleaning those bytes no longer
+/// yields the blob. Git's non-force removal refuses such a view every time, so
+/// treating Git's verdict as a change left the refused add pending for good.
+///
+/// The view is renamed back to the add's scratch path in one atomic step and
+/// compared again there, so a write that raced the rename is found and the
+/// view is put back. Git then unregisters the missing destination through its
+/// ordinary missing-path checks, and rollback deletes the scratch path with
+/// the journal's other paths. After an interruption, the next rollback finds
+/// the pointer in scratch and restores the view before trying again.
+fn remove_unchanged_view_git_calls_dirty(
+    git: &Git,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::RollbackViewSetAside,
+        &journal.destination,
+    );
+    fs::rename(&journal.destination, &journal.scratch).map_err(|source| {
+        io(
+            "set aside unchanged worktree view",
+            &journal.scratch,
+            source,
+        )
+    })?;
+    sync_parent(&journal.destination)?;
+    let unregistered =
+        view_matches_base(&journal.base_path, &journal.scratch).and_then(|unchanged| {
+            if !unchanged {
+                return Err(changed_rollback_worktree(journal));
+            }
+            remove_worktree_for_rollback(git, &journal.repository, &journal.destination, None)
+        });
+    if let Err(error) = unregistered {
+        restore_pointer_for_rollback(journal)?;
+        return Err(error);
     }
     Ok(())
 }
@@ -13942,6 +14055,7 @@ mod tests {
             std::path::PathBuf::from("/work/caf\u{00e9}"),
             std::path::PathBuf::from("/work/cafe\u{0301}"),
             std::path::PathBuf::from("/work/./caf\u{00e9}"),
+            std::path::PathBuf::from("/work//cafe\u{0301}/"),
             std::path::PathBuf::from("/WORK/PLAIN"),
             std::path::PathBuf::from(r"C:\work\plain"),
             std::path::PathBuf::from(r"\\?\C:\work\plain"),
@@ -13978,6 +14092,33 @@ mod tests {
             assert_eq!(inventory.find(path), expected);
         }
         assert!(inventory.find(Path::new("/not-registered")).is_none());
+    }
+
+    /// `Path` equality ignores redundant separators, so the normalization
+    /// alias has to ignore them too, or one spelling matches two paths that
+    /// do not match each other.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn normalization_aliases_ignore_redundant_separators() {
+        let composed = Path::new("/work/caf\u{00e9}");
+        for decomposed in [
+            "/work/cafe\u{0301}",
+            "/work/cafe\u{0301}/",
+            "/work//cafe\u{0301}",
+            "/work/./cafe\u{0301}",
+        ] {
+            let decomposed = Path::new(decomposed);
+            assert!(super::paths_match(composed, decomposed), "{decomposed:?}");
+            assert!(super::paths_match(decomposed, composed), "{decomposed:?}");
+        }
+        assert!(!super::paths_match(
+            composed,
+            Path::new("/work/cafe\u{0301}/nested")
+        ));
+        assert!(!super::paths_match(
+            composed,
+            Path::new("/workcafe\u{0301}")
+        ));
     }
 
     fn inventory_entry(path: PathBuf) -> riftri_git::WorktreeInfo {
@@ -14980,6 +15121,129 @@ mod tests {
         assert_eq!(accounting.pending_compactions, 0, "{accounting:?}");
         assert_eq!(accounting.cancelled_compactions, 1, "{accounting:?}");
         assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// A compaction killed between the two renames of its swap: the view
+    /// waits in its quarantine and nothing is at the worktree's path.
+    fn compaction_killed_mid_swap() -> (crate::test_support::WritableTempDir, PathBuf, PathBuf) {
+        let (fixture, destination, state) =
+            stopped_compaction(CompactWorktreePhase::ReplacementReady);
+        let quarantine = crate::journal::CompactJournalStore::open(&state)
+            .load_all()
+            .expect("load compaction")
+            .remove(0)
+            .quarantine;
+        fs::rename(&destination, &quarantine).expect("quarantine the view");
+        forget_caller_worktree(fixture.path());
+        (fixture, destination, state)
+    }
+
+    /// Reconciliation takes any detached worktree at a journal's commit for
+    /// its relocated view and holds back. Without the fixture's caller
+    /// worktree, an empty path reads as a view deleted by hand.
+    fn forget_caller_worktree(fixture: &Path) {
+        git(
+            &fixture.join("repository"),
+            &[
+                "worktree",
+                "remove",
+                fixture.join("caller").to_str().unwrap(),
+            ],
+        );
+    }
+
+    /// Repair took the path a killed swap left empty for a worktree deleted
+    /// by hand and retired its add journal, then put the view back: registered
+    /// with Git, but no longer managed, and its base collectible.
+    #[test]
+    fn repair_keeps_a_view_managed_when_its_compaction_was_killed_mid_swap() {
+        let (fixture, destination, state) = compaction_killed_mid_swap();
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.retired_adds, 0, "{report:?}");
+        assert_eq!(
+            fs::read_to_string(destination.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+        assert_eq!(accounting.cancelled_compactions, 1, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: fixture.path().join("repository"),
+            destination,
+            state_dir: Some(state),
+        })
+        .expect("the view is still managed");
+    }
+
+    /// The swap that undoes a compaction leaves the same gap. Repair retired
+    /// the add journal there too, then retargeted its base, and every later
+    /// repair and removal refused the mismatched retirement record.
+    #[test]
+    fn repair_keeps_a_view_managed_when_its_restore_was_killed_mid_swap() {
+        let (fixture, destination, state, old_view) = compaction_awaiting_quarantine_cleanup();
+        fs::write(old_view.join("new.txt"), "new\n").unwrap();
+        git(&old_view, &["add", "new.txt"]);
+        git(&old_view, &["commit", "--quiet", "-m", "during compaction"]);
+        let store = crate::journal::CompactJournalStore::open(&fs::canonicalize(&state).unwrap());
+        let journal = store.load_all().unwrap().remove(0);
+        let mut record = store.reload(&journal).unwrap();
+        record
+            .transition(CompactWorktreePhase::RestoringOriginal)
+            .unwrap();
+        store.persist(&record).unwrap();
+        fs::rename(&destination, &journal.replacement).expect("set the compacted view aside");
+        forget_caller_worktree(fixture.path());
+
+        for _ in 0..2 {
+            let report = recover_incomplete_operations(&state).expect("repair");
+            assert!(report.errors.is_empty(), "{report:?}");
+            assert_eq!(report.retired_adds, 0, "{report:?}");
+        }
+        assert_eq!(fs::read(destination.join("new.txt")).unwrap(), b"new\n");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: fixture.path().join("repository"),
+            destination,
+            state_dir: Some(state),
+        })
+        .expect("the view is still managed");
+    }
+
+    /// An add reconciles its destination the same way before claiming it.
+    /// Git's stale registration normally refuses the add first, but not once
+    /// it is pruned: the add then retired the journal and built a second view
+    /// on the path, orphaning the one in quarantine.
+    #[test]
+    fn add_refuses_the_path_of_a_view_killed_mid_swap() {
+        let (fixture, destination, state) = compaction_killed_mid_swap();
+        let repository = fixture.path().join("repository");
+        git(&repository, &["worktree", "prune"]);
+
+        let error = add_worktree_inner(
+            AddWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect_err("the path belongs to the view being compacted");
+
+        assert!(
+            error.to_string().contains("already claimed by active"),
+            "{error}"
+        );
+        assert!(!destination.exists());
     }
 
     #[test]
@@ -18799,6 +19063,144 @@ mod tests {
         assert_eq!(fs::read(&saved).unwrap(), b"user data\n");
     }
 
+    /// A repository whose HEAD Git checks out dirty: under `text eol=crlf` a
+    /// blob that already holds CRLF is written unchanged, but cleaning those
+    /// bytes no longer yields the blob.
+    #[cfg(unix)]
+    fn repository_git_checks_out_dirty(fixture: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let (repository, destination, state) = committed_repository(fixture);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("stored-with-crlf.txt"), "dos\r\nlines\r\n").unwrap();
+        git(&repository, &["add", "--", "stored-with-crlf.txt"]);
+        fs::write(repository.join(".gitattributes"), "* text eol=crlf\n").unwrap();
+        git(&repository, &["add", "--", ".gitattributes"]);
+        git(&repository, &["commit", "--quiet", "-m", "crlf blob"]);
+        assert_eq!(
+            git_stdout(
+                &repository,
+                &["cat-file", "-s", "HEAD:stored-with-crlf.txt"]
+            ),
+            "12",
+            "the blob must keep its carriage returns"
+        );
+        (repository, destination, state)
+    }
+
+    #[cfg(unix)]
+    fn add_detached(
+        repository: &Path,
+        destination: &Path,
+        state: &Path,
+        rollback_on_error: bool,
+    ) -> super::WorktreeError {
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.to_path_buf(),
+                destination: destination.to_path_buf(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.to_path_buf()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            rollback_on_error,
+        )
+        .expect_err("Git reports the new view dirty")
+    }
+
+    #[cfg(unix)]
+    fn assert_nothing_left_behind(fixture: &Path, repository: &Path, destination: &Path) {
+        let mut entries = fs::read_dir(fixture)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        assert_eq!(entries, ["repository", "state"]);
+        assert!(!registered(repository, destination));
+        let accounting = storage_accounting(&fixture.join("state")).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// The add is refused, and nobody touched the view, so rollback must not
+    /// read Git's dirty verdict as a change and keep the view pending.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_add_of_a_tree_git_checks_out_dirty_leaves_nothing_behind() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = repository_git_checks_out_dirty(fixture.path());
+
+        let error = add_detached(&repository, &destination, &state, true);
+
+        assert!(
+            matches!(&error, super::WorktreeError::InvalidRequest(message)
+                if message.contains("is not clean; it was not activated")),
+            "{error:?}"
+        );
+        assert_nothing_left_behind(fixture.path(), &repository, &destination);
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+    }
+
+    /// A write that lands after rollback compared the view with its base, but
+    /// before the view is set aside, must still be found and kept.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_keeps_a_write_racing_the_removal_of_a_view_git_calls_dirty() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = repository_git_checks_out_dirty(fixture.path());
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::RollbackViewSetAside,
+            |path| fs::write(path.join("mine.txt"), "user data\n").expect("write raced file"),
+        );
+
+        let error = add_detached(&repository, &destination, &state, true);
+
+        let super::WorktreeError::OperationAndRollback { rollback, .. } = &error else {
+            panic!("the add must report its unfinished rollback: {error}");
+        };
+        assert!(
+            matches!(**rollback, super::WorktreeError::RecoveryPending { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(destination.join("mine.txt")).unwrap(),
+            b"user data\n"
+        );
+        assert_eq!(
+            fs::read(destination.join("stored-with-crlf.txt")).unwrap(),
+            b"dos\r\nlines\r\n"
+        );
+        assert!(registered(&repository, &destination));
+
+        // Following the reported steps lets repair finish the rollback.
+        fs::remove_dir_all(&destination).expect("delete the kept destination");
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_nothing_left_behind(fixture.path(), &repository, &destination);
+    }
+
+    /// A rollback killed after it set the view aside leaves the view at the
+    /// add's scratch path while Git still registers the destination.
+    #[cfg(unix)]
+    #[test]
+    fn repair_finishes_a_rollback_interrupted_after_setting_the_view_aside() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = repository_git_checks_out_dirty(fixture.path());
+        add_detached(&repository, &destination, &state, false);
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journal")
+            .pop()
+            .expect("incomplete add journal");
+        fs::rename(&destination, &journal.scratch).expect("set the view aside");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_nothing_left_behind(fixture.path(), &repository, &destination);
+    }
+
     /// The same write, landing before the view was swapped in: the destination
     /// holds only Git's pointer and the caller's file.
     #[cfg(unix)]
@@ -21682,6 +22084,56 @@ mod tests {
         assert!(second.errors.is_empty(), "{second:?}");
     }
 
+    /// `git worktree move` renames the directory before it rewrites the
+    /// registration. Killed in between, Git marks the old path prunable, and
+    /// repair retired the add journal of a view that only sat at its new path.
+    #[test]
+    fn repair_keeps_a_view_managed_when_git_was_killed_mid_move() {
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let source = root.join("source");
+        let moved = root.join("moved");
+        add_with_state(&repository, &source, &state).expect("add");
+        move_worktree_inner(
+            move_request(&repository, &source, &moved, &state),
+            Some(MoveWorktreePhase::IntentRecorded),
+        )
+        .expect_err("stop after the move intent");
+        fs::rename(&source, &moved).expect("rename as Git does first");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert_eq!(report.retired_adds, 0, "{report:?}");
+        assert_eq!(report.errors.len(), 1, "{report:?}");
+        assert!(report.errors[0].contains("both paths were preserved"));
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert!(
+            accounting
+                .bases
+                .iter()
+                .all(|base| base.reference_count == 1),
+            "the view still holds its base: {accounting:?}"
+        );
+
+        // Finishing Git's half of the move lets repair finish the rest.
+        git(
+            &repository,
+            &["worktree", "repair", moved.to_str().unwrap()],
+        );
+        let report = recover_incomplete_operations(&state).expect("second repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.recovered_moves, 1, "{report:?}");
+        let accounting = super::storage_accounting(&state).expect("status");
+        assert_eq!(accounting.active_views, 1, "{accounting:?}");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository,
+            destination: moved,
+            state_dir: Some(state),
+        })
+        .expect("the moved view is still managed");
+    }
+
     /// Moving a worktree into itself is refused before anything is recorded.
     #[test]
     fn a_move_into_the_worktree_itself_is_refused_up_front() {
@@ -23370,6 +23822,38 @@ mod tests {
                 .contains("not explained by a completion marker or journal"),
             "unexpected diagnostic: {issue:?}"
         );
+    }
+
+    /// A completion marker whose base directory is gone is planned as a
+    /// zero-byte candidate, so applying the plan must collect it too instead
+    /// of failing on the missing base before it reaches the bases after it.
+    #[test]
+    fn garbage_collection_collects_a_completion_marker_without_a_base() {
+        let fixture = tempdir().expect("fixture");
+        let (_repository, state, base_path) =
+            unreferenced_base_fixture(fixture.path(), "feature/gc-marker-only");
+        // All zeros sorts before any real tree ID, so it is collected first.
+        let missing_base = base_path.with_file_name("0".repeat(40));
+        let orphan_marker = missing_base.with_extension("complete");
+        fs::write(&orphan_marker, "").expect("write marker without a base");
+
+        let plan = garbage_collect_inner(&state, false, None).expect("plan collection");
+        assert_eq!(
+            plan.candidates
+                .iter()
+                .map(|candidate| (candidate.base_path.clone(), candidate.logical_bytes > 0))
+                .collect::<Vec<_>>(),
+            [(missing_base.clone(), false), (base_path.clone(), true)]
+        );
+
+        let applied = garbage_collect_inner(&state, true, None).expect("apply collection");
+        assert_eq!(applied.collected, [missing_base, base_path.clone()]);
+        assert!(!orphan_marker.exists());
+        assert!(!base_path.exists());
+        let again = garbage_collect_inner(&state, true, None).expect("apply again");
+        assert!(again.candidates.is_empty(), "{again:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
     }
 
     #[test]

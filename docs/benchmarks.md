@@ -100,6 +100,103 @@ and do not infer a product speedup from supervisor tests. Stack sampling is not
 supported in this timing lane. Small real-APFS and cancellation tests run in
 the existing macOS benchmark-test CI step.
 
+### Inspecting startup costs without running another benchmark
+
+After a supervised startup run, analyze its existing `results.json` and sibling
+`git-ROUND-LABEL-WORKER.jsonl` traces:
+
+```sh
+node docs/benchmarks/startup-profile.mjs /path/to/benchmark-output/results.json
+```
+
+This read-only command prints JSON. It does not run Git or a recorded executable,
+read the recorded worktree paths, write into the fixture, or change the timing
+runner. It also works after downloading an artifact onto another operating
+system. Results and each trace get SHA-256 identities in the output.
+
+The breakdown reports whole-add milliseconds, Git process starts, and separate
+`reset` and `status` command times. Where Git provides them, it also reports
+each command's index `refresh`/`preload` elapsed time and `sum_scan`/`sum_lstat`
+counters. Command names come from Trace2 `cmd_name`, not substring matches in
+arguments (a directory can itself be named `status`). Sessions stay separate,
+including interleaved child Git processes. Trace2 semantics are documented in
+[Git's Trace2 API](https://git-scm.com/docs/api-trace2).
+
+The report also exposes `resetLfsFilterStarts` / `statusLfsFilterStarts` and
+`resetLfsFilterMs` / `statusLfsFilterMs`. These recognize only the canonical
+`git-lfs filter-process` child command, paired by child ID within its owning
+Git session. The scalar lifetime is present only for one successfully exited
+filter; multiple lifetimes remain separate under `commands[].children` and are
+never added. A filter lifetime includes startup, processing, and potentially
+idle time. It overlaps the owning Git command and does **not** measure bytes
+hashed, useful CPU work, or startup alone. Zero starts means no canonical
+long-running filter was observed, not that no other LFS command ran.
+
+In particular, `refresh/sum_scan=0` does not prove absence of LFS filter work.
+The LFS regression fixture retains the complete top-level reset/status sessions
+(their lines unchanged) from `candidate/git-1-before.jsonl` in
+[run 38319750916](https://github.com/assistant-ui/riftri/actions/runs/38319750916).
+That production-baseline sample launched a filter in both commands despite zero
+status refresh scans. The fixture excludes other Git sessions; it is evidence
+for parsing, not a speedup claim. Unfinished or failed recognized filters prevent
+complete profiles and aggregate distributions.
+
+For individual retained traces, including the cold-LFS runner's files:
+
+```sh
+node docs/benchmarks/startup-profile.mjs --trace /path/to/git-1-before.jsonl
+```
+
+This mode remains read-only and reports a trace hash, but does not validate a
+benchmark receipt, attempt inventory, cleanup, or timing controls. Use the
+full-results mode above when evaluating a startup benchmark.
+
+Interpretation rules:
+
+- Regions are **included** in command time, and parent/child commands can
+  overlap. Do not add them together. The report does not subtract Git time
+  from total time and call the remainder cloning or integrity verification;
+  those Riftri costs are not isolated by this trace.
+- A missing or repeated metric is `null`, not zero. A scalar reset/status
+  metric requires exactly one successful top-level command of that name;
+  ambiguous commands and worker-thread counters are not summed. All commands
+  remain available for inspection.
+- Groups keep labels/binary hashes, fresh versus reused bases, and concurrency
+  separate. `p50` and `p95` use nearest-rank percentiles, not the arithmetic
+  middle-pair median. Four concurrent workers are not four independent
+  repetitions or a batch-latency measurement. Fresh-base creation does not
+  mean a cleared filesystem cache.
+- Every recorded attempt is retained. Missing attempts/traces, truncated or
+  malformed traces, unfinished commands, failed attempts and incomplete cleanup
+  prevent aggregate distributions and produce exit code 1. Missing optional
+  Git counters leave that metric's distribution `null`, with observation counts
+  and per-sample reasons. `complete: true` only means the profile's required
+  evidence was present, not that timing controls passed or an optimization won.
+
+The trace's command arguments, exit times and exit codes must also match the
+runner's separately recorded command inventory. This detects traces cut exactly
+between commands and accidentally swapped files; hashes identify inputs but
+are not a substitute for retaining the original run and its provenance.
+
+The checked-in real-trace test fixture is the first cached **production** sample
+from [run 38295860743](https://github.com/assistant-ui/riftri/actions/runs/38295860743),
+`prefix-startup/candidate-cached/git-1-baseline-0.jsonl`, retained verbatim. It
+records 5,864 refresh scans during `reset`, and zero during the final `status`
+(which still performs a preload/stat pass). It is a parser regression fixture,
+not a performance comparison. The earlier prefix optimization did not qualify
+as a whole-creation improvement; this profiling tool does not change that result.
+
+Use this breakdown to locate costs, then require same-binary controls and a
+fully verified end-to-end comparison for any runtime proposal. Moving the
+initial Git content verification to a later command is not eliminating it.
+Neither the initial verification nor the final clean check may be skipped to
+make a number smaller. No runtime behavior or startup-speed improvement is
+claimed by this profiling follow-up.
+
+```sh
+node --test docs/benchmarks/startup-profile.test.mjs
+```
+
 The [October 10 location controls](benchmarks/apfs-location-controls-2026-10-10.md)
 found unstable unchanged-code timings on both host APFS and nested APFS images.
 Fourteen cases completed; one was interrupted and one never started. No runtime
@@ -243,6 +340,93 @@ must show one candidate pointer batch for 127/128 files and two for 129. Raw
 paired cached-add timings and the LFS version are saved. macOS CI runs one pair
 per boundary against the same binary as a correctness gate, not a speedup claim;
 manual comparisons default to three alternating pairs per boundary.
+
+For cold-base LFS expansion, use the supervised comparison (32 checkout paths,
+2 MiB each, eight alternating pairs by default):
+
+```sh
+node docs/benchmarks/cold-lfs.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory 32 2097152 8 1800000
+```
+
+This uses real local Git LFS without fetching or changing user configuration.
+Each timed add must create a new immutable base; the OS page cache is not
+cleared. It checks SHA-256 contents, executable bits, HEAD, Git cleanliness,
+private-write isolation from the base and local object store, safe corruption
+and missing-object refusal, removal, repair and empty state after GC. A shared
+process supervisor bounds every command and the entire run. Failures retain
+the fixture, attempts, command logs and raw Git traces. Success also retains
+raw samples and binary/runner hashes. Run independent same-binary controls
+before and after a comparison; `speedupClaim` stays false in the raw receipt.
+Do not infer cached-add speedups from this workload or count CI smoke-test
+timings as performance evidence. macOS CI exercises a four-file, 8-MiB-per-file pair and a
+budget-expiry receipt with the release binary.
+
+Compare the three retained lanes with
+`node docs/benchmarks/cold-lfs-summary.mjs /path/to/lanes`, where the directory
+contains `control-before/results.json`, `candidate/results.json`, and
+`control-after/results.json`. Qualification requires at least eight complete
+pairs in every lane; shorter smoke runs still produce statistics but cannot
+claim a speedup. Missing or malformed runner/binary hashes, workload metadata,
+or recorded OS/kernel/CPU information are rejected, as are mismatched recorded
+environments. Matching those fields does not prove identical host load or
+filesystem conditions: keep the same measurement host and volume, fresh build
+receipts, and bracketing same-binary controls. Both controls must stay within
+5% at p50/p95; the candidate must improve full-creation p50 by at least 5%
+without worsening p95 by more than 5%. An optional build-provenance JSON path
+as the second argument also checks `baseline.sha256` and `candidate.sha256`
+against the recorded binaries.
+
+The opt-in **Cold LFS qualification** workflow runs the same comparison on a
+dedicated `macos-15` runner. It runs for PRs changing the hosted study, or by
+manual dispatch with an explicit baseline revision and selected candidate ref.
+It resolves both commits, records a plan before timing, and builds independent
+uncached release binaries with verified Cargo receipts. Three sequential lanes
+use 16 × 8-MiB objects and 20 alternating pairs each (120 verified adds total).
+The existing thresholds are unchanged; the larger fixed sample size does not
+remove outliers, retry a noisy lane, or guarantee low host noise.
+
+The job fails if the comparison does not qualify, independently of the ordinary
+correctness CI. Its 90-day artifact retains the plan, build provenance, all
+receipts, command output and raw Trace2 files even on failure; fixture
+repositories and build directories are not uploaded. The summary verifies
+every trace offline and binds the workload and measured binaries to the plan.
+After downloading the artifact, reproduce it with
+`node docs/benchmarks/cold-lfs-ci.mjs evaluate /path/to/evidence` from the
+recorded candidate source (move the existing `summary.json` aside first; the
+tool refuses to overwrite evidence). Earlier local or hosted failures remain
+part of the evidence and must not be replaced by a later favorable run.
+
+Cold LFS cloning must be evaluated separately from cached worktree creation.
+The verified streaming materializer keeps the Git-created checkout file's
+mode, ACL and extended attributes.
+Two checkout paths for the same object may have different metadata. The core
+`lfs_materialization_tests` now make this contract explicit, including source
+attributes that must not appear in the checkout.
+
+The APFS `lfs_clone_metadata_restoration_feasibility` test demonstrates why a
+direct object clone is insufficient: it copies object-store modes and extended
+attributes, and does not retain the existing checkout's ACL. In a private-file
+fixture, restoring metadata from the pointer file with `fcopyfile` and
+`COPYFILE_METADATA` preserves the cloned contents, replaces attributes and
+restores the expected ACL/mode across four source/destination ACL combinations.
+The test also verifies private-write isolation. This is a test-only native
+experiment, not an LFS transaction, allocation measurement or speedup claim.
+See Apple's [copyfile contract](https://github.com/apple-oss-distributions/copyfile/blob/main/copyfile.3)
+for the metadata flags; the clone flags for `copyfile` are not proof that an
+`fcopyfile` call shared data blocks.
+
+The narrowly scoped APFS runtime candidate handles objects of at least 8 MiB
+only when source and destination are same-volume, single-link, caller-owned
+ordinary files with matching ownership and no ACLs, xattrs, special modes or
+file flags. Other cases retain verified streaming. Descriptor-based cloning,
+private staging, complete SHA-256 verification and pre-publication identity
+checks protect the new path; a subprocess-exit regression leaves a real clone
+behind and proves that add-journal recovery removes it without touching the
+object store. No timing claim follows from these correctness tests. Use the
+cold-LFS comparison above with `16 8388608 8` to exercise the candidate (128 MiB
+per fresh base), including both same-binary control lanes. Do not bypass hashing,
+use hardlinks, or infer that this changes the cached-base path.
 
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:
