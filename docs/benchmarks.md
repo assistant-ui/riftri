@@ -333,6 +333,21 @@ Do not infer cached-add speedups from this workload or count CI smoke-test
 timings as performance evidence. macOS CI exercises a four-file pair and a
 budget-expiry receipt with the release binary.
 
+Compare the three retained lanes with
+`node docs/benchmarks/cold-lfs-summary.mjs /path/to/lanes`, where the directory
+contains `control-before/results.json`, `candidate/results.json`, and
+`control-after/results.json`. Qualification requires at least eight complete
+pairs in every lane; shorter smoke runs still produce statistics but cannot
+claim a speedup. Missing or malformed runner/binary hashes, workload metadata,
+or recorded OS/kernel/CPU information are rejected, as are mismatched recorded
+environments. Matching those fields does not prove identical host load or
+filesystem conditions: keep the same measurement host and volume, fresh build
+receipts, and bracketing same-binary controls. Both controls must stay within
+5% at p50/p95; the candidate must improve full-creation p50 by at least 5%
+without worsening p95 by more than 5%. An optional build-provenance JSON path
+as the second argument also checks `baseline.sha256` and `candidate.sha256`
+against the recorded binaries.
+
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:
 
