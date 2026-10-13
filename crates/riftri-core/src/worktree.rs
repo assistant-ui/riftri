@@ -8483,48 +8483,66 @@ fn classify_active_destination(
         reference.extend_from_slice(branch.as_encoded_bytes());
         reference
     });
-    for worktree in registered {
-        // Git reports its registry in its own spelling (forward slashes, no
-        // verbatim prefix on Windows), so comparisons against journal paths
-        // must go through `paths_match`, never raw equality: a missed match
-        // here would let a worktree another journal owns pass as this
-        // journal's relocation.
-        if worktree.bare
-            || claimed
+    if let Some(worktree) = find_relocation(
+        registered,
+        expected_branch.as_deref(),
+        &journal.expected_commit,
+        // Git's registry spelling may differ from a journal's native path;
+        // preserve alias-aware ownership checks for every plausible candidate.
+        |path| {
+            claimed
                 .iter()
-                .any(|destination| paths_match(destination, &worktree.path))
-        {
-            continue;
+                .any(|destination| paths_match(destination, path))
+        },
+    ) {
+        // Report the location in the same canonical filesystem form that
+        // journal destinations (and therefore `worktree list`) use, not
+        // Git's slash-normalized spelling — on Windows those differ
+        // (`R:/...` versus `\\?\R:\...`). The worktree exists, so
+        // canonicalization normally succeeds; if it does not, the raw
+        // registry spelling is still a truthful report.
+        let registered_path =
+            fs::canonicalize(&worktree.path).unwrap_or_else(|_| worktree.path.clone());
+        return Ok(ActiveDestinationState::Relocated(registered_path));
+    }
+    Ok(ActiveDestinationState::Vanished)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn find_relocation<'a>(
+    registered: &'a [riftri_git::WorktreeInfo],
+    expected_branch: Option<&[u8]>,
+    expected_commit: &str,
+    mut is_claimed: impl FnMut(&Path) -> bool,
+) -> Option<&'a riftri_git::WorktreeInfo> {
+    registered.iter().find(|worktree| {
+        if worktree.bare {
+            return false;
         }
-        let plausible = match &expected_branch {
-            // Git refuses to check one branch out in two worktrees, so a
-            // worktree holding this journal's branch is the only worktree that
-            // can be this journal's relocated view.
-            Some(expected) => worktree.branch.as_ref() == Some(expected),
-            // A detached journal has no such unique key. Match conservatively
-            // on the recorded commit: over-matching only blocks retirement.
+        let plausible = match expected_branch {
+            // A branch is unique; detached views conservatively match HEAD.
+            Some(expected) => worktree.branch.as_deref() == Some(expected),
             None => {
                 worktree.detached
                     && worktree
                         .head
                         .as_ref()
-                        .is_some_and(|head| head.as_str() == journal.expected_commit)
+                        .is_some_and(|head| head.as_str() == expected_commit)
             }
         };
-        if plausible {
-            // Report the location in the same canonical filesystem form that
-            // journal destinations (and therefore `worktree list`) use, not
-            // Git's slash-normalized spelling — on Windows those differ
-            // (`R:/...` versus `\\?\R:\...`). The worktree exists, so
-            // canonicalization normally succeeds; if it does not, the raw
-            // registry spelling is still a truthful report.
-            let registered_path =
-                fs::canonicalize(&worktree.path).unwrap_or_else(|_| worktree.path.clone());
-            return Ok(ActiveDestinationState::Relocated(registered_path));
-        }
-    }
-    Ok(ActiveDestinationState::Vanished)
+        // Most registrations have an unrelated branch/HEAD. Reject those
+        // before scanning and normalizing every claimed destination, while
+        // retaining the first unclaimed match and conservative detached rule.
+        plausible && !is_claimed(&worktree.path)
+    })
 }
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[path = "relocation_tests.rs"]
+mod relocation_tests;
 
 /// Active add journals that still claim `destination` and that no completed
 /// removal has retired.
