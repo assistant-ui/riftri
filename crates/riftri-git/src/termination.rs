@@ -355,6 +355,10 @@ mod forwarding {
 }
 
 #[cfg(all(test, unix))]
+#[path = "termination_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(all(test, unix))]
 mod tests {
     use std::process::Command;
 

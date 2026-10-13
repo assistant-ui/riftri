@@ -157,6 +157,36 @@ fn enable_and_disable_change_only_repository_local_config() {
 }
 
 #[test]
+fn activation_addresses_the_repository_git_opens_under_a_work_tree_override() {
+    let fixture = RepositoryFixture::new();
+    let other = RepositoryFixture::new();
+    let enabled = |repository: &Path| {
+        git(
+            repository,
+            &["config", "--local", "--get", "riftri.enabled"],
+        )
+        .stdout
+    };
+    let overridden = |arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(arguments)
+            .env("GIT_WORK_TREE", &other.repository)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("run Riftri CLI under GIT_WORK_TREE")
+    };
+
+    assert!(overridden(&["enable"]).status.success());
+    assert_eq!(enabled(&fixture.repository), b"true\n");
+    assert!(enabled(&other.repository).is_empty());
+
+    assert!(riftri(&other.repository, &["enable"]).status.success());
+    assert!(overridden(&["disable"]).status.success());
+    assert!(enabled(&fixture.repository).is_empty());
+    assert_eq!(enabled(&other.repository), b"true\n");
+}
+
+#[test]
 fn state_unregister_accepts_missing_relative_parent_paths() {
     let fixture = RepositoryFixture::new();
     let directory = fs::canonicalize(fixture.directory.path()).expect("resolve fixture directory");
@@ -1051,6 +1081,34 @@ fn exec_delegates_normal_git_to_the_real_executable() {
     assert_eq!(scoped_failure.stderr, direct_failure.stderr);
 }
 
+/// Where Git cannot enter `-C` or open `--git-dir`, the shim used to answer
+/// with Riftri's own inspection error and exit code instead of Git's.
+#[test]
+fn exec_leaves_unopenable_repositories_to_git() {
+    let directory = writable_tempdir().expect("fixture directory");
+    fs::write(directory.path().join("file"), "").expect("write regular file");
+
+    for arguments in [
+        &["-C", "missing", "rm", "x"][..],
+        &["-C", "missing", "mv", "a", "b"][..],
+        &["-C", "missing", "definitely-not-a-command"][..],
+        &["-C", "file", "rm", "x"][..],
+        &["--git-dir=missing", "worktree"][..],
+        &["--git-dir=missing", "worktree", "list"][..],
+        &["--git-dir=missing", "worktree", "add", "../view"][..],
+    ] {
+        let direct = git(directory.path(), arguments);
+        let scoped = riftri(
+            directory.path(),
+            &[&["exec", "--", "git"], arguments].concat(),
+        );
+        assert_eq!(direct.status.code(), Some(128), "{arguments:?}");
+        assert_eq!(scoped.status.code(), direct.status.code(), "{arguments:?}");
+        assert_eq!(scoped.stdout, direct.stdout, "{arguments:?}");
+        assert_eq!(scoped.stderr, direct.stderr, "{arguments:?}");
+    }
+}
+
 /// Regression test: evaluating shell deactivation inside a `riftri exec`
 /// session used to leave the process-scoped shim first on `PATH` with its
 /// delegation environment stripped, so `git --version` answered as Riftri and
@@ -1905,6 +1963,413 @@ fn enabled_git_directory_options_cannot_bypass_managed_removal_guard() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn work_tree_outside_the_repository_cannot_bypass_managed_lifecycle_guards() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("work-tree-guarded-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "add", "--detach"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::write(destination.join("uncommitted.txt"), "uncommitted\n").expect("dirty the view");
+    let other = RepositoryFixture::new();
+
+    // Git still opens the repository found from the current directory, so
+    // none of these work trees may decide whether the guard applies.
+    for work_tree in [
+        fixture.directory.path().join("missing"),
+        fixture.repository.join("tracked.txt"),
+        fixture.directory.path().to_path_buf(),
+        other.repository.clone(),
+    ] {
+        let mut option = std::ffi::OsString::from("--work-tree=");
+        option.push(&work_tree);
+        let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .arg(option)
+            .args(["worktree", "remove", "--force"])
+            .arg(&destination)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("guard removal under a work tree elsewhere");
+
+        assert!(
+            !removal.status.success(),
+            "--work-tree={} bypassed the managed removal guard",
+            work_tree.display()
+        );
+        assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+        assert_eq!(
+            fs::read(destination.join("uncommitted.txt")).expect("preserved uncommitted file"),
+            b"uncommitted\n"
+        );
+    }
+
+    // The environment spelling of the same option, pointed at a repository
+    // that never enabled Riftri.
+    for arguments in [
+        &["remove", "--force", "../work-tree-guarded-view"][..],
+        &["move", "../work-tree-guarded-view", "../moved-view"][..],
+        &["prune"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git", "worktree"])
+            .args(arguments)
+            .env("GIT_WORK_TREE", &other.repository)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("guard lifecycle under GIT_WORK_TREE");
+
+        assert!(
+            !output.status.success(),
+            "GIT_WORK_TREE let {arguments:?} bypass the managed lifecycle guard"
+        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("GIT_WORK_TREE is set"));
+        assert_eq!(
+            fs::read(destination.join("uncommitted.txt")).expect("preserved uncommitted file"),
+            b"uncommitted\n"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn git_directory_aliases_cannot_bypass_managed_removal_guard() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("git-dir-alias-guarded-view");
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::write(destination.join("untracked.txt"), "private\n").expect("dirty managed view");
+    assert!(
+        git(
+            &fixture.repository,
+            &["config", "alias.wtrm", "worktree remove --force"],
+        )
+        .status
+        .success()
+    );
+
+    // Git reads the alias from the repository `--git-dir` names, wherever the
+    // command runs, so the lookup must not stop at the current directory.
+    // `--work-tree` moves the checked-out files, never the repository, so it
+    // must not hide the alias either.
+    for options in [
+        &["--git-dir=repository/.git"][..],
+        &["--git-dir", "repository/.git"][..],
+        &["--git-dir=repository/.git", "--work-tree=."][..],
+        &["--git-dir", "repository/.git", "--work-tree", "."][..],
+    ] {
+        let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(options)
+            .arg("wtrm")
+            .arg(&destination)
+            .current_dir(fixture.directory.path())
+            .output()
+            .expect("guard aliased removal through --git-dir");
+
+        assert!(
+            !removal.status.success(),
+            "{options:?} hid the alias from the managed removal guard"
+        );
+        assert!(
+            String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"),
+            "{}",
+            String::from_utf8_lossy(&removal.stderr)
+        );
+        assert!(destination.join("untracked.txt").is_file());
+    }
+}
+
+/// Under `--git-dir` Git resolves a relative worktree path against the
+/// directory it runs in. The shim resolved it against the worktree root it
+/// derived from the Git directory, so from the parent directory
+/// `git --git-dir=repository/.git worktree remove --force ./view` was checked
+/// against a path that is not a worktree and reached real Git, which deleted
+/// the managed view. Real Git is the oracle here: `git worktree lock` resolves
+/// its argument exactly like `remove` and `move`, and changes no files.
+#[cfg(target_os = "macos")]
+#[test]
+fn relative_worktree_paths_are_guarded_where_git_resolves_them() {
+    let fixture = RepositoryFixture::new();
+    let root = fixture.directory.path();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let managed = root.join("view");
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach"])
+        .arg(&managed)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add managed worktree");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::write(managed.join("untracked.txt"), "private\n").expect("dirty managed view");
+    // An ordinary worktree with the same basename, so no unique suffix
+    // decides and both Git and the shim fall back to the literal path.
+    let ordinary = root.join("sub/view");
+    fs::create_dir_all(root.join("sub/deep")).expect("create nested directories");
+    assert!(
+        git(
+            &fixture.repository,
+            &["worktree", "add", "--quiet", "--detach", "../sub/view"]
+        )
+        .status
+        .success()
+    );
+
+    let git_resolves = |directory: &Path, globals: &[&str], selector: &str| {
+        let lock = [globals, &["worktree", "lock", selector]].concat();
+        assert!(git(directory, &lock).status.success(), "{lock:?}");
+        let listing = git(&fixture.repository, &["worktree", "list", "--porcelain"]);
+        let listing = String::from_utf8(listing.stdout).expect("UTF-8 worktree list");
+        let locked = listing
+            .split("\n\n")
+            .find(|entry| entry.lines().any(|line| line.starts_with("locked")))
+            .and_then(|entry| entry.lines().next())
+            .and_then(|line| line.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .expect("one locked worktree");
+        let unlock = [globals, &["worktree", "unlock", selector]].concat();
+        assert!(git(directory, &unlock).status.success(), "{unlock:?}");
+        fs::canonicalize(locked).expect("canonical worktree path")
+    };
+    let shim = |directory: &Path, globals: &[&str], command: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(globals)
+            .args(command)
+            .current_dir(directory)
+            .output()
+            .expect("run Git through the shim")
+    };
+    let managed_canonical = fs::canonicalize(&managed).expect("canonical managed view");
+
+    for (directory, globals, selector) in [
+        (root, &["--git-dir=repository/.git"][..], "./view"),
+        (root, &["--git-dir", "repository/.git"][..], "sub/../view"),
+        (
+            root,
+            &["--git-dir=repository/.git", "--work-tree=repository"][..],
+            "./view",
+        ),
+        (
+            fixture.repository.as_path(),
+            &["-C", "..", "--git-dir=repository/.git"][..],
+            "./view",
+        ),
+        (
+            root.join("sub").as_path(),
+            &["--git-dir=../repository/.git"][..],
+            "../view",
+        ),
+    ] {
+        assert_eq!(
+            git_resolves(directory, globals, selector),
+            managed_canonical,
+            "{globals:?} {selector}: Git does not resolve this to the managed view"
+        );
+        for command in [
+            &["worktree", "remove", "--force", selector][..],
+            &["worktree", "move", selector, "./moved"][..],
+        ] {
+            let refused = shim(directory, globals, command);
+            assert!(
+                !refused.status.success(),
+                "{globals:?} {command:?} reached Git"
+            );
+            assert!(
+                String::from_utf8_lossy(&refused.stderr).contains("managed Riftri worktree"),
+                "{globals:?} {command:?}: {}",
+                String::from_utf8_lossy(&refused.stderr)
+            );
+            assert!(managed.join("untracked.txt").is_file());
+        }
+    }
+
+    // The same spelling from another directory names the ordinary worktree,
+    // which stays ordinary Git, although from the repository root it would
+    // name the managed view.
+    let deep = root.join("sub/deep");
+    let globals = &["--git-dir=../../repository/.git"][..];
+    assert_eq!(
+        git_resolves(&deep, globals, "../view"),
+        fs::canonicalize(&ordinary).expect("canonical ordinary worktree")
+    );
+    let removed = shim(
+        &deep,
+        globals,
+        &["worktree", "remove", "--force", "../view"],
+    );
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!ordinary.exists());
+    assert!(managed.join("untracked.txt").is_file());
+}
+
+/// Riftri manages a bare repository's worktrees from its Git directory, but
+/// the shim took a repository without a working-tree root for no repository
+/// at all, so from there `git worktree remove --force <managed>` ran as
+/// ordinary Git and deleted the view outside the removal journal.
+#[cfg(target_os = "macos")]
+#[test]
+fn bare_repository_git_directory_cannot_bypass_managed_lifecycle_guards() {
+    let fixture = RepositoryFixture::new();
+    let root = fixture.directory.path();
+    let bare = root.join("bare.git");
+    assert!(
+        git(
+            root,
+            &["clone", "--quiet", "--bare", "repository", "bare.git"]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        git(&bare, &["config", "core.autocrlf", "false"])
+            .status
+            .success()
+    );
+    // `riftri enable` needs a working tree, so opt in from a linked one.
+    assert!(
+        git(&bare, &["worktree", "add", "--quiet", "../linked"])
+            .status
+            .success()
+    );
+    assert!(riftri(&root.join("linked"), &["enable"]).status.success());
+    let shim = |directory: &Path, arguments: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["exec", "--", "git"])
+            .args(arguments)
+            .current_dir(directory)
+            .output()
+            .expect("run Git through the shim")
+    };
+    let managed = || {
+        let listed = riftri(&bare, &["worktree", "list"]);
+        assert!(listed.status.success());
+        String::from_utf8(listed.stdout).expect("UTF-8 worktree list")
+    };
+
+    // An add from the bare directory is optimized, as `riftri worktree add`
+    // already is there, so the view is managed.
+    let added = shim(&bare, &["worktree", "add", "--detach", "../view"]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let view = root.join("view");
+    assert!(managed().contains(view.to_str().expect("UTF-8 fixture path")));
+    fs::write(view.join("untracked.txt"), "private\n").expect("dirty managed view");
+
+    // Git's own dirty-worktree refusal still applies.
+    assert!(
+        !shim(&bare, &["worktree", "remove", "../view"])
+            .status
+            .success()
+    );
+    assert!(view.join("untracked.txt").is_file());
+
+    // A move and a prune take their journals.
+    let moved = shim(&bare, &["worktree", "move", "../view", "../moved"]);
+    assert!(
+        moved.status.success(),
+        "{}",
+        String::from_utf8_lossy(&moved.stderr)
+    );
+    let view = root.join("moved");
+    assert!(view.join("untracked.txt").is_file());
+    assert!(managed().contains(view.to_str().expect("UTF-8 fixture path")));
+    assert!(shim(&bare, &["worktree", "prune"]).status.success());
+    assert!(riftri(&bare, &["worktree", "prune"]).status.success());
+    assert!(view.join("untracked.txt").is_file());
+
+    // Forms the journal cannot reproduce are refused, from the bare
+    // directory and through `--git-dir` from outside it.
+    for (directory, arguments) in [
+        (
+            bare.as_path(),
+            &[
+                "-c",
+                "core.quotePath=false",
+                "worktree",
+                "remove",
+                "--force",
+                "../moved",
+            ][..],
+        ),
+        (
+            bare.as_path(),
+            &["worktree", "move", "--force", "../moved", "../again"][..],
+        ),
+        (
+            root,
+            &[
+                "--git-dir=bare.git",
+                "worktree",
+                "remove",
+                "--force",
+                "moved",
+            ][..],
+        ),
+        (
+            root,
+            &[
+                "--git-dir=bare.git",
+                "worktree",
+                "remove",
+                "--force",
+                "./moved",
+            ][..],
+        ),
+    ] {
+        let refused = shim(directory, arguments);
+        assert!(!refused.status.success(), "{arguments:?} was not refused");
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("managed Riftri worktree"),
+            "{arguments:?}: {}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(view.join("untracked.txt").is_file());
+    }
+
+    // A forced removal is journaled, so Riftri still knows what became of
+    // the view.
+    let removed = shim(&bare, &["worktree", "remove", "--force", "../moved"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    assert!(!view.exists());
+    assert!(!managed().contains("outside Riftri"), "{}", managed());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn exec_path_cannot_bypass_managed_lifecycle_guards() {
     let fixture = RepositoryFixture::new();
     let destination = fixture.directory.path().join("exec-path-view");
@@ -2059,6 +2524,115 @@ fn linked_worktree_git_directory_cannot_bypass_managed_removal_guard() {
             .stdout
             .is_empty()
     );
+}
+
+#[cfg(target_os = "macos")]
+fn add_dirty_custom_state_view(fixture: &RepositoryFixture, name: &str) -> PathBuf {
+    let destination = fixture.directory.path().join(name);
+    let added = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "add", "--detach", "--state-dir"])
+        .arg(fixture.directory.path().join("custom-state"))
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("add worktree with custom state");
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    fs::write(destination.join("untracked.txt"), "private\n").expect("dirty managed view");
+    destination
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn work_tree_environment_cannot_hide_the_repository_from_lifecycle_guards() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let destination = add_dirty_custom_state_view(&fixture, "work-tree-environment-view");
+
+    // Git opens the repository it finds from the current directory; the work
+    // tree only says where its files are. Neither another repository's
+    // missing opt-in nor its empty state registrations may answer for this one.
+    let unenabled = RepositoryFixture::new();
+    let enabled = RepositoryFixture::new();
+    assert!(riftri(&enabled.repository, &["enable"]).status.success());
+    for work_tree in [&unenabled.repository, &enabled.repository] {
+        let listed = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args(["worktree", "list", "--all-states"])
+            .env("GIT_WORK_TREE", work_tree)
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("list managed worktrees under GIT_WORK_TREE");
+        assert!(
+            String::from_utf8_lossy(&listed.stdout).contains("work-tree-environment-view"),
+            "{}",
+            String::from_utf8_lossy(&listed.stdout)
+        );
+        for arguments in [&["remove", "--force"][..], &["prune"][..]] {
+            let guarded = Command::new(env!("CARGO_BIN_EXE_riftri"))
+                .args(["exec", "--", "git", "worktree"])
+                .args(arguments)
+                .args((arguments[0] == "remove").then_some(&destination))
+                .env("GIT_WORK_TREE", work_tree)
+                .current_dir(&fixture.repository)
+                .output()
+                .expect("guard lifecycle command under GIT_WORK_TREE");
+
+            assert!(
+                !guarded.status.success(),
+                "GIT_WORK_TREE let `git worktree {arguments:?}` bypass the journal"
+            );
+            assert!(
+                String::from_utf8_lossy(&guarded.stderr).contains("GIT_WORK_TREE is set"),
+                "{}",
+                String::from_utf8_lossy(&guarded.stderr)
+            );
+            assert!(destination.join("untracked.txt").is_file());
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn configured_work_tree_cannot_hide_the_repository_from_the_removal_guard() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let destination = add_dirty_custom_state_view(&fixture, "configured-work-tree-view");
+    let other = RepositoryFixture::new();
+    let other_root = other.repository.to_str().expect("UTF-8 fixture path");
+
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "-c"])
+        .arg(format!("core.worktree={other_root}"))
+        .args(["worktree", "remove", "--force"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard removal under -c core.worktree");
+    assert!(!removal.status.success());
+    assert!(String::from_utf8_lossy(&removal.stderr).contains("managed Riftri worktree"));
+    assert!(destination.join("untracked.txt").is_file());
+
+    assert!(
+        git(
+            &fixture.repository,
+            &["config", "core.worktree", other_root]
+        )
+        .status
+        .success()
+    );
+    let removal = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["exec", "--", "git", "worktree", "remove", "--force"])
+        .arg(&destination)
+        .current_dir(&fixture.repository)
+        .output()
+        .expect("guard removal under a persisted core.worktree");
+    // Lifecycle commands still run Git from the working-tree root, which is
+    // now another repository, so the journaled removal refuses instead.
+    assert!(!removal.status.success());
+    assert!(destination.join("untracked.txt").is_file());
 }
 
 #[cfg(target_os = "macos")]

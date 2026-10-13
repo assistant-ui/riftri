@@ -2217,6 +2217,14 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> JournalEr
 }
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[path = "journal_hegel_tests.rs"]
+pub(crate) mod hegel_tests;
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+#[path = "journal_state_hegel_tests.rs"]
+mod state_hegel_tests;
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use std::os::unix::fs::symlink;
     use std::path::Path;
