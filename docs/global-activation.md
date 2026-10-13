@@ -41,7 +41,10 @@ environment and does not change the parent shell or its cache settings.
 a complete hook and whether the selected repository opted in. Effective optimized
 interception also requires that `RIFTRI_BYPASS` is not `1`, `true`, or `yes`
 (case-insensitive). When bypass is active, status identifies `RIFTRI_BYPASS` as
-the reason without reporting that the hook is inactive.
+the reason without reporting that the hook is inactive. A path outside any
+repository is reported as `Repository: none`, a bare repository as
+`Repository: bare`, and a repository that could not be inspected as
+`Repository: unavailable (<reason>)` with its opt-in state unknown.
 
 Remove Riftri from the current shell with:
 

@@ -7,6 +7,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri shell status` reports a repository it could not inspect as
+  `Repository: unavailable (<reason>)` with an unknown opt-in state, and a bare
+  repository as `Repository: bare`. Every inspection failure used to be
+  reported as `Repository: none`, which now means only that the path is not
+  inside a repository.
 - `riftri exec --worktree` naming a path inside a Git directory, such as
   `<repository>/.git`, is now an `invalid-worktree-binding` policy refusal
   (exit 3) like every other path that is not a worktree root. It was reported
