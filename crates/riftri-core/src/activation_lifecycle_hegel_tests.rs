@@ -101,15 +101,17 @@ fn global_prefix(tc: &TestCase) -> (Vec<OsString>, bool) {
 
 /// The ways Git can be told to force-remove a worktree: spelled out, behind
 /// invocation or stored aliases, with quoting and escapes in the alias body.
+/// Alias names avoid Git's own commands: Git never expands an alias such as
+/// `rm` over its builtin.
 fn force_remove_command(tc: &TestCase, selector: OsString) -> Vec<OsString> {
     let alias =
         |body: &str, name: &str| vec![os("-c"), os(&format!("alias.{name}={body}")), os(name)];
     let mut arguments = match tc.draw(gs::integers::<u8>().max_value(6)) {
         0 => vec![os("worktree"), os("remove"), os("--force")],
         1 => vec![os("worktree"), os("remove"), os("-f"), os("--")],
-        2 => alias("worktree remove --force", "rm"),
-        3 => alias("worktree 'remove' \"--force\"", "RM"),
-        4 => alias(r"w\orktree remove -f", "rm"),
+        2 => alias("worktree remove --force", "drop"),
+        3 => alias("worktree 'remove' \"--force\"", "DROP"),
+        4 => alias(r"w\orktree remove -f", "drop"),
         5 => vec![os("stored-force-remove")],
         _ => vec![
             os("-c"),
@@ -437,10 +439,15 @@ fn worktree_bindings_refuse_git_directories_as_bindings() {
 }
 
 /// Ways to force-remove the managed worktree that real Git executes (see the
-/// oracle properties in `activation_hegel_tests.rs`) but the proxy misreads.
+/// oracle properties in `activation_hegel_tests.rs`) and the proxy once
+/// misread.
 fn misread_force_remove(tc: &TestCase, fixture: &ManagedFixture) -> Vec<OsString> {
     let view = fixture.view.clone().into_os_string();
-    let alias = [os("-c"), os("alias.rm=worktree remove --force"), os("rm")];
+    let alias = [
+        os("-c"),
+        os("alias.drop=worktree remove --force"),
+        os("drop"),
+    ];
     let mut arguments: Vec<OsString> = match tc.draw(gs::integers::<u8>().max_value(4)) {
         // The value of a global option the proxy has no rule for.
         0 => [os("--attr-source"), os("HEAD")]
@@ -473,8 +480,8 @@ fn misread_force_remove(tc: &TestCase, fixture: &ManagedFixture) -> Vec<OsString
             let spaced = fixture.spaced_view.to_str().expect("UTF-8 fixture path");
             return vec![
                 os("-c"),
-                os(&format!("alias.rm=worktree remove --force {spaced}")),
-                os("rm"),
+                os(&format!("alias.drop=worktree remove --force {spaced}")),
+                os("drop"),
             ];
         }
     };
@@ -483,7 +490,6 @@ fn misread_force_remove(tc: &TestCase, fixture: &ManagedFixture) -> Vec<OsString
 }
 
 #[test]
-#[ignore = "bug: spaced global-option values, alias chains past 24 hops, and Unicode whitespace in alias bodies reach Git unguarded"]
 fn a_managed_worktree_is_guarded_however_git_is_asked_to_remove_it() {
     let fixture = ManagedFixture::new();
     Hegel::new(|tc: TestCase| {

@@ -284,7 +284,7 @@ impl Worktrees {
             let unknown = OsString::from(unknown);
             assert_eq!(
                 self.git
-                    .resolve_worktree_path(&repository, &unknown)
+                    .resolve_worktree_path(&repository, &repository, &unknown)
                     .unwrap(),
                 repository.join(&unknown)
             );
@@ -302,7 +302,9 @@ impl Worktrees {
         // Git accepts any unique trailing part of a worktree's path.
         let name = linked.path.file_name().unwrap();
         assert_eq!(
-            self.git.resolve_worktree_path(&repository, name).unwrap(),
+            self.git
+                .resolve_worktree_path(&repository, &repository, name)
+                .unwrap(),
             linked.path
         );
         let info = self.git.inspect_repository(&linked.path).unwrap();
