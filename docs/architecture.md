@@ -156,11 +156,29 @@ before durable state exists
 Git materializes the exact pointer tree inside Riftri's isolated administrative
 directory, where inherited filters are intentionally disabled. Riftri then
 opens each validated local LFS object without following links, checks its exact
-size and SHA-256 while streaming it into the base staging tree, and only then
+size and SHA-256 while materializing it into the base staging tree, and only then
 allows the immutable base rename and completion marker. Riftri never downloads
 an LFS object during a worktree transaction. The checkout profile includes the
 Git LFS version, standard filter configuration, native path, object ID, and
 size, so older or semantically different bases cannot be reused.
+
+For APFS objects of at least 8 MiB, a narrowly eligible cold-base expansion
+clones from the already-open object descriptor into an exclusive temporary
+directory beneath the unpublished staging tree. Both files must be ordinary
+single-link files on the same volume, with matching owner/group, owned by the
+caller, and without ACLs, xattrs, special permission bits or file flags. The
+clone receives the checkout's metadata, never the object store's, and a new
+modification time. Core reads and verifies the complete private clone against
+the pointer's length and SHA-256 before atomically replacing the unchanged
+pointer file. Identity and modification metadata are revalidated at publication.
+These checks assume the existing trusted-process, exclusively owned staging
+boundary; they are not an atomic compare-and-swap against hostile writers.
+Native clone errors fail the transaction. Ineligible files, smaller objects and
+other platforms retain the existing verified streaming materialization; this
+does not add a byte-copy fallback to native worktree-view cloning. Temporary
+clones remain under the add journal's existing staging ownership, so interrupted
+preparation is cleaned by the same rollback/recovery path. Cached-base creation,
+Git cleanliness checks and integrity-marker verification are unchanged.
 
 ### Storage engine
 

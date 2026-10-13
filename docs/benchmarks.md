@@ -377,9 +377,9 @@ without worsening p95 by more than 5%. An optional build-provenance JSON path
 as the second argument also checks `baseline.sha256` and `candidate.sha256`
 against the recorded binaries.
 
-Cold LFS cloning is still an investigation, not an enabled optimization. The
-current materializer verifies SHA-256 while streaming into the Git-created
-checkout file, keeping that destination's mode, ACL and extended attributes.
+Cold LFS cloning must be evaluated separately from cached worktree creation.
+The verified streaming materializer keeps the Git-created checkout file's
+mode, ACL and extended attributes.
 Two checkout paths for the same object may have different metadata. The core
 `lfs_materialization_tests` now make this contract explicit, including source
 attributes that must not appear in the checkout.
@@ -396,13 +396,17 @@ See Apple's [copyfile contract](https://github.com/apple-oss-distributions/copyf
 for the metadata flags; the clone flags for `copyfile` are not proof that an
 `fcopyfile` call shared data blocks.
 
-A production candidate still needs descriptor-safe source validation,
-exclusive staging and cleanup, exact destination-metadata behavior (including
-ownership, inherited ACLs and file flags), same-volume eligibility, full
-SHA-256 verification before publication, and lifecycle failure/recovery tests.
-Only then should the cold-LFS comparison above determine whether avoided
-writes outweigh the extra clone, metadata and verification work. Do not bypass
-hashing, use hardlinks, or infer that this changes the cached-base path.
+The narrowly scoped APFS runtime candidate handles objects of at least 8 MiB
+only when source and destination are same-volume, single-link, caller-owned
+ordinary files with matching ownership and no ACLs, xattrs, special modes or
+file flags. Other cases retain verified streaming. Descriptor-based cloning,
+private staging, complete SHA-256 verification and pre-publication identity
+checks protect the new path; a subprocess-exit regression leaves a real clone
+behind and proves that add-journal recovery removes it without touching the
+object store. No timing claim follows from these correctness tests. Use the
+cold-LFS comparison above with `16 8388608 8` to exercise the candidate (128 MiB
+per fresh base), including both same-binary control lanes. Do not bypass hashing,
+use hardlinks, or infer that this changes the cached-base path.
 
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:
