@@ -377,6 +377,33 @@ without worsening p95 by more than 5%. An optional build-provenance JSON path
 as the second argument also checks `baseline.sha256` and `candidate.sha256`
 against the recorded binaries.
 
+Cold LFS cloning is still an investigation, not an enabled optimization. The
+current materializer verifies SHA-256 while streaming into the Git-created
+checkout file, keeping that destination's mode, ACL and extended attributes.
+Two checkout paths for the same object may have different metadata. The core
+`lfs_materialization_tests` now make this contract explicit, including source
+attributes that must not appear in the checkout.
+
+The APFS `lfs_clone_metadata_restoration_feasibility` test demonstrates why a
+direct object clone is insufficient: it copies object-store modes and extended
+attributes, and does not retain the existing checkout's ACL. In a private-file
+fixture, restoring metadata from the pointer file with `fcopyfile` and
+`COPYFILE_METADATA` preserves the cloned contents, replaces attributes and
+restores the expected ACL/mode across four source/destination ACL combinations.
+The test also verifies private-write isolation. This is a test-only native
+experiment, not an LFS transaction, allocation measurement or speedup claim.
+See Apple's [copyfile contract](https://github.com/apple-oss-distributions/copyfile/blob/main/copyfile.3)
+for the metadata flags; the clone flags for `copyfile` are not proof that an
+`fcopyfile` call shared data blocks.
+
+A production candidate still needs descriptor-safe source validation,
+exclusive staging and cleanup, exact destination-metadata behavior (including
+ownership, inherited ACLs and file flags), same-volume eligibility, full
+SHA-256 verification before publication, and lifecycle failure/recovery tests.
+Only then should the cold-LFS comparison above determine whether avoided
+writes outweigh the extra clone, metadata and verification work. Do not bypass
+hashing, use hardlinks, or infer that this changes the cached-base path.
+
 For journal-history scaling, build the baseline and candidate with the same
 release profile, then run this Unix/native-COW fixture:
 
