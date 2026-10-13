@@ -253,6 +253,14 @@ the versioned checkout profile. This gives common local Git LFS repositories a
 deterministic path without authorizing arbitrary filter execution while shared
 bases are built.
 
+APFS cold expansion may prepare a descriptor-bound native clone for local
+objects of at least 8 MiB, but only for same-volume, caller-owned, single-link
+files with matching ownership and no private metadata. The private clone is
+fully SHA-256 verified before replacing its unchanged staging pointer. Other
+cases keep verified streaming. Clone failures do not silently copy, no
+verification cache is introduced, and no live worktree file is replaced by
+this optimization. Staging remains owned by the existing add journal.
+
 Custom filters, pointer extensions, custom LFS storage, working-tree encodings,
 ident substitution, legacy or unknown attributes, and any effective
 repository-local, global, or system attribute source remain fail-closed. The
@@ -470,6 +478,13 @@ non-ASCII case equivalence. This intentionally pays name-only probe I/O for
 international path sets rather than risk a false negative from an approximate
 Unicode folding table. Native Unix bytes remain intact; ASCII-only trees with
 no case alias retain their existing fast path.
+
+Unix probes may omit ordinary ASCII-only, case-distinct sibling groups. Every
+name in a potentially ambiguous group is still replayed, including ASCII
+siblings of non-ASCII names; representative descendant paths recreate directory
+names and their parents. Unusual ASCII spellings, long paths/components, invalid
+tree shapes, and Windows retain full-tree replay. No Unicode folding table or
+persistent probe cache decides whether two names coexist.
 
 ### D036: forced removal binds consent to an exact content snapshot
 
@@ -723,6 +738,10 @@ for a bare repository, from its Git directory, and journals record that
 directory, the first entry of `git worktree list`, as the repository.
 Repository-local Git interception (`riftri enable`) still requires a working
 tree and keeps the `bare-repository` policy receipt.
+Once a linked worktree has enabled the repository, the Git shim plans
+`git worktree` commands run from the bare directory as it does from any
+worktree: adds are optimized, and removals, moves, and prunes of managed views
+are journaled or refused.
 
 ### D043: gc retires finished journal history
 

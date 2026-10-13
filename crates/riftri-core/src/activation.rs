@@ -16,7 +16,9 @@ use riftri_git::{Git, GitError};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::worktree::{managed_worktree_state_directory, repository_state_directories};
+use crate::worktree::{
+    git_command_root, managed_worktree_state_directory, repository_state_directories,
+};
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
     PruneWorktreesRequest, PruneWorktreesResult, RemoveWorktreeRequest, RemoveWorktreeResult,
@@ -117,8 +119,12 @@ pub enum ActivationError {
 pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let git = Git::default();
     let status = repository_identity_with_git(&git, path)?;
-    git.set_local_config(&status.repository, ENABLED_CONFIG_KEY, OsStr::new("true"))?;
-    protect_worktrees_from_git_prune(&git, &status.repository)?;
+    git.set_local_config(
+        &status.common_git_dir,
+        ENABLED_CONFIG_KEY,
+        OsStr::new("true"),
+    )?;
+    protect_worktrees_from_git_prune(&git, &status.common_git_dir)?;
     Ok(RepositoryActivation {
         enabled: true,
         ..status
@@ -128,8 +134,8 @@ pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, Activation
 pub fn disable_repository(path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let git = Git::default();
     let status = repository_identity_with_git(&git, path)?;
-    git.unset_local_config(&status.repository, ENABLED_CONFIG_KEY)?;
-    release_worktree_prune_protection(&git, &status.repository)?;
+    git.unset_local_config(&status.common_git_dir, ENABLED_CONFIG_KEY)?;
+    release_worktree_prune_protection(&git, &status.common_git_dir)?;
     Ok(RepositoryActivation {
         enabled: false,
         ..status
@@ -197,29 +203,88 @@ fn plan_git_command_inner(
     arguments: &[OsString],
     expand_aliases: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
-    let Some(context) = command_context(current_directory, arguments) else {
-        return Ok(GitProxyPlan::Passthrough);
-    };
+    // More than one reading exists only behind an unrecognized global option,
+    // which already rules out the optimized paths, so the first reading that
+    // is not ordinary Git is a refusal and decides the plan.
+    for context in command_contexts(current_directory, arguments) {
+        let plan = plan_command_reading(current_directory, arguments, context, expand_aliases)?;
+        if !matches!(plan, GitProxyPlan::Passthrough) {
+            return Ok(plan);
+        }
+    }
+    Ok(GitProxyPlan::Passthrough)
+}
+
+fn plan_command_reading(
+    current_directory: &Path,
+    arguments: &[OsString],
+    context: CommandContext,
+    expand_aliases: bool,
+) -> Result<GitProxyPlan, ActivationError> {
     if arguments
         .get(context.command_index)
         .map(OsString::as_os_str)
         != Some(OsStr::new(WORKTREE_SUBCOMMAND))
     {
-        if expand_aliases && let Some(expanded) = expand_worktree_alias(&context, arguments)? {
+        if !expand_aliases {
+            return Ok(GitProxyPlan::Passthrough);
+        }
+        return match expand_worktree_alias(&context, arguments) {
             // Re-plan the command Git will actually run. Aliases are not
             // expanded recursively, so one pass is enough and terminates.
-            return plan_git_command_inner(current_directory, &expanded, false);
-        }
-        return Ok(GitProxyPlan::Passthrough);
+            Ok(Some(expanded)) => plan_git_command_inner(current_directory, &expanded, false),
+            Ok(None) => Ok(GitProxyPlan::Passthrough),
+            // An alias that cannot be resolved might run any worktree
+            // command, so only a repository that is provably absent or never
+            // opted in is left to Git, which then reports the failure itself.
+            Err(ActivationError::Git(error)) => {
+                let location = context
+                    .git_directory
+                    .as_deref()
+                    .map_or(context.repository.as_path(), git_directory_location);
+                match uninspected_for_proxy(&Git::default(), location, error)? {
+                    ProxyRepository::Unhealthy {
+                        enabled: true,
+                        error,
+                    } => Err(error.into()),
+                    _ => Ok(GitProxyPlan::Passthrough),
+                }
+            }
+            Err(error) => Err(error),
+        };
     }
 
-    let repository = match context.git_directory.as_deref() {
-        Some(git_directory) => Git::default()
-            .worktree_root_from_git_dir(git_directory)?
-            .unwrap_or(context.repository),
-        None => context.repository,
+    let git = Git::default();
+    let root = match context.git_directory.as_deref() {
+        Some(git_directory) => git
+            .worktree_root_from_git_dir(git_directory)
+            .map_err(|error| (git_directory, error)),
+        None => Ok(None),
     };
-    let activation = match activation_for_proxy(&repository)? {
+    let (repository, proxy) = match root {
+        Ok(root) => {
+            // Without a live working tree to stand in for it, a repository
+            // named by `--git-dir` is planned from that directory, which is
+            // where Riftri runs Git for a bare repository.
+            let repository = root
+                .or(context.git_directory)
+                .unwrap_or_else(|| context.repository.clone());
+            let proxy = activation_for_proxy(&repository)?;
+            (repository, proxy)
+        }
+        Err((git_directory, error)) => {
+            let proxy = uninspected_for_proxy(&git, git_directory_location(git_directory), error)?;
+            (context.repository.clone(), proxy)
+        }
+    };
+    // Two directories from here on. `repository` is inside the repository
+    // Git opens and is where Riftri runs its own Git commands. `directory`
+    // is where the caller's Git runs, and Git resolves relative worktree
+    // paths there. They differ under `--git-dir`: keying path arguments on
+    // `repository` let `git --git-dir=<repository>/.git worktree remove
+    // --force ./view` from elsewhere be checked against the wrong path.
+    let directory = context.repository.as_path();
+    let activation = match proxy {
         ProxyRepository::Absent => return Ok(GitProxyPlan::Passthrough),
         ProxyRepository::Inspected(activation) => activation,
         ProxyRepository::Unhealthy { enabled, error } => {
@@ -247,22 +312,24 @@ fn plan_git_command_inner(
     match subcommand.to_string_lossy().as_ref() {
         "add" => plan_enabled_add(
             &repository,
+            directory,
             &arguments[context.command_index + 2..],
             context.global_options,
         ),
         "remove" => plan_enabled_remove(
             &repository,
+            directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
         ),
         "move" => plan_enabled_move(
             &repository,
+            directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
         ),
         "prune" => plan_enabled_prune(
             &repository,
-            &activation,
             &arguments[context.command_index + 2..],
             context.global_options,
         ),
@@ -548,16 +615,30 @@ fn resolve_worktree_binding(requested: &Path) -> Result<PathBuf, ActivationError
     }
 
     let git = Git::default();
-    // Only "not a repository" is about the requested path; any other Git
-    // failure (a missing or broken Git) is operational and stays one.
-    let repository = git
-        .inspect_repository(&canonical)
-        .map_err(|error| match error {
-            GitError::RepositoryAbsent { .. } => {
-                worktree_binding_error(format!("inspect {}: {error}", canonical.display()))
+    // Only "not a repository" and "inside a Git directory" are about the
+    // requested path; any other Git failure (a missing or broken Git) is
+    // operational and stays one. Git has no worktree root to report from
+    // inside a non-bare repository's Git directory and fails the inspection
+    // there, so that case is identified on the failure path, where the extra
+    // Git process costs a valid binding nothing.
+    let repository = match git.inspect_repository(&canonical) {
+        Ok(repository) => repository,
+        Err(error @ GitError::RepositoryAbsent { .. }) => {
+            return Err(worktree_binding_error(format!(
+                "inspect {}: {error}",
+                canonical.display()
+            )));
+        }
+        Err(error) => {
+            if git.inside_git_directory(&canonical).unwrap_or(false) {
+                return Err(worktree_binding_error(format!(
+                    "{} is inside a Git directory, not a worktree",
+                    canonical.display()
+                )));
             }
-            error => ActivationError::Git(error),
-        })?;
+            return Err(ActivationError::Git(error));
+        }
+    };
     let root = repository.root.ok_or_else(|| {
         worktree_binding_error(format!("{} is a bare repository", canonical.display()))
     })?;
@@ -1061,7 +1142,7 @@ fn powershell_quote_path(path: &Path) -> Result<String, ActivationError> {
 fn activation_with_git(git: &Git, path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let mut activation = repository_identity_with_git(git, path)?;
     activation.enabled = git
-        .local_config_bool(&activation.repository, ENABLED_CONFIG_KEY)?
+        .local_config_bool(&activation.common_git_dir, ENABLED_CONFIG_KEY)?
         .unwrap_or(false);
     Ok(activation)
 }
@@ -1099,32 +1180,61 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
     let git = Git::default();
     let repository = match git.inspect_repository(path) {
         Ok(repository) => repository,
-        Err(error) => {
-            if git.repository_absent(path)? {
-                return Ok(ProxyRepository::Absent);
-            }
-            // Repository discovery works even over a damaged object store, so
-            // the opt-in flag is still readable; a repository that never
-            // enabled Riftri stays ordinary Git. When even the flag cannot be
-            // read, claim enablement: an unprovable opt-out fails closed.
-            let enabled = git
-                .local_config_bool(path, ENABLED_CONFIG_KEY)
-                .map(|enabled| enabled.unwrap_or(false))
-                .unwrap_or(true);
-            return Ok(ProxyRepository::Unhealthy { enabled, error });
-        }
+        Err(error) => return uninspected_for_proxy(&git, path, error),
     };
-    let Some(root) = repository.root else {
+    // A bare repository has no working-tree root, but Riftri manages its
+    // worktrees from its Git directory, so it is planned like any other.
+    let Some(root) = git_command_root(&repository).map(Path::to_path_buf) else {
         return Ok(ProxyRepository::Absent);
     };
-    let enabled = git
-        .local_config_bool(&root, ENABLED_CONFIG_KEY)?
-        .unwrap_or(false);
+    // Read the opt-in from the common Git directory, not from `root`:
+    // `GIT_WORK_TREE` or `core.worktree` can place the working tree outside
+    // the repository, even inside one that never enabled Riftri.
+    let enabled =
+        match git.local_config_bool(&repository.identity.common_git_dir, ENABLED_CONFIG_KEY) {
+            Ok(enabled) => enabled.unwrap_or(false),
+            // An unprovable opt-out fails closed here too.
+            Err(error) => {
+                return Ok(ProxyRepository::Unhealthy {
+                    enabled: true,
+                    error,
+                });
+            }
+        };
     Ok(ProxyRepository::Inspected(RepositoryActivation {
         repository: root,
         common_git_dir: repository.identity.common_git_dir,
         enabled,
     }))
+}
+
+/// A directory inside the repository `--git-dir` names. The option may name
+/// a linked worktree's `.git` file, which sits in the worktree it belongs to.
+fn git_directory_location(git_directory: &Path) -> &Path {
+    match git_directory.parent() {
+        Some(parent) if git_directory.is_file() => parent,
+        _ => git_directory,
+    }
+}
+
+/// Classify a location where a Git inspection failed with `error`.
+fn uninspected_for_proxy(
+    git: &Git,
+    path: &Path,
+    error: GitError,
+) -> Result<ProxyRepository, ActivationError> {
+    if git.repository_absent(path)? {
+        return Ok(ProxyRepository::Absent);
+    }
+    // Repository discovery works even over a damaged object store, so the
+    // opt-in flag is still readable; a repository that never enabled Riftri
+    // stays ordinary Git. When even the flag cannot be read, claim
+    // enablement: an unprovable opt-out fails closed.
+    let enabled = git
+        .local_config_bool(path, ENABLED_CONFIG_KEY)
+        .map(|enabled| enabled.unwrap_or(false))
+        .unwrap_or(true);
+    Ok(ProxyRepository::Unhealthy { enabled, error })
 }
 
 /// How the global Git options in front of `worktree` constrain optimization.
@@ -1156,32 +1266,34 @@ impl GlobalOptionScope {
 }
 
 struct CommandContext {
+    /// The directory Git runs in after every `-C`, which is where it looks for
+    /// the repository unless `--git-dir` names one. `--work-tree` is absent on
+    /// purpose: it moves the checked-out files, never the repository.
     repository: PathBuf,
     git_directory: Option<PathBuf>,
     command_index: usize,
     global_options: GlobalOptionScope,
     /// Aliases defined for this one invocation via `-c alias.<name>=<body>`
-    /// or `--config-env=alias.<name>=<variable>`. Git gives these the highest
+    /// or `--config-env alias.<name>=<variable>`. Git gives these the highest
     /// configuration precedence, so an alias planner that only reads the
     /// repository's stored configuration never sees them — which let
     /// `git -c 'alias.x=worktree remove --force' x <managed>` reach real Git
     /// unclassified. Names are lowercased (configuration keys are
-    /// ASCII-case-insensitive) and later entries win at lookup time.
-    invocation_aliases: Vec<(String, String)>,
+    /// ASCII-case-insensitive) and later entries win at lookup time. Bodies
+    /// stay in the platform's argument encoding because Git runs them whether
+    /// or not they are UTF-8.
+    invocation_aliases: Vec<(String, Vec<u8>)>,
 }
 
 /// Record a `key=value` invocation-configuration assignment when the key
 /// names an alias. Entries Git would refuse to use — a missing `=`, an empty
 /// name, an empty body — are skipped: Git errors on them at lookup, so
 /// passthrough stays safe.
-fn record_invocation_alias(aliases: &mut Vec<(String, String)>, assignment: &OsStr) {
-    let Some(text) = assignment.to_str() else {
+fn record_invocation_alias(aliases: &mut Vec<(String, Vec<u8>)>, assignment: &OsStr) {
+    let Some((key, body)) = split_assignment(assignment) else {
         return;
     };
-    let Some((key, body)) = text.split_once('=') else {
-        return;
-    };
-    let key = key.as_bytes();
+    let (key, body) = (key.as_encoded_bytes(), body.as_encoded_bytes());
     if key.len() <= 6 || !key[..6].eq_ignore_ascii_case(b"alias.") {
         return;
     }
@@ -1191,13 +1303,68 @@ fn record_invocation_alias(aliases: &mut Vec<(String, String)>, assignment: &OsS
     if name.is_empty() || body.is_empty() {
         return;
     }
-    aliases.push((name.to_ascii_lowercase(), body.to_owned()));
+    aliases.push((name.to_ascii_lowercase(), body.to_vec()));
+}
+
+/// Split a `key=value` argument at its first `=` without requiring either
+/// side to be UTF-8.
+fn split_assignment(assignment: &OsStr) -> Option<(&OsStr, &OsStr)> {
+    let encoded = assignment.as_encoded_bytes();
+    let separator = encoded.iter().position(|byte| *byte == b'=')?;
+    // SAFETY: both splits border the ASCII `=`, which is a valid boundary in
+    // the platform-independent encoded representation.
+    Some(unsafe {
+        (
+            OsStr::from_encoded_bytes_unchecked(&encoded[..separator]),
+            OsStr::from_encoded_bytes_unchecked(&encoded[separator + 1..]),
+        )
+    })
+}
+
+/// An alias word as the argument Git passes to the command it runs. Unix
+/// arguments are bytes, so every word converts and the planner checks the
+/// exact path Git will see.
+#[cfg(unix)]
+fn alias_argument(word: Vec<u8>) -> Result<OsString, ActivationError> {
+    use std::os::unix::ffi::OsStringExt;
+
+    Ok(OsString::from_vec(word))
+}
+
+/// An alias word as the argument Git passes to the command it runs. Windows
+/// arguments are UTF-16 and Git for Windows applies its own conversion to
+/// bytes that are not UTF-8, so the path it would touch cannot be known here
+/// and a worktree alias carrying such a word is refused.
+#[cfg(not(unix))]
+fn alias_argument(word: Vec<u8>) -> Result<OsString, ActivationError> {
+    String::from_utf8(word).map(OsString::from).map_err(|_| {
+        unsupported(format!(
+            "refusing a Git alias for `git worktree` whose arguments are not valid UTF-8 because the path Git would use cannot be determined; set {BYPASS_ENV}=1 for an explicit ordinary-Git operation"
+        ))
+    })
+}
+
+/// Record a `--config-env` `<name>=<variable>` assignment when the name is an
+/// alias, taking the body from the named environment variable. An unset
+/// variable is skipped: Git itself errors on it at lookup.
+fn record_environment_alias(aliases: &mut Vec<(String, Vec<u8>)>, assignment: &OsStr) {
+    if let Some((key, variable)) = split_assignment(assignment)
+        && let Some(body) = env::var_os(variable)
+    {
+        let mut assignment = key.to_os_string();
+        assignment.push("=");
+        assignment.push(body);
+        record_invocation_alias(aliases, &assignment);
+    }
 }
 
 /// Git commands common enough that resolving an alias for them would add a
 /// configuration read to the hot path. Git never lets an alias shadow a
-/// built-in command, so skipping the lookup for these is correct as well as
-/// cheap; a built-in missing from this list only costs one harmless read.
+/// built-in command that is not deprecated, and none of these is, so skipping
+/// the lookup for them is correct as well as cheap. This is a shortcut, not
+/// the full set: a built-in missing from the list costs that one read, and
+/// [`expand_worktree_alias`] asks Git for the real set before it trusts an
+/// alias that leads to a worktree command.
 const COMMON_GIT_BUILTINS: &[&str] = &[
     "add",
     "branch",
@@ -1248,79 +1415,169 @@ fn expand_worktree_alias(
     let Some(name) = token.to_str() else {
         return Ok(None);
     };
-    // Git chains alias-to-alias expansions itself (with its own loop
-    // detection), and each inner body's arguments run before the outer
-    // body's remainder. Follow the chain the same way; on a cycle or an
-    // implausible depth, pass through — Git fatals on the loop itself, so
-    // nothing reaches a worktree command. Every stop that is not the
+    // Git chains alias-to-alias expansions itself, to any depth, and stops
+    // only on a loop. Each inner body's arguments run before the outer
+    // body's remainder. Follow the chain the same way; on a cycle, pass
+    // through: Git fatals on the loop itself, so nothing reaches a worktree
+    // command. `seen` also bounds this loop, because every further hop needs
+    // an alias name that has not been expanded yet. Every stop that is not the
     // `worktree` token is equally safe to pass through: Git either runs a
     // builtin, errors on an unknown name, or executes a shell alias that
     // re-enters the proxy on its own.
     let mut name = name.to_owned();
-    let mut pending: Vec<String> = Vec::new();
+    let mut invocation_aliases = context.invocation_aliases.clone();
+    let mut options: Vec<OsString> = Vec::new();
+    let mut pending: Vec<Vec<u8>> = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for _ in 0..24 {
+    loop {
         if name.is_empty() || COMMON_GIT_BUILTINS.contains(&name.as_str()) {
             return Ok(None);
         }
-        let lowered = name.to_ascii_lowercase();
-        if !seen.insert(lowered.clone()) {
+        // Git detects a loop by exact name, and the shadowing check below
+        // needs the names as typed. Alias lookup ignores case, so a name
+        // that differs only in case resolves to the same body and repeats.
+        if !seen.insert(name.clone()) {
             return Ok(None);
         }
-        let value = if let Some((_, body)) = context
-            .invocation_aliases
+        let lowered = name.to_ascii_lowercase();
+        let value = if let Some((_, body)) = invocation_aliases
             .iter()
             .rev()
             .find(|(alias, _)| *alias == lowered)
         {
             body.clone()
         } else {
-            let Some(value) =
-                Git::default().config_value(&context.repository, &format!("alias.{name}"))?
+            // Git reads the alias from the repository it opens, so an explicit
+            // `--git-dir` outranks the directory the command runs in.
+            let Some(value) = Git::default().config_value_in(
+                &context.repository,
+                context.git_directory.as_deref(),
+                &format!("alias.{name}"),
+            )?
             else {
-                return Ok(None);
-            };
-            let Ok(value) = String::from_utf8(value) else {
                 return Ok(None);
             };
             value
         };
-        let value = value.trim();
-        if value.starts_with('!') {
+        // Git tests the first byte and splits the body untrimmed, so
+        // trimming here would plan a command Git never runs.
+        if value.starts_with(b"!") {
             return Ok(None);
         }
-        let Ok(words) = split_alias_words(value) else {
+        let Ok(mut words) = split_alias_words(&value) else {
             // Git refuses the same body ("bad alias string"), so passthrough
             // dies in Git with nothing executed.
             return Ok(None);
         };
+        // Git runs its global option parser over the body before it reads
+        // the command, and that parser stops at the first word that does not
+        // start with `-`, so only such a body has options to find.
+        if words.first().is_some_and(|word| word.starts_with(b"-")) {
+            let mut body_options = words
+                .iter()
+                .cloned()
+                .map(alias_argument)
+                .collect::<Result<Vec<_>, _>>()?;
+            // Find the command the way the outer command line does. Git dies
+            // on an option it does not know, so the first reading is the only
+            // one, and with no command behind the options it dies as well.
+            let Some(body) = command_contexts(&context.repository, &body_options)
+                .into_iter()
+                .next()
+            else {
+                return Ok(None);
+            };
+            body_options.truncate(body.command_index);
+            if !git_runs_alias_options(&body_options) {
+                return Ok(None);
+            }
+            // The options stay in front of the command Git will run, where
+            // planning weighs them like any other global option, and a body
+            // can define the alias a later hop names.
+            options.append(&mut body_options);
+            invocation_aliases.extend(body.invocation_aliases);
+            words.drain(..body.command_index);
+        }
         let mut words = words.into_iter();
         let Some(first) = words.next() else {
             return Ok(None);
         };
-        let mut tail: Vec<String> = words.collect();
+        let mut tail: Vec<Vec<u8>> = words.collect();
         tail.append(&mut pending);
         pending = tail;
-        if first == WORKTREE_SUBCOMMAND {
+        if first == WORKTREE_SUBCOMMAND.as_bytes() {
+            // Git runs a builtin or a `git-<name>` program before it looks
+            // for an alias of that name, so a chain that passes through one
+            // never reaches this worktree command. A deprecated builtin is
+            // the exception: Git prefers its alias, so it is not in the set.
+            // Only Git knows the full set, and asking costs a process, so the
+            // question waits until here, the one outcome it can change.
+            let commands = Git::default().commands_run_before_aliases()?;
+            if commands.iter().any(|command| seen.contains(command)) {
+                return Ok(None);
+            }
             let mut expanded = arguments[..context.command_index].to_vec();
+            expanded.append(&mut options);
             expanded.push(OsString::from(WORKTREE_SUBCOMMAND));
-            expanded.extend(pending.into_iter().map(OsString::from));
+            for word in pending {
+                expanded.push(alias_argument(word)?);
+            }
             expanded.extend_from_slice(&arguments[context.command_index + 1..]);
             return Ok(Some(expanded));
         }
+        // Git rejects an alias key with a byte outside ASCII, so a command
+        // word that is not UTF-8 cannot name another alias.
+        let Ok(first) = String::from_utf8(first) else {
+            return Ok(None);
+        };
         name = first;
     }
-    Ok(None)
+}
+
+/// Whether Git's locale-independent `isspace` accepts the byte: space, tab,
+/// line feed, and carriage return, and nothing else. Vertical tab, form feed,
+/// and the bytes of Unicode spaces such as U+00A0 are ordinary word bytes.
+fn is_git_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+/// Whether Git runs an alias whose body starts with these global options.
+///
+/// Verified against git 2.53.0: Git dies ("alias '<name>' changes environment
+/// variables") on every option that sets `envchanged` in its `handle_options`,
+/// and the remaining ones print usage or a path and exit, so only these reach
+/// the command behind them.
+fn git_runs_alias_options(options: &[OsString]) -> bool {
+    let mut options = options.iter();
+    while let Some(option) = options.next() {
+        let runs = if option == "-p" || option == "--paginate" {
+            true
+        } else if option == "-c" || option == "--config-env" {
+            options.next().is_some()
+        } else if option == "-C" {
+            options.next().is_some_and(|directory| directory.is_empty())
+        } else {
+            let option = option.as_encoded_bytes();
+            option.starts_with(b"--exec-path=") || option.starts_with(b"--config-env=")
+        };
+        if !runs {
+            return false;
+        }
+    }
+    true
 }
 
 /// Split an alias body exactly the way Git's own `split_cmdline` does,
-/// verified against git 2.50.1: whitespace separates; single quotes are fully
-/// literal; inside double quotes and in the open, a backslash makes the next
-/// character literal (`l\og` is `log`, `"a\tb"` is `atb`). `Err` mirrors the
-/// inputs Git itself refuses — an unclosed quote or a trailing backslash — so
-/// the caller can pass the command through and let Git fail it identically,
-/// with no room for a parse that Git accepts and Riftri reads differently.
-fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
+/// verified against git 2.53.0: Git splits bytes, so the words are bytes too;
+/// a run of Git whitespace ends one word and starts the next, so the body is
+/// never trimmed and a leading or trailing run yields an empty first or last
+/// word; single quotes are fully literal; inside double quotes and in the
+/// open, a backslash makes the next byte literal (`l\og` is `log`, `"a\tb"`
+/// is `atb`). `Err` mirrors the inputs Git itself refuses (an unclosed quote
+/// or a trailing backslash) so the caller can pass the command through and
+/// let Git fail it identically, with no room for a parse that Git accepts and
+/// Riftri reads differently.
+fn split_alias_words(value: &[u8]) -> Result<Vec<Vec<u8>>, ()> {
     #[derive(PartialEq)]
     enum State {
         Open,
@@ -1329,66 +1586,57 @@ fn split_alias_words(value: &str) -> Result<Vec<String>, ()> {
     }
     let mut state = State::Open;
     let mut words = Vec::new();
-    let mut word = String::new();
-    let mut started = false;
-    let mut characters = value.chars();
-    while let Some(character) = characters.next() {
+    let mut word = Vec::new();
+    let mut bytes = value.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
         match state {
-            State::SingleQuoted => match character {
-                '\'' => state = State::Open,
+            State::SingleQuoted => match byte {
+                b'\'' => state = State::Open,
                 other => word.push(other),
             },
-            State::DoubleQuoted => match character {
-                '"' => state = State::Open,
-                '\\' => word.push(characters.next().ok_or(())?),
+            State::DoubleQuoted => match byte {
+                b'"' => state = State::Open,
+                b'\\' => word.push(bytes.next().ok_or(())?),
                 other => word.push(other),
             },
-            State::Open => match character {
-                '\'' => {
-                    state = State::SingleQuoted;
-                    started = true;
+            State::Open => match byte {
+                b'\'' => state = State::SingleQuoted,
+                b'"' => state = State::DoubleQuoted,
+                b'\\' => word.push(bytes.next().ok_or(())?),
+                byte if is_git_space(byte) => {
+                    words.push(std::mem::take(&mut word));
+                    while bytes.next_if(|next| is_git_space(*next)).is_some() {}
                 }
-                '"' => {
-                    state = State::DoubleQuoted;
-                    started = true;
-                }
-                '\\' => {
-                    word.push(characters.next().ok_or(())?);
-                    started = true;
-                }
-                character if character.is_whitespace() => {
-                    if started {
-                        words.push(std::mem::take(&mut word));
-                        started = false;
-                    }
-                }
-                other => {
-                    word.push(other);
-                    started = true;
-                }
+                other => word.push(other),
             },
         }
     }
     if state != State::Open {
         return Err(());
     }
-    if started {
-        words.push(word);
-    }
+    words.push(word);
     Ok(words)
 }
 
-fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<CommandContext> {
+/// Every reading of where the global options end and the command begins.
+///
+/// There is one reading unless the word after an unrecognized global option
+/// could be that option's separate value; then that word is the command in
+/// one reading and the scan continues past it for the other. A global option
+/// that is missing its value ends the scan: Git refuses the invocation.
+fn command_contexts(current_directory: &Path, arguments: &[OsString]) -> Vec<CommandContext> {
+    let mut contexts = Vec::new();
     let mut repository = current_directory.to_path_buf();
-    let mut work_tree = None;
     let mut git_directory = None;
     let mut global_options = GlobalOptionScope::None;
     let mut invocation_aliases = Vec::new();
-    let mut unrecognized_global_option = false;
+    let mut possible_value_index = None;
     let mut index = 0;
     while let Some(argument) = arguments.get(index) {
         if argument == "-C" {
-            let directory = arguments.get(index + 1)?;
+            let Some(directory) = arguments.get(index + 1) else {
+                break;
+            };
             let directory = Path::new(directory);
             repository = if directory.is_absolute() {
                 directory.to_path_buf()
@@ -1397,20 +1645,16 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             };
             index += 2;
         } else if argument == "--git-dir" || argument == "--work-tree" {
-            let value = arguments.get(index + 1)?;
-            if argument == "--work-tree" {
-                work_tree = Some(value.clone());
-            } else {
+            let Some(value) = arguments.get(index + 1) else {
+                break;
+            };
+            if argument == "--git-dir" {
                 git_directory = Some(value.clone());
             }
             global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if let Some(value) = option_value(argument, "--git-dir=") {
             git_directory = Some(value);
-            global_options.observe(GlobalOptionScope::Significant);
-            index += 1;
-        } else if let Some(value) = option_value(argument, "--work-tree=") {
-            work_tree = Some(value);
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else if argument == "--no-pager"
@@ -1420,29 +1664,32 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
         {
             index += 1;
         } else if argument == "-c" {
-            let assignment = arguments.get(index + 1)?;
+            let Some(assignment) = arguments.get(index + 1) else {
+                break;
+            };
             record_invocation_alias(&mut invocation_aliases, assignment);
             global_options.observe(GlobalOptionScope::Significant);
             index += 2;
-        } else if argument.to_string_lossy().starts_with("--config-env=") {
-            // `--config-env=alias.<name>=<variable>` takes the alias body from
-            // the named environment variable. An unset or unparseable variable
-            // is skipped: Git itself errors on it at lookup.
-            if let Some(assignment) = argument
-                .to_str()
-                .and_then(|argument| argument.strip_prefix("--config-env="))
-                && let Some((key, variable)) = assignment.split_once('=')
-                && let Ok(body) = std::env::var(variable)
-            {
-                record_invocation_alias(
-                    &mut invocation_aliases,
-                    OsStr::new(&format!("{key}={body}")),
-                );
-            }
+        } else if argument == "--config-env" {
+            let Some(assignment) = arguments.get(index + 1) else {
+                break;
+            };
+            record_environment_alias(&mut invocation_aliases, assignment);
+            global_options.observe(GlobalOptionScope::Significant);
+            index += 2;
+        } else if let Some(assignment) = option_value(argument, "--config-env=") {
+            record_environment_alias(&mut invocation_aliases, &assignment);
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
-        } else if argument == "--namespace" {
-            arguments.get(index + 1)?;
+        } else if argument == "--namespace"
+            || argument == "--attr-source"
+            || argument == "--shallow-file"
+        {
+            // Git takes the next word as this option's value, whatever it
+            // spells, so it must never be read as the command.
+            if arguments.get(index + 1).is_none() {
+                break;
+            }
             global_options.observe(GlobalOptionScope::Significant);
             index += 2;
         } else if argument == "--no-optional-locks"
@@ -1457,7 +1704,9 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             global_options.observe(GlobalOptionScope::CheckoutNeutral);
             index += 1;
         } else if argument.to_string_lossy().starts_with("--namespace=")
+            || argument.as_encoded_bytes().starts_with(b"--attr-source=")
             || argument.as_encoded_bytes().starts_with(b"--exec-path=")
+            || argument.as_encoded_bytes().starts_with(b"--work-tree=")
             || argument == "--no-replace-objects"
             || argument == "--no-lazy-fetch"
             || argument == "--glob-pathspecs"
@@ -1469,43 +1718,37 @@ fn command_context(current_directory: &Path, arguments: &[OsString]) -> Option<C
             index += 1;
         } else if argument.to_string_lossy().starts_with('-') {
             // An option this parser does not know. Treating it as "not our
-            // business" would fail *open*: `git --attr-source=HEAD worktree
+            // business" would fail *open*: `git --future-option worktree
             // remove <managed>` would reach real Git with no lifecycle guard,
-            // even though the same command without the option is refused. Note
-            // the asymmetry that used to exist — an unrecognized *subcommand*
-            // option already fails closed. Record it as significant, which
-            // disqualifies the optimized paths and leaves the managed-path
-            // guard in charge, and keep scanning for the subcommand.
-            unrecognized_global_option = true;
+            // even though the same command without the option is refused, and
+            // an unrecognized *subcommand* option already fails closed. Record
+            // it as significant, which disqualifies the optimized paths and
+            // leaves the managed-path guard in charge, and keep scanning. Its
+            // arity is unknown, so unless a value is attached with `=` the
+            // next word may be its value.
+            if !argument.as_encoded_bytes().contains(&b'=') {
+                possible_value_index = Some(index + 1);
+            }
             global_options.observe(GlobalOptionScope::Significant);
             index += 1;
         } else {
-            // The option above may have taken a separate value, in which case
-            // the token here is that value rather than the subcommand. Rather
-            // than guess its arity, look for the subcommand Riftri actually
-            // claims; anything else still resolves to this token and falls
-            // through to passthrough as before.
-            if unrecognized_global_option
-                && argument != WORKTREE_SUBCOMMAND
-                && let Some(offset) = arguments[index..]
-                    .iter()
-                    .position(|argument| argument == WORKTREE_SUBCOMMAND)
-            {
-                index += offset;
-            }
-            let work_tree = work_tree.map(|path| resolve_command_path(&repository, &path));
-            let git_directory = git_directory.map(|path| resolve_command_path(&repository, &path));
-            let git_directory = work_tree.is_none().then_some(git_directory).flatten();
-            return Some(CommandContext {
-                repository: work_tree.unwrap_or(repository),
+            let git_directory = git_directory
+                .as_deref()
+                .map(|path| resolve_command_path(&repository, path));
+            contexts.push(CommandContext {
+                repository: repository.clone(),
                 git_directory,
                 command_index: index,
                 global_options,
-                invocation_aliases,
+                invocation_aliases: invocation_aliases.clone(),
             });
+            if possible_value_index != Some(index) {
+                break;
+            }
+            index += 1;
         }
     }
-    None
+    contexts
 }
 
 fn resolve_command_path(base: &Path, value: &OsStr) -> PathBuf {
@@ -1538,6 +1781,7 @@ fn requests_git_help(arguments: &[OsString]) -> bool {
 
 fn plan_enabled_add(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
@@ -1554,13 +1798,14 @@ fn plan_enabled_add(
         // Nothing about the request is unreproducible, but Riftri also gains
         // nothing by claiming the option: ordinary Git honors it exactly.
         GlobalOptionScope::CheckoutNeutral => Ok(GitProxyPlan::Passthrough),
-        GlobalOptionScope::None => parse_enabled_add(repository, arguments)
+        GlobalOptionScope::None => parse_enabled_add(repository, directory, arguments)
             .map(|(request, quiet)| GitProxyPlan::OptimizedAdd { request, quiet }),
     }
 }
 
 fn parse_enabled_add(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
 ) -> Result<(AddWorktreeRequest, bool), ActivationError> {
     let mut mode = None;
@@ -1688,12 +1933,7 @@ fn parse_enabled_add(
         }
     };
 
-    let destination = PathBuf::from(&positional[0]);
-    let destination = if destination.is_absolute() {
-        destination
-    } else {
-        repository.join(destination)
-    };
+    let destination = resolve_command_path(directory, &positional[0]);
 
     Ok((
         AddWorktreeRequest {
@@ -1718,6 +1958,7 @@ fn is_short_option_cluster(argument: &OsStr) -> bool {
 
 fn parse_enabled_remove(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<(RemoveWorktreeRequest, bool)>, ActivationError> {
     let mut force = false;
@@ -1737,7 +1978,7 @@ fn parse_enabled_remove(
     let [path] = positional.as_slice() else {
         return Ok(None);
     };
-    let destination = Git::default().resolve_worktree_path(repository, path)?;
+    let destination = Git::default().resolve_worktree_path(repository, directory, path)?;
     let Some(state_directory) = managed_worktree_state_directory(repository, &destination)? else {
         return Ok(None);
     };
@@ -1753,11 +1994,12 @@ fn parse_enabled_remove(
 
 fn plan_enabled_remove(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
     if optimization_compatible
-        && let Some((request, force)) = parse_enabled_remove(repository, arguments)?
+        && let Some((request, force)) = parse_enabled_remove(repository, directory, arguments)?
     {
         return Ok(if force {
             GitProxyPlan::OptimizedForceRemove(request)
@@ -1765,12 +2007,13 @@ fn plan_enabled_remove(
             GitProxyPlan::OptimizedRemove(request)
         });
     }
-    guard_managed_path_lifecycle(repository, arguments, "remove")?;
+    guard_managed_path_lifecycle(repository, directory, arguments, "remove")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
 fn parse_enabled_move(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<MoveWorktreeRequest>, ActivationError> {
     let (source, destination) = match arguments {
@@ -1778,27 +2021,30 @@ fn parse_enabled_move(
         [separator, source, destination] if separator == "--" => (source, destination),
         _ => return Ok(None),
     };
-    let source = Git::default().resolve_worktree_path(repository, source)?;
+    let source = Git::default().resolve_worktree_path(repository, directory, source)?;
     let Some(state_directory) = managed_worktree_state_directory(repository, &source)? else {
         return Ok(None);
     };
     Ok(Some(MoveWorktreeRequest {
         repository: repository.to_path_buf(),
         source,
-        destination: resolve_command_path(repository, destination),
+        destination: resolve_command_path(directory, destination),
         state_dir: Some(state_directory),
     }))
 }
 
 fn plan_enabled_move(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
-    if optimization_compatible && let Some(request) = parse_enabled_move(repository, arguments)? {
+    if optimization_compatible
+        && let Some(request) = parse_enabled_move(repository, directory, arguments)?
+    {
         return Ok(GitProxyPlan::OptimizedMove(request));
     }
-    guard_managed_path_lifecycle(repository, arguments, "move")?;
+    guard_managed_path_lifecycle(repository, directory, arguments, "move")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
@@ -1838,7 +2084,6 @@ fn is_recognized_prune_argument(argument: &OsString) -> bool {
 
 fn plan_enabled_prune(
     repository: &Path,
-    activation: &RepositoryActivation,
     arguments: &[OsString],
     global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
@@ -1869,7 +2114,7 @@ fn plan_enabled_prune(
     }
 
     let mut managed_states = Vec::new();
-    for state_directory in repository_state_directories(&activation.repository)? {
+    for state_directory in repository_state_directories(repository)? {
         let status = storage_accounting(&state_directory)?;
         if status.active_views > 0
             || status.pending_adds > 0
@@ -1911,13 +2156,14 @@ fn plan_enabled_prune(
 
 fn guard_managed_path_lifecycle(
     repository: &Path,
+    directory: &Path,
     arguments: &[OsString],
     operation: &str,
 ) -> Result<(), ActivationError> {
     let Some(path) = positional_paths(arguments).first().copied() else {
         return Ok(());
     };
-    let path = Git::default().resolve_worktree_path(repository, path)?;
+    let path = Git::default().resolve_worktree_path(repository, directory, path)?;
     if managed_worktree_state_directory(repository, &path)?.is_some() {
         return Err(unsupported(format!(
             "refusing `git worktree {operation}` options that would bypass the journal for managed Riftri worktree {}; use a supported Riftri lifecycle command instead",
@@ -2683,6 +2929,130 @@ mod tests {
         ));
     }
 
+    /// `--work-tree` changes where Git looks for checked-out files, never
+    /// which repository it opens: that is still found from the current
+    /// directory. The planner used to key on the option's value instead, so
+    /// naming any path outside the enabled repository turned its commands
+    /// into ordinary Git.
+    #[test]
+    fn work_tree_options_do_not_select_the_planned_repository() {
+        let enabled = repository_fixture();
+        enable_repository(enabled.path()).expect("enable repository");
+        let unenabled = repository_fixture();
+        let add = [
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("--detach"),
+            OsString::from("../detached-view"),
+        ];
+        let with_work_tree = |work_tree: &Path, attached: bool| {
+            let mut arguments = if attached {
+                let mut option = OsString::from("--work-tree=");
+                option.push(work_tree);
+                vec![option]
+            } else {
+                vec![OsString::from("--work-tree"), work_tree.into()]
+            };
+            arguments.extend(add.iter().cloned());
+            arguments
+        };
+
+        for attached in [true, false] {
+            for work_tree in [
+                unenabled.path().to_path_buf(),
+                unenabled.path().join("tracked.txt"),
+                unenabled.path().join("missing"),
+            ] {
+                let error = plan_git_command(enabled.path(), &with_work_tree(&work_tree, attached))
+                    .expect_err("an enabled repository must keep planning its own adds");
+                assert!(
+                    error.to_string().contains("invocation-level configuration"),
+                    "{}: {error}",
+                    work_tree.display()
+                );
+            }
+            assert!(
+                matches!(
+                    plan_git_command(unenabled.path(), &with_work_tree(enabled.path(), attached))
+                        .expect("plan in the repository that never opted in"),
+                    GitProxyPlan::Passthrough
+                ),
+                "a work tree elsewhere must not opt the current repository in"
+            );
+        }
+    }
+
+    /// The lifecycle half of the same rule: with the planner keyed on the
+    /// `--work-tree` value, `git --work-tree=<anything else> worktree remove
+    /// --force <managed>` reached real Git, which deleted the view outside
+    /// the removal journal.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn work_tree_options_cannot_bypass_the_managed_lifecycle_guard() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        git(
+            fixture.path(),
+            &["config", "alias.drop", "worktree remove --force"],
+        );
+        let destination = fixture.path().join("guarded-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/guarded")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let other = repository_fixture();
+
+        for work_tree in [
+            other.path().to_path_buf(),
+            other.path().join("tracked.txt"),
+            other.path().join("missing"),
+        ] {
+            let mut option = OsString::from("--work-tree=");
+            option.push(&work_tree);
+            for (command, refusal) in [
+                (
+                    &["worktree", "remove", "--force", "guarded-view"][..],
+                    "managed Riftri worktree",
+                ),
+                (
+                    &["worktree", "move", "guarded-view", "moved-view"][..],
+                    "managed Riftri worktree",
+                ),
+                (&["drop", "guarded-view"][..], "managed Riftri worktree"),
+                (&["worktree", "prune"][..], "managed Riftri state"),
+            ] {
+                for git_directory in [None, Some("--git-dir=.git")] {
+                    let arguments = git_directory
+                        .map(OsString::from)
+                        .into_iter()
+                        .chain([option.clone()])
+                        .chain(command.iter().map(OsString::from))
+                        .collect::<Vec<_>>();
+                    let error = plan_git_command(fixture.path(), &arguments)
+                        .expect_err("a work tree elsewhere must not bypass the guard");
+                    assert!(
+                        error.to_string().contains(refusal),
+                        "{arguments:?}: {error}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn enabled_add_refuses_invocation_config_instead_of_ignoring_it() {
         let fixture = repository_fixture();
@@ -2824,6 +3194,104 @@ mod tests {
         );
     }
 
+    /// Git looks for an alias only when the name is neither a builtin nor a
+    /// `git-<name>` program, so an alias with such a name never runs. The
+    /// planner used to expand it anyway: with `alias.gc = worktree remove
+    /// --force`, `git gc <managed>` was planned as a forced removal of a
+    /// worktree the user never asked to remove, while real Git runs `gc`.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn aliases_cannot_shadow_the_commands_git_runs_first() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("shadowed-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/shadowed")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let destination = destination.to_str().expect("UTF-8 fixture path");
+
+        let force_remove = "worktree remove --force";
+        git(fixture.path(), &["config", "alias.gc", force_remove]);
+        git(fixture.path(), &["config", "alias.prune", "worktree prune"]);
+        // `git-submodule` is a program in Git's exec-path, not a builtin.
+        git(fixture.path(), &["config", "alias.submodule", force_remove]);
+        // A chain stops at the first name Git runs itself.
+        git(fixture.path(), &["config", "alias.viagc", "gc"]);
+        for arguments in [
+            vec!["gc", destination],
+            vec!["prune"],
+            vec!["submodule", destination],
+            vec!["viagc", destination],
+            vec![
+                "-c",
+                "alias.fsck=worktree remove --force",
+                "fsck",
+                destination,
+            ],
+        ] {
+            let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan shadowed alias"),
+                    GitProxyPlan::Passthrough
+                ),
+                "{arguments:?} was planned as the alias Git never runs"
+            );
+        }
+
+        // Git lets an alias replace a deprecated builtin, so these are
+        // aliases too: probed on git 2.53.0, `git -c alias.whatchanged='worktree
+        // list' whatchanged` lists worktrees.
+        let deprecated = Command::new("git")
+            .arg("--list-cmds=deprecated")
+            .output()
+            .expect("list deprecated commands");
+        let deprecated = String::from_utf8(deprecated.stdout).expect("UTF-8 command names");
+        for name in deprecated.lines() {
+            git(
+                fixture.path(),
+                &["config", &format!("alias.{name}"), force_remove],
+            );
+            assert!(
+                matches!(
+                    plan_git_command(
+                        fixture.path(),
+                        &[OsString::from(name), OsString::from(destination)],
+                    )
+                    .expect("plan alias of a deprecated builtin"),
+                    GitProxyPlan::OptimizedForceRemove(_)
+                ),
+                "`git {name}` runs its alias, which was not planned"
+            );
+        }
+
+        // A name Git does not run itself is still an alias.
+        git(fixture.path(), &["config", "alias.wtrm", force_remove]);
+        assert!(matches!(
+            plan_git_command(
+                fixture.path(),
+                &[OsString::from("wtrm"), OsString::from(destination)],
+            )
+            .expect("plan alias"),
+            GitProxyPlan::OptimizedForceRemove(_)
+        ));
+    }
+
     /// Alias resolution must not capture anything else. A shell alias spawns a
     /// process that resolves `git` through `PATH`, so a worktree command inside
     /// one already re-enters the proxy on its own and must be left alone.
@@ -2849,6 +3317,38 @@ mod tests {
         }
     }
 
+    /// Git reads an alias from the repository `--git-dir` selects, not from
+    /// the directory the command runs in.
+    #[test]
+    fn alias_lookup_follows_an_explicit_git_directory() {
+        let fixture = repository_fixture();
+        git(
+            fixture.path(),
+            &["config", "alias.wtrm", "worktree remove --force"],
+        );
+        let outside = tempdir().expect("directory outside the repository");
+        let selection = [
+            OsString::from("--git-dir"),
+            fixture.path().join(".git").into_os_string(),
+        ];
+        let arguments = [&selection[..], &["wtrm".into(), "view".into()]].concat();
+        let context = super::command_contexts(outside.path(), &arguments)
+            .into_iter()
+            .next()
+            .expect("command context");
+
+        assert_eq!(
+            super::expand_worktree_alias(&context, &arguments).expect("expand alias"),
+            Some(
+                [
+                    &selection[..],
+                    &["worktree", "remove", "--force", "view"].map(OsString::from),
+                ]
+                .concat()
+            )
+        );
+    }
+
     /// `record_invocation_alias` mirrors what Git accepts: entries Git would
     /// refuse at lookup are skipped so passthrough stays safe, and key case
     /// never matters.
@@ -2871,8 +3371,8 @@ mod tests {
         assert_eq!(
             aliases,
             [
-                ("wtrm".to_owned(), "worktree remove".to_owned()),
-                ("keep".to_owned(), "log --oneline".to_owned()),
+                ("wtrm".to_owned(), b"worktree remove".to_vec()),
+                ("keep".to_owned(), b"log --oneline".to_vec()),
             ]
         );
     }
@@ -3074,6 +3574,130 @@ mod tests {
         ));
     }
 
+    /// Where Git cannot enter `-C` or open `--git-dir` there is nothing for
+    /// Riftri to guard, in an enabled repository or outside one. The planner
+    /// used to return its own inspection error instead of letting Git fail.
+    #[test]
+    fn repositories_git_cannot_open_stay_ordinary_git() {
+        let elsewhere = tempdir().expect("plain directory");
+        let enabled = repository_fixture();
+        enable_repository(enabled.path()).expect("enable repository");
+
+        for directory in [elsewhere.path(), enabled.path()] {
+            fs::write(directory.join("file"), "").expect("write regular file");
+            for arguments in [
+                &["-C", "missing", "rm", "x"][..],
+                &["-C", "missing", "definitely-not-a-command"][..],
+                &["-C", "file", "mv", "a", "b"][..],
+                &["--git-dir=missing", "worktree"][..],
+                &["--git-dir=missing", "worktree", "list"][..],
+                &["--git-dir", "missing", "worktree", "add", "../view"][..],
+            ] {
+                let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+                assert!(
+                    matches!(
+                        plan_git_command(directory, &arguments),
+                        Ok(GitProxyPlan::Passthrough)
+                    ),
+                    "{arguments:?}"
+                );
+            }
+        }
+    }
+
+    /// Letting Git answer for a repository it cannot open must not open the
+    /// lifecycle guard: an enabled repository that exists but cannot be read
+    /// still refuses, whether it is named by `--git-dir`, by a linked
+    /// worktree's `.git` file, or reached through an alias.
+    #[test]
+    fn unreadable_enabled_repositories_fail_closed_through_git_dir_and_aliases() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        git(fixture.path(), &["config", "alias.wtp", "worktree prune"]);
+        let linked = tempdir().expect("linked worktree parent");
+        let view = linked.path().join("view");
+        git(
+            fixture.path(),
+            &["worktree", "add", "--quiet", view.to_str().expect("view")],
+        );
+        let configuration = fixture.path().join(".git/config");
+        let mut contents = fs::read(&configuration).expect("read configuration");
+        contents.extend_from_slice(b"[broken\n");
+        fs::write(&configuration, contents).expect("corrupt configuration");
+        let plan = |arguments: &[&OsStr]| {
+            let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+            plan_git_command(fixture.path(), &arguments)
+        };
+        let git_file = view.join(".git");
+
+        plan(&[OsStr::new("wtp")]).expect_err("an unresolvable alias must not reach Git");
+        // The alias lives in the repository `--git-dir` names, so that is the
+        // repository whose opt-in decides, wherever the command runs.
+        let outside = tempdir().expect("directory outside the repository");
+        let git_directory = fixture.path().join(".git");
+        plan_git_command(
+            outside.path(),
+            &[
+                OsString::from("--git-dir"),
+                git_directory.into_os_string(),
+                OsString::from("wtp"),
+            ],
+        )
+        .expect_err("an unresolvable alias behind --git-dir must not reach Git");
+        for git_directory in [OsStr::new(".git"), git_file.as_os_str()] {
+            let message = plan(&[
+                OsStr::new("--git-dir"),
+                git_directory,
+                OsStr::new("worktree"),
+                OsStr::new("prune"),
+            ])
+            .expect_err("an unreadable enabled repository must refuse lifecycle commands")
+            .to_string();
+            assert!(
+                message.contains("could not be inspected") && message.contains(BYPASS_ENV),
+                "{git_directory:?}: {message}"
+            );
+            assert!(
+                matches!(
+                    plan(&[
+                        OsStr::new("--git-dir"),
+                        git_directory,
+                        OsStr::new("worktree"),
+                        OsStr::new("list"),
+                    ]),
+                    Ok(GitProxyPlan::Passthrough)
+                ),
+                "{git_directory:?}: read-only worktree commands stay ordinary Git"
+            );
+        }
+    }
+
+    /// An enablement flag Git cannot parse is an unprovable opt-out, so
+    /// lifecycle commands refuse while read-only ones stay ordinary Git.
+    #[test]
+    fn an_unreadable_enablement_flag_fails_closed_only_for_lifecycle_commands() {
+        let fixture = repository_fixture();
+        git(fixture.path(), &["config", "riftri.enabled", "maybe"]);
+        let plan = |subcommand: &str| {
+            plan_git_command(
+                fixture.path(),
+                &[
+                    OsString::from(super::WORKTREE_SUBCOMMAND),
+                    OsString::from(subcommand),
+                ],
+            )
+        };
+
+        assert!(matches!(plan("list"), Ok(GitProxyPlan::Passthrough)));
+        let message = plan("prune")
+            .expect_err("an unreadable flag must refuse lifecycle commands")
+            .to_string();
+        assert!(
+            message.contains("could not be inspected") && message.contains(BYPASS_ENV),
+            "{message}"
+        );
+    }
+
     /// Git's alias grammar accepts backslash escapes and chains alias to
     /// alias, so `alias.h = w\orktree remove` and a two-hop chain both reach
     /// a worktree lifecycle command. The planner used to read neither and
@@ -3142,9 +3766,17 @@ mod tests {
     /// parsed word verbatim), not derived from documentation.
     #[test]
     fn alias_bodies_split_the_way_git_splits_them() {
-        let split = |value: &str| super::split_alias_words(value).expect(value);
+        let split = |value: &str| {
+            super::split_alias_words(value.as_bytes())
+                .expect(value)
+                .into_iter()
+                .map(|word| String::from_utf8(word).expect(value))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(split("worktree prune -v"), ["worktree", "prune", "-v"]);
-        assert_eq!(split("  worktree   prune  "), ["worktree", "prune"]);
+        // A run of separators is one boundary, but Git does not trim: git
+        // 2.53.0 traces this body as `'' worktree prune ''`.
+        assert_eq!(split("  worktree   prune  "), ["", "worktree", "prune", ""]);
         assert_eq!(
             split("worktree 'remove' \"--force\""),
             ["worktree", "remove", "--force"]
@@ -3162,12 +3794,132 @@ mod tests {
             ["log", "atb", "a\"b", r"a\b"]
         );
         assert_eq!(split(r"log 'a\tb'"), ["log", r"a\tb"]);
-        assert!(split("   ").is_empty());
+        assert_eq!(split("   "), ["", ""]);
         // Git refuses these ("bad alias string"), so the caller passes them
         // through and Git fails them identically.
-        assert!(super::split_alias_words("log 'oops").is_err());
-        assert!(super::split_alias_words(r#"log "oops"#).is_err());
-        assert!(super::split_alias_words(r"log ends\").is_err());
+        assert!(super::split_alias_words(b"log 'oops").is_err());
+        assert!(super::split_alias_words(br#"log "oops"#).is_err());
+        assert!(super::split_alias_words(br"log ends\").is_err());
+    }
+
+    /// Git's alias splitter separates on its own `isspace` only: space, tab,
+    /// line feed, and carriage return. Rows probed against git 2.53.0 with
+    /// `GIT_TRACE=1 git -c alias.zz=<body> zz`, which prints the split words.
+    #[test]
+    fn alias_bodies_split_on_gits_whitespace_only() {
+        let split = |value: &str| {
+            super::split_alias_words(value.as_bytes())
+                .expect(value)
+                .into_iter()
+                .map(|word| String::from_utf8(word).expect(value))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            split("worktree\tremove\n--force\r\nview"),
+            ["worktree", "remove", "--force", "view"]
+        );
+        for not_a_separator in ['\u{b}', '\u{c}', '\u{85}', '\u{a0}', '\u{2003}'] {
+            let word = format!("no{not_a_separator}break");
+            assert_eq!(
+                split(&format!("worktree remove {word}")),
+                ["worktree", "remove", word.as_str()],
+                "{not_a_separator:?} separated an alias word"
+            );
+        }
+        // Git does not trim a body. A leading separator leaves an empty
+        // command, which Git refuses, and a trailing one adds an empty
+        // argument.
+        assert_eq!(split("worktree prune "), ["worktree", "prune", ""]);
+        assert_eq!(split(" worktree prune"), ["", "worktree", "prune"]);
+        assert_eq!(split("worktree '' prune"), ["worktree", "", "prune"]);
+        // The split is over bytes: a byte that is not UTF-8 stays in its
+        // word, and no byte above ASCII is a separator.
+        assert_eq!(
+            super::split_alias_words(b"worktree remove a\xffb\x85c\xa0d\x0be\x0cf"),
+            Ok(vec![
+                b"worktree".to_vec(),
+                b"remove".to_vec(),
+                b"a\xffb\x85c\xa0d\x0be\x0cf".to_vec(),
+            ])
+        );
+    }
+
+    /// The planner has to guard the path Git will act on. Splitting a body on
+    /// Unicode whitespace turned a managed path containing U+00A0 into two
+    /// words, so the guard checked the wrong one and a forced removal reached
+    /// real Git. Trimming a body planned a lifecycle command where Git runs
+    /// none: Git reads a leading space as an empty command and refuses it.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn alias_whitespace_cannot_move_the_lifecycle_guard_off_the_managed_path() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("no\u{a0}break");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/no-break")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        // Git's alias splitting treats a backslash as an escape, so a Windows
+        // path needs doubled separators to stay unquoted and intact.
+        let destination = destination
+            .to_str()
+            .expect("UTF-8 fixture path")
+            .replace('\\', "\\\\");
+
+        let error = plan_git_command(
+            fixture.path(),
+            &[
+                OsString::from("-c"),
+                OsString::from(format!("alias.wtrm=worktree remove --force {destination}")),
+                OsString::from("wtrm"),
+            ],
+        )
+        .expect_err("a no-break space in the managed path must not bypass the guard");
+        assert!(
+            error.to_string().contains("managed Riftri worktree"),
+            "{error}"
+        );
+
+        // Git runs `worktree prune ''` here and fails on the extra argument,
+        // so this must not become a journaled prune.
+        git(
+            fixture.path(),
+            &["config", "alias.trailing", "worktree prune "],
+        );
+        let error = plan_git_command(fixture.path(), &[OsString::from("trailing")])
+            .expect_err("a prune with an extra empty argument is not a bare prune");
+        assert!(error.to_string().contains("worktree prune"), "{error}");
+
+        // Git refuses the empty command, so nothing is removed.
+        git(
+            fixture.path(),
+            &["config", "alias.leading", " worktree remove --force"],
+        );
+        assert!(
+            matches!(
+                plan_git_command(
+                    fixture.path(),
+                    &[OsString::from("leading"), OsString::from(destination)],
+                )
+                .expect("plan an alias Git refuses"),
+                GitProxyPlan::Passthrough
+            ),
+            "a body Git refuses was planned as a lifecycle command"
+        );
     }
 
     /// Chained expansion follows Git: each inner body's arguments run before
@@ -3181,10 +3933,10 @@ mod tests {
             command_index: 0,
             global_options: super::GlobalOptionScope::Significant,
             invocation_aliases: vec![
-                ("inner".to_owned(), "worktree remove".to_owned()),
-                ("outer".to_owned(), "inner --force".to_owned()),
-                ("loop1".to_owned(), "loop2".to_owned()),
-                ("loop2".to_owned(), "loop1".to_owned()),
+                ("inner".to_owned(), "worktree remove".into()),
+                ("outer".to_owned(), "inner --force".into()),
+                ("loop1".to_owned(), "loop2".into()),
+                ("loop2".to_owned(), "loop1".into()),
             ],
         };
         let arguments = [OsString::from("outer"), OsString::from("view")];
@@ -3200,6 +3952,491 @@ mod tests {
         assert_eq!(
             super::expand_worktree_alias(&context, &arguments).expect("expand"),
             None
+        );
+    }
+
+    /// A path inside a repository's Git directory is never a worktree root,
+    /// so binding to it is the caller's mistake like any other wrong path. Git
+    /// answers the root query there with a plain command failure, which used
+    /// to surface as an operational Git error.
+    #[test]
+    fn a_worktree_binding_inside_a_git_directory_is_a_binding_refusal() {
+        let fixture = repository_fixture();
+        for inside in [".git", ".git/objects"] {
+            let error = super::resolve_worktree_binding(&fixture.path().join(inside))
+                .expect_err("a Git directory is not a worktree root");
+            assert!(
+                matches!(error, super::ActivationError::WorktreeBinding(_)),
+                "{inside}: {error:?}"
+            );
+        }
+    }
+
+    /// Git follows an alias chain of any length and stops only on a loop, so
+    /// a long chain must still be planned as the worktree command it ends in.
+    /// A fixed hop limit used to pass anything longer to real Git unclassified.
+    #[test]
+    fn alias_chains_are_followed_as_far_as_git_follows_them() {
+        const HOPS: usize = 64;
+        let mut invocation_aliases: Vec<(String, Vec<u8>)> = (1..HOPS)
+            .map(|hop| (format!("hop{hop}"), format!("hop{}", hop + 1).into_bytes()))
+            .collect();
+        invocation_aliases.push((format!("hop{HOPS}"), "worktree remove --force".into()));
+        let context = super::CommandContext {
+            repository: std::path::PathBuf::from("."),
+            git_directory: None,
+            command_index: 0,
+            global_options: super::GlobalOptionScope::Significant,
+            invocation_aliases,
+        };
+        let arguments = [OsString::from("hop1"), OsString::from("view")];
+        assert_eq!(
+            super::expand_worktree_alias(&context, &arguments).expect("expand"),
+            Some(
+                ["worktree", "remove", "--force", "view"]
+                    .map(OsString::from)
+                    .to_vec()
+            )
+        );
+    }
+
+    /// A Unix alias body is bytes, and Git runs it whether or not they are
+    /// UTF-8. The planner used to give up on such a body and pass the command
+    /// through, so the expansion has to carry the exact bytes Git will see,
+    /// from every place an alias can be defined.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_alias_bodies_expand_to_the_bytes_git_runs() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let fixture = repository_fixture();
+        let body = OsStr::from_bytes(b"worktree remove --force ../vi\xffew");
+        let status = Command::new("git")
+            .args([OsStr::new("config"), OsStr::new("alias.stored"), body])
+            .current_dir(fixture.path())
+            .status()
+            .expect("store alias");
+        assert!(status.success());
+        let variable = OsStr::from_bytes(b"RIFTRI_TEST_NON_UTF8_ALIAS_\xff");
+        // SAFETY: test-only, and the variable name is unique to this test.
+        unsafe {
+            std::env::set_var(variable, body);
+        }
+        let assignment = |key: &str, value: &OsStr| {
+            let mut assignment = OsString::from(key);
+            assignment.push(value);
+            assignment
+        };
+
+        for arguments in [
+            vec![OsString::from("stored")],
+            vec![
+                OsString::from("-c"),
+                assignment("alias.one=", body),
+                OsString::from("one"),
+            ],
+            vec![
+                assignment("--config-env=alias.env=", variable),
+                OsString::from("env"),
+            ],
+            vec![
+                OsString::from("--config-env"),
+                assignment("alias.spaced=", variable),
+                OsString::from("spaced"),
+            ],
+        ] {
+            let context = super::command_contexts(fixture.path(), &arguments)
+                .into_iter()
+                .next()
+                .expect("command context");
+            let expanded = super::expand_worktree_alias(&context, &arguments)
+                .expect("expand")
+                .unwrap_or_else(|| panic!("{arguments:?} was not expanded"));
+            assert_eq!(
+                expanded[context.command_index..],
+                [
+                    OsString::from("worktree"),
+                    OsString::from("remove"),
+                    OsString::from("--force"),
+                    OsString::from_vec(b"../vi\xffew".to_vec()),
+                ],
+                "{arguments:?}"
+            );
+        }
+    }
+
+    /// macOS cannot create a non-UTF-8 path, so the end-to-end case uses a
+    /// non-UTF-8 option value: real Git accepts `--expire=now\xff` and prunes.
+    #[cfg(unix)]
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(feature = "native-cow-integration", target_os = "linux")
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn non_utf8_aliases_cannot_bypass_the_lifecycle_guard() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: fixture.path().join("bytes-view"),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/bytes")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+
+        let error = plan_git_command(
+            fixture.path(),
+            &[
+                OsString::from("-c"),
+                OsString::from_vec(b"alias.px=worktree prune --expire=now\xff".to_vec()),
+                OsString::from("px"),
+            ],
+        )
+        .expect_err("a non-UTF-8 worktree alias must not bypass the guard");
+        assert!(
+            error.to_string().contains("refusing `git worktree prune"),
+            "{error}"
+        );
+    }
+
+    /// Git runs its global option parser over an expanded alias body, so
+    /// `alias.pw = -p worktree remove --force` reaches the same lifecycle
+    /// command as the bare body. The planner used to read `-p` as the command
+    /// name and passed the removal to real Git unclassified.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn alias_bodies_with_global_options_cannot_bypass_the_lifecycle_guard() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("optioned-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/optioned")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let destination = destination.into_os_string();
+
+        // Stored aliases whose options leave the invocation unchanged plan as
+        // the journaled removal, alone and through a chain.
+        git(
+            fixture.path(),
+            &["config", "alias.pw", "-p worktree remove --force"],
+        );
+        git(fixture.path(), &["config", "alias.hop", "--paginate pw"]);
+        git(
+            fixture.path(),
+            &["config", "alias.here", "-C '' worktree remove --force"],
+        );
+        for name in ["pw", "hop", "here"] {
+            let arguments = [OsString::from(name), destination.clone()];
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan optioned alias"),
+                    GitProxyPlan::OptimizedForceRemove(_)
+                ),
+                "`git {name}` was not planned as the journaled removal"
+            );
+        }
+
+        // Options the outer command line treats as significant keep that
+        // meaning inside a body, so the managed-path guard refuses.
+        let refused = |arguments: &[OsString]| {
+            let error = plan_git_command(fixture.path(), arguments)
+                .expect_err("an alias body with global options must not bypass the guard");
+            assert!(
+                error.to_string().contains("managed Riftri worktree"),
+                "{arguments:?}: {error}"
+            );
+        };
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "alias.ep",
+                "--exec-path=/nonexistent worktree remove --force",
+            ],
+        );
+        // A body can define the alias its own command names.
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "alias.nested",
+                "-c 'alias.inner=-p worktree remove --force' inner",
+            ],
+        );
+        refused(&[OsString::from("ep"), destination.clone()]);
+        refused(&[OsString::from("nested"), destination.clone()]);
+        refused(&[
+            OsString::from("-c"),
+            OsString::from("alias.one=-p worktree remove --force"),
+            OsString::from("one"),
+            destination.clone(),
+        ]);
+        // SAFETY: test-only, and the variable name is unique to this test.
+        unsafe {
+            std::env::set_var(
+                "RIFTRI_TEST_OPTIONED_ALIAS",
+                "--paginate worktree remove --force",
+            );
+        }
+        refused(&[
+            OsString::from("--config-env=alias.ce=RIFTRI_TEST_OPTIONED_ALIAS"),
+            OsString::from("ce"),
+            destination.clone(),
+        ]);
+        // Git also accepts the spaced `--config-env <name>=<variable>` form,
+        // on the command line and at the start of a body.
+        refused(&[
+            OsString::from("--config-env"),
+            OsString::from("alias.ce=RIFTRI_TEST_OPTIONED_ALIAS"),
+            OsString::from("ce"),
+            destination.clone(),
+        ]);
+        git(
+            fixture.path(),
+            &[
+                "config",
+                "alias.envhop",
+                "--config-env alias.viaenv=RIFTRI_TEST_OPTIONED_ALIAS viaenv",
+            ],
+        );
+        refused(&[OsString::from("envhop"), destination.clone()]);
+
+        // Git dies on a body whose options change its environment, so these
+        // still delegate and nothing executes.
+        for body in [
+            "-P worktree remove --force",
+            "-C . worktree remove --force",
+            "--no-optional-locks worktree remove --force",
+        ] {
+            git(fixture.path(), &["config", "alias.dies", body]);
+            assert!(
+                matches!(
+                    plan_git_command(
+                        fixture.path(),
+                        &[OsString::from("dies"), destination.clone()]
+                    )
+                    .expect("plan refused-by-git alias"),
+                    GitProxyPlan::Passthrough
+                ),
+                "`{body}` was not delegated to Git"
+            );
+        }
+    }
+
+    /// Real Git is the reference for which global options an alias body may
+    /// start with: it must run a body exactly when the planner follows it.
+    #[test]
+    fn alias_body_options_match_what_git_accepts() {
+        let fixture = repository_fixture();
+        for options in [
+            "",
+            "-p",
+            "--paginate",
+            "-p --paginate",
+            "--exec-path=/nonexistent",
+            "-C ''",
+            "-c riftri.probe=1",
+            "--config-env=riftri.probe=PATH",
+            "--config-env riftri.probe=PATH",
+            "--attr-source HEAD",
+            "--shallow-file shallow",
+            "-P",
+            "--no-pager",
+            "-C .",
+            "--git-dir=.git",
+            "--git-dir .git",
+            "--work-tree=.",
+            "--work-tree .",
+            "--namespace=probe",
+            "--namespace probe",
+            "--bare",
+            "--no-optional-locks",
+            "--no-advice",
+            "--literal-pathspecs",
+            "--glob-pathspecs",
+            "--noglob-pathspecs",
+            "--icase-pathspecs",
+            "--no-replace-objects",
+            "--no-lazy-fetch",
+            "--attr-source=HEAD",
+            "--list-cmds=main",
+            "--exec-path",
+            "--help",
+            "--version",
+            "--unknown-option",
+            "-p -P",
+        ] {
+            let body = format!("{options} rev-parse --git-dir");
+            let body = body.trim_start();
+            let git_runs = std::process::Command::new("git")
+                .args(["-c", &format!("alias.probe={body}"), "probe"])
+                .current_dir(fixture.path())
+                .output()
+                .expect("run git");
+            let git_runs = git_runs.status.success() && git_runs.stdout == b".git\n";
+            let words: Vec<OsString> = if options.is_empty() {
+                Vec::new()
+            } else {
+                super::split_alias_words(options.as_bytes())
+                    .expect("split options")
+                    .into_iter()
+                    .map(|word| super::alias_argument(word).expect("UTF-8 option"))
+                    .collect()
+            };
+            assert_eq!(super::git_runs_alias_options(&words), git_runs, "`{body}`");
+        }
+    }
+
+    /// A bare repository has no working-tree root, and the planner used to
+    /// read that as "no repository": from the bare directory every worktree
+    /// command, guarded or not, was ordinary Git. Riftri manages such a
+    /// repository from its Git directory, so the shim has to plan there too.
+    #[test]
+    fn an_enabled_bare_repository_plans_from_its_git_directory() {
+        let fixture = repository_fixture();
+        let parent = tempdir().expect("bare repository parent");
+        let bare = parent.path().join("bare.git");
+        git(
+            parent.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                fixture.path().to_str().expect("UTF-8 fixture path"),
+                "bare.git",
+            ],
+        );
+        let add = ["worktree", "add", "--detach", "../view"].map(OsString::from);
+
+        assert!(matches!(
+            plan_git_command(&bare, &add).expect("plan before opting in"),
+            GitProxyPlan::Passthrough
+        ));
+        // `riftri enable` needs a working tree, so it records the opt-in in
+        // this configuration from one of the repository's linked worktrees.
+        git(&bare, &["config", "riftri.enabled", "true"]);
+        assert!(matches!(
+            plan_git_command(&bare, &add).expect("plan from the bare directory"),
+            GitProxyPlan::OptimizedAdd { .. }
+        ));
+
+        // `--git-dir` names the same repository from outside it, with no
+        // linked worktree to stand in for it.
+        let selected = [
+            &[OsString::from("--git-dir"), bare.into_os_string()],
+            &add[..],
+        ]
+        .concat();
+        let error = plan_git_command(parent.path(), &selected)
+            .expect_err("an enabled bare repository must plan its own adds");
+        assert!(
+            error.to_string().contains("invocation-level configuration"),
+            "{error}"
+        );
+    }
+
+    /// The planner keeps two directories apart: the repository, where Riftri
+    /// runs its own Git commands, and the directory the caller's Git runs
+    /// in, where Git resolves relative worktree paths. Every path argument
+    /// of a planned request has to come from the second.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn worktree_path_arguments_resolve_in_the_directory_git_runs_in() {
+        let parent = tempdir().expect("fixture parent");
+        let parent = fs::canonicalize(parent.path()).expect("canonical fixture parent");
+        let repository = parent.join("repository");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write fixture");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        enable_repository(&repository).expect("enable repository");
+        let view = parent.join("view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: view.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::Detached,
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        let arguments = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+
+        // From the repository root `./view` is not a worktree at all.
+        assert!(
+            super::parse_enabled_remove(&repository, &repository, &arguments(&["./view"]))
+                .expect("parse removal from the repository root")
+                .is_none()
+        );
+        let (removal, _) =
+            super::parse_enabled_remove(&repository, &parent, &arguments(&["./view"]))
+                .expect("parse removal")
+                .expect("the managed view, named from its parent directory");
+        assert_eq!(removal.repository, repository);
+        assert_eq!(removal.destination, parent.join("./view"));
+
+        let relocation =
+            super::parse_enabled_move(&repository, &parent, &arguments(&["./view", "./moved"]))
+                .expect("parse move")
+                .expect("the managed view, named from its parent directory");
+        assert_eq!(relocation.repository, repository);
+        assert_eq!(relocation.source, parent.join("./view"));
+        assert_eq!(relocation.destination, parent.join("./moved"));
+
+        let (addition, _) =
+            super::parse_enabled_add(&repository, &parent, &arguments(&["--detach", "./new"]))
+                .expect("parse add");
+        assert_eq!(addition.repository, repository);
+        assert_eq!(addition.destination, parent.join("./new"));
+
+        let error = super::guard_managed_path_lifecycle(
+            &repository,
+            &parent,
+            &arguments(&["--force", "./view"]),
+            "remove",
+        )
+        .expect_err("the guard must check the path Git acts on");
+        assert!(
+            error.to_string().contains("managed Riftri worktree"),
+            "{error}"
         );
     }
 
@@ -3233,10 +4470,10 @@ mod tests {
     /// A global option this parser does not know must not fail *open*. It used
     /// to: the parse bailed out and the command reached real Git with no
     /// lifecycle guard, so `git --attr-source=HEAD worktree remove <managed>`
-    /// removed a managed worktree that the same command without the option
-    /// refuses. Every future Git global option inherits that hole, so the
-    /// unknown-token policy has to match the subcommand parser's, which
-    /// already fails closed.
+    /// (an option the parser did not know then) removed a managed worktree
+    /// that the same command without the option refuses. Every future Git
+    /// global option inherits that hole, so the unknown-token policy has to
+    /// match the subcommand parser's, which already fails closed.
     // Creating a managed worktree needs a native copy-on-write backend, so
     // this runs where `worktree.rs`'s own tests run.
     #[cfg_attr(
@@ -3269,6 +4506,8 @@ mod tests {
         for option in [
             vec![OsString::from("--attr-source=HEAD")],
             vec![OsString::from("--attr-source"), OsString::from("HEAD")],
+            vec![OsString::from("--riftri-unknown=HEAD")],
+            vec![OsString::from("--riftri-unknown"), OsString::from("HEAD")],
         ] {
             let mut arguments = option.clone();
             arguments.extend([
@@ -3282,6 +4521,107 @@ mod tests {
             assert!(
                 error.to_string().contains("managed Riftri worktree"),
                 "{option:?}: {error}"
+            );
+        }
+    }
+
+    /// Git reads the word after `--attr-source`, `--config-env`, or
+    /// `--shallow-file` as that option's value, and more options may follow
+    /// it. The planner used to take the value for the command, so
+    /// `git --attr-source HEAD -c 'alias.wtrm=worktree remove --force' wtrm
+    /// <managed>` reached real Git unclassified. An option the planner does
+    /// not know may or may not take a value, so both readings are guarded.
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            all(
+                feature = "native-cow-integration",
+                any(target_os = "linux", target_os = "windows")
+            )
+        )),
+        ignore = "requires a native copy-on-write worktree backend"
+    )]
+    #[test]
+    fn spaced_global_option_values_are_not_read_as_the_command() {
+        let fixture = repository_fixture();
+        enable_repository(fixture.path()).expect("enable repository");
+        let destination = fixture.path().join("spaced-view");
+        crate::add_worktree(crate::AddWorktreeRequest {
+            repository: fixture.path().to_path_buf(),
+            destination: destination.clone(),
+            revision: OsString::from("HEAD"),
+            mode: crate::WorktreeMode::NewBranch(OsString::from("feature/spaced")),
+            state_dir: None,
+            sparse_directories: Vec::new(),
+        })
+        .expect("create managed worktree");
+        git(
+            fixture.path(),
+            &["config", "alias.stored", "worktree remove --force"],
+        );
+        // SAFETY: test-only, and the variable name is unique to this test.
+        unsafe {
+            std::env::set_var("RIFTRI_TEST_SPACED_ALIAS", "worktree remove --force");
+        }
+
+        let one_shot = "alias.wtrm=worktree remove --force";
+        for prefix in [
+            vec!["--attr-source", "HEAD", "-c", one_shot, "wtrm"],
+            vec!["--attr-source", "HEAD", "stored"],
+            vec!["--attr-source", "worktree", "worktree", "remove", "--force"],
+            vec![
+                "--config-env",
+                "alias.wtrm=RIFTRI_TEST_SPACED_ALIAS",
+                "wtrm",
+            ],
+            vec![
+                "--config-env",
+                "core.quotePath=RIFTRI_TEST_SPACED_ALIAS",
+                "-c",
+                one_shot,
+                "wtrm",
+            ],
+            vec!["--shallow-file", "shallow", "-c", one_shot, "wtrm"],
+            // Not a Git option today: the next word is its value in one
+            // reading and the command in the other.
+            vec!["--riftri-unknown", "value", "-c", one_shot, "wtrm"],
+            vec!["--riftri-unknown", "value", "stored"],
+            vec!["--riftri-unknown", "stored"],
+            vec![
+                "--riftri-unknown",
+                "worktree",
+                "worktree",
+                "remove",
+                "--force",
+            ],
+            vec!["--riftri-unknown", "worktree", "remove", "--force"],
+            vec!["-X", "value", "--riftri-unknown", "value", "stored"],
+        ] {
+            let mut arguments: Vec<OsString> = prefix.iter().map(OsString::from).collect();
+            arguments.push(destination.clone().into_os_string());
+
+            let error = plan_git_command(fixture.path(), &arguments)
+                .expect_err("a spaced global option value must not bypass the guard");
+            assert!(
+                error.to_string().contains("managed Riftri worktree"),
+                "{prefix:?}: {error}"
+            );
+        }
+
+        // The guard stays narrow: a value that merely spells `worktree`, or a
+        // later argument that does, is not a lifecycle command.
+        for arguments in [
+            vec!["--attr-source", "worktree", "log"],
+            vec!["--riftri-unknown", "worktree", "list"],
+            vec!["--riftri-unknown", "value", "log", "--grep", "worktree"],
+        ] {
+            let arguments: Vec<OsString> = arguments.iter().map(OsString::from).collect();
+            assert!(
+                matches!(
+                    plan_git_command(fixture.path(), &arguments).expect("plan ordinary command"),
+                    GitProxyPlan::Passthrough
+                ),
+                "{arguments:?} was not delegated to Git"
             );
         }
     }

@@ -611,12 +611,15 @@ fn doctor_inner(repository_path: &Path, destination: &Path, explicit: bool) -> D
     let repository_enabled = repository_check
         .value
         .as_ref()
-        .and_then(|repository| repository.root.as_deref())
-        .map(|root| {
-            git.local_config_bool(root, activation::ENABLED_CONFIG_KEY)
-                .ok()
-                .flatten()
-                .unwrap_or(false)
+        .filter(|repository| repository.root.is_some())
+        .map(|repository| {
+            git.local_config_bool(
+                &repository.identity.common_git_dir,
+                activation::ENABLED_CONFIG_KEY,
+            )
+            .ok()
+            .flatten()
+            .unwrap_or(false)
         });
     let repository_compatibility = match repository_check.value.as_ref() {
         Some(repository) => match worktree::git_command_root(repository) {
