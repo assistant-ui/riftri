@@ -3836,7 +3836,12 @@ mod tests {
             sparse_directories: Vec::new(),
         })
         .expect("create managed worktree");
-        let destination = destination.to_str().expect("UTF-8 fixture path");
+        // Git's alias splitting treats a backslash as an escape, so a Windows
+        // path needs doubled separators to stay unquoted and intact.
+        let destination = destination
+            .to_str()
+            .expect("UTF-8 fixture path")
+            .replace('\\', "\\\\");
 
         let error = plan_git_command(
             fixture.path(),
