@@ -295,6 +295,10 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> StorageEr
 }
 
 #[cfg(test)]
+#[path = "apfs_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(test)]
 mod tests {
     use std::ffi::CString;
     use std::fs;

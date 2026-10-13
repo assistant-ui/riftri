@@ -24,6 +24,10 @@ where
 }
 
 #[cfg(test)]
+#[path = "exact_copy_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(test)]
 mod tests {
     use std::io::Read;
 
