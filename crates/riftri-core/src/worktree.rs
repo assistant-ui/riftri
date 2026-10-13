@@ -8809,6 +8809,51 @@ fn rehome_add_journal(
     Ok(true)
 }
 
+/// Operation-local positive registration cache. A miss is never evidence
+/// that a view vanished: callers must re-list Git and classify under the
+/// existing operation/metadata locks before retiring anything.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+enum RegisteredWorktrees {
+    Linear(Vec<riftri_git::WorktreeInfo>),
+    Indexed(WorktreeInventory),
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+impl RegisteredWorktrees {
+    fn new(entries: Vec<riftri_git::WorktreeInfo>, single_destination: bool) -> Self {
+        // Adds reconcile one path, so indexing their complete registry would
+        // add allocation without amortizing it over repeated lookups.
+        if single_destination || entries.len() < 2 {
+            return Self::Linear(entries);
+        }
+        // Filter before indexing: a prunable first duplicate must not hide
+        // a later live registration. This is the original `any` predicate,
+        // using the same native-path equivalence as the status index.
+        Self::Indexed(WorktreeInventory::new(
+            entries
+                .into_iter()
+                .filter(|entry| entry.prunable_reason.is_none())
+                .collect(),
+        ))
+    }
+
+    fn contains(&self, destination: &Path) -> bool {
+        match self {
+            Self::Linear(entries) => entries.iter().any(|entry| {
+                paths_match(&entry.path, destination) && entry.prunable_reason.is_none()
+            }),
+            Self::Indexed(inventory) => inventory.find(destination).is_some(),
+        }
+    }
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+#[path = "registered_worktrees_tests.rs"]
+mod registered_worktrees_tests;
+
 /// Reconcile every active add journal in `state_directory` against Git's
 /// worktree registry, retiring the journals whose worktree no longer exists.
 ///
@@ -8884,16 +8929,19 @@ fn reconcile_active_add_journals(
         if !inventories.contains_key(&journal.repository)
             && let Ok(listed) = git.list_worktrees(&journal.repository)
         {
-            inventories.insert(journal.repository.clone(), listed);
+            inventories.insert(
+                journal.repository.clone(),
+                RegisteredWorktrees::new(listed, only_destination.is_some()),
+            );
+            #[cfg(test)]
+            crate::test_hooks::fire(
+                crate::test_hooks::FilesystemRacePoint::ReconciliationInventoryLoaded,
+                &journal.destination,
+            );
         }
         if inventories
             .get(&journal.repository)
-            .is_some_and(|inventory| {
-                matches!(
-                    classify_active_destination(inventory, &claimed, &journal),
-                    Ok(ActiveDestinationState::Registered)
-                )
-            })
+            .is_some_and(|inventory| inventory.contains(&journal.destination))
         {
             continue;
         }
@@ -15234,6 +15282,63 @@ mod tests {
             state_dir: Some(state),
         })
         .expect("the view is still managed");
+    }
+
+    #[test]
+    fn reconciliation_cache_miss_rechecks_git_before_classifying_a_view() {
+        let (fixture, repository, destination, state) = same_destination_fixture();
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .unwrap();
+        let moved = fixture.path().join("moved");
+        git(
+            &repository,
+            &[
+                "worktree",
+                "move",
+                destination.to_str().unwrap(),
+                moved.to_str().unwrap(),
+            ],
+        );
+        let repo = repository.clone();
+        let original = destination.clone();
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::ReconciliationInventoryLoaded,
+            move |_| {
+                git(
+                    &repo,
+                    &[
+                        "worktree",
+                        "move",
+                        moved.to_str().unwrap(),
+                        original.to_str().unwrap(),
+                    ],
+                );
+            },
+        );
+        let (retired, relocated, errors) =
+            super::reconcile_active_add_journals(&Git::default(), &state, None).unwrap();
+        assert_eq!(retired, 0);
+        assert!(
+            relocated.is_empty(),
+            "a stale miss must re-list Git: {relocated:?}"
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(destination.join("file-0.txt").is_file());
+        let report = recover_incomplete_operations(&state).unwrap();
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.active, 1);
+        assert_eq!(report.retired_adds, 0);
     }
 
     /// An add reconciles its destination the same way before claiming it.
