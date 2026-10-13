@@ -7,6 +7,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- `riftri gc --apply` collects a completion marker whose base directory is
+  missing, as its preview already listed. It used to stop on the missing base
+  before reaching later candidates and fail the same way on every run.
 - `riftri repair` no longer retires the add journal of a worktree whose move
   or compaction was interrupted while its path was briefly empty. Repair
   recorded a completed removal and then put the view back, leaving a registered
