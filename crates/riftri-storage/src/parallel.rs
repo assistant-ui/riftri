@@ -71,6 +71,10 @@ where
 }
 
 #[cfg(test)]
+#[path = "parallel_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};

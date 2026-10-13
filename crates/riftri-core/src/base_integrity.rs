@@ -372,6 +372,10 @@ impl std::fmt::Display for ChangedWhileReading {
 impl std::error::Error for ChangedWhileReading {}
 
 #[cfg(all(test, unix))]
+#[path = "base_integrity_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::os::unix::ffi::OsStringExt;

@@ -1824,8 +1824,22 @@ fn print_shell_status(repository: &Path) -> Result<()> {
                 }
             );
         }
-        Err(_) => {
-            outputln!("Repository: none at {}", repository.display());
+        Err(error) => {
+            let bare = matches!(error, riftri_core::ActivationError::BareRepository);
+            if !bare && !riftri_core::is_absent_repository(&error) {
+                // Same wording as `doctor`: a repository that could not be
+                // inspected is not a missing one, and its opt-in state is
+                // not known.
+                outputln!("Repository: unavailable ({error})");
+                outputln!("Repository optimization: unknown");
+                outputln!("Effective optimized interception: unknown");
+                return Ok(());
+            }
+            if bare {
+                outputln!("Repository: bare");
+            } else {
+                outputln!("Repository: none at {}", repository.display());
+            }
             outputln!("Repository optimization: not applicable");
             outputln!("Effective optimized interception: inactive");
         }

@@ -1,0 +1,123 @@
+name: Cold LFS qualification
+
+on:
+  # Opt in by changing the study itself; ordinary PRs do not pay for 120 adds.
+  pull_request:
+    paths:
+      - .github/workflows/cold-lfs.yml
+      - docs/benchmarks/cold-lfs-ci.mjs
+      - docs/benchmarks/cold-lfs-ci.test.mjs
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: Baseline Git revision to compare with the selected workflow ref
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cold-lfs:
+    name: Controlled cold LFS (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_RELEASE_DEBUG: 0
+      COLD_LFS_ROOT: ${{ github.workspace }}/cold-lfs-evidence
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out exact candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Check out baseline source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha || inputs.baseline }}
+          path: baseline
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Test evidence gates
+        run: node --test candidate/docs/benchmarks/cold-lfs-ci.test.mjs candidate/docs/benchmarks/cold-lfs-summary.test.mjs candidate/docs/benchmarks/startup-profile.test.mjs
+
+      - name: Record the plan before building or measuring
+        run: |
+          node candidate/docs/benchmarks/cold-lfs-ci.mjs plan "$COLD_LFS_ROOT" \
+            "$(git -C baseline rev-parse HEAD)" "$(git -C candidate rev-parse HEAD)"
+          rustc -Vv > "$COLD_LFS_ROOT/rustc.txt"
+          cargo -V > "$COLD_LFS_ROOT/cargo.txt"
+          sw_vers > "$COLD_LFS_ROOT/macos.txt"
+          volume_device="$(df -P "$COLD_LFS_ROOT" | awk 'NR == 2 { print $1 }')"
+          diskutil info -plist "$volume_device" > "$COLD_LFS_ROOT/volume.plist"
+          test "$(plutil -extract FilesystemType raw "$COLD_LFS_ROOT/volume.plist")" = apfs
+          if ! command -v git-lfs >/dev/null; then
+            brew install git-lfs
+          fi
+          git-lfs version
+
+      - name: Build fresh baseline release
+        working-directory: baseline
+        run: |
+          CARGO_TARGET_DIR="$RUNNER_TEMP/baseline-target" \
+            cargo build --release --locked -p riftri-cli --message-format=json \
+            | tee "$COLD_LFS_ROOT/baseline-build.jsonl"
+
+      - name: Build fresh candidate release
+        working-directory: candidate
+        run: |
+          CARGO_TARGET_DIR="$RUNNER_TEMP/candidate-target" \
+            cargo build --release --locked -p riftri-cli --message-format=json \
+            | tee "$COLD_LFS_ROOT/candidate-build.jsonl"
+
+      - name: Verify fresh release identities
+        run: |
+          node candidate/docs/benchmarks/cold-lfs-ci.mjs identity "$COLD_LFS_ROOT" \
+            "$RUNNER_TEMP/baseline-target/release/riftri" "$RUNNER_TEMP/candidate-target/release/riftri"
+
+      - name: Run one predeclared sequential study
+        timeout-minutes: 32
+        run: |
+          for lane in control-before candidate control-after; do
+            comparison="$RUNNER_TEMP/baseline-target/release/riftri"
+            if [ "$lane" = candidate ]; then
+              comparison="$RUNNER_TEMP/candidate-target/release/riftri"
+            fi
+            node candidate/docs/benchmarks/cold-lfs.mjs \
+              "$RUNNER_TEMP/baseline-target/release/riftri" "$comparison" \
+              "$COLD_LFS_ROOT/$lane" 16 8388608 20 600000
+          done
+
+      - name: Evaluate every sample and raw Git trace
+        if: always()
+        run: node candidate/docs/benchmarks/cold-lfs-ci.mjs evaluate "$COLD_LFS_ROOT"
+
+      - name: Retain evidence even when qualification fails
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cold-lfs-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 90
+          if-no-files-found: error
+          # No multi-hundred-MiB fixture repositories or build directories.
+          path: |
+            ${{ env.COLD_LFS_ROOT }}/*.json
+            ${{ env.COLD_LFS_ROOT }}/*.jsonl
+            ${{ env.COLD_LFS_ROOT }}/*.txt
+            ${{ env.COLD_LFS_ROOT }}/*.plist
+            ${{ env.COLD_LFS_ROOT }}/*/results.json
+            ${{ env.COLD_LFS_ROOT }}/*/git-*.jsonl
+            ${{ env.COLD_LFS_ROOT }}/*/command-*.log
+            ${{ env.COLD_LFS_ROOT }}/*/command-*.stdout
