@@ -18,7 +18,7 @@ use hegel::{Hegel, Settings, TestCase};
 use tempfile::tempdir;
 
 use super::{
-    COMMON_GIT_BUILTINS, GlobalOptionScope, command_context, expand_worktree_alias,
+    COMMON_GIT_BUILTINS, GlobalOptionScope, command_contexts, expand_worktree_alias,
     record_invocation_alias,
 };
 
@@ -107,7 +107,9 @@ impl GitOracle {
                     .replace(ECHO, "worktree"))
             })
             .collect::<Vec<_>>();
-        let context = command_context(self.directory.path(), &arguments)?;
+        let context = command_contexts(self.directory.path(), &arguments)
+            .into_iter()
+            .next()?;
         if arguments[context.command_index] == "worktree" {
             return Some(arguments[context.command_index + 1..].to_vec());
         }
@@ -174,13 +176,11 @@ fn alias_bodies_split_as_git_splits_them() {
 }
 
 #[test]
-#[ignore = "bug: alias bodies are split on whitespace Git treats as ordinary text"]
 fn alias_bodies_with_unicode_whitespace_split_as_git_splits_them() {
     alias_bodies_agree_with_git(BodyWhitespace::Foreign);
 }
 
 #[test]
-#[ignore = "bug: trailing whitespace in a `-c` alias body is dropped, but Git passes an empty argument"]
 fn alias_bodies_with_trailing_whitespace_split_as_git_splits_them() {
     alias_bodies_agree_with_git(BodyWhitespace::GitWithTrailing);
 }
@@ -231,7 +231,6 @@ fn alias_chains_expand_as_git_expands_them() {
 }
 
 #[test]
-#[ignore = "bug: alias chains longer than 24 hops are passed through, but Git follows them"]
 fn long_alias_chains_expand_as_git_expands_them() {
     let oracle = GitOracle::new();
     Hegel::new(|tc: TestCase| oracle.assert_agreement(&alias_chain(&tc, 40)))
@@ -307,20 +306,24 @@ fn commands_after_global_options_are_found_where_git_finds_them() {
 }
 
 #[test]
-#[ignore = "bug: the separate value of an unknown global option is read as the command"]
 fn commands_after_spaced_global_option_values_are_found_where_git_finds_them() {
     commands_after_global_options_agree_with_git(true);
 }
 
 /// Git never lets an alias replace one of its own commands, so an alias named
-/// after a builtin must leave that builtin's command line alone.
+/// after a builtin must leave that builtin's command line alone. A Git that
+/// lists deprecated builtins lets an alias replace them, so those are left
+/// out; an older Git refuses the `deprecated` listing.
 #[test]
-#[ignore = "bug: an alias named after a builtin outside COMMON_GIT_BUILTINS is expanded"]
 fn aliases_never_shadow_git_builtins() {
     let oracle = GitOracle::new();
+    let deprecated = stdout_line(real_git(oracle.directory.path()).arg("--list-cmds=deprecated"))
+        .unwrap_or_default();
+    let deprecated = deprecated.lines().collect::<Vec<_>>();
     let builtins = stdout_line(real_git(oracle.directory.path()).arg("--list-cmds=builtins"))
         .expect("list Git builtins")
         .lines()
+        .filter(|builtin| !deprecated.contains(builtin))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     assert!(builtins.iter().any(|builtin| builtin == "worktree"));
@@ -332,7 +335,10 @@ fn aliases_never_shadow_git_builtins() {
             os(&format!("alias.{builtin}=worktree prune")),
             os(&builtin),
         ];
-        let context = command_context(oracle.directory.path(), &arguments).expect("context");
+        let context = command_contexts(oracle.directory.path(), &arguments)
+            .into_iter()
+            .next()
+            .expect("context");
         assert_eq!(
             expand_worktree_alias(&context, &arguments).expect("expand"),
             None,
@@ -353,7 +359,10 @@ fn aliases_never_shadow_the_builtins_the_proxy_knows(tc: TestCase) {
         os(builtin),
         os("end"),
     ];
-    let context = command_context(Path::new("."), &arguments).expect("context");
+    let context = command_contexts(Path::new("."), &arguments)
+        .into_iter()
+        .next()
+        .expect("context");
     assert_eq!(
         expand_worktree_alias(&context, &arguments).expect("expand"),
         None
@@ -374,8 +383,9 @@ fn invocation_aliases_are_recorded_only_for_usable_assignments(tc: TestCase) {
         assignment.push(b'=');
         assignment.extend_from_slice(body.as_bytes());
     }
-    // Git reads configuration as bytes; an assignment that is not UTF-8
-    // cannot name an alias the proxy could expand, so it is never recorded.
+    // Git runs an alias body whether or not it is UTF-8, so a trailing byte
+    // that is not UTF-8 stays in the recorded body. Without an `=` it lands in
+    // the key instead, and the assignment defines nothing.
     let invalid = tc.draw(gs::integers::<u8>().max_value(9)) == 0;
     if invalid {
         assignment.push(0xff);
@@ -390,10 +400,17 @@ fn invocation_aliases_are_recorded_only_for_usable_assignments(tc: TestCase) {
         .filter(|prefix| prefix.eq_ignore_ascii_case("alias."))
         .map(|_| &key[6..])
         .filter(|alias| !alias.is_empty());
-    let body = body.filter(|body| !body.is_empty());
+    let body = body
+        .map(|body| {
+            let mut body = body.into_bytes();
+            if invalid {
+                body.push(0xff);
+            }
+            body
+        })
+        .filter(|body| !body.is_empty());
     let expected = alias
         .zip(body)
-        .filter(|_| !invalid)
         .map(|(alias, body)| (alias.to_ascii_lowercase(), body));
     assert_eq!(recorded, expected.into_iter().collect::<Vec<_>>());
 }
@@ -505,10 +522,10 @@ pub(super) fn global_option(tc: &TestCase) -> GlobalOption {
 }
 
 /// Git applies global options left to right: each `-C` is relative to the
-/// one before it, `--git-dir` and `--work-tree` are relative to the final
-/// directory, the last of each wins, and a work tree outranks a Git
-/// directory when both are given. The command is the first word that is not
-/// one of them or its value.
+/// one before it, `--git-dir` is relative to the final directory and the last
+/// one wins, and `--work-tree` moves the checked-out files but never the
+/// repository. The command is the first word that is not one of them or its
+/// value.
 #[hegel::test]
 fn global_options_are_read_the_way_git_applies_them(tc: TestCase) {
     let current = PathBuf::from("/current");
@@ -524,7 +541,7 @@ fn global_options_are_read_the_way_git_applies_them(tc: TestCase) {
         arguments.extend([os("worktree"), os("list")]);
     }
 
-    let Some(context) = command_context(&current, &arguments) else {
+    let Some(context) = command_contexts(&current, &arguments).into_iter().next() else {
         assert!(!has_command, "no command was found in {arguments:?}");
         return;
     };
@@ -542,13 +559,11 @@ fn global_options_are_read_the_way_git_applies_them(tc: TestCase) {
             .next_back()
             .map(|path| directory.join(path))
     };
-    let work_tree = last(|option| option.work_tree.as_ref());
-    let git_directory = last(|option| option.git_directory.as_ref());
     assert_eq!(
         context.git_directory,
-        git_directory.filter(|_| work_tree.is_none())
+        last(|option| option.git_directory.as_ref())
     );
-    assert_eq!(context.repository, work_tree.unwrap_or(directory));
+    assert_eq!(context.repository, directory);
 
     let scopes = options.iter().map(|option| option.scope);
     let expected = if scopes
