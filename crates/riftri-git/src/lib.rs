@@ -699,6 +699,12 @@ impl Git {
     /// its object is unreadable in a damaged store — and the original error is
     /// kept, so corruption is never reported as a caller mistake.
     ///
+    /// A full-length hex object ID is the exception: `--verify` echoes it
+    /// without looking the object up, so it is probed as `<id>^{object}`. No
+    /// ref vouches for a bare ID, which leaves one that was never in the
+    /// repository indistinguishable from one lost to damage; Git's own
+    /// `worktree add` calls both an invalid reference, and so does this.
+    ///
     /// Only for revisions the caller supplied. `HEAD` inside an existing
     /// worktree failing to resolve is a crash shape, not a typo, and keeps
     /// going through `resolve_revision`.
@@ -715,12 +721,19 @@ impl Git {
         match self.resolve_revision(path, revision) {
             Ok(resolved) => Ok(Some(resolved)),
             Err(error @ GitError::CommandFailed { .. }) => {
+                let mut probed = revision.to_os_string();
+                let is_object_id = revision
+                    .to_str()
+                    .is_some_and(|revision| ObjectId::parse(revision).is_ok());
+                if is_object_id {
+                    probed.push("^{object}");
+                }
                 let arguments = [
                     OsString::from("rev-parse"),
                     OsString::from("--verify"),
                     OsString::from("--quiet"),
                     OsString::from("--end-of-options"),
-                    revision.to_os_string(),
+                    probed,
                 ];
                 let probe = self.output_os(Some(path), &arguments)?;
                 if probe.status.code() == Some(1) || self.names_a_non_commit(path, revision)? {
@@ -5301,6 +5314,52 @@ mod tests {
     }
 
     #[test]
+    fn an_absent_full_length_object_id_names_no_commit() {
+        // `rev-parse --verify` echoes a full-length hex ID without looking the
+        // object up, so the probe took an absent ID for a name that resolves
+        // and kept Git's "bad revision" failure. Git's own `worktree add`
+        // calls it an invalid reference, the same as a misspelled branch.
+        let git_runner = Git::default();
+        let sha256 = RepositoryFixture {
+            directory: tempdir().expect("temporary directory"),
+        };
+        git(
+            sha256.path(),
+            &["init", "--quiet", "--object-format=sha256"],
+        );
+        let committed = RepositoryFixture::committed();
+        for (fixture, length) in [
+            (&RepositoryFixture::unborn(), 40),
+            (&committed, 40),
+            (&sha256, 64),
+        ] {
+            for digit in ["1", "A"] {
+                assert_eq!(
+                    git_runner
+                        .resolve_requested_revision(
+                            fixture.path(),
+                            OsStr::new(&digit.repeat(length))
+                        )
+                        .expect("classify an absent object ID"),
+                    None
+                );
+            }
+        }
+
+        // A branch records that its commit once existed, so a missing object
+        // there is damage rather than a typo and keeps Git's error.
+        git(committed.path(), &["branch", "saved"]);
+        let head = git_runner
+            .resolve_revision(committed.path(), OsStr::new("HEAD"))
+            .expect("resolve HEAD");
+        delete_loose_object(committed.path(), head.commit.as_str());
+        assert!(matches!(
+            git_runner.resolve_requested_revision(committed.path(), OsStr::new("saved")),
+            Err(super::GitError::CommandFailed { .. })
+        ));
+    }
+
+    #[test]
     fn local_branch_lookup_ignores_refs_that_only_end_with_the_branch_ref() {
         // show-ref patterns match ref-name suffixes, so these matched
         // `refs/heads/topic`: an absent branch read as present, and a present
@@ -6430,6 +6489,77 @@ mod tests {
             1,
             "do not retry a failed source query through a different path"
         );
+    }
+
+    #[test]
+    fn attributed_tree_queries_reject_a_missing_unqueried_subtree() {
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        for format in ["sha1", "sha256"] {
+            let fixture = tempdir().unwrap();
+            git(
+                fixture.path(),
+                &[
+                    "init",
+                    "--quiet",
+                    "--bare",
+                    &format!("--object-format={format}"),
+                ],
+            );
+            let blob = |bytes: &[u8]| {
+                let output = handle
+                    .run_os_with_input(
+                        Some(fixture.path()),
+                        &["hash-object".into(), "-w".into(), "--stdin".into()],
+                        &[],
+                        bytes,
+                    )
+                    .unwrap();
+                super::parse_object_output(&output.stdout).unwrap()
+            };
+            let attributes = blob(b"*.txt text eol=lf\n");
+            let contents = blob(b"tracked\n");
+            let missing = "f".repeat(contents.as_str().len());
+            assert!(
+                handle
+                    .run(Some(fixture.path()), &["cat-file", "-e", &missing])
+                    .is_err()
+            );
+            // The queried file and its attribute blob are valid. Only a
+            // different subtree is missing. A direct --source lookup can
+            // answer this path successfully without reading that subtree;
+            // replacing the private-index path must not lose its refusal.
+            let records = format!(
+                "100644 blob {}\t.gitattributes\n040000 tree {missing}\tabsent\n100644 blob {}\ttracked.txt\n",
+                attributes.as_str(),
+                contents.as_str(),
+            );
+            let output = handle
+                .run_os_with_input(
+                    Some(fixture.path()),
+                    &["mktree".into(), "--missing".into()],
+                    &[],
+                    records.as_bytes(),
+                )
+                .unwrap();
+            let tree = super::parse_object_output(&output.stdout).unwrap();
+            // Core's recursive preflight also refuses this tree. Keep the
+            // low-level attribute API fail-closed independently of that scan.
+            assert!(handle.list_tree(fixture.path(), &tree).is_err());
+            assert!(
+                matches!(
+                    handle.attribute_pair_for_tree(
+                        fixture.path(),
+                        &tree,
+                        &[PathBuf::from("tracked.txt")],
+                        true,
+                        &info,
+                    ),
+                    Err(super::GitError::CommandFailed { .. })
+                ),
+                "{format}: a broken unqueried subtree must not look supported"
+            );
+        }
     }
 
     #[test]
