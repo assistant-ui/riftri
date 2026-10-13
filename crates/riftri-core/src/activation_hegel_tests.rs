@@ -311,13 +311,19 @@ fn commands_after_spaced_global_option_values_are_found_where_git_finds_them() {
 }
 
 /// Git never lets an alias replace one of its own commands, so an alias named
-/// after a builtin must leave that builtin's command line alone.
+/// after a builtin must leave that builtin's command line alone. A Git that
+/// lists deprecated builtins lets an alias replace them, so those are left
+/// out; an older Git refuses the `deprecated` listing.
 #[test]
 fn aliases_never_shadow_git_builtins() {
     let oracle = GitOracle::new();
+    let deprecated = stdout_line(real_git(oracle.directory.path()).arg("--list-cmds=deprecated"))
+        .unwrap_or_default();
+    let deprecated = deprecated.lines().collect::<Vec<_>>();
     let builtins = stdout_line(real_git(oracle.directory.path()).arg("--list-cmds=builtins"))
         .expect("list Git builtins")
         .lines()
+        .filter(|builtin| !deprecated.contains(builtin))
         .map(str::to_owned)
         .collect::<Vec<_>>();
     assert!(builtins.iter().any(|builtin| builtin == "worktree"));
