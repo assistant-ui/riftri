@@ -7,9 +7,10 @@ use std::path::Path;
 use hegel::TestCase;
 use hegel::generators as gs;
 
+#[cfg(unix)]
+use super::resolve_program;
 use super::{
     SetupOutput, choose_agent, confirm, default_destination, display, print_next_steps, question,
-    resolve_program,
 };
 
 const REJECTION: &str = "Please enter a value without control characters.\n";
