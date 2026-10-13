@@ -188,6 +188,9 @@ mod apfs;
 #[cfg(target_os = "macos")]
 mod macos_acl;
 
+#[cfg(target_os = "macos")]
+pub mod checkout_clone;
+
 /// Inspect the entry's extended macOS ACL without following symlinks.
 /// Errors are returned rather than interpreting unreadable ACLs as absent.
 #[cfg(target_os = "macos")]

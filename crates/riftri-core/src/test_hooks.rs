@@ -17,6 +17,8 @@ pub(crate) enum FilesystemRacePoint {
     BaseReuseAfterExclusiveWait,
     AddIntentPersist,
     AddCleanCheck,
+    #[cfg(target_os = "macos")]
+    LfsClonePrepared,
 }
 
 type Hook = Box<dyn FnOnce(&Path)>;
