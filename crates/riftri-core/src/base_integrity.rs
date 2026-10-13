@@ -342,11 +342,27 @@ fn hash_file_bytes(
     buffer: &mut [u8],
 ) -> io::Result<()> {
     let mut file = open_regular(path)?;
+    hash_reader_bytes(&mut file, expected_length, digest, buffer)
+}
+
+fn hash_reader_bytes(
+    file: &mut impl Read,
+    expected_length: u64,
+    digest: &mut Sha256,
+    buffer: &mut [u8],
+) -> io::Result<()> {
     let mut length = 0;
     loop {
-        let count = file.read(buffer)?;
+        // One extra byte proves growth. Do not hash an arbitrarily enlarged
+        // file (or chase a writer) after the snapshot is already invalid.
+        let remaining = expected_length - length;
+        let limit = remaining.saturating_add(1).min(buffer.len() as u64) as usize;
+        let count = file.read(&mut buffer[..limit])?;
         if count == 0 {
             break;
+        }
+        if count as u64 > remaining {
+            return Err(io::Error::other(ChangedWhileReading));
         }
         length += count as u64;
         digest.update(&buffer[..count]);
@@ -370,6 +386,10 @@ impl std::fmt::Display for ChangedWhileReading {
 }
 
 impl std::error::Error for ChangedWhileReading {}
+
+#[cfg(test)]
+#[path = "bounded_integrity_tests.rs"]
+mod bounded_integrity_tests;
 
 #[cfg(all(test, unix))]
 #[path = "base_integrity_hegel_tests.rs"]

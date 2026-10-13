@@ -149,6 +149,32 @@ fn small_lfs_workloads_stay_inline() {
     assert_eq!(super::lfs_materialization_workers(&objects), 1);
 }
 
+#[test]
+fn lfs_growth_after_open_does_not_write_oversized_content() {
+    use crate::test_hooks::{FilesystemRacePoint, install};
+    let (_fixture, staging, mut objects) = fixture_with_size(1);
+    objects.truncate(1); // Inline worker keeps the deterministic hook local.
+    let source = objects[0].source_path.clone();
+    let _hook = install(FilesystemRacePoint::LfsReadReady, move |_| {
+        fs::write(source, vec![42; 4 * 1024 * 1024]).unwrap();
+    });
+    let error = materialize_git_lfs_objects(&staging, &objects).unwrap_err();
+    assert!(
+        error.to_string().contains("changed while it was read"),
+        "{error}"
+    );
+    assert_eq!(
+        fs::metadata(staging.join(&objects[0].checkout_path))
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        fs::metadata(&objects[0].source_path).unwrap().len(),
+        4 * 1024 * 1024
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn native_lfs_expansion_verifies_the_private_snapshot_before_publication() {
@@ -158,6 +184,7 @@ fn native_lfs_expansion_verifies_the_private_snapshot_before_publication() {
     for action in [
         "success",
         "corrupt-clone",
+        "grow-clone",
         "source-write",
         "checkout-write",
         "source-corrupt",
@@ -181,6 +208,12 @@ fn native_lfs_expansion_verifies_the_private_snapshot_before_publication() {
             seen.set(true);
             match action {
                 "corrupt-clone" => fs::write(clone, vec![0xff; 8 * 1024 * 1024]).unwrap(),
+                "grow-clone" => fs::OpenOptions::new()
+                    .write(true)
+                    .open(clone)
+                    .unwrap()
+                    .set_len(8 * 1024 * 1024 + 1)
+                    .unwrap(),
                 "source-write" => fs::write(source, b"later source write").unwrap(),
                 "checkout-write" => fs::write(destination, b"later checkout write").unwrap(),
                 _ => {}
@@ -199,6 +232,8 @@ fn native_lfs_expansion_verifies_the_private_snapshot_before_publication() {
             assert!(
                 error.contains(if action == "checkout-write" {
                     "changed before publication"
+                } else if action == "grow-clone" {
+                    "changed while it was read"
                 } else {
                     "failed SHA-256 verification"
                 }),
