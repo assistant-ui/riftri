@@ -19,8 +19,8 @@ use std::process::Command;
 use hegel::generators as gs;
 use hegel::{Hegel, Settings, TestCase};
 use riftri_core::{
-    DestinationReadinessStatus, RepositoryCompatibilityBlockerKind, doctor, doctor_for_destination,
-    enable_repository,
+    DestinationReadinessStatus, OverlayFsHelperReadiness, RepositoryCompatibilityBlockerKind,
+    doctor, doctor_for_destination, enable_repository,
 };
 use shell_words::shell_words;
 
@@ -239,7 +239,18 @@ fn doctor_reports_are_consistent_runnable_and_read_only() {
                 word("enable"),
                 repository.clone().into_os_string(),
             ]),
-            DestinationReadinessStatus::Blocked => None,
+            // A blocked verdict names a command only when the missing
+            // OverlayFS mount helper is what Riftri can point at.
+            DestinationReadinessStatus::Blocked => {
+                (readiness.overlayfs_helper == OverlayFsHelperReadiness::Unavailable).then(|| {
+                    vec![
+                        word("sudo"),
+                        word("riftri"),
+                        word("overlayfs"),
+                        word("install-helper"),
+                    ]
+                })
+            }
         };
         assert_eq!(command, expected_command);
 
