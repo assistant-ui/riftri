@@ -164,9 +164,12 @@ pub(crate) struct ScriptedGit {
 impl ScriptedGit {
     pub(crate) fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/scripted-git.sh");
         #[cfg(unix)]
-        std::os::unix::fs::symlink(script, directory.path().join("git")).unwrap();
+        std::os::unix::fs::symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/scripted-git.sh"),
+            directory.path().join("git"),
+        )
+        .unwrap();
         Self { directory }
     }
 
@@ -188,6 +191,16 @@ impl ScriptedGit {
         };
         std::fs::write(file("out"), stdout).unwrap();
         std::fs::write(file("end"), end).unwrap();
+    }
+
+    /// Make the scripted invocation with this index read all of its standard
+    /// input before replying, as a Git that consumed the whole request would.
+    pub(crate) fn drain_input(&self, invocation: usize) {
+        std::fs::write(
+            self.directory.path().join(format!("{invocation}.drain")),
+            "",
+        )
+        .unwrap();
     }
 
     /// Forget every script and restart the invocation count.

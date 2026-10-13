@@ -470,8 +470,10 @@ fn conditional_includes_are_rejected_unless_their_target_can_be_checked(tc: Test
 
 #[hegel::test(test_cases = 12)]
 fn a_batch_answer_is_refused_when_git_never_read_the_whole_request(tc: TestCase) {
-    // The stand-in replies without reading its input. A request larger than
-    // any pipe buffer therefore cannot have been delivered in full.
+    // A small request is read in full before the reply. A large one gets a
+    // reply without being read, and as it is larger than any pipe buffer it
+    // cannot have been delivered in full. A small request that is never read
+    // is left out: whether it reached the pipe before Git exited is a race.
     let request_count = tc.draw(hegel::one_of!(
         gs::integers::<usize>().min_value(1).max_value(20),
         gs::integers::<usize>().min_value(4000).max_value(5000)
@@ -480,8 +482,16 @@ fn a_batch_answer_is_refused_when_git_never_read_the_whole_request(tc: TestCase)
     let objects = vec![blob.clone(); request_count];
     let reply = format!("{} blob 7\n", blob.as_str()).repeat(request_count);
 
-    let sizes = with_reply(0, reply.as_bytes(), |git, fixture| {
-        git.blob_sizes(&fixture.repository(), &objects)
+    let sizes = SCENE.with(|scene| {
+        scene.scripted.reset();
+        scene.scripted.script(0, reply.as_bytes(), End::Exit(0));
+        if request_count <= 20 {
+            scene.scripted.drain_input(0);
+        }
+        scene
+            .scripted
+            .git()
+            .blob_sizes(&scene.fixture.repository(), &objects)
     });
 
     if request_count <= 20 {
