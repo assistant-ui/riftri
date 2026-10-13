@@ -210,3 +210,74 @@ test('read-only CLI uses local trace names, not recorded machine paths or execut
   fs.writeFileSync(file, JSON.stringify(r));
   assert.throws(() => readStartupProfile(file), /label/);
 });
+
+test('canonical LFS children are session-scoped, not inferred from index counters or substrings', () => {
+  const events = trace();
+  const add = (sid, child_id, argv, seconds = 0.025) => events.push(
+    event(sid, 'child_start', {child_id, child_class: 'subprocess', use_shell: true, argv}),
+    event(sid, 'child_exit', {child_id, t_rel: seconds, code: 0}));
+  add('status', 0, ['git-lfs filter-process']);
+  add('reset', 0, ['printf git-lfs filter-process']);
+  add('reset', 1, ['git-lfs filter-process --custom']);
+  events.push(...command('reset/child', 'status', 0.1, 42));
+  add('reset/child', 0, ['git-lfs filter-process']);
+  const p = profileTrace(jsonl(events));
+  assert.equal(p.complete, true);
+  assert.equal(p.metrics.statusRefreshScan, 0);
+  assert.equal(p.metrics.statusLfsFilterStarts, 1);
+  assert.equal(p.metrics.statusLfsFilterMs, 25);
+  assert.equal(p.metrics.resetLfsFilterStarts, 0);
+  assert.equal(p.metrics.resetLfsFilterMs, null);
+  assert.equal(p.metrics.statusMs, 40, 'child lifetime must not be added to parent time');
+});
+
+test('unfinished or failed LFS children prevent aggregate evidence; multiple lifetimes are not summed', () => {
+  const events = trace();
+  const start = id => event('reset', 'child_start', {child_id:id, child_class:'subprocess', use_shell:true, argv:['git-lfs filter-process']});
+  const end = (id, code = 0) => event('reset', 'child_exit', {child_id:id, t_rel:0.2, code});
+  for (const child of [[start(0)], [start(0),end(0,1)]]) {
+    const p = profileTrace(jsonl([...events,...child]));
+    assert.equal(p.complete, false);
+    assert.equal(p.metrics.resetLfsFilterMs, null);
+    const grouped = profileStartup(report(),()=>jsonl([...events,...child]));
+    assert.ok(grouped.groups.every(g=>Object.values(g.metrics).every(m=>m.distribution===null)));
+  }
+  const p = profileTrace(jsonl([...events,start(0),start(1),end(1),end(0)]));
+  assert.equal(p.complete,true);
+  assert.equal(p.metrics.resetLfsFilterStarts,2);
+  assert.equal(p.metrics.resetLfsFilterMs,null);
+  assert.equal(p.commands.find(c=>c.name==='reset').children.length,2);
+  assert.throws(()=>profileTrace(jsonl([...events,start(0),start(0)])),/duplicate child/);
+  assert.throws(()=>profileTrace(jsonl([...events,start(0),end(0),end(0)])),/duplicate child/);
+  assert.equal(profileTrace(jsonl([...events,end(0)])).complete,false);
+});
+
+test('retained real LFS trace exposes a filter even with zero status refresh scans', () => {
+  const file = new URL('./fixtures/lfs-trace-38319750916.jsonl', import.meta.url);
+  const text = fs.readFileSync(file,'utf8');
+  assert.equal(createHash('sha256').update(text).digest('hex'),
+    '13f5e443b63805fa7a59a8f515143b3fc3d2027e89d6caee8dda2d7de50c7b2b');
+  const p = profileTrace(text);
+  assert.equal(p.complete,true);
+  assert.equal(p.metrics.resetLfsFilterStarts,1);
+  assert.equal(p.metrics.statusLfsFilterStarts,1);
+  assert.equal(p.metrics.statusRefreshScan,0);
+  assert.equal(p.metrics.statusLfsFilterMs,0.264894*1000);
+  const cli = spawnSync(process.execPath,[script,'--trace',fileURLToPath(file)],{encoding:'utf8',timeout:10000});
+  assert.equal(cli.status,0,cli.stderr);
+  assert.equal(JSON.parse(cli.stdout).metrics.statusLfsFilterStarts,1);
+  assert.equal(JSON.parse(cli.stdout).speedupClaim,false);
+  assert.equal(fs.readFileSync(file,'utf8'),text);
+});
+
+test('direct canonical filter argv is recognized and malformed child receipts are refused', () => {
+  const start = event('status','child_start',{child_id:0,child_class:'subprocess',use_shell:false,argv:['git-lfs','filter-process']});
+  const end = event('status','child_exit',{child_id:0,t_rel:0.02,code:0});
+  assert.equal(profileTrace(jsonl([...trace(),start,end])).metrics.statusLfsFilterStarts,1);
+  for (const invalid of [{child_id:-1},{argv:[]},{argv:['git-lfs',null]}]) {
+    assert.throws(()=>profileTrace(jsonl([...trace(),{...start,...invalid},end])),/child/);
+  }
+  for (const invalid of [{child_id:-1},{t_rel:-1},{t_rel:'0.02'},{code:null}]) {
+    assert.throws(()=>profileTrace(jsonl([...trace(),start,{...end,...invalid}])),/child/);
+  }
+});
