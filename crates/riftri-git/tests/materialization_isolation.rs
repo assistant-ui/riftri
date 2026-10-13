@@ -1,43 +1,14 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::PathBuf;
+use std::process::Command;
 
 use riftri_git::{Git, ObjectId};
 
-fn isolated_git(repository: &Path) -> Command {
-    let mut command = Command::new("git");
-    command
-        .current_dir(repository)
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            if cfg!(windows) { "NUL" } else { "/dev/null" },
-        )
-        .env("GIT_CONFIG_NOSYSTEM", "1");
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
-    ] {
-        command.env_remove(name);
-    }
-    command
-}
+#[allow(dead_code)]
+mod support;
 
-fn git(repository: &Path, args: &[&str]) -> Output {
-    let output = isolated_git(repository).args(args).output().unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    output
-}
+use support::git;
 
 fn required_helper_path(name: &str) -> PathBuf {
     PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("missing {name}")))
