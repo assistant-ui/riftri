@@ -730,6 +730,10 @@ for a bare repository, from its Git directory, and journals record that
 directory, the first entry of `git worktree list`, as the repository.
 Repository-local Git interception (`riftri enable`) still requires a working
 tree and keeps the `bare-repository` policy receipt.
+Once a linked worktree has enabled the repository, the Git shim plans
+`git worktree` commands run from the bare directory as it does from any
+worktree: adds are optimized, and removals, moves, and prunes of managed views
+are journaled or refused.
 
 ### D043: gc retires finished journal history
 

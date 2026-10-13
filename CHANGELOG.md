@@ -45,6 +45,97 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   repository as `Repository: bare`. Every inspection failure used to be
   reported as `Repository: none`, which now means only that the path is not
   inside a repository.
+- The Git shim plans `git worktree` commands against the repository Git opens,
+  not the directory `--work-tree` or `GIT_WORK_TREE` names. A work tree outside
+  the enabled repository (a missing path, a file, a plain directory, or another
+  repository) used to turn `git worktree add`, `remove`, `move`, and `prune`
+  into ordinary Git, so `git --work-tree=<elsewhere> worktree remove --force
+  <managed>` deleted a managed view outside the removal journal.
+
+- Read and write `riftri.enabled` and `riftri.stateDirectory` in the
+  repository Git opens instead of at the working-tree root. With
+  `GIT_WORK_TREE` or a persisted `core.worktree` naming another repository,
+  the shim consulted that repository's settings and passed
+  `git worktree remove --force` and `git worktree prune` for a managed view to
+  real Git outside the journal, and `riftri enable` and `riftri disable`
+  changed the wrong repository.
+
+- The Git shim leaves a command to Git when Git cannot enter its `-C`
+  directory or open its `--git-dir`, so Git reports the failure with its own
+  message and exit code. An enabled repository that exists but cannot be
+  inspected still refuses worktree lifecycle commands, and an unreadable
+  `riftri.enabled` value no longer blocks read-only worktree commands.
+
+- Look up a Git alias in the repository `--git-dir` selects. The shim asked
+  for the alias in the current directory, so from outside the repository
+  `git --git-dir=<repository>/.git <alias>` for an alias of
+  `worktree remove --force` reached real Git unclassified and deleted a
+  managed view outside the journal.
+
+- A Git global option written with a separate value no longer hides a worktree
+  lifecycle command from the shim. The value of `--attr-source <value>`,
+  `--config-env <name>=<envvar>`, or `--shallow-file <file>` was read as the
+  command, so `git --attr-source HEAD -c 'alias.wtrm=worktree remove --force'
+  wtrm <managed>` reached Git and removed a managed worktree outside the
+  journal. Those forms are now parsed as Git parses them, and for a global
+  option the shim does not know, the next word is checked both as the option's
+  value and as the command.
+
+- A chain of Git aliases longer than 24 hops that ends in a worktree lifecycle
+  command is now planned as that command. The shim stopped following the chain
+  at a fixed depth and passed it to Git, which follows a chain of any length,
+  so a managed worktree could be removed outside the journal.
+
+- A Git alias named after a command Git runs itself is no longer expanded by
+  the shim. Git never looks up an alias for a builtin or for a `git-<name>`
+  program, but the shim exempted only a short list of common builtins, so with
+  `alias.gc = worktree remove --force`, `git gc <managed>` was planned as a
+  forced removal of a worktree the user never asked to remove. The shim now
+  asks Git for its command list before it acts on an alias that resolves to a
+  worktree command; other invocations start no extra Git process. An alias
+  named after a deprecated builtin such as `whatchanged`, which Git does run
+  in place of the builtin, is still planned as the command it expands to.
+
+- Git alias bodies are split on the whitespace Git itself splits on (space,
+  tab, line feed, carriage return) and are no longer trimmed. The shim split on
+  any Unicode whitespace, so an alias such as `worktree remove --force
+  <managed>` whose path contained a no-break space was checked against the
+  wrong word and reached Git, which removed the managed worktree outside the
+  journal. An alias body with leading or trailing whitespace is now planned as
+  the command Git runs: Git refuses the first and passes an extra empty
+  argument for the second.
+
+- The Git shim reads alias bodies as bytes. On Unix an alias whose body is not
+  valid UTF-8, for example because it names a path with arbitrary bytes, used
+  to be skipped and reached real Git unclassified; it is now planned or
+  refused like the spelled-out command, whether it is stored, passed with
+  `-c`, or read through `--config-env`. On Windows a worktree alias whose
+  arguments are not valid UTF-8 is refused.
+
+- The Git shim reads an alias body the way Git does when the body starts with
+  global options. An alias such as `-p worktree remove --force` reached real
+  Git unclassified and removed a managed worktree outside the journal; it is
+  now planned or refused like the spelled-out command. Bodies Git itself
+  refuses, such as one starting with `-C <path>` or `--no-pager`, still
+  delegate to Git.
+
+- The Git shim guards managed worktrees from a bare repository's Git
+  directory. It took a repository without a working-tree root for no
+  repository, so in a bare repository enabled from one of its linked
+  worktrees, `git worktree remove --force <managed>` run from the bare
+  directory, or from outside it with `--git-dir`, reached real Git and deleted
+  the view outside the removal journal. Removals, moves, and prunes there are
+  now journaled or refused, and `git worktree add` is optimized as
+  `riftri worktree add` already was. `riftri worktree prune` no longer refuses
+  a bare repository.
+
+- The Git shim resolves a relative worktree path in the directory Git runs
+  in. Under `--git-dir` it used the worktree root it derived from the Git
+  directory instead, so from another directory
+  `git --git-dir=<repository>/.git worktree remove --force ./view` was checked
+  against a path that is not a worktree and reached real Git, which deleted
+  the managed view outside the removal journal. The same held for
+  `git worktree move` and for a bare repository named by `--git-dir`.
 
 
 ## [0.6.4] - 2026-10-08
