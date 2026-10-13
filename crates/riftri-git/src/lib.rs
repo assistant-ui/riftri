@@ -699,6 +699,12 @@ impl Git {
     /// its object is unreadable in a damaged store — and the original error is
     /// kept, so corruption is never reported as a caller mistake.
     ///
+    /// A full-length hex object ID is the exception: `--verify` echoes it
+    /// without looking the object up, so it is probed as `<id>^{object}`. No
+    /// ref vouches for a bare ID, which leaves one that was never in the
+    /// repository indistinguishable from one lost to damage; Git's own
+    /// `worktree add` calls both an invalid reference, and so does this.
+    ///
     /// Only for revisions the caller supplied. `HEAD` inside an existing
     /// worktree failing to resolve is a crash shape, not a typo, and keeps
     /// going through `resolve_revision`.
@@ -715,12 +721,19 @@ impl Git {
         match self.resolve_revision(path, revision) {
             Ok(resolved) => Ok(Some(resolved)),
             Err(error @ GitError::CommandFailed { .. }) => {
+                let mut probed = revision.to_os_string();
+                let is_object_id = revision
+                    .to_str()
+                    .is_some_and(|revision| ObjectId::parse(revision).is_ok());
+                if is_object_id {
+                    probed.push("^{object}");
+                }
                 let arguments = [
                     OsString::from("rev-parse"),
                     OsString::from("--verify"),
                     OsString::from("--quiet"),
                     OsString::from("--end-of-options"),
-                    revision.to_os_string(),
+                    probed,
                 ];
                 let probe = self.output_os(Some(path), &arguments)?;
                 if probe.status.code() == Some(1) || self.names_a_non_commit(path, revision)? {
@@ -5292,6 +5305,52 @@ mod tests {
             1,
             "an ordinary revision must still resolve in one process"
         );
+    }
+
+    #[test]
+    fn an_absent_full_length_object_id_names_no_commit() {
+        // `rev-parse --verify` echoes a full-length hex ID without looking the
+        // object up, so the probe took an absent ID for a name that resolves
+        // and kept Git's "bad revision" failure. Git's own `worktree add`
+        // calls it an invalid reference, the same as a misspelled branch.
+        let git_runner = Git::default();
+        let sha256 = RepositoryFixture {
+            directory: tempdir().expect("temporary directory"),
+        };
+        git(
+            sha256.path(),
+            &["init", "--quiet", "--object-format=sha256"],
+        );
+        let committed = RepositoryFixture::committed();
+        for (fixture, length) in [
+            (&RepositoryFixture::unborn(), 40),
+            (&committed, 40),
+            (&sha256, 64),
+        ] {
+            for digit in ["1", "A"] {
+                assert_eq!(
+                    git_runner
+                        .resolve_requested_revision(
+                            fixture.path(),
+                            OsStr::new(&digit.repeat(length))
+                        )
+                        .expect("classify an absent object ID"),
+                    None
+                );
+            }
+        }
+
+        // A branch records that its commit once existed, so a missing object
+        // there is damage rather than a typo and keeps Git's error.
+        git(committed.path(), &["branch", "saved"]);
+        let head = git_runner
+            .resolve_revision(committed.path(), OsStr::new("HEAD"))
+            .expect("resolve HEAD");
+        delete_loose_object(committed.path(), head.commit.as_str());
+        assert!(matches!(
+            git_runner.resolve_requested_revision(committed.path(), OsStr::new("saved")),
+            Err(super::GitError::CommandFailed { .. })
+        ));
     }
 
     #[test]
