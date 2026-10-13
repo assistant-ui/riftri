@@ -5088,6 +5088,7 @@ fn validate_destination_path_semantics(
         .tempdir_in(parent)
         .map_err(|source| io("create destination path-semantics probe", parent, source))?;
     let probe_path = probe.path().to_path_buf();
+    let paths = path_probe::select(paths, &probe_path);
     let mut directories = HashSet::new();
 
     let validation = (|| {
@@ -5137,6 +5138,9 @@ fn validate_destination_path_semantics(
     })?;
     validation
 }
+
+#[path = "path_probe.rs"]
+mod path_probe;
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn needs_destination_path_probe(paths: &[PathBuf]) -> bool {
