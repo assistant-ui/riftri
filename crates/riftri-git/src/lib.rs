@@ -6483,6 +6483,77 @@ mod tests {
     }
 
     #[test]
+    fn attributed_tree_queries_reject_a_missing_unqueried_subtree() {
+        let handle = Git::default();
+        let info = handle.detect().unwrap();
+        for format in ["sha1", "sha256"] {
+            let fixture = tempdir().unwrap();
+            git(
+                fixture.path(),
+                &[
+                    "init",
+                    "--quiet",
+                    "--bare",
+                    &format!("--object-format={format}"),
+                ],
+            );
+            let blob = |bytes: &[u8]| {
+                let output = handle
+                    .run_os_with_input(
+                        Some(fixture.path()),
+                        &["hash-object".into(), "-w".into(), "--stdin".into()],
+                        &[],
+                        bytes,
+                    )
+                    .unwrap();
+                super::parse_object_output(&output.stdout).unwrap()
+            };
+            let attributes = blob(b"*.txt text eol=lf\n");
+            let contents = blob(b"tracked\n");
+            let missing = "f".repeat(contents.as_str().len());
+            assert!(
+                handle
+                    .run(Some(fixture.path()), &["cat-file", "-e", &missing])
+                    .is_err()
+            );
+            // The queried file and its attribute blob are valid. Only a
+            // different subtree is missing. A direct --source lookup can
+            // answer this path successfully without reading that subtree;
+            // replacing the private-index path must not lose its refusal.
+            let records = format!(
+                "100644 blob {}\t.gitattributes\n040000 tree {missing}\tabsent\n100644 blob {}\ttracked.txt\n",
+                attributes.as_str(),
+                contents.as_str(),
+            );
+            let output = handle
+                .run_os_with_input(
+                    Some(fixture.path()),
+                    &["mktree".into(), "--missing".into()],
+                    &[],
+                    records.as_bytes(),
+                )
+                .unwrap();
+            let tree = super::parse_object_output(&output.stdout).unwrap();
+            // Core's recursive preflight also refuses this tree. Keep the
+            // low-level attribute API fail-closed independently of that scan.
+            assert!(handle.list_tree(fixture.path(), &tree).is_err());
+            assert!(
+                matches!(
+                    handle.attribute_pair_for_tree(
+                        fixture.path(),
+                        &tree,
+                        &[PathBuf::from("tracked.txt")],
+                        true,
+                        &info,
+                    ),
+                    Err(super::GitError::CommandFailed { .. })
+                ),
+                "{format}: a broken unqueried subtree must not look supported"
+            );
+        }
+    }
+
+    #[test]
     #[ignore = "paired direct-tree attribute benchmark; no wall-clock threshold"]
     fn reports_direct_tree_attribute_latency() {
         let fixture = RepositoryFixture::committed();
