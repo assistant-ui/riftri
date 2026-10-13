@@ -504,6 +504,16 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[path = "setup_hegel_tests.rs"]
+mod hegel_tests;
+
+// The plan creates real copy-on-write worktrees, which these tests can only
+// count on where the backend needs no prepared volume.
+#[cfg(all(test, target_os = "macos"))]
+#[path = "setup_plan_hegel_tests.rs"]
+mod plan_hegel_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;

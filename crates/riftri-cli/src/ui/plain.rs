@@ -138,6 +138,10 @@ impl fmt::Display for Interrupted {
 impl std::error::Error for Interrupted {}
 
 #[cfg(test)]
+#[path = "plain_hegel_tests.rs"]
+mod hegel_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
