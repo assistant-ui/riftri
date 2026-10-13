@@ -1,0 +1,8 @@
+# The global Git configuration for tests. See ../../config.toml.
+#
+# With the system configuration hidden, Git for Windows probes symlink support
+# at `git init` and writes `core.symlinks=false` into the new repository, which
+# doctor reports as a checkout-compatibility blocker. Every other platform
+# already defaults to true.
+[core]
+	symlinks = true
