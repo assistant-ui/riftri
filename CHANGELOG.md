@@ -19,6 +19,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   worktree that Riftri no longer managed and whose base `riftri gc` could
   collect; after an interrupted compaction undo, every later repair and removal
   failed. An add onto such a path is refused the same way.
+- `riftri gc --apply` collects a completion marker whose base directory is
+  missing, as its preview already listed. It used to stop on the missing base
+  before reaching later candidates and fail the same way on every run.
 
 
 ## [0.6.4] - 2026-10-08
