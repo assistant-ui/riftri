@@ -122,7 +122,7 @@ fn attribute_source_support_follows_the_release_number(tc: TestCase) {
         format!("git version {major}.{minor}.{patch}.{build}"),
         format!("git version {major}.x.{patch}"),
         format!("git version v{major}.{minor}.{patch}"),
-        format!("git version {major}.{minor}.99999999999"),
+        format!("git version {major}.{minor}.99999999999999999999999"),
         "git version".to_owned(),
     ]));
     assert!(!supports(unknown.clone()), "{unknown}");
@@ -253,7 +253,6 @@ fn tree_entries_accepted_after_corruption_still_match_their_records(tc: TestCase
 }
 
 #[hegel::test]
-#[ignore = "bug: parse_tree_entries accepts a signed mode such as +100644"]
 fn tree_entry_modes_are_octal_digits_only(tc: TestCase) {
     let record = TreeRecord::draw(&tc);
     let mode: String = tc.draw(gs::text().alphabet("+-01234567").min_size(1).max_size(8));

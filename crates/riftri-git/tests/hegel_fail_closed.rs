@@ -97,7 +97,7 @@ const PROBES: &[(&str, bool, Probe)] = &[
         shown(git.list_worktrees(path))
     }),
     ("resolve_worktree_path", true, |git, path, _| {
-        shown(git.resolve_worktree_path(path, OsStr::new("repository")))
+        shown(git.resolve_worktree_path(path, path, OsStr::new("repository")))
     }),
     ("worktree_root_from_git_dir", false, |git, path, _| {
         shown(git.worktree_root_from_git_dir(&path.join(".git")))
