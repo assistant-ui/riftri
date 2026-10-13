@@ -377,6 +377,26 @@ without worsening p95 by more than 5%. An optional build-provenance JSON path
 as the second argument also checks `baseline.sha256` and `candidate.sha256`
 against the recorded binaries.
 
+The opt-in **Cold LFS qualification** workflow runs the same comparison on a
+dedicated `macos-15` runner. It runs for PRs changing the hosted study, or by
+manual dispatch with an explicit baseline revision and selected candidate ref.
+It resolves both commits, records a plan before timing, and builds independent
+uncached release binaries with verified Cargo receipts. Three sequential lanes
+use 16 × 8-MiB objects and 20 alternating pairs each (120 verified adds total).
+The existing thresholds are unchanged; the larger fixed sample size does not
+remove outliers, retry a noisy lane, or guarantee low host noise.
+
+The job fails if the comparison does not qualify, independently of the ordinary
+correctness CI. Its 90-day artifact retains the plan, build provenance, all
+receipts, command output and raw Trace2 files even on failure; fixture
+repositories and build directories are not uploaded. The summary verifies
+every trace offline and binds the workload and measured binaries to the plan.
+After downloading the artifact, reproduce it with
+`node docs/benchmarks/cold-lfs-ci.mjs evaluate /path/to/evidence` from the
+recorded candidate source (move the existing `summary.json` aside first; the
+tool refuses to overwrite evidence). Earlier local or hosted failures remain
+part of the evidence and must not be replaced by a later favorable run.
+
 Cold LFS cloning must be evaluated separately from cached worktree creation.
 The verified streaming materializer keeps the Git-created checkout file's
 mode, ACL and extended attributes.
