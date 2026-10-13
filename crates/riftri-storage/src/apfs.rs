@@ -299,6 +299,7 @@ mod tests {
     use std::ffi::CString;
     use std::fs;
     use std::io::Write;
+    use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
     use std::path::Path;
@@ -308,6 +309,127 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{clone_tree, clone_tree_bulk_for_evaluation};
+
+    // Feasibility only: there is deliberately no production LFS clone helper.
+    // A data clone carries object-store metadata; a checkout must instead keep
+    // its own permissions, ACL and attributes. Exercise the proposed metadata
+    // restoration on private fixture files before considering a runtime path.
+    #[test]
+    fn lfs_clone_metadata_restoration_feasibility() {
+        for source_acl in [false, true] {
+            for checkout_acl in [false, true] {
+                let fixture = tempdir().unwrap();
+                let source = fixture.path().join("object");
+                let checkout = fixture.path().join("pointer");
+                let cloned = fixture.path().join("clone");
+                let payload = vec![0x5a; 2 * 1024 * 1024];
+                fs::write(&source, &payload).unwrap();
+                fs::write(&checkout, b"pointer\n").unwrap();
+                fs::set_permissions(&source, fs::Permissions::from_mode(0o640)).unwrap();
+                fs::set_permissions(&checkout, fs::Permissions::from_mode(0o751)).unwrap();
+                set_xattr(&source, "com.riftri.shared", b"object");
+                set_xattr(&source, "com.riftri.source-only", b"object");
+                set_xattr(&checkout, "com.riftri.shared", b"checkout");
+                set_xattr(&checkout, "com.riftri.checkout-only", b"checkout");
+                for (path, present, rule) in [
+                    (&source, source_acl, "everyone allow read"),
+                    (&checkout, checkout_acl, "everyone allow read,execute"),
+                ] {
+                    if present {
+                        assert!(
+                            std::process::Command::new("/bin/chmod")
+                                .args(["+a", rule])
+                                .arg(path)
+                                .status()
+                                .unwrap()
+                                .success()
+                        );
+                    }
+                }
+                let acl = |path: &Path| {
+                    let output = std::process::Command::new("/bin/ls")
+                        .arg("-lde")
+                        .arg(path)
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success());
+                    String::from_utf8(output.stdout)
+                        .unwrap()
+                        .lines()
+                        .skip(1)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                let source_acl_before = acl(&source);
+                let checkout_acl_before = acl(&checkout);
+                super::clone_path(&source, &cloned).unwrap();
+                assert_ne!(
+                    fs::metadata(&source).unwrap().ino(),
+                    fs::metadata(&cloned).unwrap().ino()
+                );
+                assert_eq!(
+                    get_xattr(&cloned, "com.riftri.shared"),
+                    Some(b"object".to_vec())
+                );
+                // clone_path uses flags=0: it does not request source ACLs.
+                // A newly cloned inode still does not have the existing
+                // checkout's independently assigned ACL.
+                assert!(acl(&cloned).is_empty());
+                assert_eq!(
+                    fs::metadata(&cloned).unwrap().permissions().mode() & 0o7777,
+                    0o640
+                );
+
+                let pointer = fs::File::open(&checkout).unwrap();
+                let clone = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&cloned)
+                    .unwrap();
+                // SAFETY: both live descriptors refer to private regular fixture
+                // files. A null state asks copyfile to manage its own state;
+                // metadata-only copying must not replace the cloned data.
+                let result = unsafe {
+                    libc::fcopyfile(
+                        pointer.as_raw_fd(),
+                        clone.as_raw_fd(),
+                        std::ptr::null_mut(),
+                        libc::COPYFILE_METADATA,
+                    )
+                };
+                assert_eq!(
+                    result,
+                    0,
+                    "restore metadata: {}",
+                    std::io::Error::last_os_error()
+                );
+                assert_eq!(
+                    fs::metadata(&cloned).unwrap().permissions().mode() & 0o7777,
+                    0o751
+                );
+                assert_eq!(acl(&cloned), checkout_acl_before);
+                assert_eq!(
+                    get_xattr(&cloned, "com.riftri.shared"),
+                    Some(b"checkout".to_vec())
+                );
+                assert_eq!(
+                    get_xattr(&cloned, "com.riftri.checkout-only"),
+                    Some(b"checkout".to_vec())
+                );
+                assert_eq!(get_xattr(&cloned, "com.riftri.source-only"), None);
+                assert_eq!(fs::read(&cloned).unwrap(), payload);
+                fs::write(&cloned, b"private write").unwrap();
+                assert_eq!(fs::read(&source).unwrap(), payload);
+                assert_eq!(acl(&source), source_acl_before);
+                assert_eq!(
+                    get_xattr(&source, "com.riftri.shared"),
+                    Some(b"object".to_vec())
+                );
+                assert_eq!(fs::read(&checkout).unwrap(), b"pointer\n");
+                assert_eq!(acl(&checkout), checkout_acl_before);
+            }
+        }
+    }
 
     #[test]
     fn writable_clone_matches_the_two_pass_path_and_preserves_the_base() {

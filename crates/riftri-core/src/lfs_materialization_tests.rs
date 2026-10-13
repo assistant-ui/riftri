@@ -144,3 +144,125 @@ fn small_lfs_workloads_stay_inline() {
     }
     assert_eq!(super::lfs_materialization_workers(&objects), 1);
 }
+
+// Native data sharing must not turn local object-store metadata into checkout
+// metadata. In particular, two paths with the same OID can have different Git
+// executable bits and destination attributes. Keep this contract before trying
+// a clone-based replacement for the existing verified streaming expansion.
+#[cfg(unix)]
+#[test]
+fn lfs_expansion_preserves_destination_metadata_not_object_store_metadata() {
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(target_os = "macos")]
+    const SHARED: &str = "com.riftri.lfs-shared";
+    #[cfg(target_os = "macos")]
+    const SOURCE_ONLY: &str = "com.riftri.lfs-source-only";
+    #[cfg(not(target_os = "macos"))]
+    const SHARED: &str = "user.riftri.lfs-shared";
+    #[cfg(not(target_os = "macos"))]
+    const SOURCE_ONLY: &str = "user.riftri.lfs-source-only";
+    let (_fixture, staging, objects) = fixture();
+    let source = &objects[0].source_path;
+    fs::set_permissions(source, fs::Permissions::from_mode(0o640)).unwrap();
+    for name in [SHARED, SOURCE_ONLY] {
+        rustix::fs::setxattr(
+            source,
+            name,
+            b"object-store",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .unwrap();
+    }
+    let destinations = [
+        (0, 0o751, b"first".as_slice()),
+        (2, 0o600, b"second".as_slice()),
+    ];
+    for (index, mode, value) in destinations {
+        let path = staging.join(&objects[index].checkout_path);
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        rustix::fs::setxattr(&path, SHARED, value, rustix::fs::XattrFlags::empty()).unwrap();
+    }
+    materialize_git_lfs_objects(&staging, &objects).unwrap();
+    for (index, mode, value) in destinations {
+        let path = staging.join(&objects[index].checkout_path);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            mode
+        );
+        let mut buffer = Vec::with_capacity(64);
+        rustix::fs::getxattr(&path, SHARED, rustix::buffer::spare_capacity(&mut buffer)).unwrap();
+        assert_eq!(buffer, value);
+        let error = rustix::fs::getxattr(&path, SOURCE_ONLY, &mut [0_u8; 64]).unwrap_err();
+        #[cfg(target_os = "macos")]
+        assert_eq!(error, rustix::io::Errno::NOATTR);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(error, rustix::io::Errno::NODATA);
+        assert_eq!(fs::read(&path).unwrap(), fs::read(source).unwrap());
+    }
+    assert_eq!(
+        fs::metadata(source).unwrap().permissions().mode() & 0o7777,
+        0o640
+    );
+    let mut buffer = Vec::with_capacity(64);
+    rustix::fs::getxattr(
+        source,
+        SOURCE_ONLY,
+        rustix::buffer::spare_capacity(&mut buffer),
+    )
+    .unwrap();
+    assert_eq!(buffer, b"object-store");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn lfs_expansion_preserves_checkout_acls_without_importing_object_store_acls() {
+    let (_fixture, staging, objects) = fixture();
+    let source = &objects[0].source_path;
+    let output = std::process::Command::new("/bin/chmod")
+        .args(["+a", "everyone allow read"])
+        .arg(source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(riftri_storage::has_macos_acl(source).unwrap());
+    let destination = staging.join(&objects[0].checkout_path);
+    let destination_with_acl = staging.join(&objects[2].checkout_path);
+    assert!(
+        std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow read,execute"])
+            .arg(&destination_with_acl)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let acl = |path: &std::path::Path| {
+        let output = std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let checkout_acl = acl(&destination_with_acl);
+    assert!(!checkout_acl.is_empty());
+    assert!(!riftri_storage::has_macos_acl(&destination).unwrap());
+    materialize_git_lfs_objects(&staging, &objects).unwrap();
+    assert!(!riftri_storage::has_macos_acl(&destination).unwrap());
+    assert_eq!(acl(&destination_with_acl), checkout_acl);
+    assert!(riftri_storage::has_macos_acl(source).unwrap());
+    assert_eq!(fs::read(destination).unwrap(), fs::read(source).unwrap());
+    assert_eq!(
+        fs::read(destination_with_acl).unwrap(),
+        fs::read(source).unwrap()
+    );
+}
