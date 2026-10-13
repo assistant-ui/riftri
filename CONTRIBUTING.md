@@ -24,9 +24,24 @@ $ npm test
 $ npm run pack:check
 ```
 
-`.cargo/config.toml` gives every Cargo-run process an empty global and system
-Git configuration, so your own Git settings cannot change test results. A test
-binary started without Cargo does not get that isolation.
+`.cargo/config.toml` gives every Cargo-run process the repository's own
+global Git configuration and no system one, so your own Git settings cannot
+change test results. A test binary started without Cargo does not get that
+isolation.
+
+Property tests use [Hegel](https://hegel.dev) and run with `cargo test`. A
+failing case prints a `#[hegel::reproduce_failure(...)]` attribute that replays
+it. To measure line coverage, install `cargo-llvm-cov` and run:
+
+```console
+$ cargo llvm-cov clean --workspace
+$ cargo llvm-cov --workspace --locked --no-report
+$ cargo llvm-cov --workspace --locked --no-report --lib -- --ignored reports_
+$ cargo llvm-cov report --summary-only
+```
+
+The second run executes the ignored `reports_*` benchmarks, which live in the
+crates' test modules and otherwise count as uncovered lines.
 
 The root `package.json` defines the public npm package. The `package/` directory
 contains only its launcher, platform manifests, release scripts, and tests.
