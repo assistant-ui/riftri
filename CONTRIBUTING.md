@@ -24,6 +24,10 @@ $ npm test
 $ npm run pack:check
 ```
 
+`.cargo/config.toml` gives every Cargo-run process an empty global and system
+Git configuration, so your own Git settings cannot change test results. A test
+binary started without Cargo does not get that isolation.
+
 The root `package.json` defines the public npm package. The `package/` directory
 contains only its launcher, platform manifests, release scripts, and tests.
 Product behavior belongs in the Rust crates, following their documented
