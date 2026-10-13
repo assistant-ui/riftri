@@ -267,7 +267,6 @@ fn an_add_the_shim_takes_over_means_what_git_means(tc: TestCase) {
 
 /// The shim must not answer for Git when Git itself would refuse to start.
 #[hegel::test(process_cases(12))]
-#[ignore = "bug: the shim exits 1 with its own error where Git cannot enter -C or open --git-dir"]
 fn a_repository_git_cannot_open_is_gits_error_to_report(tc: TestCase) {
     let scratch = Scratch::new();
     let root = scratch.root();

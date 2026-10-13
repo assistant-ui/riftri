@@ -329,7 +329,6 @@ fn shell_status_reports_activation_only_when_every_part_is_in_place(tc: TestCase
 }
 
 #[hegel::test(process_cases(6))]
-#[ignore = "bug: shell status reports `Repository: none` when Git could not be started in a real repository"]
 fn shell_status_never_calls_an_uninspectable_repository_absent(tc: TestCase) {
     let scratch = Scratch::new();
     let activation = Activation {
