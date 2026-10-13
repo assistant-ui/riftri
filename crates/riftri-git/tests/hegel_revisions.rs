@@ -327,7 +327,6 @@ fn a_repository_without_commits_resolves_nothing(tc: TestCase) {
 }
 
 #[hegel::test(test_cases = 20)]
-#[ignore = "bug: resolve_requested_revision reports an absent full-length ID as a Git failure"]
 fn a_full_length_id_of_an_absent_object_names_nothing(tc: TestCase) {
     let (fixture, commits) = history(&tc);
     let repository = fixture.repository();

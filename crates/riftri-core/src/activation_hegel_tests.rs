@@ -176,13 +176,11 @@ fn alias_bodies_split_as_git_splits_them() {
 }
 
 #[test]
-#[ignore = "bug: alias bodies are split on whitespace Git treats as ordinary text"]
 fn alias_bodies_with_unicode_whitespace_split_as_git_splits_them() {
     alias_bodies_agree_with_git(BodyWhitespace::Foreign);
 }
 
 #[test]
-#[ignore = "bug: trailing whitespace in a `-c` alias body is dropped, but Git passes an empty argument"]
 fn alias_bodies_with_trailing_whitespace_split_as_git_splits_them() {
     alias_bodies_agree_with_git(BodyWhitespace::GitWithTrailing);
 }
@@ -233,7 +231,6 @@ fn alias_chains_expand_as_git_expands_them() {
 }
 
 #[test]
-#[ignore = "bug: alias chains longer than 24 hops are passed through, but Git follows them"]
 fn long_alias_chains_expand_as_git_expands_them() {
     let oracle = GitOracle::new();
     Hegel::new(|tc: TestCase| oracle.assert_agreement(&alias_chain(&tc, 40)))
@@ -309,7 +306,6 @@ fn commands_after_global_options_are_found_where_git_finds_them() {
 }
 
 #[test]
-#[ignore = "bug: the separate value of an unknown global option is read as the command"]
 fn commands_after_spaced_global_option_values_are_found_where_git_finds_them() {
     commands_after_global_options_agree_with_git(true);
 }
@@ -317,7 +313,6 @@ fn commands_after_spaced_global_option_values_are_found_where_git_finds_them() {
 /// Git never lets an alias replace one of its own commands, so an alias named
 /// after a builtin must leave that builtin's command line alone.
 #[test]
-#[ignore = "bug: an alias named after a builtin outside COMMON_GIT_BUILTINS is expanded"]
 fn aliases_never_shadow_git_builtins() {
     let oracle = GitOracle::new();
     let builtins = stdout_line(real_git(oracle.directory.path()).arg("--list-cmds=builtins"))

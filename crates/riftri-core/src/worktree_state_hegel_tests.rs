@@ -389,8 +389,13 @@ fn collection_deletes_only_real_marked_bases(tc: TestCase) {
         .iter()
         .any(|(_, marker)| matches!(marker, MarkerShape::Symlink | MarkerShape::Directory));
     let marked = |shape: &(BaseShape, MarkerShape)| shape.1 == MarkerShape::File;
+    // A marker whose base is already gone is collected too, with nothing
+    // to reclaim.
     let real = |shape: &(BaseShape, MarkerShape)| {
-        matches!(shape.0, BaseShape::Directory | BaseShape::ReadOnlyDirectory)
+        matches!(
+            shape.0,
+            BaseShape::Directory | BaseShape::ReadOnlyDirectory | BaseShape::Missing
+        )
     };
     let collectible = shapes.iter().filter(|shape| marked(shape)).all(real);
     match &applied {
@@ -443,7 +448,6 @@ fn collection_deletes_only_real_marked_bases(tc: TestCase) {
 /// Whatever a plan lists as collectible, the run collects. A completion
 /// marker whose base directory is gone is listed, with nothing to reclaim.
 #[hegel::test(test_cases = 50)]
-#[ignore = "bug: gc --apply fails on a marker whose base is gone, though the plan lists it as collectible"]
 fn a_collection_run_collects_every_planned_candidate(tc: TestCase) {
     let fixture = SyntheticState::new();
     let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));

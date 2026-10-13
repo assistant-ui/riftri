@@ -592,7 +592,6 @@ fn normalized_path_text(tc: &TestCase, alphabet: &str) -> String {
 /// normalization-insensitive comparison should too.
 #[cfg(target_os = "macos")]
 #[hegel::test]
-#[ignore = "bug: paths_match stops ignoring redundant separators once the two spellings differ in Unicode normalization"]
 fn path_matching_ignores_redundant_separators_in_any_normalization(tc: TestCase) {
     use unicode_normalization::UnicodeNormalization;
 

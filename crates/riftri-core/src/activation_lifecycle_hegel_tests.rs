@@ -420,7 +420,6 @@ fn worktree_bindings_accept_exactly_live_worktree_roots() {
 /// A directory inside a repository's Git directory is not a worktree root
 /// either, so naming one is the same caller mistake as naming a subdirectory.
 #[test]
-#[ignore = "bug: binding to a path inside a Git directory fails as an operational Git error, not an invalid binding"]
 fn worktree_bindings_refuse_git_directories_as_bindings() {
     let fixture = ManagedFixture::new();
     Hegel::new(|tc: TestCase| {
