@@ -443,6 +443,24 @@ the live view, removes it, collects its base, runs repair, and checks empty
 status. A failed run retains its fixture and is not a completed benchmark.
 Use larger cycle counts (up to 1,000) when evaluating long-lived repositories.
 
+For live-view repair and protected-base GC planning, use:
+
+```sh
+node docs/benchmarks/lifecycle-scaling.mjs /path/to/before /path/to/after \
+  /path/to/new-output-directory repair 256 8
+```
+
+Replace `repair` with `gc` to create a distinct exact-tree base per view. Build
+both binaries with the same release profile and record their source commits.
+The runner records binary hashes and all process receipts, alternates eight
+pairs per lane, and brackets the candidate with same-baseline controls. Its
+predeclared qualification requires both control medians and p95s within 5%,
+at least a 5% candidate median reduction, and at most a 5% p95 regression. It
+does not evict OS caches or discard samples. Complete JSON reports must match,
+all clean views and one deliberately dirty view must survive, and explicit
+managed cleanup must finish with no views, bases, or diagnostics. A failed or
+noisy run is retained, not evidence of an established latency improvement.
+
 The ignored `reports_journal_relationship_index_latency` core test isolates
 grouping 10,000 records, including index construction. A local release run
 measured 45,191–48,072 microseconds for linear grouping and 591–776 microseconds
