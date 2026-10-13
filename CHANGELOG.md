@@ -5,6 +5,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- A refused add of a tree that Git itself checks out dirty, such as a blob
+  stored with CRLF under `text eol=crlf`, is now rolled back completely.
+  Rollback read Git's dirty verdict as a change, kept the untouched view
+  registered, and left the add pending with `riftri repair` failing the same
+  way every time. A view that still equals its immutable base and has nothing
+  staged is now removed, and a write that races the removal is still kept.
+
 ## [0.6.4] - 2026-10-08
 
 ### Changed

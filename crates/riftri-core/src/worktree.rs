@@ -12218,22 +12218,64 @@ fn remove_registered_worktree_for_rollback(
             Some(&journal.base_path),
         )?;
     } else if view_matches_base(&journal.base_path, &journal.destination)? {
-        if !git
-            .initialize_missing_worktree_index(&journal.destination, &journal.sparse_directories)?
-        {
-            return Err(changed_rollback_worktree(journal));
+        git.initialize_missing_worktree_index(&journal.destination, &journal.sparse_directories)?;
+        if git.worktree_is_clean(&journal.destination)? {
+            remove_worktree_for_rollback(
+                git,
+                &journal.repository,
+                &journal.destination,
+                Some(&journal.base_path),
+            )?;
+        } else {
+            remove_unchanged_view_git_calls_dirty(git, journal)?;
         }
-        if !git.worktree_is_clean(&journal.destination)? {
-            return Err(changed_rollback_worktree(journal));
-        }
-        remove_worktree_for_rollback(
-            git,
-            &journal.repository,
-            &journal.destination,
-            Some(&journal.base_path),
-        )?;
     } else {
         return Err(changed_rollback_worktree(journal));
+    }
+    Ok(())
+}
+
+/// Remove a view that equals its immutable base and has nothing staged, yet
+/// Git reports dirty.
+///
+/// Some exact trees check out dirty: under `text eol=crlf`, Git writes a blob
+/// that already holds CRLF unchanged, and cleaning those bytes no longer
+/// yields the blob. Git's non-force removal refuses such a view every time, so
+/// treating Git's verdict as a change left the refused add pending for good.
+///
+/// The view is renamed back to the add's scratch path in one atomic step and
+/// compared again there, so a write that raced the rename is found and the
+/// view is put back. Git then unregisters the missing destination through its
+/// ordinary missing-path checks, and rollback deletes the scratch path with
+/// the journal's other paths. After an interruption, the next rollback finds
+/// the pointer in scratch and restores the view before trying again.
+fn remove_unchanged_view_git_calls_dirty(
+    git: &Git,
+    journal: &DecodedJournal,
+) -> Result<(), WorktreeError> {
+    #[cfg(test)]
+    crate::test_hooks::fire(
+        crate::test_hooks::FilesystemRacePoint::RollbackViewSetAside,
+        &journal.destination,
+    );
+    fs::rename(&journal.destination, &journal.scratch).map_err(|source| {
+        io(
+            "set aside unchanged worktree view",
+            &journal.scratch,
+            source,
+        )
+    })?;
+    sync_parent(&journal.destination)?;
+    let unregistered =
+        view_matches_base(&journal.base_path, &journal.scratch).and_then(|unchanged| {
+            if !unchanged {
+                return Err(changed_rollback_worktree(journal));
+            }
+            remove_worktree_for_rollback(git, &journal.repository, &journal.destination, None)
+        });
+    if let Err(error) = unregistered {
+        restore_pointer_for_rollback(journal)?;
+        return Err(error);
     }
     Ok(())
 }
@@ -18839,6 +18881,144 @@ mod tests {
             "the rolled-back add must not stay registered"
         );
         assert_eq!(fs::read(&saved).unwrap(), b"user data\n");
+    }
+
+    /// A repository whose HEAD Git checks out dirty: under `text eol=crlf` a
+    /// blob that already holds CRLF is written unchanged, but cleaning those
+    /// bytes no longer yields the blob.
+    #[cfg(unix)]
+    fn repository_git_checks_out_dirty(fixture: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let (repository, destination, state) = committed_repository(fixture);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("stored-with-crlf.txt"), "dos\r\nlines\r\n").unwrap();
+        git(&repository, &["add", "--", "stored-with-crlf.txt"]);
+        fs::write(repository.join(".gitattributes"), "* text eol=crlf\n").unwrap();
+        git(&repository, &["add", "--", ".gitattributes"]);
+        git(&repository, &["commit", "--quiet", "-m", "crlf blob"]);
+        assert_eq!(
+            git_stdout(
+                &repository,
+                &["cat-file", "-s", "HEAD:stored-with-crlf.txt"]
+            ),
+            "12",
+            "the blob must keep its carriage returns"
+        );
+        (repository, destination, state)
+    }
+
+    #[cfg(unix)]
+    fn add_detached(
+        repository: &Path,
+        destination: &Path,
+        state: &Path,
+        rollback_on_error: bool,
+    ) -> super::WorktreeError {
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.to_path_buf(),
+                destination: destination.to_path_buf(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::Detached,
+                state_dir: Some(state.to_path_buf()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            rollback_on_error,
+        )
+        .expect_err("Git reports the new view dirty")
+    }
+
+    #[cfg(unix)]
+    fn assert_nothing_left_behind(fixture: &Path, repository: &Path, destination: &Path) {
+        let mut entries = fs::read_dir(fixture)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        entries.sort_unstable();
+        assert_eq!(entries, ["repository", "state"]);
+        assert!(!registered(repository, destination));
+        let accounting = storage_accounting(&fixture.join("state")).expect("status");
+        assert_eq!(accounting.pending_adds, 0, "{accounting:?}");
+        assert!(accounting.diagnostic_issues.is_empty(), "{accounting:?}");
+    }
+
+    /// The add is refused, and nobody touched the view, so rollback must not
+    /// read Git's dirty verdict as a change and keep the view pending.
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_add_of_a_tree_git_checks_out_dirty_leaves_nothing_behind() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = repository_git_checks_out_dirty(fixture.path());
+
+        let error = add_detached(&repository, &destination, &state, true);
+
+        assert!(
+            matches!(&error, super::WorktreeError::InvalidRequest(message)
+                if message.contains("is not clean; it was not activated")),
+            "{error:?}"
+        );
+        assert_nothing_left_behind(fixture.path(), &repository, &destination);
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+    }
+
+    /// A write that lands after rollback compared the view with its base, but
+    /// before the view is set aside, must still be found and kept.
+    #[cfg(unix)]
+    #[test]
+    fn rollback_keeps_a_write_racing_the_removal_of_a_view_git_calls_dirty() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = repository_git_checks_out_dirty(fixture.path());
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::RollbackViewSetAside,
+            |path| fs::write(path.join("mine.txt"), "user data\n").expect("write raced file"),
+        );
+
+        let error = add_detached(&repository, &destination, &state, true);
+
+        let super::WorktreeError::OperationAndRollback { rollback, .. } = &error else {
+            panic!("the add must report its unfinished rollback: {error}");
+        };
+        assert!(
+            matches!(**rollback, super::WorktreeError::RecoveryPending { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            fs::read(destination.join("mine.txt")).unwrap(),
+            b"user data\n"
+        );
+        assert_eq!(
+            fs::read(destination.join("stored-with-crlf.txt")).unwrap(),
+            b"dos\r\nlines\r\n"
+        );
+        assert!(registered(&repository, &destination));
+
+        // Following the reported steps lets repair finish the rollback.
+        fs::remove_dir_all(&destination).expect("delete the kept destination");
+        let report = recover_incomplete_operations(&state).expect("repair");
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_nothing_left_behind(fixture.path(), &repository, &destination);
+    }
+
+    /// A rollback killed after it set the view aside leaves the view at the
+    /// add's scratch path while Git still registers the destination.
+    #[cfg(unix)]
+    #[test]
+    fn repair_finishes_a_rollback_interrupted_after_setting_the_view_aside() {
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = repository_git_checks_out_dirty(fixture.path());
+        add_detached(&repository, &destination, &state, false);
+        let journal = JournalStore::open(&state)
+            .load_all()
+            .expect("load add journal")
+            .pop()
+            .expect("incomplete add journal");
+        fs::rename(&destination, &journal.scratch).expect("set the view aside");
+
+        let report = recover_incomplete_operations(&state).expect("repair");
+
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_nothing_left_behind(fixture.path(), &repository, &destination);
     }
 
     /// The same write, landing before the view was swapped in: the destination
