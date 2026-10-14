@@ -105,6 +105,10 @@ struct CompatibilityAnalysis {
     checkout_paths: Vec<PathBuf>,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     checkout_config: Vec<(String, Vec<u8>)>,
+    /// Proven by this operation's attribute queries, not inferred from the
+    /// absence of a root .gitattributes file or cached across adds.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    attribute_free_checkout: bool,
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
     lfs_objects: Vec<GitLfsObject>,
     /// `core.hooksPath` from the same batched read the blockers use, so
@@ -3961,6 +3965,7 @@ fn add_worktree_inner(
                 &request.mode,
                 &resolved.tree,
                 &compatibility.checkout_config,
+                compatibility.attribute_free_checkout,
                 &compatibility.lfs_objects,
                 &sparse_directories,
                 fail_after,
@@ -4060,6 +4065,7 @@ fn perform_add(
     mode: &WorktreeMode,
     tree: &ObjectId,
     checkout_config: &[(String, Vec<u8>)],
+    attribute_free_checkout: bool,
     lfs_objects: &[GitLfsObject],
     sparse_directories: &[String],
     fail_after: Option<AddWorktreePhase>,
@@ -4160,12 +4166,15 @@ fn perform_add(
     }
 
     if sparse_directories.is_empty() {
-        if lfs_objects.is_empty() {
+        if lfs_objects.is_empty() && !attribute_free_checkout {
             git.synchronize_worktree_index(destination)?;
         } else {
-            // The mandatory status below is the first content refresh. Avoid
-            // starting LFS once during reset and again during a racy status.
-            // All ordinary and sparse index paths retain their existing policy.
+            // The mandatory status below is the first content refresh. This
+            // avoids an extra metadata pass for attribute-free checkouts and
+            // retains the existing LFS policy. Attribute-enabled ordinary
+            // checkouts keep their refresh: normalization can otherwise change
+            // the dirty verdict for a write between reset and status. Sparse
+            // checkouts retain their separate index path as well.
             git.synchronize_worktree_index_deferred_refresh(destination)?;
         }
     } else {
@@ -5539,6 +5548,8 @@ fn analyze_resolved_repository_compatibility(
         });
     }
     let mut lfs_paths = Vec::new();
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    let mut attribute_free_checkout = false;
 
     // Callers pass the common Git directory that `inspect_repository` already
     // resolved with `rev-parse --path-format=absolute --git-common-dir`, the
@@ -5603,6 +5614,10 @@ fn analyze_resolved_repository_compatibility(
             has_in_tree_attribute_file,
             &git_info,
         )?;
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        {
+            attribute_free_checkout = in_tree.is_empty() && effective.is_empty();
+        }
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
             Err(explanation) => {
@@ -5906,6 +5921,8 @@ fn analyze_resolved_repository_compatibility(
         checkout_paths: entries.into_iter().map(|entry| entry.path).collect(),
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         checkout_config,
+        #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+        attribute_free_checkout,
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
         hooks_path: config_values.get("core.hookspath").cloned(),
         #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -19462,6 +19479,78 @@ mod tests {
         git(&repository, &["add", "--", "tracked.txt"]);
         git(&repository, &["commit", "--quiet", "-m", "initial"]);
         (repository, fixture.join("worktree"), fixture.join("state"))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plain_index_refresh_preserves_writes_before_activation_and_during_repair() {
+        for attributes in [false, true] {
+            for interrupted in [false, true] {
+                let fixture = tempdir().unwrap();
+                let (repository, destination, state) = committed_repository(fixture.path());
+                git(&repository, &["config", "core.autocrlf", "false"]);
+                if attributes {
+                    fs::write(
+                        repository.join(".gitattributes"),
+                        "tracked.txt text eol=crlf\n",
+                    )
+                    .unwrap();
+                    git(&repository, &["add", ".gitattributes"]);
+                    git(&repository, &["commit", "--quiet", "-m", "line endings"]);
+                }
+                let changed: &[u8] = if attributes {
+                    b"tracked\n"
+                } else {
+                    b"altered\n"
+                };
+                let _hook = (!interrupted).then(|| {
+                    crate::test_hooks::install(
+                        crate::test_hooks::FilesystemRacePoint::AddCleanCheck,
+                        move |path| {
+                            let file = path.join("tracked.txt");
+                            let modified = fs::metadata(&file).unwrap().modified().unwrap();
+                            fs::write(&file, changed).unwrap();
+                            fs::File::options()
+                                .write(true)
+                                .open(&file)
+                                .unwrap()
+                                .set_times(fs::FileTimes::new().set_modified(modified))
+                                .unwrap();
+                        },
+                    )
+                });
+                add_worktree_inner(
+                    AddWorktreeRequest {
+                        repository: repository.clone(),
+                        destination: destination.clone(),
+                        revision: OsString::from("HEAD"),
+                        mode: WorktreeMode::Detached,
+                        state_dir: Some(state.clone()),
+                        sparse_directories: Vec::new(),
+                    },
+                    interrupted.then_some(AddWorktreePhase::IndexSynchronized),
+                    !interrupted,
+                )
+                .expect_err("an interrupted or changed view must not be activated");
+                if interrupted {
+                    fs::write(destination.join("tracked.txt"), changed).unwrap();
+                }
+                for _ in 0..2 {
+                    let report = recover_incomplete_operations(&state).unwrap();
+                    assert_eq!(
+                        report.recovered, 0,
+                        "attributes={attributes}, interrupted={interrupted}: {report:?}"
+                    );
+                    assert_eq!(report.errors.len(), 1, "{report:?}");
+                    assert_eq!(fs::read(destination.join("tracked.txt")).unwrap(), changed);
+                    assert_eq!(
+                        fs::read(repository.join("tracked.txt")).unwrap(),
+                        b"tracked\n"
+                    );
+                    assert!(registered(&repository, &destination));
+                }
+            }
+        }
     }
 
     #[cfg(unix)]
