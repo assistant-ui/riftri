@@ -27,5 +27,5 @@ PowerShell profile.
 - Your account needs permission to create any symlinks in the checkout.
 - Unsupported hooks, filters, or repository features still block creation.
 
-Experimental: keep important work committed, and follow
+Keep important work committed or backed up, and follow
 [recovery guidance](troubleshooting.md) after an interruption.

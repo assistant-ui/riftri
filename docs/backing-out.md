@@ -1,7 +1,7 @@
 # Backing out of Riftri
 
-Riftri is pre-release software that manages worktrees, so the fair question
-before adopting it is what happens when you stop. This page answers it.
+Riftri manages worktrees, so before adopting it, understand what happens when
+you stop using it. This page explains how to return to ordinary Git.
 
 ## The short version
 

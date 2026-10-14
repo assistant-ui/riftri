@@ -1,7 +1,7 @@
 # Windows ReFS support
 
-Riftri's experimental Windows backend creates real Git linked worktrees backed
-by native ReFS block clones. It is available only when the repository,
+Riftri's Windows backend creates real Git linked worktrees backed by native
+ReFS block clones. It is available only when the repository,
 destination, and Riftri state all resolve to the same writable ReFS volume.
 
 ## What Riftri verifies
@@ -76,9 +76,8 @@ Invoke-Expression ((riftri shell deactivate powershell) -join [Environment]::New
   objects are supported, while custom filters, sparse checkout, submodules, and
   external attributes are rejected.
 - A Windows account needs permission to create any symlink present in the tree.
-- The implementation is experimental; keep important work committed or backed
-  up and use `riftri status` and `riftri repair` when diagnosing interrupted
-  lifecycle operations.
+- Keep important work committed or backed up and use `riftri status` and
+  `riftri repair` when diagnosing interrupted lifecycle operations.
 
 The ReFS API behavior and restrictions are documented by Microsoft in
 [Block cloning on ReFS](https://learn.microsoft.com/windows-server/storage/refs/block-cloning)

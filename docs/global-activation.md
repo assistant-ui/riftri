@@ -149,6 +149,5 @@ test filesystem traffic.
   file access, builds, tests, and editor operations have no Riftri process or
   daemon overhead.
 
-Riftri remains experimental. Keep valuable changes committed or backed up, and
-use `riftri status` plus `riftri repair` when a lifecycle operation is
-interrupted.
+Keep valuable changes committed or backed up, and use `riftri status` plus
+`riftri repair` when a lifecycle operation is interrupted.
