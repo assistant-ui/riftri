@@ -696,7 +696,9 @@ fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
     for condition in ["gitdir:**/repository/.git", "gitdir:**/worktrees/**"] {
         fs::write(
             &global,
-            format!("[includeIf \"{condition}\"]\n path = identity-config\n"),
+            // Repeated references must retain both the source/destination
+            // checks and the unsafe/nested-key refusals below.
+            format!("[includeIf \"{condition}\"]\n path = identity-config\n").repeat(32),
         )
         .expect("write global configuration");
         for (case, (contents, compatible)) in [

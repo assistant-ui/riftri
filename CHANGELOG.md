@@ -5,6 +5,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- Validate repeated conditional Git include targets once per compatibility
+  check, avoiding extra Git processes when multiple rules share one identity
+  file. Distinct targets are still checked, every new call re-reads them, and
+  unsafe keys, nested includes, and unreadable files remain fail-closed.
+
 ### Fixed
 
 - Conditional Git includes (`includeIf`) that set commit signing or SSH
