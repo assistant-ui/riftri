@@ -1,6 +1,6 @@
 # Linux reflink verification
 
-Riftri's experimental Linux backend supports Btrfs and reflink-enabled XFS. It
+Riftri's Linux reflink backend supports Btrfs and reflink-enabled XFS. It
 uses the kernel `FICLONE` ioctl, so unchanged file data shares physical storage
 and ordinary reads and writes stay on the native filesystem path.
 

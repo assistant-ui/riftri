@@ -5,6 +5,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- Describe Riftri and its backends by their supported capabilities rather than
+  blanket maturity labels. Backup guidance, filesystem requirements, and the
+  security-sandbox boundary remain explicit.
+
 ### Fixed
 
 - Conditional Git includes (`includeIf`) that set commit signing or SSH

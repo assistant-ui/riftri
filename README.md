@@ -8,11 +8,10 @@ agents working on several tasks at once.
 
 [![CI](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml/badge.svg)](https://github.com/assistant-ui/riftri/actions/workflows/ci.yml)
 
-> [!WARNING]
-> Riftri is experimental, pre-release software. Keep important work committed or
-> backed up. Optimized worktrees need APFS on macOS, Btrfs or reflink-enabled
-> XFS or OverlayFS on Linux, or ReFS on Windows — see
-> [what works today](#what-works-today).
+> [!IMPORTANT]
+> Keep important work committed or backed up. Optimized worktrees need APFS on
+> macOS, Btrfs or reflink-enabled XFS or OverlayFS on Linux, or ReFS on Windows —
+> see [what works today](#what-works-today).
 
 ## Why Riftri?
 
@@ -140,7 +139,7 @@ are covered in [global activation](docs/global-activation.md) and the
 | --- | --- | --- |
 | macOS | APFS clones | Supported |
 | Linux | Btrfs / reflink-enabled XFS | Supported |
-| Linux | OverlayFS | Experimental |
+| Linux | OverlayFS | Requires mount access or helper |
 | Windows | ReFS block clones | Supported |
 
 On those backends Riftri creates real linked worktrees, intercepts Git per

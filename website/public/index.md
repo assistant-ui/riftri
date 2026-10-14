@@ -12,7 +12,7 @@ Editors, builds, agents, and Git still use ordinary files.
 - [Releases](https://github.com/assistant-ui/riftri/releases)
 - [This Markdown guide](https://riftri.dev/index.md)
 
-Riftri is experimental. Keep important work committed or backed up. This guide
+Keep important work committed or backed up. This guide
 describes the project; check your release's capabilities and run `riftri doctor`
 before using a new repository or destination.
 

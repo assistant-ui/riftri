@@ -8,10 +8,10 @@ refusals are tested on real filesystems, and how the performance numbers are
 kept honest. Every claim here is traceable to the linked documents, the CI
 configuration, or the code.
 
-Two boundaries up front, from the [security policy](../SECURITY.md): Riftri is
-experimental, pre-release software, and its copy-on-write isolation is not a
-security sandbox — untrusted processes still belong in a container, VM, or
-operating-system sandbox.
+Keep important work committed or backed up. As the
+[security policy](../SECURITY.md) explains, Riftri's copy-on-write isolation is
+not a security sandbox — untrusted processes still belong in a container, VM,
+or operating-system sandbox.
 
 ## Fail-closed by design
 

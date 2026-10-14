@@ -2,6 +2,24 @@ import { expect, test, type Page } from "@playwright/test";
 
 const install = "curl -fsSL https://riftri.dev/install.sh | bash";
 
+test("capability wording retains visible backup and filesystem guidance", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await expect(page.locator("body")).not.toContainText(/experimental|pre-release software|production-ready/i);
+  await expect(page.locator(".backend-cycle-item small")).toHaveText([
+    "macOS · APFS required",
+    "Linux · volume checked",
+    "Windows · ReFS required",
+  ]);
+  const requirements = page.locator("details").filter({ hasText: "Will it work on my machine and repository?" });
+  await requirements.locator("summary").click();
+  const answer = requirements.locator(".faq-answer");
+  await expect(answer).toBeVisible();
+  await expect(answer).toContainText("Keep important work committed or backed up.");
+  await expect(answer).toContainText("Ordinary NTFS is not supported.");
+  await expect(answer).toContainText("riftri doctor --destination ../app-auth");
+  await requirements.screenshot({ path: testInfo.outputPath(`requirements-${testInfo.project.name}.png`) });
+});
+
 test("footer stays compact with comfortable link targets", async ({ page }, testInfo) => {
   await page.goto("/");
   const footer = page.getByRole("contentinfo");

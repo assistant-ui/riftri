@@ -11,9 +11,9 @@ const stages = [
 ] as const;
 
 const platforms = [
-  { name: "macOS", backend: "APFS clone", status: "current" },
-  { name: "Linux", backend: "reflink / OverlayFS", status: "experimental · current" },
-  { name: "Windows", backend: "ReFS block clone", status: "experimental · current" },
+  { name: "macOS", backend: "APFS clone", status: "APFS required" },
+  { name: "Linux", backend: "reflink / OverlayFS", status: "volume checked" },
+  { name: "Windows", backend: "ReFS block clone", status: "ReFS required" },
 ] as const;
 
 function BackendCycle() {
@@ -29,7 +29,7 @@ function BackendCycle() {
       </span>
       <span className="visually-hidden">
         Native copy-on-write view. APFS clone on macOS, Linux reflinks and mount-capable OverlayFS,
-        and Windows ReFS block clones are current experimental backends.
+        and Windows ReFS block clones are available on supported volumes.
       </span>
     </>
   );

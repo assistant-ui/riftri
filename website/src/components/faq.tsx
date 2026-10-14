@@ -93,8 +93,8 @@ const questions = [
         <p>
           Run <code>riftri doctor --destination ../app-auth</code> from your repository
           first. Some checkout settings are unsupported, and Riftri stops with an
-          explanation instead of silently making a full copy. It is still experimental;
-          keep important work committed or backed up.
+          explanation instead of silently making a full copy. Keep important work
+          committed or backed up.
         </p>
       </>
     ),
