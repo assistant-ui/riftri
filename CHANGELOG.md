@@ -7,6 +7,9 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- Describe Riftri and its backends by their supported capabilities rather than
+  blanket maturity labels. Backup guidance, filesystem requirements, and the
+  security-sandbox boundary remain explicit.
 - Validate repeated conditional Git include targets once per compatibility
   check, avoiding extra Git processes when multiple rules share one identity
   file. Distinct targets are still checked, every new call re-reads them, and

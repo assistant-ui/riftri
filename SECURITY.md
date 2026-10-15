@@ -1,10 +1,9 @@
 # Security policy
 
-Riftri is experimental, pre-release software. It performs opt-in worktree
-creation, removal, repair, and garbage-collection mutations on supported
-macOS/APFS, Linux reflink and OverlayFS, and Windows/ReFS destinations. The
-latest tagged release and `main` receive security fixes; older experimental
-releases may require upgrading.
+Riftri performs opt-in worktree creation, removal, repair, and garbage-collection
+mutations on supported macOS/APFS, Linux reflink and OverlayFS, and Windows/ReFS
+destinations. The latest tagged release and `main` receive security fixes;
+older releases may require upgrading.
 
 Do not open a public issue for vulnerabilities or behavior that could delete,
 overwrite, expose, or cross-contaminate worktree data. Use GitHub's private

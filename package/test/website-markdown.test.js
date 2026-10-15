@@ -20,7 +20,8 @@ test("Markdown guide covers setup, internals, lifecycle, and measured savings", 
     "riftri exec -- claude",
     "riftri exec --worktree ../app-auth -- claude",
   ]) assert.ok(markdown.includes(command), command);
-  assert.match(markdown, /experimental/i);
+  assert.doesNotMatch(markdown, /experimental|pre-release software/i);
+  assert.match(markdown, /Keep important work committed or backed up/);
   assert.match(markdown, /### Guided setup\n/);
   assert.match(markdown, /Available starting with v0\.3\.1/);
   assert.doesNotMatch(markdown, /Guided setup \(unreleased\)|not in the v0\.3\.0 release/);

@@ -50,5 +50,5 @@ what `gc` and `worktree compact` reclaim.
   [build caches](guides/build-caches.md).
 - Nothing is activated globally: interception needs both an activated shell or
   process and per-repository consent.
-- Experimental: keep important work committed or backed up. Worktree
+- Keep important work committed or backed up. Worktree
   isolation is not a security sandbox.

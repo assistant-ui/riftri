@@ -1,6 +1,6 @@
 # Safety
 
-Riftri is experimental; keep important work committed or backed up.
+Keep important work committed or backed up.
 Copy-on-write isolates file changes; it is **not a security sandbox**.
 
 Riftri deletes directories and, on Linux, can install a root-owned mount
