@@ -1,6 +1,6 @@
 //! Interaction with the user's installed Git executable.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
@@ -1037,7 +1037,7 @@ impl Git {
         }
     }
 
-    /// Read every conditional target, including conditions that do not match.
+    /// Read every distinct conditional target, including conditions that do not match.
     /// Nested includes and unreadable targets cannot satisfy the key allowlist.
     pub fn conditional_config_has_only(
         &self,
@@ -1059,6 +1059,7 @@ impl Git {
         if !output.status.success() {
             return Err(command_failed(&arguments, &output));
         }
+        let mut validated = HashSet::<OsString>::new();
         let mut records = output.stdout.split(|byte| *byte == 0);
         while let Some(origin) = records.next().filter(|record| !record.is_empty()) {
             let Some(value) = records
@@ -1084,6 +1085,12 @@ impl Git {
             let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
                 return Ok(false);
             };
+            // Repeated includeIf rules often share one identity file. Reuse
+            // only this call's successful validation of the exact native path
+            // after resolving its origin; do not fold case or resolve aliases.
+            if validated.contains(target.as_os_str()) {
+                continue;
+            }
             let arguments = [
                 OsString::from("config"),
                 OsString::from("--file"),
@@ -1107,6 +1114,7 @@ impl Git {
             {
                 return Ok(false);
             }
+            validated.insert(target.into_os_string());
         }
         Ok(true)
     }
@@ -5709,6 +5717,188 @@ mod tests {
             git.expand_config_path(OsStr::new("relative/hooks"))
                 .expect("preserve relative hooks path"),
             PathBuf::from("relative/hooks")
+        );
+    }
+
+    #[test]
+    fn conditional_targets_are_validated_once_per_call_not_once_per_reference() {
+        let fixture = RepositoryFixture::unborn();
+        let included = fixture.path().join("identity-é");
+        fs::write(&included, "[user]\n email = work@example.invalid\n").unwrap();
+        let git = Git::default();
+        for index in 0..32 {
+            git.set_local_config(
+                fixture.path(),
+                &format!("includeIf.gitdir:never-{index}.path"),
+                included.canonicalize().unwrap().as_os_str(),
+            )
+            .unwrap();
+        }
+        let before = git.process_attempts();
+        assert!(
+            git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+        assert_eq!(
+            git.process_attempts() - before,
+            2,
+            "one listing and one target read"
+        );
+
+        // A new call must re-read the file and apply that call's allowlist.
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.name"])
+                .unwrap()
+        );
+        fs::write(&included, "[core]\n eol = crlf\n").unwrap();
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+        fs::remove_file(&included).unwrap();
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn conditional_targets_do_not_hide_a_distinct_unsafe_target_after_duplicates() {
+        let fixture = RepositoryFixture::unborn();
+        let git = Git::default();
+        let included = fixture.path().join("identity");
+        let other = fixture.path().join("other");
+        fs::write(&included, "[user]\n email = work@example.invalid\n").unwrap();
+        fs::write(&other, "[user]\n email = other@example.invalid\n").unwrap();
+        for index in 0..4 {
+            git.set_local_config(
+                fixture.path(),
+                &format!("includeIf.gitdir:never-{index}.path"),
+                included.canonicalize().unwrap().as_os_str(),
+            )
+            .unwrap();
+        }
+        git.set_local_config(
+            fixture.path(),
+            "includeIf.gitdir:last.path",
+            other.canonicalize().unwrap().as_os_str(),
+        )
+        .unwrap();
+        let before = git.process_attempts();
+        assert!(
+            git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+        assert_eq!(
+            git.process_attempts() - before,
+            3,
+            "both distinct targets must be read"
+        );
+        for contents in [
+            "[core]\n eol = crlf\n",
+            "[include]\n path = identity\n",
+            "[includeIf \"gitdir:never\"]\n path = identity\n",
+            "[malformed\n",
+        ] {
+            fs::write(&other, contents).unwrap();
+            assert!(
+                !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                    .unwrap(),
+                "{contents}"
+            );
+        }
+        fs::remove_file(other).unwrap();
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn conditional_targets_resolve_relative_paths_against_each_origin() {
+        let fixture = RepositoryFixture::unborn();
+        let git = Git::default();
+        for directory in ["first", "second"] {
+            let root = fixture.path().join(".git").join(directory);
+            fs::create_dir(&root).unwrap();
+            fs::write(
+                root.join("identity"),
+                "[user]\n email = work@example.invalid\n",
+            )
+            .unwrap();
+            fs::write(
+                root.join("config"),
+                "[includeIf \"gitdir:never\"]\n path = identity\n".repeat(4),
+            )
+            .unwrap();
+            let output = git
+                .output_os(
+                    Some(fixture.path()),
+                    &[
+                        OsString::from("config"),
+                        OsString::from("--add"),
+                        OsString::from("include.path"),
+                        OsString::from(format!("{directory}/config")),
+                    ],
+                )
+                .unwrap();
+            assert!(output.status.success());
+        }
+        let before = git.process_attempts();
+        assert!(
+            git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+        assert_eq!(
+            git.process_attempts() - before,
+            3,
+            "same basename in different origins is not the same target"
+        );
+        fs::write(
+            fixture.path().join(".git/second/identity"),
+            "[core]\n eol = crlf\n",
+        )
+        .unwrap();
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn conditional_targets_deduplicate_without_losing_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let fixture = RepositoryFixture::unborn();
+        let git = Git::default();
+        // These names become identical if converted with to_string_lossy.
+        for byte in [0xfe, 0xff] {
+            let included = fixture.path().join(OsString::from_vec(vec![b'i', byte]));
+            fs::write(&included, "[user]\n email = work@example.invalid\n").unwrap();
+            for index in 0..4 {
+                git.set_local_config(
+                    fixture.path(),
+                    &format!("includeIf.gitdir:never-{byte}-{index}.path"),
+                    included.as_os_str(),
+                )
+                .unwrap();
+            }
+        }
+        let before = git.process_attempts();
+        assert!(
+            git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
+        );
+        assert_eq!(git.process_attempts() - before, 3);
+        fs::write(
+            fixture.path().join(OsString::from_vec(vec![b'i', 0xff])),
+            "[core]\n eol = crlf\n",
+        )
+        .unwrap();
+        assert!(
+            !git.conditional_config_has_only(fixture.path(), &["user.email"])
+                .unwrap()
         );
     }
 
