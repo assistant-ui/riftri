@@ -104,6 +104,17 @@ fn accepted_destinations_are_the_ones_git_creates(tc: TestCase) {
         );
     }
 
+    // Git has no answer to compare for an empty path: Apple Git 2.50.1 aborts
+    // with `BUG: builtin/worktree.c:464`, and the aborted child can stall the
+    // suite on macOS. Riftri's refusal is checked here instead.
+    if destination.as_os_str().is_empty() {
+        assert!(
+            matches!(normalized, Err(WorktreeError::InvalidRequest(_))),
+            "an empty destination is a request error: {normalized:?}"
+        );
+        return;
+    }
+
     let by_git = Command::new("git")
         .args(["worktree", "add", "--quiet", "--detach"])
         .arg(&destination)
