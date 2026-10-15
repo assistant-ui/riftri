@@ -226,7 +226,17 @@ try {
   assert.deepEqual(report.final.diagnostic_issues, []);
   verify(repo); scope.check(); report.complete = true; save();
 } catch (error) {
-  report.failure = String(error.stack); report.retained = [...live]; save();
+  report.complete = false;
+  report.failure = String(error?.stack ?? error); report.retained = [...live];
+  try { save(); } catch (saveError) {
+    // Disk-full/rename errors must not replace the failure we are diagnosing.
+    // The last atomic checkpoint may be stale: retain recovery paths in stderr
+    // too, without claiming that a new receipt was persisted or forcing cleanup.
+    console.error('Cannot retain failure receipt:', saveError);
+    console.error('Unpersisted benchmark failure:', JSON.stringify({
+      complete: false, failure: report.failure, retained: report.retained,
+    }));
+  }
   throw error; // Preserve unexpected state for inspection; never force cleanup.
 } finally {
   await scope.close();
