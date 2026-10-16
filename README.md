@@ -139,13 +139,14 @@ are covered in [global activation](docs/global-activation.md) and the
 | --- | --- | --- |
 | macOS | APFS clones | Supported |
 | Linux | Btrfs / reflink-enabled XFS | Supported |
-| Linux | OverlayFS | Requires mount access or helper |
+| Linux | OverlayFS | Supported; requires mount access or helper |
 | Windows | ReFS block clones | Supported |
 
 On those backends Riftri creates real linked worktrees, intercepts Git per
-repository or per process, removes, moves, prunes, and compacts them, reuses
-immutable bases with disk accounting, and recovers from interruption through
-journaled repair and garbage collection.
+repository or per process, reuses immutable bases with disk accounting, and
+supports journaled removal, guarded prune, repair, and garbage collection.
+Native-COW views also support managed moves and pristine-view compaction;
+mounted OverlayFS moves and compaction remain unsupported.
 
 OverlayFS additionally needs either a mount-capable namespace or a one-time
 helper. The helper is installed system-wide but intercepts nothing on its own,
