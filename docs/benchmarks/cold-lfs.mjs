@@ -52,13 +52,21 @@ async function execute(command, args, {cwd = repo, extraEnv = {}, allowFailure =
     // than leaving a command that never started looking alive.
     Object.assign(receipt, {settled: true, started: false, cancelled: scope.signal.aborted,
       error: error.message});
-    save();
+    // The outer handler persists this receipt without masking the rejection.
     throw error;
   } finally { fs.closeSync(log); }
   Object.assign(receipt, {settled: true, started: result.started, code: result.code, signal: result.signal, timedOut: result.timedOut,
     cancelled: result.cancelled, error: result.error?.message});
-  fs.writeFileSync(path.join(root, `command-${receipt.index}.stdout`), result.stdout);
-  save();
+  try {
+    fs.writeFileSync(path.join(root, `command-${receipt.index}.stdout`), result.stdout);
+    save();
+  } catch (saveError) {
+    if (!scope.signal.aborted) throw saveError;
+    console.error('Cannot retain cancelled command receipt:', saveError);
+  }
+  // Preserve any available output, but do not replace cancellation with a
+  // checkpoint error. The outer handler retains both errors and the fixture.
+  scope.signal.throwIfAborted();
   assert.ifError(result.error);
   assert.equal(result.cancelled, false);
   assert.equal(result.timedOut, false);
@@ -170,5 +178,15 @@ try {
     distribution(report.samples.filter(sample => sample.label === label).map(sample => sample.milliseconds))]));
   scope.check(); report.complete = true; save();
 } catch (error) {
-  report.failure = error.stack; save(); throw error;
+  report.complete = false;
+  report.failure = String(error?.stack ?? error);
+  try { save(); } catch (saveError) {
+    // The previous atomic checkpoint may be stale. Preserve the original
+    // failure and recovery location in stderr without forcing any cleanup.
+    console.error('Cannot retain failure receipt:', saveError);
+    console.error('Unpersisted benchmark failure:', JSON.stringify({
+      complete: false, failure: report.failure, cancellation: report.cancellation, root,
+    }));
+  }
+  throw error;
 } finally { await scope.close(); }
