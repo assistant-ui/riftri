@@ -61,6 +61,8 @@ for (const runner of runners) {
       const checkpoint = JSON.parse(fs.readFileSync(path.join(output, 'results.json')));
       assert.equal(checkpoint.complete, false);
       assert.equal(checkpoint[runner.field], undefined);
+      if (runner.name === 'cold-lfs') assert.ok(fs.existsSync(path.join(output, 'command-0.stdout')),
+        'cancellation must still retain command stdout when that write succeeds');
       assert.ok(fs.existsSync(path.join(output, 'repository')), 'failed fixtures must be retained');
       fs.rmSync(parent, {recursive: true}); // Only the fake command ran.
     });

@@ -57,10 +57,16 @@ async function execute(command, args, {cwd = repo, extraEnv = {}, allowFailure =
   } finally { fs.closeSync(log); }
   Object.assign(receipt, {settled: true, started: result.started, code: result.code, signal: result.signal, timedOut: result.timedOut,
     cancelled: result.cancelled, error: result.error?.message});
-  // Retain the cancellation reason even if the next checkpoint cannot be saved.
+  try {
+    fs.writeFileSync(path.join(root, `command-${receipt.index}.stdout`), result.stdout);
+    save();
+  } catch (saveError) {
+    if (!scope.signal.aborted) throw saveError;
+    console.error('Cannot retain cancelled command receipt:', saveError);
+  }
+  // Preserve any available output, but do not replace cancellation with a
+  // checkpoint error. The outer handler retains both errors and the fixture.
   scope.signal.throwIfAborted();
-  fs.writeFileSync(path.join(root, `command-${receipt.index}.stdout`), result.stdout);
-  save();
   assert.ifError(result.error);
   assert.equal(result.cancelled, false);
   assert.equal(result.timedOut, false);
