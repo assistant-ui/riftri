@@ -461,6 +461,12 @@ all clean views and one deliberately dirty view must survive, and explicit
 managed cleanup must finish with no views, bases, or diagnostics. A failed or
 noisy run is retained, not evidence of an established latency improvement.
 
+The cold-LFS and lifecycle-scaling runners save result checkpoints by atomic
+rename. If saving a failure also fails, stderr retains both errors and the
+fixture location; the last checkpoint may be stale. A failed final save leaves
+the run incomplete, and lifecycle failures cannot qualify as a speedup. No
+failure path force-deletes the retained fixture.
+
 The ignored `reports_journal_relationship_index_latency` core test isolates
 grouping 10,000 records, including index construction. A local release run
 measured 45,191–48,072 microseconds for linear grouping and 591–776 microseconds
