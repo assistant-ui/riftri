@@ -1,7 +1,9 @@
 # Linux OverlayFS
 
-Without reflinks, Riftri can share a read-only base through OverlayFS; each
-worktree stores its changes in a private layer.
+Riftri supports OverlayFS on Linux when the caller's mount namespace passes
+the active probe, directly or through the optional mount helper. Without
+native reflinks, OverlayFS shares a read-only base while each worktree stores
+its changes in a private layer.
 
 ## Check support
 
