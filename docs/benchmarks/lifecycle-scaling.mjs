@@ -34,9 +34,14 @@ const result = {
     cache: 'warm; alternating order; no OS cache eviction; no retries or discarded samples'},
   samples: [], complete: false,
 };
-const save = () => fs.writeFileSync(path.join(root, 'results.json'), JSON.stringify(result, null, 2));
+const save = () => {
+  fs.writeFileSync(path.join(root, 'results.json.tmp'), JSON.stringify(result, null, 2));
+  fs.renameSync(path.join(root, 'results.json.tmp'), path.join(root, 'results.json'));
+};
 save(); // Fix the protocol before setup and measurement.
-const scope = createProcessScope({budgetMs: 25 * 60_000, onCancel: reason => {result.cancelled = reason; save();}});
+const scope = createProcessScope({budgetMs: 25 * 60_000, onCancel: reason => {
+  result.cancelled = reason; result.complete = false; result.qualified = false; save();
+}});
 async function run(executable, args) {
   const receipt = await scope.run(executable, args, {cwd: repository, env, timeoutMs: 60_000});
   assert.ok(receipt.code === 0 && !receipt.error && !receipt.timedOut && !receipt.cancelled,
@@ -130,5 +135,15 @@ try {
   result.complete = true; result.finishedAt = new Date().toISOString(); save();
   console.log(JSON.stringify({root, qualified: result.qualified, summary: result.summary}, null, 2));
 } catch (error) {
-  result.error = String(error.stack ?? error); save(); throw error;
+  result.complete = false; result.qualified = false;
+  result.error = String(error?.stack ?? error);
+  try { save(); } catch (saveError) {
+    // A failed write or rename must not hide the error that stopped the run.
+    // Leave the fixture and the last atomic checkpoint available for inspection.
+    console.error('Cannot retain failure receipt:', saveError);
+    console.error('Unpersisted benchmark failure:', JSON.stringify({
+      complete: false, qualified: false, error: result.error, cancelled: result.cancelled, root,
+    }));
+  }
+  throw error;
 } finally { await scope.close(); }

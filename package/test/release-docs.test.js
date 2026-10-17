@@ -33,6 +33,28 @@ test("release-facing documentation matches current guarantees", () => {
   assert.doesNotMatch(guarantees, /Riftri has no forced managed removal/);
 });
 
+test("Linux support is explicit without hiding OverlayFS requirements or limits", () => {
+  const readme = read("README.md");
+  assert.match(readme, /\| Linux \| Btrfs \/ reflink-enabled XFS \| Supported \|/);
+  assert.match(readme, /\| Linux \| OverlayFS \| Supported[^\n]*mount access or helper/);
+  assert.match(readme, /mounted OverlayFS moves\s+and compaction remain unsupported/);
+
+  for (const guide of ["docs/linux-overlayfs.md", "website/content/guides/linux-overlayfs.md"]) {
+    const text = read(guide);
+    assert.match(text, /Riftri supports OverlayFS on Linux/, guide);
+    assert.match(text, /mount namespace/, `${guide} must retain the mount requirement`);
+    assert.match(text, /riftri overlayfs install-helper/, `${guide} must retain explicit helper setup`);
+    assert.match(text, /[Mm]ounted moves\s+and compaction (?:remain |are )unsupported/, guide);
+  }
+  for (const doc of [
+    "README.md", "SUPPORT.md", "docs/linux-reflink.md", "docs/linux-overlayfs.md",
+    "website/content/guides/linux-reflink.md", "website/content/guides/linux-overlayfs.md",
+    "website/content/guides/filesystem-compatibility.md", "website/public/index.md",
+  ]) {
+    assert.doesNotMatch(read(doc), /experimental|pre-release software/i, `${doc} has stale support wording`);
+  }
+});
+
 test("public docs do not call sparse checkout unsupported", () => {
   // `riftri worktree add --sparse-dir` ships. README, the agent reference, and
   // troubleshooting all grouped sparse checkout with submodules and custom
