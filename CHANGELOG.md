@@ -36,6 +36,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   it, so each operation now makes two fewer full flushes, about 7 to 9 ms on
   APFS. Recovery decisions and output are unchanged, and journals an earlier
   Riftri left in either state still recover as before.
+- Pass `git worktree` subcommands other than `add`, `remove`, `move`, and
+  `prune` (such as `list`, `lock`, and `repair`) straight to Git from the shim,
+  without inspecting the repository first. `git worktree list` now starts one
+  Git process instead of five, and an alias such as `alias.wtl = worktree list`
+  two instead of six. Lifecycle subcommands are planned and guarded exactly as
+  before, however they are reached.
 
 ### Fixed
 

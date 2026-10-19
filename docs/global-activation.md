@@ -27,7 +27,9 @@ Invoke-Expression ((riftri shell hook powershell) -join [Environment]::NewLine)
 
 Riftri never adds or removes that line. In repositories without `riftri enable`,
 and outside Git repositories, the shim immediately starts the captured real Git
-executable. Non-worktree Git commands are delegated in enabled repositories too.
+executable. Non-worktree Git commands are delegated in enabled repositories too,
+as are worktree subcommands other than `add`, `remove`, `move`, and `prune`,
+without inspecting the repository first.
 
 ## Inspect and reverse it
 
