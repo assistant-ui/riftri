@@ -14,6 +14,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   check, avoiding extra Git processes when multiple rules share one identity
   file. Distinct targets are still checked, every new call re-reads them, and
   unsafe keys, nested includes, and unreadable files remain fail-closed.
+- Pass `git worktree` subcommands other than `add`, `remove`, `move`, and
+  `prune` (such as `list`, `lock`, and `repair`) straight to Git from the shim,
+  without inspecting the repository first. `git worktree list` now starts one
+  Git process instead of five, and an alias such as `alias.wtl = worktree list`
+  two instead of six. Lifecycle subcommands are planned and guarded exactly as
+  before, however they are reached.
 
 ### Fixed
 

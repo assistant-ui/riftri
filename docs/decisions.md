@@ -137,6 +137,10 @@ atomically installs a real `git.exe` shim so agents that launch Git directly
 receive the same behavior as interactive PowerShell commands. Riftri never
 evaluates the hook or edits a shell profile itself. In either scope, the shim delegates
 commands outside enabled repositories and non-worktree Git commands unchanged.
+Worktree subcommands other than `add`, `remove`, `move`, and `prune` are
+delegated the same way, before the repository is inspected: Git takes the
+subcommand only from the next argument and matches it exactly, so nothing else
+there can reach a lifecycle operation.
 Unsupported optimized add forms fail visibly; `RIFTRI_BYPASS=1` is the explicit
 ordinary-Git escape hatch. Interception never hides Git from the caller:
 `git worktree add -h` and `--help` print Git's own usage, and an add carrying

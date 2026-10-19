@@ -229,7 +229,7 @@ fn plan_command_reading(
         if !expand_aliases {
             return Ok(GitProxyPlan::Passthrough);
         }
-        return match expand_worktree_alias(&context, arguments) {
+        return match expand_alias_chain(&context, arguments, true) {
             // Re-plan the command Git will actually run. Aliases are not
             // expanded recursively, so one pass is enough and terminates.
             Ok(Some(expanded)) => plan_git_command_inner(current_directory, &expanded, false),
@@ -252,6 +252,17 @@ fn plan_command_reading(
             }
             Err(error) => Err(error),
         };
+    }
+
+    // Only the lifecycle subcommands are ever planned or refused below, so
+    // any other one is Git's alone. Deciding that before the repository is
+    // inspected saves `git worktree list` and friends three to four Git
+    // processes, and changes no outcome: every later branch passes a
+    // non-lifecycle subcommand through, healthy repository or not.
+    let subcommand = arguments.get(context.command_index + 1);
+    if !subcommand.is_some_and(|subcommand| is_lifecycle_subcommand(subcommand.as_encoded_bytes()))
+    {
+        return Ok(GitProxyPlan::Passthrough);
     }
 
     let git = Git::default();
@@ -1395,6 +1406,30 @@ const COMMON_GIT_BUILTINS: &[&str] = &[
     WORKTREE_SUBCOMMAND,
 ];
 
+/// Whether `git worktree <word>` is one of the lifecycle subcommands Riftri
+/// plans. Every other subcommand is left to Git unplanned.
+///
+/// Git reads the subcommand only from the argument right after `worktree` and
+/// matches it exactly: no abbreviation, no case folding, and no option or
+/// `--` in front of it (`git worktree -q add` and `git worktree -- add` both
+/// stop with a usage error). Git 2.36 compares `argv[1]` with `strcmp`, and
+/// later releases parse it with `OPT_SUBCOMMAND`, which behaves the same way
+/// for these inputs (probed on Git 2.50.1). So no other word in that position
+/// can reach a lifecycle subcommand.
+fn is_lifecycle_subcommand(word: &[u8]) -> bool {
+    matches!(word, b"add" | b"remove" | b"move" | b"prune")
+}
+
+/// [`expand_alias_chain`] for the exact command Git runs, whatever its
+/// worktree subcommand.
+#[cfg(test)]
+fn expand_worktree_alias(
+    context: &CommandContext,
+    arguments: &[OsString],
+) -> Result<Option<Vec<OsString>>, ActivationError> {
+    expand_alias_chain(context, arguments, false)
+}
+
 /// Resolve a `git` alias that ultimately runs `git worktree ...`.
 ///
 /// The proxy compares the subcommand token to `worktree` literally, so an alias
@@ -1405,9 +1440,16 @@ const COMMON_GIT_BUILTINS: &[&str] = &[
 /// Shell aliases (`!command`) are deliberately left alone: they spawn a new
 /// process that resolves `git` through `PATH`, so any worktree command inside
 /// one already re-enters the proxy on its own.
-fn expand_worktree_alias(
+///
+/// With `lifecycle_only`, an alias that reaches any other worktree subcommand
+/// is reported as `None`, which the planner passes through, as it would the
+/// full expansion: the planner acts only on lifecycle subcommands. That skips
+/// the Git process that asks whether a builtin earlier in the chain would run
+/// instead, which can only turn the outcome into a passthrough as well.
+fn expand_alias_chain(
     context: &CommandContext,
     arguments: &[OsString],
+    lifecycle_only: bool,
 ) -> Result<Option<Vec<OsString>>, ActivationError> {
     let Some(token) = arguments.get(context.command_index) else {
         return Ok(None);
@@ -1506,6 +1548,17 @@ fn expand_worktree_alias(
         tail.append(&mut pending);
         pending = tail;
         if first == WORKTREE_SUBCOMMAND.as_bytes() {
+            // The word after `worktree` in the command Git will run: the
+            // body's next word, or else the caller's first argument.
+            let subcommand = match pending.first() {
+                Some(word) => word.as_slice(),
+                None => arguments
+                    .get(context.command_index + 1)
+                    .map_or(&[][..], |argument| argument.as_encoded_bytes()),
+            };
+            if lifecycle_only && !is_lifecycle_subcommand(subcommand) {
+                return Ok(None);
+            }
             // Git runs a builtin or a `git-<name>` program before it looks
             // for an alias of that name, so a chain that passes through one
             // never reaches this worktree command. A deprecated builtin is
