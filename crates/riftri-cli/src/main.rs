@@ -270,6 +270,32 @@ enum Command {
 }
 
 impl Command {
+    /// Whether this command inspects a repository through enough read-only
+    /// Git queries (three or more) to repay one `xcrun --find git` on macOS,
+    /// which lets those queries skip Apple's `/usr/bin/git` trampoline
+    /// (D046). Commands that start at most a version check stay on the
+    /// trampoline throughout; `exec` and the shell hook run on every new
+    /// agent or shell, so they must not pay for a lookup they cannot repay.
+    fn runs_many_git_queries(&self) -> bool {
+        match self {
+            Self::Setup { .. }
+            | Self::Enable { .. }
+            | Self::Disable { .. }
+            | Self::Doctor { .. }
+            | Self::Status { .. }
+            | Self::Repair { .. }
+            | Self::Gc { .. }
+            | Self::State { .. }
+            | Self::Worktree { .. } => true,
+            Self::Shell { command } => matches!(command, ShellCommand::Status { .. }),
+            Self::Exec { .. }
+            | Self::Overlayfs { .. }
+            | Self::Completions { .. }
+            | Self::Man { .. }
+            | Self::Backends { .. } => false,
+        }
+    }
+
     fn machine_output(&self) -> bool {
         match self {
             Self::Doctor { json, .. }
@@ -732,6 +758,9 @@ fn main() -> Result<()> {
         Err(error) => error.exit(),
     };
     let cli = Cli::from_arg_matches(&matches)?;
+    if cli.command.runs_many_git_queries() {
+        riftri_core::allow_direct_git_queries();
+    }
     let json_errors = cli.json_errors;
     let operation = cli.command.operation_name();
     let _presentation = ui::initialize(
