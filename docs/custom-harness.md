@@ -154,6 +154,9 @@ can fix them:
   exact root of a registered Git worktree (a subdirectory, a missing path, a
   file, a path inside a Git directory, or a directory outside any
   repository). The command was not started.
+- `unsupported-git-version`: the Git that `riftri enable`, `riftri exec`, or
+  `riftri shell hook` would use is older than Git 2.36. Nothing was enabled,
+  started, or installed; upgrade Git or put a newer one first on `PATH`.
 
 With `--json-errors`, the failure arrives as one receipt on stderr:
 

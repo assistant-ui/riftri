@@ -189,6 +189,8 @@ Git paths and embedded Git libraries are outside interception.
 ### `riftri enable [PATH]`
 
 Enable optimized worktree creation for one repository. `PATH` defaults to `.`.
+Refuses a Git older than 2.36 with the `unsupported-git-version` policy code;
+see [the Git version requirement](install.md#git-version-requirement).
 
 ### `riftri disable [PATH]`
 
@@ -210,6 +212,10 @@ without any shell-level activation.
 | Flag | Effect |
 | --- | --- |
 | `--worktree <PATH>` | Start the command from this exact, registered Git worktree root |
+
+Before starting the command, `riftri exec` checks that the Git it records is
+2.36 or newer and otherwise refuses with the `unsupported-git-version` policy
+code; see [the Git version requirement](install.md#git-version-requirement).
 
 Termination follows the platform's conventions. On Unix, without a foreground
 controlling terminal (a supervisor or script), the command runs in its own
@@ -259,7 +265,8 @@ for a fatal SIGINT.
 Configure shell-scoped interception for normal Git commands.
 
 - **`riftri shell hook <SHELL>`** — print initialization code to evaluate in a
-  shell. Shells: `sh`, `bash`, `zsh`, `powershell`.
+  shell. Shells: `sh`, `bash`, `zsh`, `powershell`. Refuses a Git older than
+  2.36 with the `unsupported-git-version` policy code and prints no code.
 - **`riftri shell deactivate <SHELL>`** — print code to evaluate to deactivate
   Riftri in the current shell. Same shell choices. The code removes both the
   durable shell-hook shim and any process-scoped `riftri exec` shim entries

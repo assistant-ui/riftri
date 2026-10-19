@@ -370,8 +370,16 @@ fn failures_classify_the_same_through_every_wrapper(tc: TestCase) {
 #[hegel::test]
 fn only_policy_refusals_have_a_refusal_code(tc: TestCase) {
     let message = tc.draw(gs::text().max_size(12));
-    let (error, code) = match tc.draw(gs::integers::<u8>().max_value(4)) {
+    let (error, code) = match tc.draw(gs::integers::<u8>().max_value(5)) {
         0 => (ActivationError::BareRepository, Some("bare-repository")),
+        4 => (
+            ActivationError::UnsupportedGitVersion {
+                git: message.clone().into(),
+                version: message,
+                minimum: "2.36",
+            },
+            Some("unsupported-git-version"),
+        ),
         1 => (
             ActivationError::WorktreeBinding(message),
             Some("invalid-worktree-binding"),

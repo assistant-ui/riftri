@@ -96,6 +96,7 @@ non-disruptive:
 | Child tools | Plain-shell, `claude`, and `codex`-named child harnesses inherit interception without Riftri-specific prompts. |
 | Shared storage | Three child-created views reuse one immutable base while keeping separate writable views. |
 | Delegation | Standard input, standard output, standard error, and exit status match direct Git for passthrough commands; a signalled child produces the conventional `128 + signal` shell status. |
+| Delegation cost | Common builtins such as `status`, `cat-file`, `rev-list`, and `for-each-ref` start exactly one Git process through the shim. The shim reads an alias only for a command it cannot prove Git runs itself. |
 | Repeated activation | The shim is placed first on `PATH` without accumulating leading entries. |
 | Deactivation | All shim entries and environment markers are removed from the current shell. |
 | Unsupported platforms | The npm launcher works, but mutation remains an explicit unsupported-backend error until a native backend exists. |
@@ -121,6 +122,14 @@ test filesystem traffic.
 
 ## Boundaries and edge cases
 
+- The hook and `riftri exec` require Git 2.36 or newer and refuse an older Git
+  with `unsupported-git-version` before changing `PATH`. The shim relies on
+  that release: it never asks Git for an alias named after one of the builtins
+  it knows, because Git runs those builtins first, and some of them (such as
+  `switch` and `restore`) are not builtins in older Git. The shim does not
+  re-check the version on each delegated command, so a Git replaced in place by
+  an older release mid-session is noticed only by the next hook or
+  `riftri exec`.
 - Managed `git worktree remove` and `git worktree move` commands accept a unique
   path suffix, such as a basename. Riftri resolves the selector through Git's
   inventory before it selects the lifecycle journal or rejects unsupported options.

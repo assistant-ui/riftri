@@ -802,6 +802,32 @@ it, so an unsigned tag costs seconds rather than eight platform builds, and
 nothing is published before it passes. The job itself stays unconditional
 while its only step is push-only, because a skipped job skips its dependents.
 
+### D045: Git 2.36 is the minimum, checked where a shim scope starts
+
+Riftri requires Git 2.36 or newer. Lifecycle operations read
+`git worktree list --porcelain -z` (Git 2.36), repository inspection uses
+`git rev-parse --path-format=absolute` (Git 2.31), and sparse views use
+`git sparse-checkout set --cone` (Git 2.35). The Git shim depends on the same
+floor: it skips the alias lookup for a fixed list of common commands, because
+Git never lets an alias replace a builtin that is not deprecated, and every
+name on that list is a builtin from Git 2.36 on. On an older Git some are not
+(`switch` and `restore` became builtins in Git 2.23), so an alias with that
+name could run a worktree lifecycle command the shim never planned.
+
+The version is checked where Riftri records the real Git a scope delegates to,
+`riftri exec` and `riftri shell hook`, and by `riftri enable`; each refuses an
+older Git with the `unsupported-git-version` policy code before changing
+anything, and `riftri doctor` reports it. `riftri disable` does not check, so
+consent can always be withdrawn. The shim itself never checks: a delegated
+command must not pay for a `git --version` process. What remains is a Git
+replaced in place by an older release after its scope started. Every Riftri
+lifecycle command already fails on such a Git, and the alias route also needs
+an alias named after one of those builtins, so the gap is documented rather
+than paid for on every command; the next hook or `riftri exec` checks again.
+A name joins the list only when it is a builtin in Git 2.36 and is not
+deprecated in current Git, and a test checks both. Raising the minimum is a new
+decision.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw
