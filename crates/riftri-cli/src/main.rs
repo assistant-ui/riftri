@@ -2919,8 +2919,8 @@ fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
                 },
             });
             // A Git older than the supported minimum is found but unusable.
-            if let Some(error) = &report.git.error {
-                value["error"] = serde_json::json!(error);
+            if !report.git.available {
+                value["error"] = serde_json::json!(report.git.error);
             }
             value
         }
@@ -3092,14 +3092,14 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
     );
 
     match &report.git.value {
-        Some(git) => match &report.git.error {
-            Some(error) => outputln!(
-                "Git: {} ({}), unsupported: {error}",
-                git.version,
-                git.command.display()
-            ),
-            None => outputln!("Git: {} ({})", git.version, git.command.display()),
-        },
+        // A Git older than the supported minimum is found but unusable.
+        Some(git) if !report.git.available => outputln!(
+            "Git: {} ({}), unsupported: {}",
+            git.version,
+            git.command.display(),
+            report.git.error.as_deref().unwrap_or("unknown error")
+        ),
+        Some(git) => outputln!("Git: {} ({})", git.version, git.command.display()),
         None => outputln!(
             "Git: unavailable ({})",
             report.git.error.as_deref().unwrap_or("unknown error")
