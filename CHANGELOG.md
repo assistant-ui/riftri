@@ -14,6 +14,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   check, avoiding extra Git processes when multiple rules share one identity
   file. Distinct targets are still checked, every new call re-reads them, and
   unsafe keys, nested includes, and unreadable files remain fail-closed.
+- Skip one durable journal write per add (`clean-verified`) and per removal
+  (`base-released`). No reader tells either state apart from the one before
+  it, so each operation now makes two fewer full flushes, about 7 to 9 ms on
+  APFS. Recovery decisions and output are unchanged, and journals an earlier
+  Riftri left in either state still recover as before.
 
 ### Fixed
 

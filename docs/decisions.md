@@ -96,6 +96,12 @@ forward state machine under `removals/` so cleanup cannot be confused with
 reversal of an incomplete add. Journal path encoding preserves platform-native
 paths.
 
+Every durable write costs a file flush and a directory flush, so a state that
+no reader tells apart from its predecessor, with no work between them, is taken
+in memory and not written on its own: `clean-verified` on add and
+`base-released` on removal. Both stay in the format, and a journal an earlier
+version left in either state recovers exactly as before.
+
 ### D015: npm is a distribution layer for native Rust binaries
 
 The public `riftri` npm package contains a small Node.js launcher and exact
