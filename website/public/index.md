@@ -27,8 +27,8 @@ Starring is optional and never required to install or use Riftri.
 
 ## Installation
 
-Git must be installed. The standalone native CLI does not require Node.js, npm,
-or a Rust toolchain.
+Git 2.36 or newer must be installed. The standalone native CLI does not require
+Node.js, npm, or a Rust toolchain.
 
 ### macOS and Linux
 

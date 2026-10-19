@@ -2909,14 +2909,21 @@ fn print_allocation_note() {
 
 fn doctor_json(report: &riftri_core::DoctorReport) -> serde_json::Value {
     let git = match &report.git.value {
-        Some(git) => serde_json::json!({
-            "available": report.git.available,
-            "value": {
-                "command": git.command.display().to_string(),
-                "command_native_hex": native_path_hex(&git.command),
-                "version": git.version,
-            },
-        }),
+        Some(git) => {
+            let mut value = serde_json::json!({
+                "available": report.git.available,
+                "value": {
+                    "command": git.command.display().to_string(),
+                    "command_native_hex": native_path_hex(&git.command),
+                    "version": git.version,
+                },
+            });
+            // A Git older than the supported minimum is found but unusable.
+            if let Some(error) = &report.git.error {
+                value["error"] = serde_json::json!(error);
+            }
+            value
+        }
         None => serde_json::json!(report.git),
     };
     let repository = match &report.repository.value {
@@ -3085,7 +3092,14 @@ fn print_doctor(report: &riftri_core::DoctorReport) {
     );
 
     match &report.git.value {
-        Some(git) => outputln!("Git: {} ({})", git.version, git.command.display()),
+        Some(git) => match &report.git.error {
+            Some(error) => outputln!(
+                "Git: {} ({}), unsupported: {error}",
+                git.version,
+                git.command.display()
+            ),
+            None => outputln!("Git: {} ({})", git.version, git.command.display()),
+        },
         None => outputln!(
             "Git: unavailable ({})",
             report.git.error.as_deref().unwrap_or("unknown error")

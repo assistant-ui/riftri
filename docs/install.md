@@ -1,10 +1,22 @@
 # Installing Riftri
 
 Riftri's standalone Rust executable does not need Node.js, npm, or a Rust
-toolchain. Git must be installed. Download a published version from the
-[official GitHub releases](https://github.com/assistant-ui/riftri/releases),
+toolchain. Git 2.36 or newer must be installed; see the
+[Git version requirement](#git-version-requirement). Download a published
+version from the [official GitHub releases](https://github.com/assistant-ui/riftri/releases),
 along with its `SHA256SUMS` file. Pin the version in the commands below to the
 release you intend to install; do not mix files from different versions.
+
+## Git version requirement
+
+Riftri needs Git 2.36 or newer. Every lifecycle operation reads Git's worktree
+inventory with `git worktree list --porcelain -z`, which Git 2.36 introduced,
+and repository inspection relies on `git rev-parse --path-format=absolute`
+(Git 2.31). `riftri enable`, `riftri exec`, and `riftri shell hook` check the
+version of the Git they will use and refuse an older one with the
+`unsupported-git-version` policy code (exit 3) before changing anything.
+`riftri doctor` reports it as a `git` blocker. `riftri disable` works with any
+Git, so consent can always be withdrawn. Run `git --version` to check.
 
 ## Bash installer
 

@@ -114,10 +114,21 @@ pub enum ActivationError {
 
     #[error("shell activation failed: {0}")]
     Shell(String),
+
+    #[error(
+        "Riftri requires Git {minimum} or later, but {} reports `{version}`; upgrade Git, or run Git without Riftri",
+        .git.display()
+    )]
+    UnsupportedGitVersion {
+        git: PathBuf,
+        version: String,
+        minimum: &'static str,
+    },
 }
 
 pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let git = Git::default();
+    require_supported_git(&git)?;
     let status = repository_identity_with_git(&git, path)?;
     git.set_local_config(
         &status.common_git_dir,
@@ -139,6 +150,29 @@ pub fn disable_repository(path: &Path) -> Result<RepositoryActivation, Activatio
     Ok(RepositoryActivation {
         enabled: false,
         ..status
+    })
+}
+
+/// Refuse to enable a repository or to start a Git shim scope on a Git older
+/// than [`riftri_git::MINIMUM_GIT_VERSION`].
+///
+/// The shim decides on its hot path, without starting Git, that an alias
+/// cannot replace a command in [`COMMON_GIT_BUILTINS`]. That holds only on a
+/// Git where every one of those commands is a builtin: on an older Git, an
+/// `alias.switch` that runs `worktree remove --force` would reach Git
+/// unplanned. Checking the version once, when the scope records the real Git
+/// it delegates to, keeps that guarantee without adding a Git process to any
+/// delegated command. Riftri's lifecycle commands already fail on an older
+/// Git, so the refusal only makes that failure early and explicit.
+fn require_supported_git(git: &Git) -> Result<(), ActivationError> {
+    let info = git.detect()?;
+    if info.meets_minimum_version() {
+        return Ok(());
+    }
+    Err(ActivationError::UnsupportedGitVersion {
+        git: info.command,
+        version: info.version,
+        minimum: riftri_git::MINIMUM_GIT_VERSION_TEXT,
     })
 }
 
@@ -546,6 +580,7 @@ fn execute_scoped_command_from(
         .split_first()
         .ok_or_else(|| process_error("no process-scoped command was supplied"))?;
     let real_git = locate_real_git()?;
+    require_supported_git(&Git::new(&real_git))?;
     let current_executable = env::current_exe()
         .map_err(|error| process_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = tempfile::Builder::new()
@@ -706,6 +741,7 @@ pub fn shell_activation_status() -> Result<ShellActivationStatus, ActivationErro
 #[cfg(unix)]
 fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     let real_git = locate_real_git()?;
+    require_supported_git(&Git::new(&real_git))?;
     let current_executable = env::current_exe()
         .map_err(|error| shell_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = shell_shim_directory()?;
@@ -754,6 +790,7 @@ fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
 #[cfg(target_os = "windows")]
 fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
     let real_git = locate_real_git()?;
+    require_supported_git(&Git::new(&real_git))?;
     let current_executable = env::current_exe()
         .map_err(|error| shell_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = shell_shim_directory()?;
@@ -1361,38 +1398,86 @@ fn record_environment_alias(aliases: &mut Vec<(String, Vec<u8>)>, assignment: &O
 /// Git commands common enough that resolving an alias for them would add a
 /// configuration read to the hot path. Git never lets an alias shadow a
 /// built-in command that is not deprecated, and none of these is, so skipping
-/// the lookup for them is correct as well as cheap. This is a shortcut, not
-/// the full set: a built-in missing from the list costs that one read, and
+/// the lookup for them is correct as well as cheap. Every entry is a builtin in
+/// every Git from [`riftri_git::MINIMUM_GIT_VERSION`] on, which a shim scope
+/// checks before it starts: `switch` and `restore`, for example, became
+/// builtins only in Git 2.23, so on an older Git an alias of that name would
+/// run. Programs Git runs from its exec-path (`git-bisect` before Git 2.40,
+/// `git-submodule`) are not builtins and stay out. This is a shortcut, not the
+/// full set: a built-in missing from the list costs that one read, and
 /// [`expand_worktree_alias`] asks Git for the real set before it trusts an
 /// alias that leads to a worktree command.
 const COMMON_GIT_BUILTINS: &[&str] = &[
     "add",
+    "am",
+    "apply",
+    "archive",
+    "blame",
     "branch",
+    "cat-file",
+    "check-attr",
+    "check-ignore",
+    "check-ref-format",
     "checkout",
     "cherry-pick",
+    "clean",
     "clone",
     "commit",
+    "commit-tree",
     "config",
+    "count-objects",
+    "describe",
     "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
     "fetch",
+    "for-each-ref",
+    "format-patch",
+    "fsck",
+    "gc",
     "grep",
+    "hash-object",
+    "help",
     "init",
+    "interpret-trailers",
     "log",
     "ls-files",
+    "ls-remote",
+    "ls-tree",
     "merge",
+    "merge-base",
+    "mktree",
+    "mv",
+    "name-rev",
+    "notes",
+    "patch-id",
     "pull",
     "push",
+    "read-tree",
     "rebase",
+    "reflog",
     "remote",
     "reset",
     "restore",
+    "rev-list",
     "rev-parse",
+    "revert",
+    "rm",
+    "shortlog",
     "show",
+    "show-ref",
     "stash",
     "status",
     "switch",
+    "symbolic-ref",
     "tag",
+    "update-index",
+    "update-ref",
+    "var",
+    "version",
     WORKTREE_SUBCOMMAND,
+    "write-tree",
 ];
 
 /// Resolve a `git` alias that ultimately runs `git worktree ...`.
@@ -3290,6 +3375,215 @@ mod tests {
             .expect("plan alias"),
             GitProxyPlan::OptimizedForceRemove(_)
         ));
+    }
+
+    /// Every builtin in Git 2.36, the oldest supported release, as listed by
+    /// the `commands[]` table in its `git.c`. Entries in
+    /// [`super::COMMON_GIT_BUILTINS`] must come from here, because the shim
+    /// skips their alias lookup on any Git a scope accepts.
+    const GIT_2_36_BUILTINS: &[&str] = &[
+        "add",
+        "am",
+        "annotate",
+        "apply",
+        "archive",
+        "bisect--helper",
+        "blame",
+        "branch",
+        "bugreport",
+        "bundle",
+        "cat-file",
+        "check-attr",
+        "check-ignore",
+        "check-mailmap",
+        "check-ref-format",
+        "checkout",
+        "checkout--worker",
+        "checkout-index",
+        "cherry",
+        "cherry-pick",
+        "clean",
+        "clone",
+        "column",
+        "commit",
+        "commit-graph",
+        "commit-tree",
+        "config",
+        "count-objects",
+        "credential",
+        "credential-cache",
+        "credential-cache--daemon",
+        "credential-store",
+        "describe",
+        "diff",
+        "diff-files",
+        "diff-index",
+        "diff-tree",
+        "difftool",
+        "env--helper",
+        "fast-export",
+        "fast-import",
+        "fetch",
+        "fetch-pack",
+        "fmt-merge-msg",
+        "for-each-ref",
+        "for-each-repo",
+        "format-patch",
+        "fsck",
+        "fsck-objects",
+        "fsmonitor--daemon",
+        "gc",
+        "get-tar-commit-id",
+        "grep",
+        "hash-object",
+        "help",
+        "hook",
+        "index-pack",
+        "init",
+        "init-db",
+        "interpret-trailers",
+        "log",
+        "ls-files",
+        "ls-remote",
+        "ls-tree",
+        "mailinfo",
+        "mailsplit",
+        "maintenance",
+        "merge",
+        "merge-base",
+        "merge-file",
+        "merge-index",
+        "merge-ours",
+        "merge-recursive",
+        "merge-recursive-ours",
+        "merge-recursive-theirs",
+        "merge-subtree",
+        "merge-tree",
+        "mktag",
+        "mktree",
+        "multi-pack-index",
+        "mv",
+        "name-rev",
+        "notes",
+        "pack-objects",
+        "pack-redundant",
+        "pack-refs",
+        "patch-id",
+        "pickaxe",
+        "prune",
+        "prune-packed",
+        "pull",
+        "push",
+        "range-diff",
+        "read-tree",
+        "rebase",
+        "receive-pack",
+        "reflog",
+        "remote",
+        "remote-ext",
+        "remote-fd",
+        "repack",
+        "replace",
+        "rerere",
+        "reset",
+        "restore",
+        "rev-list",
+        "rev-parse",
+        "revert",
+        "rm",
+        "send-pack",
+        "shortlog",
+        "show",
+        "show-branch",
+        "show-index",
+        "show-ref",
+        "sparse-checkout",
+        "stage",
+        "stash",
+        "status",
+        "stripspace",
+        "submodule--helper",
+        "switch",
+        "symbolic-ref",
+        "tag",
+        "unpack-file",
+        "unpack-objects",
+        "update-index",
+        "update-ref",
+        "update-server-info",
+        "upload-archive",
+        "upload-archive--writer",
+        "upload-pack",
+        "var",
+        "verify-commit",
+        "verify-pack",
+        "verify-tag",
+        "version",
+        "whatchanged",
+        "worktree",
+        "write-tree",
+    ];
+
+    /// The shim skips the alias lookup for these names, which is correct only
+    /// while Git runs each of them itself. Check that against the oldest
+    /// supported Git and against the installed one: each must be a builtin,
+    /// and none may be deprecated, because Git lets an alias replace a
+    /// deprecated builtin. A Git without the `deprecated` listing has no
+    /// deprecated builtins to exclude.
+    #[test]
+    fn skipped_alias_lookups_name_builtins_of_every_supported_git() {
+        let list = |kind: &str| {
+            let output = Command::new("git")
+                .arg(format!("--list-cmds={kind}"))
+                .output()
+                .expect("list Git commands");
+            if !output.status.success() {
+                return Vec::new();
+            }
+            String::from_utf8(output.stdout)
+                .expect("UTF-8 command names")
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let installed = list("builtins");
+        assert!(installed.iter().any(|builtin| builtin == "worktree"));
+        let deprecated = list("deprecated");
+        for name in super::COMMON_GIT_BUILTINS {
+            assert!(
+                GIT_2_36_BUILTINS.contains(name),
+                "`{name}` is not a builtin in Git 2.36"
+            );
+            assert!(
+                installed.iter().any(|builtin| builtin == name),
+                "`{name}` is not a builtin in the installed Git"
+            );
+            assert!(
+                !deprecated.iter().any(|builtin| builtin == name),
+                "`{name}` is deprecated in the installed Git, so an alias can replace it"
+            );
+        }
+        for legacy in [
+            "annotate",
+            "init-db",
+            "fsck-objects",
+            "stage",
+            "pickaxe",
+            "show-branch",
+            "whatchanged",
+            "pack-redundant",
+            "get-tar-commit-id",
+        ] {
+            assert!(
+                !super::COMMON_GIT_BUILTINS.contains(&legacy),
+                "`{legacy}` is a legacy name Git may deprecate"
+            );
+        }
+        assert_eq!(
+            riftri_git::MINIMUM_GIT_VERSION,
+            (2, 36),
+            "update GIT_2_36_BUILTINS with the minimum version"
+        );
     }
 
     /// Alias resolution must not capture anything else. A shell alias spawns a

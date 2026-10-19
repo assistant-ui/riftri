@@ -1,4 +1,7 @@
 #[cfg(unix)]
+#[path = "support/real_git.rs"]
+mod real_git;
+#[cfg(unix)]
 mod support;
 
 #[cfg(unix)]
@@ -356,6 +359,91 @@ eval "$("$RIFTRI_TEST_BIN" shell deactivate sh)"
         assert_eq!(scoped.status.code(), direct.status.code());
         assert_eq!(scoped.stdout, direct.stdout);
         assert_eq!(scoped.stderr, direct.stderr);
+    }
+
+    /// The Git commands one `git <arguments>` starts through the
+    /// process-scoped shim, recorded by a wrapper that `riftri exec` captures
+    /// as the real Git. The log is cleared inside the scope, so it holds only
+    /// what the shim and Git start for this command.
+    fn git_processes_through_the_shim(repository: &Path, arguments: &[&str]) -> Vec<String> {
+        let directory = tempdir().expect("counting Git directory");
+        let log = directory.path().join("git-invocations");
+        let counting = directory.path().join("git");
+        fs::write(
+            &counting,
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIFTRI_TEST_GIT_LOG\"\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
+        )
+        .expect("write counting Git");
+        fs::set_permissions(&counting, fs::Permissions::from_mode(0o755))
+            .expect("make counting Git executable");
+        let path = env::join_paths(
+            std::iter::once(directory.path().to_path_buf())
+                .chain(env::split_paths(&env::var_os("PATH").expect("PATH is set"))),
+        )
+        .expect("counting PATH");
+        let output = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .args([
+                "exec",
+                "--",
+                "sh",
+                "-c",
+                ": > \"$RIFTRI_TEST_GIT_LOG\"; exec git \"$@\"",
+                "sh",
+            ])
+            .args(arguments)
+            .current_dir(repository)
+            .env("PATH", path)
+            // An inherited scope would delegate past the counting wrapper.
+            .env_remove("RIFTRI_SHIM_ACTIVE")
+            .env_remove("RIFTRI_REAL_GIT")
+            .env_remove("RIFTRI_BYPASS")
+            .env("RIFTRI_TEST_REAL_GIT", crate::real_git::real_git())
+            .env("RIFTRI_TEST_GIT_LOG", &log)
+            .output()
+            .expect("run Git through the shim");
+        assert!(
+            output.status.success(),
+            "git {arguments:?} failed through the shim: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::read_to_string(&log)
+            .expect("read Git invocation log")
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Plumbing that agents and editors run constantly is a builtin Git runs
+    /// before any alias, so the shim delegates it without first asking Git for
+    /// an alias of the same name: one Git process, the command itself.
+    #[test]
+    fn common_builtins_start_one_git_process_through_the_shim() {
+        let fixture = RepositoryFixture::new();
+        let enable = Command::new(env!("CARGO_BIN_EXE_riftri"))
+            .arg("enable")
+            .current_dir(&fixture.repository)
+            .output()
+            .expect("enable repository");
+        assert!(enable.status.success());
+        for arguments in [
+            &["cat-file", "-t", "HEAD"][..],
+            &["rev-list", "-n", "1", "HEAD"][..],
+            &["ls-tree", "HEAD"][..],
+            &["for-each-ref", "refs/heads"][..],
+            &["show-ref", "--head"][..],
+            &["symbolic-ref", "HEAD"][..],
+            &["merge-base", "HEAD", "HEAD"][..],
+            &["describe", "--always"][..],
+            &["diff-index", "--quiet", "HEAD"][..],
+            &["check-attr", "-a", "tracked.txt"][..],
+        ] {
+            let calls = git_processes_through_the_shim(&fixture.repository, arguments);
+            assert_eq!(
+                calls,
+                [arguments.join(" ")],
+                "git {arguments:?} started extra Git processes"
+            );
+        }
     }
 
     #[test]

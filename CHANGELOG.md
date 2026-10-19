@@ -7,6 +7,19 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- Skip the Git shim's alias lookup for 43 more long-standing builtins,
+  including `cat-file`, `rev-list`, `ls-tree`, `for-each-ref`, `merge-base`,
+  `blame`, and `rm`, so each starts one Git process instead of two through
+  `riftri exec` or a shell hook. Git never lets an alias replace one of these,
+  so no alias-routed lifecycle command can slip past planning.
+- Require Git 2.36 or newer. `riftri enable`, `riftri exec`, and
+  `riftri shell hook` refuse an older Git with the `unsupported-git-version`
+  policy code (exit 3) before changing anything, and `riftri doctor` reports
+  it as a `git` blocker. Lifecycle operations already needed Git 2.36; the
+  check also closes a route where, on a Git older than 2.23, an alias named
+  `switch` or `restore` could run a worktree lifecycle command the shim never
+  planned. `riftri disable` still works with any Git.
+
 - Describe Riftri and its backends by their supported capabilities rather than
   blanket maturity labels. Backup guidance, filesystem requirements, and the
   security-sandbox boundary remain explicit.

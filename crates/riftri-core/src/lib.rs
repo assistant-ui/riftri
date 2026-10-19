@@ -81,6 +81,9 @@ pub fn is_absent_repository(error: &(dyn std::error::Error + 'static)) -> bool {
 ///   `riftri status` against it only produced a loop between the two (#425).
 /// - `invalid-worktree-binding`: `riftri exec --worktree` did not name the
 ///   exact root of a registered Git worktree, so the command never started.
+/// - `unsupported-git-version`: the Git Riftri would delegate to is older than
+///   [`riftri_git::MINIMUM_GIT_VERSION`], so `riftri enable`, `riftri exec`,
+///   or a shell hook refused before changing anything.
 ///
 /// Like [`is_absent_repository`], each wrapper is matched explicitly:
 /// `#[error(transparent)]` forwards `source()` past the inner error, so walking
@@ -107,6 +110,12 @@ pub fn policy_refusal_code(error: &(dyn std::error::Error + 'static)) -> Option<
     );
     if invalid_state {
         return Some("invalid-state-directory");
+    }
+    if matches!(
+        error.downcast_ref::<ActivationError>(),
+        Some(ActivationError::UnsupportedGitVersion { .. })
+    ) {
+        return Some("unsupported-git-version");
     }
     // `riftri exec --worktree` that names no registered worktree root: the
     // command was never started, and only a different path can succeed.
@@ -599,7 +608,18 @@ pub fn doctor_for_destination(repository_path: &Path, destination: &Path) -> Doc
 fn doctor_inner(repository_path: &Path, destination: &Path, explicit: bool) -> DoctorReport {
     let git = Git::default();
     let git_check = match git.detect() {
-        Ok(info) => Diagnostic::success(info),
+        Ok(info) if info.meets_minimum_version() => Diagnostic::success(info),
+        // Report the version that was found next to the reason it is refused.
+        Ok(info) => Diagnostic {
+            available: false,
+            error: Some(format!(
+                "Riftri requires Git {} or later, but {} reports `{}`",
+                riftri_git::MINIMUM_GIT_VERSION_TEXT,
+                info.command.display(),
+                info.version
+            )),
+            value: Some(info),
+        },
         Err(error) => Diagnostic::failure(error.to_string()),
     };
     // `doctor` is the only consumer of working-tree cleanliness, so it is the
@@ -681,8 +701,10 @@ fn destination_readiness(
         blockers.push(DestinationReadinessBlocker {
             kind: "git",
             explanation: error.clone(),
-            remedy: "Install Git and ensure the real `git` executable is available on PATH."
-                .to_owned(),
+            remedy: format!(
+                "Install Git {} or later and ensure the real `git` executable is available on PATH.",
+                riftri_git::MINIMUM_GIT_VERSION_TEXT
+            ),
         });
     }
 

@@ -58,7 +58,47 @@ impl GitInfo {
         }
         (major, minor) >= (2, 43)
     }
+
+    /// The `(major, minor)` release this Git reports, or `None` when the
+    /// version line does not start with two decimal components.
+    ///
+    /// Every Git build, including vendor builds (`2.50.1 (Apple Git-155)`),
+    /// Git for Windows (`2.47.1.windows.1`), release candidates
+    /// (`2.47.0.rc1`), and source builds (`2.47.0.123.gabcdef`), starts its
+    /// version with the release it was cut from, so only the suffix varies.
+    pub fn release(&self) -> Option<(u64, u64)> {
+        let version = self
+            .version
+            .strip_prefix("git version ")?
+            .split_whitespace()
+            .next()?;
+        let mut parts = version.split('.');
+        let major = parse_unsigned(parts.next()?, 10)?;
+        let minor = parse_unsigned(parts.next()?, 10)?;
+        Some((major, minor))
+    }
+
+    /// Whether this Git is at least [`MINIMUM_GIT_VERSION`]. A version that
+    /// cannot be read is not assumed to be new enough.
+    pub fn meets_minimum_version(&self) -> bool {
+        self.release()
+            .is_some_and(|release| release >= MINIMUM_GIT_VERSION)
+    }
 }
+
+/// The oldest Git release Riftri supports.
+///
+/// Every lifecycle operation reads Git's worktree inventory with
+/// `git worktree list --porcelain -z`, which Git 2.36 introduced; repository
+/// inspection needs `rev-parse --path-format=absolute` (Git 2.31) and sparse
+/// views need `sparse-checkout set --cone` (Git 2.35). The Git shim also
+/// relies on it: it skips the alias lookup for a fixed list of commands that
+/// are builtins in every Git from this release on, and Git never lets an
+/// alias replace a builtin that is not deprecated.
+pub const MINIMUM_GIT_VERSION: (u64, u64) = (2, 36);
+
+/// [`MINIMUM_GIT_VERSION`] as people write it.
+pub const MINIMUM_GIT_VERSION_TEXT: &str = "2.36";
 
 /// A validated Git object ID. SHA-1 and SHA-256 repositories are supported.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -6775,6 +6815,47 @@ mod tests {
             };
             assert_eq!(info.supports_attribute_source(), supported, "{version}");
         }
+    }
+
+    #[test]
+    fn minimum_version_reads_the_release_of_every_git_build() {
+        for (version, release, supported) in [
+            ("git version 2.35.8", Some((2, 35)), false),
+            ("git version 2.36.0", Some((2, 36)), true),
+            ("git version 2.36.0.rc0", Some((2, 36)), true),
+            ("git version 2.50.1 (Apple Git-155)", Some((2, 50)), true),
+            ("git version 2.47.1.windows.1", Some((2, 47)), true),
+            ("git version 2.53.0.123.gabcdef0", Some((2, 53)), true),
+            ("git version 3.0.0", Some((3, 0)), true),
+            ("git version 2.9.5", Some((2, 9)), false),
+            ("git version 1.8.3.1", Some((1, 8)), false),
+            ("git version 2", None, false),
+            ("git version 2.+40.0", None, false),
+            ("git version +2.40.0", None, false),
+            ("git version ", None, false),
+            ("unknown", None, false),
+        ] {
+            let info = super::GitInfo {
+                command: "git".into(),
+                version: version.to_owned(),
+            };
+            assert_eq!(info.release(), release, "{version}");
+            assert_eq!(info.meets_minimum_version(), supported, "{version}");
+        }
+        assert_eq!(
+            super::MINIMUM_GIT_VERSION_TEXT,
+            format!(
+                "{}.{}",
+                super::MINIMUM_GIT_VERSION.0,
+                super::MINIMUM_GIT_VERSION.1
+            )
+        );
+    }
+
+    #[test]
+    fn installed_git_meets_the_minimum_version() {
+        let info = Git::default().detect().unwrap();
+        assert!(info.meets_minimum_version(), "{}", info.version);
     }
 
     #[test]

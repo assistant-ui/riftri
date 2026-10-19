@@ -679,13 +679,15 @@ mod unix {
             // artifact rather than from the SIGTERM forwarding under test.
             std::fs::write(
                 &executable,
-                // riftri resolves Git aliases before planning, so the shim
-                // runs `git config --get alias.<command>` first. A stand-in
-                // that sleeps for every invocation never answers that probe
-                // and the fixture deadlocks on itself. Real Git exits 1 for an
-                // unset alias, so do that and sleep only for the real command.
+                // riftri checks the Git version before it starts the scope,
+                // and resolves Git aliases before planning, so the shim runs
+                // `git config --get alias.<command>` first. A stand-in that
+                // sleeps for every invocation never answers those probes and
+                // the fixture deadlocks on itself. Answer them as real Git
+                // does (an unset alias exits 1) and sleep only for the real
+                // command.
                 "#!/bin/sh\n\
-                 case \"$1\" in config) exit 1 ;; esac\n\
+                 case \"$1\" in config) exit 1 ;; --version) echo 'git version 2.50.1'; exit 0 ;; esac\n\
                  trap '' HUP\n\
                  echo \"$$\"\n\
                  exec /bin/sleep 300\n",
