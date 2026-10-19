@@ -861,8 +861,8 @@ Apple SSDs are guaranteed to provide. Whether APFS reports an error or issues a
 plain `fsync` on a device without that support is not documented (HFS, whose
 source is public, takes a full flush). A device that ignores barriers is in
 the same class as one that ignores the cache flush `F_FULLFSYNC` already
-depends on, and a journal torn by either is unreadable, which every reader
-already refuses rather than act on. A barrier the filesystem does not implement
+depends on, and every reader refuses a torn journal that does not decode
+rather than act on it. A barrier the filesystem does not implement
 (`ENOTSUP`, `EOPNOTSUPP`, `EINVAL`, `ENOTTY`, or `ENOSYS`) falls back to
 `F_FULLFSYNC`, so durability never drops silently; an interrupted barrier is
 retried, and any other failure is reported as a failed flush, not retried
