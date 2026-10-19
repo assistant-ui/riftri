@@ -42,6 +42,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   Git process instead of five, and an alias such as `alias.wtl = worktree list`
   two instead of six. Lifecycle subcommands are planned and guarded exactly as
   before, however they are reached.
+- Start fewer Git processes for lifecycle commands by inspecting each
+  repository once: `riftri worktree prune` now starts 10 instead of 31 (13
+  instead of 40 as `git worktree prune` through the shim), `worktree move` 7
+  instead of 11 (11 instead of 21 through the shim), `worktree remove` 11
+  instead of 12 (15 instead of 22), and `riftri doctor` 9 instead of 12. Every
+  check made after taking a lock or after quarantining a view is unchanged, and
+  each prune pass still re-reads the state directories and Git's worktrees.
+  Removing or moving a path Riftri does not manage while `git worktree list`
+  fails now reports the path as unmanaged instead of the Git failure.
 
 ### Fixed
 
