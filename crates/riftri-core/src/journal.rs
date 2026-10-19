@@ -1370,6 +1370,10 @@ impl JournalStore {
         atomic_replace(&temporary, &path)?;
         temporary.disable_cleanup(true);
         sync_parent(&path)?;
+        #[cfg(test)]
+        crate::test_hooks::record_journal_persist(crate::test_hooks::PersistedPhase::Add(
+            record.phase,
+        ));
         Ok(path)
     }
 
@@ -1742,6 +1746,10 @@ impl RemovalJournalStore {
         atomic_replace(&temporary, &path)?;
         temporary.disable_cleanup(true);
         sync_parent(&path)?;
+        #[cfg(test)]
+        crate::test_hooks::record_journal_persist(crate::test_hooks::PersistedPhase::Removal(
+            record.phase,
+        ));
         Ok(path)
     }
 
