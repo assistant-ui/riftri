@@ -14,6 +14,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   check, avoiding extra Git processes when multiple rules share one identity
   file. Distinct targets are still checked, every new call re-reads them, and
   unsafe keys, nested includes, and unreadable files remain fail-closed.
+- On macOS, read the process umask once at CLI startup instead of spawning
+  `/bin/sh -c umask` during every add and removal, saving about 4 ms each.
+  The mask is read only while the kernel reports a single thread; otherwise,
+  and for library callers, Riftri asks a shell as before. Linux still reads
+  procfs, and checkout permissions are unchanged.
 
 ### Fixed
 
