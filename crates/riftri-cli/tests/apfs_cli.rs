@@ -976,3 +976,97 @@ fn explicit_worktree_add_accepts_an_existing_empty_directory_like_git() {
     );
     assert_eq!(fs::read_dir(&occupied).unwrap().count(), 1);
 }
+
+/// The CLI reads its umask once at startup instead of asking a shell during
+/// every add. Under any mask it starts with, a view must get exactly the
+/// modes a plain `git worktree add` gets under that mask.
+#[test]
+fn views_match_plain_git_modes_under_the_umask_the_cli_starts_with() {
+    for mask in ["022", "002", "027", "077"] {
+        let fixture = tempdir().expect("fixture directory");
+        let repository = fixture.path().join("repository");
+        fs::create_dir(&repository).expect("create repository");
+        for arguments in [
+            &["init", "--quiet"][..],
+            &["config", "user.name", "Riftri Tests"][..],
+            &["config", "user.email", "riftri@example.invalid"][..],
+            &["config", "core.autocrlf", "false"][..],
+        ] {
+            assert!(git(&repository, arguments).status.success());
+        }
+        fs::create_dir(repository.join("nested")).expect("create directory");
+        fs::write(repository.join("nested/file.txt"), "file\n").expect("write file");
+        fs::write(repository.join("tool.sh"), "#!/bin/sh\n").expect("write script");
+        fs::set_permissions(
+            repository.join("tool.sh"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .expect("make script executable");
+        assert!(git(&repository, &["add", "-A"]).status.success());
+        assert!(
+            git(&repository, &["commit", "--quiet", "-m", "initial"])
+                .status
+                .success()
+        );
+
+        // Each program starts under `mask`, exactly as from a user's shell.
+        let under_mask = |program: &str, arguments: &[&str]| {
+            let output = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("umask {mask} && exec \"$0\" \"$@\""))
+                .arg(program)
+                .args(arguments)
+                .current_dir(&repository)
+                .output()
+                .expect("run under umask");
+            assert!(
+                output.status.success(),
+                "{program} under umask {mask}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let plain = fixture.path().join("plain");
+        let view = fixture.path().join("view");
+        let state = fixture.path().join("state");
+        under_mask(
+            "git",
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                plain.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        under_mask(
+            env!("CARGO_BIN_EXE_riftri"),
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                view.to_str().unwrap(),
+                "HEAD",
+                "--state-dir",
+                state.to_str().unwrap(),
+                "--no-progress",
+            ],
+        );
+        for path in ["nested", "nested/file.txt", "tool.sh"] {
+            let mode = |root: &Path| {
+                fs::symlink_metadata(root.join(path))
+                    .expect("inspect checkout entry")
+                    .permissions()
+                    .mode()
+                    & 0o7777
+            };
+            assert_eq!(
+                mode(&view),
+                mode(&plain),
+                "{path} under umask {mask}: view {:o}, plain Git {:o}",
+                mode(&view),
+                mode(&plain)
+            );
+        }
+    }
+}

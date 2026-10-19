@@ -7,6 +7,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- On macOS, read the process umask once at CLI startup instead of spawning
+  `/bin/sh -c umask` during every add and removal, saving about 4 ms each.
+  The mask is read only while the kernel reports a single thread; otherwise,
+  and for library callers, Riftri asks a shell as before. Linux still reads
+  procfs, and checkout permissions are unchanged.
 - Describe Riftri and its backends by their supported capabilities rather than
   blanket maturity labels. Backup guidance, filesystem requirements, and the
   security-sandbox boundary remain explicit.
