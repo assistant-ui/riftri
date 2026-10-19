@@ -2917,8 +2917,7 @@ fn restore_completion_marker(journal: &DecodedCollectionJournal) -> Result<(), W
     staged
         .write_all(&integrity)
         .map_err(|source| io("write restored immutable-base marker", &staging, source))?;
-    staged
-        .sync_all()
+    crate::durability::sync_full(&staged)
         .map_err(|source| io("sync restored immutable-base marker", &staging, source))?;
     drop(staged);
     fs::rename(&staging, &journal.marker_path).map_err(|source| {
@@ -4850,8 +4849,7 @@ fn prepare_base(
             source,
         )
     })?;
-    marker
-        .sync_all()
+    crate::durability::sync_full(&marker)
         .map_err(|source| io("sync immutable-base marker", &complete_path, source))?;
     sync_parent(base_path)?;
     Ok(false)
@@ -11088,8 +11086,7 @@ fn copy_git_pointer(source: &Path, destination: &Path) -> Result<(), WorktreeErr
             source,
         )
     })?;
-    output
-        .sync_all()
+    crate::durability::sync_full(&output)
         .map_err(|source| io("sync linked-worktree pointer", &destination_path, source))
 }
 
@@ -13217,7 +13214,7 @@ fn remove_empty_directory_if_present(path: &Path) -> Result<(), WorktreeError> {
 fn sync_parent(path: &Path) -> Result<(), WorktreeError> {
     let parent = path.expect_parent()?;
     File::open(parent)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| crate::durability::sync_full(&directory))
         .map_err(|source| io("sync parent directory", parent, source))
 }
 
@@ -23696,6 +23693,82 @@ mod tests {
             ]
             .map(PersistedPhase::Removal)
         );
+        assert!(!destination.exists());
+    }
+
+    /// Each journal write orders its content before its rename with a barrier
+    /// and makes both durable with one full flush of its directory, so on
+    /// macOS a warm add makes 7 barriers and 11 full flushes (7 journal
+    /// directories, plus the state directory, the base bucket, and the
+    /// destination parent), and a removal 4 and 7. Every other flush is
+    /// unchanged and stays full (decision D046).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn journal_writes_order_their_content_with_a_barrier_and_one_full_flush() {
+        use crate::test_hooks::{Flush, take_flushes};
+
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = single_file_repository(fixture.path());
+        let add = |destination: &Path, branch: &str| {
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.to_path_buf(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from(branch)),
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+        };
+        let remove = |destination: &Path| {
+            remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.to_path_buf(),
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("remove worktree");
+        };
+        let counts = |flushes: Vec<Flush>| {
+            (
+                flushes
+                    .iter()
+                    .filter(|flush| **flush == Flush::Barrier)
+                    .count(),
+                flushes
+                    .iter()
+                    .filter(|flush| **flush == Flush::Full)
+                    .count(),
+            )
+        };
+
+        // The first add also builds the base and flushes its marker.
+        add(&fixture.path().join("cold"), "feature/cold");
+        take_flushes();
+        add(&destination, "feature/flushes");
+        let warm_add = take_flushes();
+        assert_eq!(counts(warm_add.clone()), (7, 11), "{warm_add:?}");
+        // Every barrier is answered by a full flush of the journal directory
+        // before anything else happens.
+        for (index, flush) in warm_add.iter().enumerate() {
+            if *flush == Flush::Barrier {
+                assert_eq!(warm_add.get(index + 1), Some(&Flush::Full), "{warm_add:?}");
+            }
+        }
+        remove(&destination);
+        let removal = take_flushes();
+        assert_eq!(counts(removal.clone()), (4, 7), "{removal:?}");
+        for (index, flush) in removal.iter().enumerate() {
+            if *flush == Flush::Barrier {
+                assert_eq!(removal.get(index + 1), Some(&Flush::Full), "{removal:?}");
+            }
+        }
         assert!(!destination.exists());
     }
 
