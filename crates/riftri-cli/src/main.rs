@@ -681,6 +681,12 @@ enum ShellKind {
 }
 
 fn main() -> Result<()> {
+    // First, while this is still the only thread: reading the umask means
+    // setting it, and Riftri never changes its own mask, so one capture saves
+    // every add and removal a shell spawn. Storage verifies the process is
+    // single-threaded and otherwise keeps asking a shell.
+    riftri_storage::capture_process_umask();
+
     #[cfg(target_os = "linux")]
     if invoked_as_overlayfs_helper() {
         return run_overlayfs_helper();

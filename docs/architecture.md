@@ -311,6 +311,14 @@ intent-recorded
 Every incomplete forward state may transition to `rollback-pending`, followed
 by `rolled-back`. `active` and `rolled-back` are terminal for an add operation.
 
+Each durable write costs a file flush and a directory flush, so a state that no
+reader can tell apart from its predecessor is taken in memory without its own
+write. `clean-verified` is such a state: nothing happens between it and
+`active`, and recovery, status, and every other reader treat it exactly like
+`index-synchronized`. An add therefore records `index-synchronized` and then
+`active`. A journal that an earlier Riftri left at `clean-verified` still
+decodes and recovers as before.
+
 A journal records the repository by its main worktree, the first entry of
 `git worktree list` (the directory itself for a bare repository), and lifecycle
 commands run Git from there. Revisions such as `HEAD` still resolve in the
@@ -358,6 +366,14 @@ intent-recorded
   -> complete
 intent-recorded | clean-verified -> cancelled
 ```
+
+Like `clean-verified` on add, `base-released` is taken in memory without its
+own durable write. The base is released by the completed journal itself, and
+every reader treats `base-released` exactly like `worktree-removed`: both are
+unfinished, and recovering either verifies the worktree is gone and completes.
+A removal therefore records `worktree-removed` and then `complete`, and a
+journal that an earlier Riftri left at `base-released` still completes as
+before.
 
 A removal is `cancelled` when it is refused after recording intent but before
 anything was removed: the native view is back at its path, Git still

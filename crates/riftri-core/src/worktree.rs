@@ -3159,18 +3159,7 @@ fn remove_worktree_with_mode(
         fail_after,
     )?;
     drop(metadata_lock);
-    advance_removal(
-        &store,
-        &mut journal,
-        RemoveWorktreePhase::BaseReleased,
-        fail_after,
-    )?;
-    advance_removal(
-        &store,
-        &mut journal,
-        RemoveWorktreePhase::Complete,
-        fail_after,
-    )?;
+    release_base_and_complete_removal(&store, &mut journal, fail_after)?;
 
     Ok(RemoveWorktreeResult {
         destination,
@@ -4192,8 +4181,27 @@ fn perform_add(
             destination.display()
         )));
     }
-    advance(store, journal, AddWorktreePhase::CleanVerified, fail_after)?;
-    advance(store, journal, AddWorktreePhase::Active, fail_after)?;
+    // `clean-verified` is taken in memory only: `active` is the next durable
+    // write. No work separates the two, and every journal reader, recovery
+    // included, treats a journal at `clean-verified` exactly like one at
+    // `index-synchronized` (only `active` is told apart), so the durable
+    // write between them could change no decision; it only cost a full
+    // flush. A journal an older Riftri left at `clean-verified` still decodes
+    // and recovers as before. An injected failure here models a crash after
+    // the clean check, before activation.
+    journal.transition(AddWorktreePhase::CleanVerified)?;
+    fail_add_if_requested(AddWorktreePhase::CleanVerified, fail_after)?;
+    journal.transition(AddWorktreePhase::Active)?;
+    store.persist(journal)?;
+    // The durable `active` journal implies the clean check passed, so both
+    // phases are reported only now, in their usual order.
+    progress::emit(ProgressEvent::AddPhase {
+        phase: AddWorktreePhase::CleanVerified,
+    });
+    progress::emit(ProgressEvent::AddPhase {
+        phase: AddWorktreePhase::Active,
+    });
+    fail_add_if_requested(AddWorktreePhase::Active, fail_after)?;
     Ok(reused_base)
 }
 
@@ -7228,6 +7236,29 @@ fn advance_removal(
     fail_removal_if_requested(phase, fail_after)
 }
 
+/// Finish a removal whose worktree is durably gone.
+///
+/// `base-released` is taken in memory only: `complete` is the next durable
+/// write. Nothing that must survive a crash happens between the two (the
+/// base is released by the completed journal itself, not by separate work),
+/// and every reader treats a journal at `base-released` exactly like one at
+/// `worktree-removed`: both are unfinished, and recovery of either verifies
+/// the worktree is gone and completes (from `worktree-removed` it first drops
+/// this add's journal-owned staged Git pointer, if one is left). A crash
+/// before `complete` therefore leaves `worktree-removed`, the state older
+/// versions already left on a crash just before writing `base-released`. A
+/// journal an older Riftri left at `base-released` still recovers as before.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn release_base_and_complete_removal(
+    store: &RemovalJournalStore,
+    journal: &mut RemovalJournalRecord,
+    fail_after: Option<RemoveWorktreePhase>,
+) -> Result<(), WorktreeError> {
+    journal.transition(RemoveWorktreePhase::BaseReleased)?;
+    fail_removal_if_requested(RemoveWorktreePhase::BaseReleased, fail_after)?;
+    advance_removal(store, journal, RemoveWorktreePhase::Complete, fail_after)
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn fail_removal_if_requested(
     phase: RemoveWorktreePhase,
@@ -8726,8 +8757,7 @@ fn retire_vanished_add_journal(
     )?;
     drop(metadata_lock);
     remove_file_if_present(&pointer_staging_path(journal))?;
-    advance_removal(&store, &mut record, RemoveWorktreePhase::BaseReleased, None)?;
-    advance_removal(&store, &mut record, RemoveWorktreePhase::Complete, None)?;
+    release_base_and_complete_removal(&store, &mut record, None)?;
     Ok(())
 }
 
@@ -9977,9 +10007,10 @@ fn resume_removal(
 
     if record.phase == RemoveWorktreePhase::WorktreeRemoved {
         remove_file_if_present(&pointer_staging_path(&managed))?;
-        record.transition(RemoveWorktreePhase::BaseReleased)?;
-        store.persist(&record)?;
+        release_base_and_complete_removal(store, &mut record, None)?;
     }
+    // Only an older Riftri persisted `base-released`; finish its journal
+    // exactly as before.
     if record.phase == RemoveWorktreePhase::BaseReleased {
         record.transition(RemoveWorktreePhase::Complete)?;
         store.persist(&record)?;
@@ -23574,6 +23605,236 @@ mod tests {
             assert_eq!(repeated.recovered_removals, 0, "phase {phase:?}");
             assert_eq!(repeated.completed_removals, 1, "phase {phase:?}");
             assert!(repeated.errors.is_empty(), "phase {phase:?}");
+        }
+    }
+
+    /// A committed repository plus its destination and state paths, for the
+    /// journal-write tests below.
+    fn single_file_repository(fixture: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let repository = fixture.join("repository");
+        fs::create_dir(&repository).expect("create repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Riftri Tests"]);
+        git(
+            &repository,
+            &["config", "user.email", "riftri@example.invalid"],
+        );
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("write file");
+        git(&repository, &["add", "--", "tracked.txt"]);
+        git(&repository, &["commit", "--quiet", "-m", "initial"]);
+        (repository, fixture.join("worktree"), fixture.join("state"))
+    }
+
+    /// Rewrite one field set of a persisted journal, as an older Riftri would
+    /// have written it.
+    fn rewrite_journal(path: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("read journal")).expect("parse journal");
+        edit(&mut value);
+        fs::write(
+            path,
+            serde_json::to_vec_pretty(&value).expect("serialize journal"),
+        )
+        .expect("write journal");
+    }
+
+    /// Each durable journal write costs a file flush and a directory flush, so
+    /// a write that no reader can tell apart from its neighbour is skipped:
+    /// `clean-verified` on add and `base-released` on removal.
+    #[cfg(unix)]
+    #[test]
+    fn add_and_removal_persist_only_the_states_recovery_tells_apart() {
+        use crate::test_hooks::{PersistedPhase, take_journal_persists};
+
+        let fixture = tempdir().expect("fixture");
+        let (repository, destination, state) = single_file_repository(fixture.path());
+        take_journal_persists();
+        add_worktree_inner(
+            AddWorktreeRequest {
+                repository: repository.clone(),
+                destination: destination.clone(),
+                revision: OsString::from("HEAD"),
+                mode: WorktreeMode::NewBranch(OsString::from("feature/persists")),
+                state_dir: Some(state.clone()),
+                sparse_directories: Vec::new(),
+            },
+            None,
+            true,
+        )
+        .expect("create worktree");
+        assert_eq!(
+            take_journal_persists(),
+            [
+                AddWorktreePhase::IntentRecorded,
+                AddWorktreePhase::GitMetadataCreated,
+                AddWorktreePhase::BaseReady,
+                AddWorktreePhase::ViewCreated,
+                AddWorktreePhase::GitPointerRestored,
+                AddWorktreePhase::IndexSynchronized,
+                AddWorktreePhase::Active,
+            ]
+            .map(PersistedPhase::Add)
+        );
+
+        remove_worktree_inner(
+            RemoveWorktreeRequest {
+                repository,
+                destination: destination.clone(),
+                state_dir: Some(state),
+            },
+            None,
+        )
+        .expect("remove worktree");
+        assert_eq!(
+            take_journal_persists(),
+            [
+                RemoveWorktreePhase::IntentRecorded,
+                RemoveWorktreePhase::CleanVerified,
+                RemoveWorktreePhase::WorktreeRemoved,
+                RemoveWorktreePhase::Complete,
+            ]
+            .map(PersistedPhase::Removal)
+        );
+        assert!(!destination.exists());
+    }
+
+    /// A crash after the clean check now leaves `index-synchronized`, and a
+    /// journal an older Riftri left at `clean-verified` at that point still
+    /// rolls back exactly as before.
+    #[test]
+    fn an_add_journal_left_at_clean_verified_by_an_older_version_still_rolls_back() {
+        for legacy in [false, true] {
+            let fixture = tempdir().expect("fixture");
+            let (repository, destination, state) = single_file_repository(fixture.path());
+            let error = add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::NewBranch(OsString::from("feature/legacy")),
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                Some(AddWorktreePhase::CleanVerified),
+                false,
+            )
+            .expect_err("simulate a kill after the clean check");
+            assert!(error.to_string().contains("injected failure"), "{error}");
+            let journal = JournalStore::open(&state).load_all().unwrap().remove(0);
+            assert_eq!(journal.phase, AddWorktreePhase::IndexSynchronized);
+            assert_eq!(
+                journal.last_forward_phase,
+                AddWorktreePhase::IndexSynchronized
+            );
+            if legacy {
+                rewrite_journal(&journal.journal_path, |value| {
+                    value["phase"] = serde_json::json!("clean-verified");
+                    value["last_forward_phase"] = serde_json::json!("clean-verified");
+                });
+                let legacy = JournalStore::open(&state).load_all().unwrap().remove(0);
+                assert_eq!(legacy.phase, AddWorktreePhase::CleanVerified);
+            }
+
+            let recovered = recover_incomplete_operations(&state).expect("recover");
+            assert!(
+                recovered.errors.is_empty(),
+                "legacy {legacy}: {recovered:?}"
+            );
+            assert_eq!(recovered.recovered, 1, "legacy {legacy}");
+            assert!(!destination.exists(), "legacy {legacy}");
+            let branch = Command::new("git")
+                .args([
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    "refs/heads/feature/legacy",
+                ])
+                .current_dir(&repository)
+                .status()
+                .expect("check branch");
+            assert!(!branch.success(), "legacy {legacy}");
+            let journal = JournalStore::open(&state).load_all().unwrap().remove(0);
+            assert_eq!(journal.phase, AddWorktreePhase::RolledBack);
+
+            let repeated = recover_incomplete_operations(&state).expect("repeat recovery");
+            assert_eq!(repeated.recovered, 0, "legacy {legacy}");
+            assert!(repeated.errors.is_empty(), "legacy {legacy}");
+        }
+    }
+
+    /// A crash once the worktree is gone now leaves `worktree-removed`, and a
+    /// removal journal an older Riftri left at `base-released` still completes
+    /// exactly as before.
+    #[test]
+    fn a_removal_journal_left_at_base_released_by_an_older_version_still_completes() {
+        for legacy in [false, true] {
+            let fixture = tempdir().expect("fixture");
+            let (repository, destination, state) = single_file_repository(fixture.path());
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("create worktree");
+            let error = remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository,
+                    destination: destination.clone(),
+                    state_dir: Some(state.clone()),
+                },
+                Some(RemoveWorktreePhase::BaseReleased),
+            )
+            .expect_err("simulate a kill after the worktree was removed");
+            assert!(
+                error.to_string().contains("injected removal failure"),
+                "{error}"
+            );
+            assert!(!destination.exists());
+            let removal = RemovalJournalStore::open(&state)
+                .load_all()
+                .unwrap()
+                .remove(0);
+            assert_eq!(removal.phase, RemoveWorktreePhase::WorktreeRemoved);
+            if legacy {
+                rewrite_journal(&removal.journal_path, |value| {
+                    value["phase"] = serde_json::json!("base-released");
+                });
+                let legacy = RemovalJournalStore::open(&state)
+                    .load_all()
+                    .unwrap()
+                    .remove(0);
+                assert_eq!(legacy.phase, RemoveWorktreePhase::BaseReleased);
+            }
+            let pending = storage_accounting(&state).expect("pending accounting");
+            assert_eq!(pending.bases[0].reference_count, 1, "legacy {legacy}");
+
+            let recovered = recover_incomplete_operations(&state).expect("recover removal");
+            assert!(
+                recovered.errors.is_empty(),
+                "legacy {legacy}: {recovered:?}"
+            );
+            assert_eq!(recovered.recovered_removals, 1, "legacy {legacy}");
+            assert_eq!(recovered.completed_removals, 1, "legacy {legacy}");
+            let removal = RemovalJournalStore::open(&state)
+                .load_all()
+                .unwrap()
+                .remove(0);
+            assert_eq!(removal.phase, RemoveWorktreePhase::Complete);
+            let accounting = storage_accounting(&state).expect("released accounting");
+            assert_eq!(accounting.active_views, 0, "legacy {legacy}");
+            assert_eq!(accounting.bases[0].reference_count, 0, "legacy {legacy}");
+
+            let repeated = recover_incomplete_operations(&state).expect("repeat recovery");
+            assert_eq!(repeated.recovered_removals, 0, "legacy {legacy}");
+            assert!(repeated.errors.is_empty(), "legacy {legacy}");
         }
     }
 

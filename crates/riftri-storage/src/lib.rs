@@ -85,8 +85,85 @@ fn current_umask() -> std::io::Result<u32> {
     {
         return parse_umask(value.as_bytes());
     }
-    // Also supports Linux environments without a readable procfs Umask field.
+    #[cfg(target_os = "macos")]
+    if let Some(mask) = CAPTURED_UMASK.get() {
+        return Ok(*mask);
+    }
+    // Also supports Linux environments without a readable procfs Umask field,
+    // and macOS processes that did not capture their mask at startup.
     inherited_umask()
+}
+
+/// The mask [`capture_process_umask`] read while the process had one thread.
+#[cfg(target_os = "macos")]
+static CAPTURED_UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Capture the process umask once, so later reads need not spawn a shell.
+///
+/// macOS has no side-effect-free way to read the mask: `umask(2)` only reads
+/// by setting. A file another thread created between setting and restoring
+/// would get the temporary mask, so the mask is read only while the kernel
+/// reports that this process has exactly one thread: no other thread then
+/// exists to create a file in between. The temporary mask is also `0o777`,
+/// which could only ever withhold permissions, never grant them.
+///
+/// Call this as the first statement of `main` in a binary that never changes
+/// its own mask afterwards. Later reads return the captured value, which is
+/// then the process's mask for its whole life.
+///
+/// Returns the captured mask, or `None` when nothing was captured: another
+/// thread exists, the thread count is unavailable, or the platform reads the
+/// mask without changing it (Linux procfs) or has none (Windows). Readers then
+/// keep asking a child shell exactly as before. A later call returns the first
+/// capture.
+pub fn capture_process_umask() -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(mask) = CAPTURED_UMASK.get() {
+            return Some(*mask);
+        }
+        if process_thread_count() != Some(1) {
+            return None;
+        }
+        // SAFETY: `umask` has no memory-safety preconditions and cannot fail.
+        // The kernel just reported this thread as the process's only one, so
+        // no file can be created under the temporary mask before the second
+        // call restores the original.
+        let mask = unsafe {
+            let original = libc::umask(0o777);
+            libc::umask(original);
+            original
+        };
+        Some(*CAPTURED_UMASK.get_or_init(|| u32::from(mask) & 0o777))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The number of threads the kernel reports for this process.
+#[cfg(target_os = "macos")]
+fn process_thread_count() -> Option<i32> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_taskinfo>::zeroed();
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>()).ok()?;
+    // SAFETY: `info` is a writable, properly aligned `proc_taskinfo`, and the
+    // kernel writes at most `size` bytes into it.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDTASKINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: the kernel filled the whole structure, and every field is a
+    // plain integer valid for any bit pattern.
+    Some(unsafe { info.assume_init() }.pti_threadnum)
 }
 
 #[cfg(unix)]
