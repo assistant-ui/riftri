@@ -7,6 +7,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- On macOS, read the process umask once at CLI startup instead of spawning
+  `/bin/sh -c umask` during every add and removal, saving about 4 ms each.
+  The mask is read only while the kernel reports a single thread; otherwise,
+  and for library callers, Riftri asks a shell as before. Linux still reads
+  procfs, and checkout permissions are unchanged.
 - Describe Riftri and its backends by their supported capabilities rather than
   blanket maturity labels. Backup guidance, filesystem requirements, and the
   security-sandbox boundary remain explicit.
@@ -14,6 +19,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   check, avoiding extra Git processes when multiple rules share one identity
   file. Distinct targets are still checked, every new call re-reads them, and
   unsafe keys, nested includes, and unreadable files remain fail-closed.
+- Skip one durable journal write per add (`clean-verified`) and per removal
+  (`base-released`). No reader tells either state apart from the one before
+  it, so each operation now makes two fewer full flushes, about 7 to 9 ms on
+  APFS. Recovery decisions and output are unchanged, and journals an earlier
+  Riftri left in either state still recover as before.
 - Pass `git worktree` subcommands other than `add`, `remove`, `move`, and
   `prune` (such as `list`, `lock`, and `repair`) straight to Git from the shim,
   without inspecting the repository first. `git worktree list` now starts one
