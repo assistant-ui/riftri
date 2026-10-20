@@ -273,7 +273,7 @@ impl Command {
     /// Whether this command inspects a repository through enough read-only
     /// Git queries (three or more) to repay one `xcrun --find git` on macOS,
     /// which lets those queries skip Apple's `/usr/bin/git` trampoline
-    /// (D046). Commands that start at most a version check stay on the
+    /// (D047). Commands that start at most a version check stay on the
     /// trampoline throughout; `exec` and the shell hook run on every new
     /// agent or shell, so they must not pay for a lookup they cannot repay.
     fn runs_many_git_queries(&self) -> bool {

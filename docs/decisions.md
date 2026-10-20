@@ -832,7 +832,7 @@ A name joins the list only when it is a builtin in Git 2.36 and is not
 deprecated in current Git, and a test checks both. Raising the minimum is a new
 decision.
 
-### D046: Riftri's own read-only Git queries skip Apple's xcrun trampoline
+### D047: Riftri's own read-only Git queries skip Apple's xcrun trampoline
 
 On macOS, `/usr/bin/git` is not Git. It is one of Apple's `xcrun` stubs on the
 sealed system volume: every start finds the active developer directory

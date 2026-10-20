@@ -1,6 +1,6 @@
 //! Riftri's own read-only Git queries may skip Apple's `/usr/bin/git`
 //! trampoline; everything that can start a hook, filter, or helper must not
-//! (D046). The trampoline adds `SDKROOT` to the environment of the Git it
+//! (D047). The trampoline adds `SDKROOT` to the environment of the Git it
 //! starts, so Git's Trace2 records which processes went through it.
 #![cfg(target_os = "macos")]
 
@@ -189,7 +189,7 @@ fn processes(trace: &Path) -> Vec<Process> {
     by_session.into_values().collect()
 }
 
-/// The queries D046 lets skip the trampoline: none reads the index or work
+/// The queries D047 lets skip the trampoline: none reads the index or work
 /// tree, writes anything, or reads more than refs, configuration, repository
 /// layout, and commits.
 fn is_direct_query(arguments: &[String]) -> bool {

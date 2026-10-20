@@ -14,7 +14,7 @@
 //! only. The added variables are read by compilers and `man`, not by Git, but a
 //! Git command that can start another program (a hook, a filter, an FSMonitor
 //! hook, a credential helper) would hand them on, so every such command keeps
-//! going through the stub. See D046 in `docs/decisions.md`.
+//! going through the stub. See D047 in `docs/decisions.md`.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

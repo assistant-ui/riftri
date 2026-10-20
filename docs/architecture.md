@@ -98,7 +98,7 @@ queries that start no other program (repository layout, refs, commits, and
 configuration) run the developer binary the trampoline would run, found once
 per command with `xcrun --find git`. Everything that can run a hook, filter, or
 helper, and everything the shim passes through, still goes through the
-trampoline. See D046.
+trampoline. See D047.
 
 ### Immutable base cache
 
