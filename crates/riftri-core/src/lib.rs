@@ -10,6 +10,7 @@ use thiserror::Error;
 mod activation;
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod base_integrity;
+mod durability;
 mod journal;
 pub mod progress;
 mod shell;
@@ -39,7 +40,7 @@ pub use activation::{
     proxy_git_command, repository_activation, shell_activation_status, shim_environment_complete,
     stripped_shim_scope_detected,
 };
-pub use riftri_git::{GitError, REAL_GIT_ENV};
+pub use riftri_git::{GitError, REAL_GIT_ENV, allow_direct_queries as allow_direct_git_queries};
 
 /// Whether a failure means the caller is not inside a Git repository.
 ///

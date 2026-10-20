@@ -832,6 +832,124 @@ A name joins the list only when it is a builtin in Git 2.36 and is not
 deprecated in current Git, and a test checks both. Raising the minimum is a new
 decision.
 
+### D046: on macOS, a barrier orders journal content before its rename
+
+Every journal write is the same sequence: write a temporary file, flush it,
+rename it over the journal, and flush the directory. The directory flush is the
+durability point; the file flush only has to keep a device from persisting the
+rename without the content it names. On macOS, `File::sync_all` is
+`fcntl(F_FULLFSYNC)`, which empties the drive's write cache, so each journal
+write cost two cache drains (about 4 to 6 ms each on an Apple SSD).
+
+The file flush is now `fcntl(F_BARRIERFSYNC)` (about 0.5 ms), and the directory
+flush stays `F_FULLFSYNC`. `fcntl(2)` documents `F_BARRIERFSYNC` as an
+`fsync(2)` followed by a barrier: the flushed I/O is persisted before any I/O
+that follows it, so no file can be persisted with the effect of a later phase
+without the earlier one. The rename is issued after the barrier returns, so at
+every power-loss point the journal path holds either the previous complete
+record or the new one. `fcntl(2)` also documents that `F_FULLFSYNC` drains the
+entire device queue, so data fsync'd on the same device before it is persisted
+when it returns. The temporary file lives in the journal directory, so when a
+write returns, its content and its rename are both on stable storage, exactly
+as before. Nothing that depends on the new state starts earlier.
+
+The difference is where the guarantee comes from inside that window. Before,
+the content was on stable storage before the rename was issued, which relied
+on the device honoring a cache flush. Now the order relies on the device
+honoring the barrier, which `fcntl(2)` says requires hardware support that
+Apple SSDs are guaranteed to provide. Whether APFS reports an error or issues a
+plain `fsync` on a device without that support is not documented (HFS, whose
+source is public, takes a full flush). A device that ignores barriers is in
+the same class as one that ignores the cache flush `F_FULLFSYNC` already
+depends on, and every reader refuses a torn journal that does not decode
+rather than act on it. A barrier the filesystem does not implement
+(`ENOTSUP`, `EOPNOTSUPP`, `EINVAL`, `ENOTTY`, or `ENOSYS`) falls back to
+`F_FULLFSYNC`, so durability never drops silently; an interrupted barrier is
+retried, and any other failure is reported as a failed flush, not retried
+as a full flush that could report success for writes the failed attempt
+dropped.
+
+All six journal kinds share one write path, so the pairing of barrier and
+directory flush cannot be separated. Other flushes stay full: the state,
+journal, base, and destination parent directories, and the base completion
+marker. A parent-directory flush is not skipped when the directory already
+existed. Another process may have created it and crashed before its own flush,
+and an observer cannot tell that directory from a durable one; a durable "layout
+flushed" marker would close that gap, but it is a new state file that every
+released Riftri reports as unexplained. Linux and Windows keep `fsync` and
+`FlushFileBuffers`, which offer no comparable split.
+
+### D047: Riftri's own read-only Git queries skip Apple's xcrun trampoline
+
+On macOS, `/usr/bin/git` is not Git. It is one of Apple's `xcrun` stubs on the
+sealed system volume: every start finds the active developer directory
+(`DEVELOPER_DIR`, then the `xcode-select` choice), finds `git` there, adds
+`SDKROOT`, `CPATH`, `LIBRARY_PATH`, and `MANPATH` to the environment, and
+executes the real binary. That costs about 8 ms per Git process, and a
+lifecycle command starts a dozen or more of them (`riftri worktree prune`
+started 31 in a small test repository).
+
+When the Git a Riftri command would start is that stub, Riftri asks
+`/usr/bin/xcrun --find git` which binary the stub would run and starts that
+binary directly for its own read-only queries. This still invokes the installed
+Git: `xcrun` answers with the stub's own lookup, honouring `DEVELOPER_DIR`,
+`xcode-select`, and `TOOLCHAINS`, and the stub starts that binary by the same
+full path, so even paths Git derives from its own location agree. The answer
+is asked for once per process, on the first query, and never cached across
+processes, because the selection can change between two commands. Anything
+unexpected (no `xcrun`, a failure, output that is not exactly one absolute
+path to an executable named `git`, or the stub itself) keeps every query on
+the stub, and a query that cannot start from the resolved binary is retried
+through the stub.
+
+The stub is recognised by resolving the Git command the way `execvp` would
+and canonicalising it to `/usr/bin/git`; a `PATH` lookup that depends on the
+working directory gives up. Linux, Windows, and any other macOS Git (Homebrew,
+Nix, a direct developer-directory path) are unchanged.
+
+The lookup costs about 10 ms, so only commands that start several queries may
+use it: the CLI's repository commands (`setup`, `enable`, `disable`, `doctor`,
+`status`, `repair`, `gc`, `state`, `shell status`, and every `worktree`
+command), and the Git shim once it is planning a worktree lifecycle
+subcommand. `riftri exec`, `riftri shell hook`, and every command the shim
+passes straight to Git start at most a version check and keep the stub.
+
+Only commands that start no other program may skip the stub, because the
+variables it adds reach every hook, filter, and helper Git starts. Git itself
+does not read them. The direct set is `git --version`; `rev-parse` for
+repository layout, refs, and `^{commit}` peels; `show --no-patch
+--no-show-signature` of commits; `worktree list`; `show-ref`;
+`symbolic-ref`; `for-each-ref`; and configuration reads. Everything else keeps
+the stub:
+
+- Anything that reads the index (`status`, `ls-files`, `diff`, `reset`,
+  `update-index`, and `check-attr`, even with `--source`): reading the index
+  runs a configured `core.fsmonitor` hook.
+- Anything that reads trees or blobs (`ls-tree`, `cat-file`, `check-attr`,
+  `^{tree}` and `:`-path revisions): in a partial clone, a missing object is
+  fetched by `git fetch` with its transport and credential helpers. Partial
+  clones made with blob, tree, or sparse filters always hold every commit, so
+  the commit lookups in the direct set never fetch.
+- Every write (`worktree add`, `remove`, `move`, and `prune`, `branch`,
+  `update-ref`, configuration writes, and base materialization), since those
+  run hooks.
+- `git lfs`, which is another program.
+- The shim's passthrough, which hands the caller's own command to the
+  recorded Git exactly as before.
+
+`git --version` comes from the same binary either way and is byte-identical,
+so the Git version in every checkout profile, and so every existing base, is
+unchanged, and reports still name the recorded Git command. A test checks the
+split end to end: Trace2 records which processes saw `SDKROOT`, and every hook
+must have seen it.
+
+Rejected alternatives: putting the developer directory first on `PATH`
+changes what the user's hooks and every passed-through command see; resolving
+the developer directory in Riftri would re-implement `xcrun`'s lookup and its
+toolchain rules; and replicating the stub's environment for every command
+would need a second `xcrun` call and depend on which variables Apple adds,
+where any difference would reach the user's hooks.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

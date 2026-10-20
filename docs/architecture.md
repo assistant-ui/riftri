@@ -93,6 +93,13 @@ The coordinator invokes the installed Git executable. Git remains responsible
 for linked-worktree metadata, per-worktree `HEAD` and index files, branch rules,
 configuration, filters, and hooks.
 
+On macOS, when that executable is Apple's `/usr/bin/git` trampoline, read-only
+queries that start no other program (repository layout, refs, commits, and
+configuration) run the developer binary the trampoline would run, found once
+per command with `xcrun --find git`. Everything that can run a hook, filter, or
+helper, and everything the shim passes through, still goes through the
+trampoline. See D047.
+
 ### Immutable base cache
 
 A base represents the checked-out files for an exact Git tree and checkout
@@ -574,6 +581,9 @@ journaled quarantine path and leaves a newly rebuilt base untouched.
 Before Milestone 2 performs its first mutation, journal persistence must write
 the intent first and replace each state atomically using a temporary file,
 `fsync`, rename, and parent-directory `fsync` where the platform supports them.
+On macOS the temporary file's flush is `F_BARRIERFSYNC`, which orders its
+content before the rename, and the directory's `F_FULLFSYNC` makes both durable
+before the write returns. See D046 in [decisions.md](decisions.md).
 The persisted path encoding must round-trip platform-native paths, including
 non-UTF-8 Unix bytes. Recovery may repeat the cleanup associated with a recorded
 state, so every rollback action must be idempotent and validate its exact target.
