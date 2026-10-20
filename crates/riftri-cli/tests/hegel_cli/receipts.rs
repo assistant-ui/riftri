@@ -304,7 +304,11 @@ fn refusals_leave_one_receipt_matching_the_exit_code(tc: TestCase) {
             serde_json::from_str::<serde_json::Value>(stderr.trim_end()).is_err(),
             "{stderr}"
         );
-        let first_line = message.lines().next().unwrap_or_default();
-        assert!(stderr.contains(first_line), "{stderr}\n{receipt}");
+        // Setup refuses `--json-errors` itself, so its plain run reaches the
+        // next refusal (no interactive terminal) with a different message.
+        if shape.operation != "setup" {
+            let first_line = message.lines().next().unwrap_or_default();
+            assert!(stderr.contains(first_line), "{stderr}\n{receipt}");
+        }
     }
 }

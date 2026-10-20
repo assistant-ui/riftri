@@ -533,6 +533,11 @@ fn checkout_policy_blocks_exactly_the_documented_hazards(tc: TestCase) {
         }
         _ => {}
     }
+    // An unsafe `info/attributes` file stops the attribute queries, so the
+    // in-tree attributes are never evaluated; the add is refused either way.
+    if expected.contains(Blocker::EffectiveAttributes.as_str()) {
+        expected.remove(Blocker::InTreeAttributes.as_str());
+    }
     let commit = fixture.commit("main", &tree);
     tc.note(&format!("expected blockers {expected:?}"));
 

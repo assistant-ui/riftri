@@ -143,7 +143,10 @@ fn accepted_destinations_are_the_ones_git_creates(tc: TestCase) {
             let message = error.to_string();
             let stricter = message.contains("climbs out of a directory")
                 || message.contains("must name a new directory")
-                || fs::symlink_metadata(&destination).is_ok_and(|entry| entry.is_symlink());
+                // A trailing `.` resolves through the link, so check the
+                // path without it, as Riftri does.
+                || fs::symlink_metadata(destination.components().collect::<PathBuf>())
+                    .is_ok_and(|entry| entry.is_symlink());
             assert!(
                 !by_git.status.success() || stricter,
                 "Git creates a destination Riftri refuses: {error}"
