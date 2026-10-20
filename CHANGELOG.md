@@ -7,6 +7,41 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- Describe Riftri and its backends by their supported capabilities rather than
+  blanket maturity labels. Backup guidance, filesystem requirements, and the
+  security-sandbox boundary remain explicit.
+- Validate repeated conditional Git include targets once per compatibility
+  check, avoiding extra Git processes when multiple rules share one identity
+  file. Distinct targets are still checked, every new call re-reads them, and
+  unsafe keys, nested includes, and unreadable files remain fail-closed.
+- Skip one durable journal write per add (`clean-verified`) and per removal
+  (`base-released`). No reader tells either state apart from the one before
+  it, so each operation now makes two fewer full flushes, about 7 to 9 ms on
+  APFS. Recovery decisions and output are unchanged, and journals an earlier
+  Riftri left in either state still recover as before.
+- On macOS, read the process umask once at CLI startup instead of spawning
+  `/bin/sh -c umask` during every add and removal, saving about 4 ms each.
+  The mask is read only while the kernel reports a single thread; otherwise,
+  and for library callers, Riftri asks a shell as before. Linux still reads
+  procfs, and checkout permissions are unchanged.
+- Skip the Git shim's alias lookup for 43 more long-standing builtins,
+  including `cat-file`, `rev-list`, `ls-tree`, `for-each-ref`, `merge-base`,
+  `blame`, and `rm`, so each starts one Git process instead of two through
+  `riftri exec` or a shell hook. Git never lets an alias replace one of these,
+  so no alias-routed lifecycle command can slip past planning.
+- Require Git 2.36 or newer. `riftri enable`, `riftri exec`, and
+  `riftri shell hook` refuse an older Git with the `unsupported-git-version`
+  policy code (exit 3) before changing anything, and `riftri doctor` reports
+  it as a `git` blocker. Lifecycle operations already needed Git 2.36; the
+  check also closes a route where, on a Git older than 2.23, an alias named
+  `switch` or `restore` could run a worktree lifecycle command the shim never
+  planned. `riftri disable` still works with any Git.
+- Pass `git worktree` subcommands other than `add`, `remove`, `move`, and
+  `prune` (such as `list`, `lock`, and `repair`) straight to Git from the shim,
+  without inspecting the repository first. `git worktree list` now starts one
+  Git process instead of five, and an alias such as `alias.wtl = worktree list`
+  two instead of six. Lifecycle subcommands are planned and guarded exactly as
+  before, however they are reached.
 - On macOS, order each journal write's content before its rename with
   `F_BARRIERFSYNC` instead of a full `F_FULLFSYNC` flush. The directory flush
   after the rename stays full, so the record and its rename are on stable
@@ -26,41 +61,6 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   helper, and everything the shim passes to Git, still go through the
   trampoline; the version Riftri keys bases with is unchanged. Linux, Windows,
   and other Git installations are unaffected.
-- On macOS, read the process umask once at CLI startup instead of spawning
-  `/bin/sh -c umask` during every add and removal, saving about 4 ms each.
-  The mask is read only while the kernel reports a single thread; otherwise,
-  and for library callers, Riftri asks a shell as before. Linux still reads
-  procfs, and checkout permissions are unchanged.
-- Skip the Git shim's alias lookup for 43 more long-standing builtins,
-  including `cat-file`, `rev-list`, `ls-tree`, `for-each-ref`, `merge-base`,
-  `blame`, and `rm`, so each starts one Git process instead of two through
-  `riftri exec` or a shell hook. Git never lets an alias replace one of these,
-  so no alias-routed lifecycle command can slip past planning.
-- Require Git 2.36 or newer. `riftri enable`, `riftri exec`, and
-  `riftri shell hook` refuse an older Git with the `unsupported-git-version`
-  policy code (exit 3) before changing anything, and `riftri doctor` reports
-  it as a `git` blocker. Lifecycle operations already needed Git 2.36; the
-  check also closes a route where, on a Git older than 2.23, an alias named
-  `switch` or `restore` could run a worktree lifecycle command the shim never
-  planned. `riftri disable` still works with any Git.
-- Describe Riftri and its backends by their supported capabilities rather than
-  blanket maturity labels. Backup guidance, filesystem requirements, and the
-  security-sandbox boundary remain explicit.
-- Validate repeated conditional Git include targets once per compatibility
-  check, avoiding extra Git processes when multiple rules share one identity
-  file. Distinct targets are still checked, every new call re-reads them, and
-  unsafe keys, nested includes, and unreadable files remain fail-closed.
-- Skip one durable journal write per add (`clean-verified`) and per removal
-  (`base-released`). No reader tells either state apart from the one before
-  it, so each operation now makes two fewer full flushes, about 7 to 9 ms on
-  APFS. Recovery decisions and output are unchanged, and journals an earlier
-  Riftri left in either state still recover as before.
-- Pass `git worktree` subcommands other than `add`, `remove`, `move`, and
-  `prune` (such as `list`, `lock`, and `repair`) straight to Git from the shim,
-  without inspecting the repository first. `git worktree list` now starts one
-  Git process instead of five, and an alias such as `alias.wtl = worktree list`
-  two instead of six. Lifecycle subcommands are planned and guarded exactly as
-  before, however they are reached.
 - Start fewer Git processes for lifecycle commands by inspecting each
   repository once: `riftri worktree prune` now starts 10 instead of 31 (13
   instead of 40 as `git worktree prune` through the shim), `worktree move` 7
