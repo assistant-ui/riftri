@@ -96,6 +96,93 @@ fn add_worktree_with_counted_git(
 }
 
 #[test]
+fn index_refresh_is_deferred_only_for_attribute_free_full_checkouts() {
+    for (name, attributes, sparse, deferred) in [
+        ("plain", None, false, true),
+        ("empty-attributes", Some("# no attributes\n"), false, true),
+        ("text-auto", Some("*.txt text=auto\n"), false, false),
+        ("text-lf", Some("*.txt text eol=lf\n"), false, false),
+        ("text-crlf", Some("*.txt text eol=crlf\n"), false, false),
+        ("binary", Some("*.txt binary\n"), false, false),
+        (
+            "metadata",
+            Some("*.txt linguist-generated=true\n"),
+            false,
+            false,
+        ),
+        ("sparse", None, true, false),
+    ] {
+        let fixture = tempdir().unwrap();
+        let repository = fixture.path().join("repository");
+        let state = fixture.path().join("state");
+        let shim_directory = fixture.path().join("shim");
+        fs::create_dir(&repository).unwrap();
+        fs::create_dir(&shim_directory).unwrap();
+        for arguments in [
+            &["init", "--quiet"][..],
+            &["config", "user.name", "Riftri Tests"][..],
+            &["config", "user.email", "riftri@example.invalid"][..],
+            &["config", "core.autocrlf", "false"][..],
+        ] {
+            git(&repository, arguments);
+        }
+        fs::create_dir(repository.join("src")).unwrap();
+        fs::write(repository.join("src/tracked.txt"), "tracked\n").unwrap();
+        if let Some(attributes) = attributes {
+            fs::write(repository.join(".gitattributes"), attributes).unwrap();
+        }
+        git(&repository, &["add", "--all"]);
+        git(
+            &repository,
+            &["commit", "--quiet", "-m", "index refresh fixture"],
+        );
+        install_counting_shim(&shim_directory);
+        let real_git = real_git();
+        for kind in ["cold", "cached"] {
+            let destination = fixture.path().join(kind);
+            let log = fixture.path().join(format!("{kind}.log"));
+            let arguments = if sparse {
+                vec!["--detach", "--sparse-dir", "src", "HEAD"]
+            } else {
+                vec!["--detach", "HEAD"]
+            };
+            let commands = add_worktree_with_counted_git(
+                &repository,
+                &destination,
+                &state,
+                &arguments,
+                &shim_directory,
+                &real_git,
+                &log,
+            );
+            let resets = commands
+                .iter()
+                .filter(|line| line.starts_with("reset "))
+                .collect::<Vec<_>>();
+            assert_eq!(resets.len(), 1, "{name}/{kind}: {commands:?}");
+            assert_eq!(
+                resets[0].contains("--no-refresh"),
+                deferred,
+                "{name}/{kind}: {resets:?}"
+            );
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|line| line.starts_with("status "))
+                    .count(),
+                1,
+                "{name}/{kind}: the final content check must remain"
+            );
+            assert!(
+                git(&destination, &["status", "--porcelain=v1", "-z"])
+                    .stdout
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
 fn worktree_add_stays_within_its_git_invocation_budget() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");
