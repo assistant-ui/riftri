@@ -4,18 +4,18 @@ use std::collections::{BTreeMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
-
+use std::sync::atomic::AtomicBool;
 #[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, OnceLock, atomic::Ordering};
 
 use std::process::Stdio;
 
 use serde::Serialize;
 use thiserror::Error;
 
+#[cfg(target_os = "macos")]
+mod apple_trampoline;
 pub mod termination;
 
 /// Absolute real-Git path supplied to a process-scoped Riftri shim.
@@ -311,10 +311,45 @@ pub enum GitError {
     },
 }
 
+/// Whether this process may start read-only Git queries without Apple's
+/// `xcrun` trampoline. Off until a command that runs enough Git queries to
+/// repay one `xcrun --find git` turns it on.
+static DIRECT_QUERIES: AtomicBool = AtomicBool::new(false);
+
+/// Let read-only Git queries in this process skip Apple's `/usr/bin/git`
+/// trampoline and start the developer binary it would run.
+///
+/// Only a Riftri command that starts several Git queries should call this:
+/// finding the binary costs one `xcrun --find git` (about 10 ms), asked once
+/// per process on the first query, while each skipped trampoline saves about
+/// 8 ms. It changes nothing unless the Git a [`Git`] handle starts is Apple's
+/// trampoline on macOS, and nothing for commands that can run a hook, filter,
+/// or helper, or for [`Git::passthrough`].
+pub fn allow_direct_queries() {
+    DIRECT_QUERIES.store(true, Ordering::Relaxed);
+}
+
+/// Which executable starts one Git process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    /// The recorded Git, exactly as configured. Every command that can start
+    /// another program (a hook, a filter, an FSMonitor hook, a credential or
+    /// transport helper, a pager) or that reads the index or work tree.
+    Recorded,
+    /// A read-only query of refs, configuration, repository layout, or commit
+    /// objects that starts no other program. On macOS this may skip Apple's
+    /// trampoline; see [`allow_direct_queries`].
+    Query,
+}
+
 /// A handle to the real Git executable.
 #[derive(Debug, Clone)]
 pub struct Git {
     command: PathBuf,
+    /// The binary that read-only queries start instead of `command`, decided
+    /// on the first query after [`allow_direct_queries`]; `None` once decided
+    /// means `command` itself.
+    query: Arc<OnceLock<Option<PathBuf>>>,
     #[cfg(test)]
     process_attempts: Arc<AtomicUsize>,
 }
@@ -434,9 +469,52 @@ impl Git {
     pub fn new(command: impl Into<PathBuf>) -> Self {
         Self {
             command: command.into(),
+            query: Arc::new(OnceLock::new()),
             #[cfg(test)]
             process_attempts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// A handle whose read-only queries start `query` and everything else
+    /// `command`, on any platform the shell stand-ins run on.
+    #[cfg(all(test, unix))]
+    fn with_query_executable(command: impl Into<PathBuf>, query: impl Into<PathBuf>) -> Self {
+        let git = Self::new(command);
+        git.query
+            .set(Some(query.into()))
+            .expect("a new handle has not decided its query executable");
+        git
+    }
+
+    /// The executable that starts a process on `route`.
+    fn program(&self, route: Route) -> &Path {
+        if route == Route::Query
+            && let Some(query) = self.query_executable()
+        {
+            return query;
+        }
+        &self.command
+    }
+
+    fn query_executable(&self) -> Option<&Path> {
+        if let Some(decided) = self.query.get() {
+            return decided.as_deref();
+        }
+        if !DIRECT_QUERIES.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.query
+            .get_or_init(|| {
+                #[cfg(target_os = "macos")]
+                {
+                    apple_trampoline::query_executable(&self.command)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    None
+                }
+            })
+            .as_deref()
     }
 
     #[cfg(test)]
@@ -445,7 +523,7 @@ impl Git {
     }
 
     pub fn detect(&self) -> Result<GitInfo, GitError> {
-        let output = self.run(None, &["--version"])?;
+        let output = self.query(None, &["--version"])?;
         let version = utf8_line(&output.stdout, "git --version")?;
 
         Ok(GitInfo {
@@ -538,7 +616,7 @@ impl Git {
             let mut requested = revision.to_os_string();
             requested.push("^{commit}");
             arguments.insert(arguments.len() - 1, requested);
-            let output = self.output_os(Some(path), &arguments)?;
+            let output = self.query_output_os(Some(path), &arguments)?;
             if output.status.success() {
                 let (head, requested) = parse_paired_revision_output(&output.stdout)?;
                 info.head_commit = Some(head.commit);
@@ -575,7 +653,7 @@ impl Git {
         // parseable as one path even when that path contains newlines — which
         // is also why no second path query may join this call: two variable
         // paths in newline-separated output cannot be told apart.
-        let output = match self.run(
+        let output = match self.query(
             Some(path),
             &[
                 "rev-parse",
@@ -625,7 +703,7 @@ impl Git {
                 });
             }
         };
-        // Mirror `run_path`: exactly one trailing newline belongs to Git, the
+        // Mirror `path_output`: exactly one trailing newline belongs to Git, the
         // rest of the bytes belong to the path.
         let common_git_dir = remainder.strip_suffix(b"\n").unwrap_or(remainder);
         if common_git_dir.is_empty() {
@@ -639,7 +717,7 @@ impl Git {
         let root = if is_bare {
             None
         } else {
-            Some(self.run_path(
+            Some(self.query_path(
                 Some(path),
                 &["rev-parse", "--path-format=absolute", "--show-toplevel"],
                 "working-tree root",
@@ -699,7 +777,7 @@ impl Git {
         if must_resolve_before_peeling(revision) {
             let object = self.resolve_required_object(path, revision, "")?;
             let arguments = resolved_revision_arguments(OsStr::new(object.as_str()));
-            let output = self.run_os(Some(path), &arguments)?;
+            let output = self.query_os(Some(path), &arguments)?;
             return parse_resolved_revision_output(&output.stdout);
         }
         if is_revision_walk(revision) {
@@ -707,7 +785,7 @@ impl Git {
             return self.resolve_commit_tree(path, commit);
         }
         let arguments = resolved_revision_arguments(revision);
-        let output = self.run_os(Some(path), &arguments)?;
+        let output = self.query_os(Some(path), &arguments)?;
         parse_resolved_revision_output(&output.stdout)
     }
 
@@ -838,7 +916,7 @@ impl Git {
         const ATTEMPTS: u32 = 4;
         let mut attempt = 1;
         loop {
-            match self.run(Some(path), &["worktree", "list", "--porcelain", "-z"]) {
+            match self.query(Some(path), &["worktree", "list", "--porcelain", "-z"]) {
                 Ok(output) => return parse_worktree_porcelain(&output.stdout),
                 Err(GitError::CommandFailed { .. }) if attempt < ATTEMPTS => {
                     std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt)));
@@ -865,7 +943,7 @@ impl Git {
         if suffix.is_empty() {
             return Ok(path);
         }
-        let config = self.run(
+        let config = self.query(
             Some(repository),
             &[
                 "config",
@@ -911,7 +989,7 @@ impl Git {
             OsString::from("--porcelain"),
             OsString::from("-z"),
         ];
-        let output = self.run_os(None, &arguments)?;
+        let output = self.query_os(None, &arguments)?;
         let worktrees = parse_worktree_porcelain(&output.stdout)?;
         if worktrees.iter().all(|worktree| worktree.bare) {
             return Ok(None);
@@ -1067,7 +1145,7 @@ impl Git {
             OsString::from("--get-regexp"),
             OsString::from(pattern),
         ];
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             Ok(true)
         } else if output.status.code() == Some(1) {
@@ -1092,7 +1170,7 @@ impl Git {
             OsString::from("--get-regexp"),
             OsString::from(r"^includeif\..*\.path$"),
         ];
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.code() == Some(1) && output.stdout.is_empty() {
             return Ok(true);
         }
@@ -1140,7 +1218,7 @@ impl Git {
                 OsString::from("--name-only"),
                 OsString::from("--list"),
             ];
-            let output = self.output_os(Some(&path.join(parent)), &arguments)?;
+            let output = self.query_output_os(Some(&path.join(parent)), &arguments)?;
             if !output.status.success()
                 || output
                     .stdout
@@ -1178,7 +1256,7 @@ impl Git {
             arguments.extend([OsString::from("--git-dir"), git_path_argument(git_dir)]);
         }
         arguments.extend(["config", "--null", "--get", key].map(OsString::from));
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             Ok(Some(
                 output
@@ -1213,7 +1291,7 @@ impl Git {
             OsString::from("--get"),
             OsString::from("riftri.path"),
         ];
-        let output = self.run_os(None, &arguments)?;
+        let output = self.query_os(None, &arguments)?;
         let value = output.stdout.strip_suffix(&[0]).unwrap_or(&output.stdout);
         Ok(PathBuf::from(os_string_from_git(
             value,
@@ -1253,7 +1331,7 @@ impl Git {
             OsString::from("--get-regexp"),
             OsString::from(pattern),
         ];
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             parse_config_values(&output.stdout, &keys)
         } else if output.status.code() == Some(1) && output.stdout.is_empty() {
@@ -1282,7 +1360,7 @@ impl Git {
             OsString::from("--get-all"),
             OsString::from(key),
         ];
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             parse_config_value_origins(&output.stdout)
         } else if output.status.code() == Some(1) && output.stdout.is_empty() {
@@ -1301,7 +1379,7 @@ impl Git {
             OsString::from("--get"),
             OsString::from(key),
         ];
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             Ok(Some(
                 output
@@ -1328,7 +1406,7 @@ impl Git {
             OsString::from("--get-all"),
             OsString::from(key),
         ];
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             output
                 .stdout
@@ -1355,7 +1433,7 @@ impl Git {
             OsString::from("--get"),
             OsString::from(key),
         ];
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             match trim_line_endings(&output.stdout) {
                 b"true" => Ok(Some(true)),
@@ -1448,7 +1526,7 @@ impl Git {
     /// Resolve the repository-specific attributes file through Git so linked
     /// worktrees use the correct common Git directory.
     pub fn info_attributes_path(&self, path: &Path) -> Result<PathBuf, GitError> {
-        let common_git_dir = self.run_path(
+        let common_git_dir = self.query_path(
             Some(path),
             &["rev-parse", "--path-format=absolute", "--git-common-dir"],
             "common Git directory",
@@ -1791,7 +1869,7 @@ impl Git {
         configuration: &[(String, Vec<u8>)],
         sparse_directories: &[String],
     ) -> Result<(), GitError> {
-        let output = self.run(
+        let output = self.query(
             Some(repository),
             &[
                 "rev-parse",
@@ -1957,9 +2035,11 @@ impl Git {
     /// index entries rather than stat-cache bytes, which ordinary status may refresh.
     pub fn worktree_removal_state(&self, worktree: &Path) -> Result<Vec<u8>, GitError> {
         let mut state = Vec::new();
+        let head = self.query(Some(worktree), &["rev-parse", "--verify", "HEAD"])?;
+        state.extend_from_slice(&(head.stdout.len() as u64).to_le_bytes());
+        state.extend_from_slice(&head.stdout);
         for arguments in [
-            &["rev-parse", "--verify", "HEAD"][..],
-            &["ls-files", "--stage", "-v", "--full-name", "-z"],
+            &["ls-files", "--stage", "-v", "--full-name", "-z"][..],
             &[
                 "diff",
                 "--cached",
@@ -1982,7 +2062,7 @@ impl Git {
             state.extend_from_slice(&output.stdout);
         }
         let arguments = ["symbolic-ref", "--quiet", "HEAD"];
-        let symbolic = self.output(Some(worktree), &arguments)?;
+        let symbolic = self.query_output(Some(worktree), &arguments)?;
         if !symbolic.status.success() && symbolic.status.code() != Some(1) {
             return Err(command_failed(&arguments.map(OsString::from), &symbolic));
         }
@@ -2029,7 +2109,7 @@ impl Git {
     }
 
     fn worktree_index_path(&self, worktree: &Path) -> Result<PathBuf, GitError> {
-        self.run_path(
+        self.query_path(
             Some(worktree),
             &["rev-parse", "--path-format=absolute", "--git-path", "index"],
             "worktree index path",
@@ -2223,7 +2303,7 @@ impl Git {
     /// for a detached `HEAD`.
     pub fn symbolic_head_branch(&self, path: &Path) -> Result<Option<Vec<u8>>, GitError> {
         let arguments = ["symbolic-ref", "--quiet", "HEAD"];
-        let output = self.output(Some(path), &arguments)?;
+        let output = self.query_output(Some(path), &arguments)?;
         if output.status.code() == Some(1) {
             return Ok(None);
         }
@@ -2239,7 +2319,7 @@ impl Git {
     /// Whether the repository has any reference at all, which tells an empty
     /// repository apart from one whose current branch is merely unborn.
     pub fn has_any_reference(&self, path: &Path) -> Result<bool, GitError> {
-        let output = self.run(Some(path), &["for-each-ref", "--count=1", "--format=x"])?;
+        let output = self.query(Some(path), &["for-each-ref", "--count=1", "--format=x"])?;
         Ok(!output.stdout.is_empty())
     }
 
@@ -2281,7 +2361,7 @@ impl Git {
     /// mirrors Git's own check, which Git applies only while the worktree
     /// directory exists.
     pub fn worktree_has_submodules(&self, worktree: &Path) -> Result<bool, GitError> {
-        let admin = self.run_path(
+        let admin = self.query_path(
             Some(worktree),
             &["rev-parse", "--absolute-git-dir"],
             "worktree administrative directory",
@@ -2399,7 +2479,7 @@ impl Git {
         // this ref counts. A refname cannot contain a space, so each
         // `<oid> <refname>` line splits unambiguously.
         let arguments = [OsString::from("show-ref"), reference.clone()];
-        let output = self.output_os(Some(repository), &arguments)?;
+        let output = self.query_output_os(Some(repository), &arguments)?;
         match output.status.code() {
             Some(0) => {
                 let reference = reference.as_encoded_bytes();
@@ -2503,7 +2583,7 @@ impl Git {
             "--end-of-options",
             revision,
         ];
-        let output = self.output(Some(path), &arguments)?;
+        let output = self.query_output(Some(path), &arguments)?;
         if output.status.success() {
             return parse_object_output(&output.stdout).map(Some);
         }
@@ -2523,7 +2603,7 @@ impl Git {
             return Ok(None);
         };
         let base_arguments = ["rev-parse", "--verify", "--quiet", "--end-of-options", base];
-        let probe = self.output(Some(path), &base_arguments)?;
+        let probe = self.query_output(Some(path), &base_arguments)?;
         if probe.status.success() {
             return Err(GitError::UnreadableObject {
                 revision: revision.to_owned(),
@@ -2544,7 +2624,7 @@ impl Git {
         path: &Path,
     ) -> Result<Option<ResolvedRevision>, GitError> {
         let arguments = resolved_revision_arguments(OsStr::new("HEAD"));
-        let output = self.output_os(Some(path), &arguments)?;
+        let output = self.query_output_os(Some(path), &arguments)?;
         if output.status.success() {
             return parse_resolved_revision_output(&output.stdout).map(Some);
         }
@@ -2574,25 +2654,28 @@ impl Git {
             OsString::from("--end-of-options"),
             expression,
         ];
-        let output = self.run_os(Some(path), &arguments)?;
+        // Peeling to a commit reads refs, tags, and commits only. A `:` asks
+        // for a path in a tree or the index instead, and the index is read
+        // through Git's FSMonitor hook when one is configured.
+        let route = if suffix == "^{commit}" && !must_resolve_before_peeling(revision) {
+            Route::Query
+        } else {
+            Route::Recorded
+        };
+        let output = self.spawn_output(route, Some(path), &arguments, &[])?;
+        let output = self.succeeded(&arguments, output)?;
         parse_object_output(&output.stdout)
     }
 
-    fn run_path(
+    /// Run a read-only query (see [`Route::Query`]) that prints one path.
+    fn query_path(
         &self,
         path: Option<&Path>,
         arguments: &[&str],
         context: &'static str,
     ) -> Result<PathBuf, GitError> {
-        let output = self.run(path, arguments)?;
-        let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
-        if bytes.is_empty() {
-            return Err(GitError::InvalidOutput {
-                context,
-                detail: "path was empty".to_owned(),
-            });
-        }
-        Ok(PathBuf::from(os_string_from_git(bytes, context)?))
+        let output = self.query(path, arguments)?;
+        path_output(&output, context)
     }
 
     fn run_text(
@@ -2611,8 +2694,21 @@ impl Git {
     }
 
     fn run_os(&self, path: Option<&Path>, arguments: &[OsString]) -> Result<Output, GitError> {
-        let output = self.output_os(path, arguments)?;
+        self.succeeded(arguments, self.output_os(path, arguments)?)
+    }
 
+    /// [`Self::run`] for a read-only query (see [`Route::Query`]).
+    fn query(&self, path: Option<&Path>, arguments: &[&str]) -> Result<Output, GitError> {
+        let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+        self.query_os(path, &arguments)
+    }
+
+    /// [`Self::run_os`] for a read-only query (see [`Route::Query`]).
+    fn query_os(&self, path: Option<&Path>, arguments: &[OsString]) -> Result<Output, GitError> {
+        self.succeeded(arguments, self.query_output_os(path, arguments)?)
+    }
+
+    fn succeeded(&self, arguments: &[OsString], output: Output) -> Result<Output, GitError> {
         if output.status.success() {
             Ok(output)
         } else {
@@ -2637,6 +2733,12 @@ impl Git {
     fn output(&self, path: Option<&Path>, arguments: &[&str]) -> Result<Output, GitError> {
         let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
         self.output_os(path, &arguments)
+    }
+
+    /// [`Self::output`] for a read-only query (see [`Route::Query`]).
+    fn query_output(&self, path: Option<&Path>, arguments: &[&str]) -> Result<Output, GitError> {
+        let arguments = arguments.iter().map(OsString::from).collect::<Vec<_>>();
+        self.query_output_os(path, &arguments)
     }
 
     /// Every command name Git runs before it looks for an alias of that name:
@@ -2680,7 +2782,8 @@ impl Git {
             return Ok(true);
         }
         let arguments = [OsString::from("rev-parse"), OsString::from("--git-dir")];
-        let output = self.output_os_with_env(
+        let output = self.spawn_output(
+            Route::Query,
             Some(path),
             &arguments,
             &[
@@ -2696,12 +2799,21 @@ impl Git {
     /// one of its work trees. Git answers with a fixed `true` or `false`
     /// line, so nothing depends on translated error text.
     pub fn inside_git_directory(&self, path: &Path) -> Result<bool, GitError> {
-        let output = self.output(Some(path), &["rev-parse", "--is-inside-git-dir"])?;
+        let output = self.query_output(Some(path), &["rev-parse", "--is-inside-git-dir"])?;
         Ok(output.status.success() && trim_line_endings(&output.stdout) == b"true")
     }
 
     fn output_os(&self, path: Option<&Path>, arguments: &[OsString]) -> Result<Output, GitError> {
         self.output_os_with_env(path, arguments, &[])
+    }
+
+    /// [`Self::output_os`] for a read-only query (see [`Route::Query`]).
+    fn query_output_os(
+        &self,
+        path: Option<&Path>,
+        arguments: &[OsString],
+    ) -> Result<Output, GitError> {
+        self.spawn_output(Route::Query, path, arguments, &[])
     }
 
     fn output_os_with_env(
@@ -2710,16 +2822,37 @@ impl Git {
         arguments: &[OsString],
         environment: &[(&OsStr, &OsStr)],
     ) -> Result<Output, GitError> {
+        self.spawn_output(Route::Recorded, path, arguments, environment)
+    }
+
+    fn spawn_output(
+        &self,
+        route: Route,
+        path: Option<&Path>,
+        arguments: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<Output, GitError> {
         #[cfg(test)]
         self.process_attempts.fetch_add(1, Ordering::Relaxed);
-        let mut command = Command::new(&self.command);
-        command.args(arguments).envs(environment.iter().copied());
-
-        if let Some(path) = path {
-            command.current_dir(path);
+        let command = |program: &Path| {
+            let mut command = Command::new(program);
+            command.args(arguments).envs(environment.iter().copied());
+            if let Some(path) = path {
+                command.current_dir(path);
+            }
+            command
+        };
+        let program = self.program(route);
+        if program != self.command {
+            // A query that could not start (the developer binary vanished
+            // under a new `xcode-select` choice, say) starts no process, so
+            // retrying it through the recorded Git changes nothing but which
+            // error, if any, the caller sees.
+            if let Ok(output) = command(program).output() {
+                return Ok(output);
+            }
         }
-
-        command
+        command(&self.command)
             .output()
             .map_err(|source| self.start_error(path, source))
     }
@@ -2792,6 +2925,19 @@ impl Git {
         })?;
         Ok(output)
     }
+}
+
+/// Parse one path that Git printed on a line of its own. Exactly one trailing
+/// newline belongs to Git; every other byte belongs to the path.
+fn path_output(output: &Output, context: &'static str) -> Result<PathBuf, GitError> {
+    let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    if bytes.is_empty() {
+        return Err(GitError::InvalidOutput {
+            context,
+            detail: "path was empty".to_owned(),
+        });
+    }
+    Ok(PathBuf::from(os_string_from_git(bytes, context)?))
 }
 
 fn attribute_source_argument(tree: Option<&ObjectId>) -> OsString {
@@ -4015,6 +4161,221 @@ mod tests {
 
         assert!(marker.exists(), "the first listing did fail");
         assert_eq!(listed.len(), 1, "{listed:?}");
+    }
+
+    /// Two stand-ins for one real Git, each recording its label and the
+    /// command it started, so a test can tell which route ran what.
+    #[cfg(unix)]
+    struct RoutedGit {
+        _directory: TempDir,
+        recorded: PathBuf,
+        query: PathBuf,
+        log: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl RoutedGit {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt;
+
+            let directory = tempdir().expect("stand-in directory");
+            let real = Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("locate git");
+            let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+            let log = directory.path().join("routes.log");
+            let stand_in = |label: &str| {
+                let path = directory.path().join(label).join("git");
+                fs::create_dir(path.parent().unwrap()).expect("stand-in directory");
+                fs::write(
+                    &path,
+                    format!(
+                        "#!/bin/sh\nprintf '%s %s\\n' {label} \"$*\" >> '{log}'\nexec '{real}' \"$@\"\n",
+                        log = log.display()
+                    ),
+                )
+                .expect("write stand-in");
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+                path
+            };
+            Self {
+                recorded: stand_in("recorded"),
+                query: stand_in("query"),
+                log,
+                _directory: directory,
+            }
+        }
+
+        fn git(&self) -> Git {
+            Git::with_query_executable(&self.recorded, &self.query)
+        }
+
+        /// Every command started since the last call, with its route.
+        fn take(&self) -> Vec<String> {
+            let log = fs::read_to_string(&self.log).unwrap_or_default();
+            fs::remove_file(&self.log).ok();
+            log.lines().map(str::to_owned).collect()
+        }
+
+        fn assert_routes(&self, label: &str, expected: &str) {
+            let routes = self.take();
+            assert!(!routes.is_empty(), "{label} started no Git");
+            for route in &routes {
+                assert!(
+                    route.starts_with(&format!("{expected} ")),
+                    "{label} started {route:?}, expected the {expected} Git"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_queries_take_the_query_route_and_nothing_else_does() {
+        let fixture = RepositoryFixture::committed();
+        let routed = RoutedGit::new();
+        let git = routed.git();
+        let repository = fixture.path();
+
+        git.detect().unwrap();
+        routed.assert_routes("detect", "query");
+        let (info, _) = git
+            .inspect_repository_for_add(repository, OsStr::new("HEAD~0"))
+            .unwrap();
+        routed.assert_routes("inspect_repository_for_add", "query");
+        git.inspect_repository(repository).unwrap();
+        routed.assert_routes("inspect_repository", "query");
+        let resolved = git
+            .resolve_revision(repository, OsStr::new("HEAD"))
+            .unwrap();
+        routed.assert_routes("resolve_revision", "query");
+        git.list_worktrees(repository).unwrap();
+        routed.assert_routes("list_worktrees", "query");
+        git.config_values(repository, &["core.autocrlf"]).unwrap();
+        git.config_value(repository, "user.name").unwrap();
+        git.local_config_bool(repository, "core.bare").unwrap();
+        git.local_config_paths(repository, "riftri.stateDirectory")
+            .unwrap();
+        git.conditional_config_has_only(repository, &[]).unwrap();
+        routed.assert_routes("configuration reads", "query");
+        git.symbolic_head_branch(repository).unwrap();
+        git.has_any_reference(repository).unwrap();
+        git.local_branch_target(repository, OsStr::new("missing"))
+            .unwrap();
+        routed.assert_routes("reference reads", "query");
+
+        // Index readers start Git's FSMonitor hook, object readers can fetch
+        // from a promisor remote, and writers run hooks: none may skip the
+        // recorded Git.
+        let tree = info.head_tree.clone().unwrap();
+        git.list_tree(repository, &tree).unwrap();
+        routed.assert_routes("list_tree", "recorded");
+        git.effective_attributes_for_tree_paths(repository, &tree, &[PathBuf::from("tracked.txt")])
+            .unwrap();
+        routed.assert_routes("attribute queries", "recorded");
+        git.worktree_is_clean(repository).unwrap();
+        routed.assert_routes("worktree_is_clean", "recorded");
+        let blob = git
+            .list_tree(repository, &tree)
+            .unwrap()
+            .remove(0)
+            .object_id;
+        routed.take();
+        git.blob_sizes(repository, std::slice::from_ref(&blob))
+            .unwrap();
+        git.read_blob(repository, &blob).unwrap();
+        routed.assert_routes("blob reads", "recorded");
+        git.resolve_requested_revision(repository, OsStr::new("HEAD:tracked.txt"))
+            .unwrap();
+        let routes = routed.take();
+        assert!(
+            routes
+                .iter()
+                .any(|route| route.starts_with("recorded rev-parse")),
+            "a path in a tree is resolved by the recorded Git: {routes:?}"
+        );
+        git.set_local_config(repository, "riftri.test", OsStr::new("true"))
+            .unwrap();
+        routed.assert_routes("set_local_config", "recorded");
+
+        let linked_parent = tempdir().unwrap();
+        let linked = linked_parent.path().join("linked");
+        git.add_worktree_no_checkout(
+            repository,
+            &linked,
+            OsStr::new(resolved.commit.as_str()),
+            WorktreeHead::Detached,
+        )
+        .unwrap();
+        routed.assert_routes("add_worktree_no_checkout", "recorded");
+        git.synchronize_worktree_index(&linked).unwrap();
+        routed.assert_routes("synchronize_worktree_index", "recorded");
+        let destination = tempdir().unwrap();
+        let index = destination.path().join("index");
+        let materialized = destination.path().join("tree");
+        fs::create_dir(&materialized).unwrap();
+        git.materialize_tree(repository, &tree, &materialized, &index)
+            .unwrap();
+        let routes = routed.take();
+        assert_eq!(
+            routes[0],
+            "query rev-parse --path-format=absolute --git-path objects --show-object-format"
+        );
+        assert!(
+            routes[1..]
+                .iter()
+                .all(|route| route.starts_with("recorded ")),
+            "{routes:?}"
+        );
+        fs::write(linked.join("tracked.txt"), "tracked\n").unwrap();
+        git.remove_worktree(repository, &linked).unwrap();
+        routed.assert_routes("remove_worktree", "recorded");
+        let status = git
+            .passthrough(&[
+                OsString::from("-C"),
+                repository.as_os_str().to_owned(),
+                OsString::from("status"),
+                OsString::from("--short"),
+            ])
+            .unwrap();
+        assert!(status.success());
+        routed.assert_routes("passthrough", "recorded");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_query_that_cannot_start_runs_on_the_recorded_git() {
+        let fixture = RepositoryFixture::committed();
+        let routed = RoutedGit::new();
+        let missing = routed.query.with_file_name("missing-git");
+        let git = Git::with_query_executable(&routed.recorded, &missing);
+        let info = git.inspect_repository(fixture.path()).unwrap();
+        assert!(info.head_commit.is_some());
+        routed.assert_routes("inspect_repository", "recorded");
+        // A missing working directory still names the directory, not Git.
+        let error = git
+            .list_worktrees(&fixture.path().join("absent"))
+            .unwrap_err();
+        assert!(
+            matches!(error, crate::GitError::WorkingDirectoryMissing { .. }),
+            "{error:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn allowing_direct_queries_changes_nothing_for_any_other_git() {
+        let fixture = RepositoryFixture::committed();
+        let routed = RoutedGit::new();
+        super::allow_direct_queries();
+        let git = Git::new(&routed.recorded);
+        git.inspect_repository(fixture.path()).unwrap();
+        git.detect().unwrap();
+        routed.assert_routes(
+            "queries through a Git that is not the trampoline",
+            "recorded",
+        );
     }
 
     #[test]
@@ -7514,7 +7875,7 @@ mod tests {
         );
         let git = Git::default();
         let linked_git_directory = git
-            .run_path(
+            .query_path(
                 Some(&linked),
                 &["rev-parse", "--path-format=absolute", "--git-dir"],
                 "linked Git directory",

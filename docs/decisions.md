@@ -879,6 +879,77 @@ flushed" marker would close that gap, but it is a new state file that every
 released Riftri reports as unexplained. Linux and Windows keep `fsync` and
 `FlushFileBuffers`, which offer no comparable split.
 
+### D047: Riftri's own read-only Git queries skip Apple's xcrun trampoline
+
+On macOS, `/usr/bin/git` is not Git. It is one of Apple's `xcrun` stubs on the
+sealed system volume: every start finds the active developer directory
+(`DEVELOPER_DIR`, then the `xcode-select` choice), finds `git` there, adds
+`SDKROOT`, `CPATH`, `LIBRARY_PATH`, and `MANPATH` to the environment, and
+executes the real binary. That costs about 8 ms per Git process, and a
+lifecycle command starts a dozen or more of them (`riftri worktree prune`
+started 31 in a small test repository).
+
+When the Git a Riftri command would start is that stub, Riftri asks
+`/usr/bin/xcrun --find git` which binary the stub would run and starts that
+binary directly for its own read-only queries. This still invokes the installed
+Git: `xcrun` answers with the stub's own lookup, honouring `DEVELOPER_DIR`,
+`xcode-select`, and `TOOLCHAINS`, and the stub starts that binary by the same
+full path, so even paths Git derives from its own location agree. The answer
+is asked for once per process, on the first query, and never cached across
+processes, because the selection can change between two commands. Anything
+unexpected (no `xcrun`, a failure, output that is not exactly one absolute
+path to an executable named `git`, or the stub itself) keeps every query on
+the stub, and a query that cannot start from the resolved binary is retried
+through the stub.
+
+The stub is recognised by resolving the Git command the way `execvp` would
+and canonicalising it to `/usr/bin/git`; a `PATH` lookup that depends on the
+working directory gives up. Linux, Windows, and any other macOS Git (Homebrew,
+Nix, a direct developer-directory path) are unchanged.
+
+The lookup costs about 10 ms, so only commands that start several queries may
+use it: the CLI's repository commands (`setup`, `enable`, `disable`, `doctor`,
+`status`, `repair`, `gc`, `state`, `shell status`, and every `worktree`
+command), and the Git shim once it is planning a worktree lifecycle
+subcommand. `riftri exec`, `riftri shell hook`, and every command the shim
+passes straight to Git start at most a version check and keep the stub.
+
+Only commands that start no other program may skip the stub, because the
+variables it adds reach every hook, filter, and helper Git starts. Git itself
+does not read them. The direct set is `git --version`; `rev-parse` for
+repository layout, refs, and `^{commit}` peels; `show --no-patch
+--no-show-signature` of commits; `worktree list`; `show-ref`;
+`symbolic-ref`; `for-each-ref`; and configuration reads. Everything else keeps
+the stub:
+
+- Anything that reads the index (`status`, `ls-files`, `diff`, `reset`,
+  `update-index`, and `check-attr`, even with `--source`): reading the index
+  runs a configured `core.fsmonitor` hook.
+- Anything that reads trees or blobs (`ls-tree`, `cat-file`, `check-attr`,
+  `^{tree}` and `:`-path revisions): in a partial clone, a missing object is
+  fetched by `git fetch` with its transport and credential helpers. Partial
+  clones made with blob, tree, or sparse filters always hold every commit, so
+  the commit lookups in the direct set never fetch.
+- Every write (`worktree add`, `remove`, `move`, and `prune`, `branch`,
+  `update-ref`, configuration writes, and base materialization), since those
+  run hooks.
+- `git lfs`, which is another program.
+- The shim's passthrough, which hands the caller's own command to the
+  recorded Git exactly as before.
+
+`git --version` comes from the same binary either way and is byte-identical,
+so the Git version in every checkout profile, and so every existing base, is
+unchanged, and reports still name the recorded Git command. A test checks the
+split end to end: Trace2 records which processes saw `SDKROOT`, and every hook
+must have seen it.
+
+Rejected alternatives: putting the developer directory first on `PATH`
+changes what the user's hooks and every passed-through command see; resolving
+the developer directory in Riftri would re-implement `xcrun`'s lookup and its
+toolchain rules; and replicating the stub's environment for every command
+would need a second `xcrun` call and depend on which variables Apple adds,
+where any difference would reach the user's hooks.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

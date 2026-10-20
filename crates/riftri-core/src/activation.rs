@@ -298,6 +298,12 @@ fn plan_command_reading(
     {
         return Ok(GitProxyPlan::Passthrough);
     }
+    // A lifecycle subcommand is planned with at least four read-only Git
+    // queries and usually carried out with many more, which repays finding
+    // the developer Git behind Apple's trampoline once (D047). Commands that
+    // returned above start at most a couple of queries and keep the
+    // trampoline; the command itself always goes to the recorded Git.
+    riftri_git::allow_direct_queries();
 
     let git = Git::default();
     let root = match context.git_directory.as_deref() {
