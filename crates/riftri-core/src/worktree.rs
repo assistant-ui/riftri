@@ -719,6 +719,58 @@ pub fn prune_worktrees(
     prune_worktrees_inner(request, None)
 }
 
+// The Git shim inspects `request.repository` while it plans a lifecycle
+// command, health-checking HEAD as it does. These entry points reuse that
+// inspection rather than repeating it; each refuses the same Git environment
+// as its public counterpart, before anything else.
+
+/// [`remove_worktree`] or [`force_remove_worktree`] with `request.repository`
+/// already inspected.
+pub(crate) fn remove_worktree_inspected(
+    request: RemoveWorktreeRequest,
+    repository: riftri_git::RepositoryInfo,
+    force: bool,
+) -> Result<RemoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    return remove_worktree_with_mode(request, None, force, Some(repository));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (repository, force);
+        remove_worktree_inner(request, None)
+    }
+}
+
+/// [`move_worktree`] with `request.repository` already inspected.
+pub(crate) fn move_worktree_inspected(
+    request: MoveWorktreeRequest,
+    repository: riftri_git::RepositoryInfo,
+) -> Result<MoveWorktreeResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    return move_worktree_resolved(request, None, Some(repository));
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = repository;
+        move_worktree_inner(request, None)
+    }
+}
+
+/// [`prune_worktrees`] with `request.repository` already inspected.
+pub(crate) fn prune_worktrees_inspected(
+    request: PruneWorktreesRequest,
+    repository: riftri_git::RepositoryInfo,
+) -> Result<PruneWorktreesResult, WorktreeError> {
+    validate_lifecycle_git_environment()?;
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    return prune_worktrees_resolved(request, repository, None);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = repository;
+        prune_worktrees_inner(request, None)
+    }
+}
+
 /// Plan or apply collection of immutable bases with no journaled references.
 pub fn garbage_collect(
     state_directory: &Path,
@@ -897,6 +949,20 @@ pub fn managed_worktree_state_directory(
     )
 }
 
+/// [`managed_worktree_state_directory`] for a repository the caller has
+/// already inspected.
+pub(crate) fn managed_worktree_state_directory_in(
+    repository: &riftri_git::RepositoryInfo,
+    destination: &Path,
+) -> Result<Option<PathBuf>, WorktreeError> {
+    Ok(
+        find_managed_worktrees_in(&Git::default(), repository, &[destination.to_path_buf()])?
+            .pop()
+            .flatten()
+            .map(|(state, _)| state),
+    )
+}
+
 /// Advisory mount readiness, not an authorization to mutate or delete a view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -1000,12 +1066,20 @@ fn find_managed_worktrees(
 ) -> Result<Vec<Option<(PathBuf, DecodedJournal)>>, WorktreeError> {
     let git = Git::default();
     let repository_info = git.inspect_repository(repository)?;
+    find_managed_worktrees_in(&git, &repository_info, destinations)
+}
+
+fn find_managed_worktrees_in(
+    git: &Git,
+    repository_info: &riftri_git::RepositoryInfo,
+    destinations: &[PathBuf],
+) -> Result<Vec<Option<(PathBuf, DecodedJournal)>>, WorktreeError> {
     let candidates = destinations
         .iter()
         .map(|destination| managed_destination_candidates(destination))
         .collect::<Result<Vec<_>, _>>()?;
     let mut matches = vec![None; destinations.len()];
-    for state_directory in repository_state_directories_with_git(&git, &repository_info)? {
+    for state_directory in repository_state_directories_with_git(git, repository_info)? {
         let snapshot = ManagedJournalSnapshot::load(&state_directory)?;
         for (index, (destination, candidates)) in destinations.iter().zip(&candidates).enumerate() {
             if snapshot.adds.iter().any(|journal| {
@@ -1057,6 +1131,9 @@ fn find_managed_worktrees(
     Ok(matches)
 }
 
+/// Only Unix tests still discover state directories from a path; everything
+/// else passes the inspection it already has.
+#[cfg(all(test, unix))]
 pub(crate) fn repository_state_directories(
     repository: &Path,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -1065,7 +1142,7 @@ pub(crate) fn repository_state_directories(
     repository_state_directories_with_git(&git, &repository_info)
 }
 
-fn repository_state_directories_with_git(
+pub(crate) fn repository_state_directories_with_git(
     git: &Git,
     repository: &riftri_git::RepositoryInfo,
 ) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -3015,7 +3092,7 @@ fn remove_worktree_inner(
     request: RemoveWorktreeRequest,
     fail_after: Option<RemoveWorktreePhase>,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
-    remove_worktree_with_mode(request, fail_after, false)
+    remove_worktree_with_mode(request, fail_after, false, None)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -3023,7 +3100,7 @@ fn force_remove_worktree_inner(
     request: RemoveWorktreeRequest,
     fail_after: Option<RemoveWorktreePhase>,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
-    remove_worktree_with_mode(request, fail_after, true)
+    remove_worktree_with_mode(request, fail_after, true, None)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -3031,15 +3108,18 @@ fn remove_worktree_with_mode(
     request: RemoveWorktreeRequest,
     fail_after: Option<RemoveWorktreePhase>,
     force: bool,
+    inspected: Option<riftri_git::RepositoryInfo>,
 ) -> Result<RemoveWorktreeResult, WorktreeError> {
     let git = Git::default();
-    let repository = git.inspect_repository(&request.repository)?;
-    let repository_root = git_command_root(&repository)
+    let repository = match inspected {
+        Some(repository) => repository,
+        None => git.inspect_repository(&request.repository)?,
+    };
+    let live_root = git_command_root(&repository)
         .map(Path::to_path_buf)
         .ok_or_else(|| {
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
-    let repository_root = stable_repository_root(&git, &repository_root)?;
     let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
@@ -3070,8 +3150,14 @@ fn remove_worktree_with_mode(
     // differently (Unicode normalization on macOS).
     let destination = managed.destination.clone();
     let metadata_lock = acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
-    let registered = git
-        .list_worktrees(&repository_root)?
+    // The worktree the command runs from still exists here, even when it is
+    // the one being removed, so it can list the inventory. Every later Git
+    // command runs from the main worktree that inventory names, which
+    // outlives this removal (#475) and is what `stable_repository_root`
+    // would have listed separately for.
+    let inventory = git.list_worktrees(&live_root)?;
+    let repository_root = main_worktree_root(&inventory, &live_root);
+    let registered = inventory
         .into_iter()
         .find(|worktree| paths_match(&worktree.path, &destination))
         .ok_or_else(|| {
@@ -3182,14 +3268,28 @@ fn move_worktree_inner(
     request: MoveWorktreeRequest,
     fail_after: Option<MoveWorktreePhase>,
 ) -> Result<MoveWorktreeResult, WorktreeError> {
+    move_worktree_resolved(request, fail_after, None)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn move_worktree_resolved(
+    request: MoveWorktreeRequest,
+    fail_after: Option<MoveWorktreePhase>,
+    inspected: Option<riftri_git::RepositoryInfo>,
+) -> Result<MoveWorktreeResult, WorktreeError> {
     let git = Git::default();
-    let repository = git.inspect_repository(&request.repository)?;
+    let repository = match inspected {
+        Some(repository) => repository,
+        None => git.inspect_repository(&request.repository)?,
+    };
+    // Unlike removal, a move runs no Git command from this directory once the
+    // inventory below is listed, and every worktree of the repository lists
+    // the same inventory, so the main worktree need not be looked up first.
     let repository_root = git_command_root(&repository)
         .map(Path::to_path_buf)
         .ok_or_else(|| {
             WorktreeError::InvalidRequest("Git did not report a working-tree root".to_owned())
         })?;
-    let repository_root = stable_repository_root(&git, &repository_root)?;
     let state_given = request.state_dir.is_some();
     let requested_state = request
         .state_dir
@@ -3258,6 +3358,14 @@ fn move_worktree_inner(
             source.display()
         )));
     }
+    // The move runs Git from the repository its add journal recorded. When
+    // that is one of the worktrees just listed, it shares this repository's
+    // common Git directory, so the metadata lock is found without inspecting
+    // it again; any other recorded path is inspected as recovery does.
+    let lock_directory = inventory
+        .iter()
+        .any(|worktree| paths_match(&worktree.path, &managed.repository))
+        .then(|| repository.identity.common_git_dir.clone());
 
     let store = MoveJournalStore::create(&state_directory)?;
     let operation_id = allocate_move_operation_id(&store)?;
@@ -3277,6 +3385,7 @@ fn move_worktree_inner(
         &store,
         journal.decode(journal_path.clone())?,
         fail_after,
+        lock_directory.as_deref(),
     )? {
         return Err(WorktreeError::InvalidRequest(format!(
             "Git refused to move {}; nothing was changed: {error}",
@@ -3565,8 +3674,19 @@ fn prune_worktrees_inner(
     request: PruneWorktreesRequest,
     fail_after: Option<PruneWorktreesPhase>,
 ) -> Result<PruneWorktreesResult, WorktreeError> {
+    let repository = Git::default().inspect_repository(&request.repository)?;
+    prune_worktrees_resolved(request, repository, fail_after)
+}
+
+/// [`prune_worktrees_inner`] for a caller that has already inspected
+/// `request.repository`, as the Git shim does before it plans the prune.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn prune_worktrees_resolved(
+    request: PruneWorktreesRequest,
+    repository: riftri_git::RepositoryInfo,
+    fail_after: Option<PruneWorktreesPhase>,
+) -> Result<PruneWorktreesResult, WorktreeError> {
     let git = Git::default();
-    let repository = git.inspect_repository(&request.repository)?;
     let repository_root = git_command_root(&repository)
         .map(Path::to_path_buf)
         .ok_or_else(|| {
@@ -3585,7 +3705,17 @@ fn prune_worktrees_inner(
     let state_directory = absolute_path(&requested_state)?;
     create_state_layout(&state_directory)?;
     let state_directory = resolve_real_state_directory(&state_directory)?;
-    verify_repository_prune_safe(&git, &state_directory, &repository_root, None)?;
+    // The journal names `repository_root`, so every later step must see Git
+    // resolve that exact directory to itself. When the request named that
+    // directory (`.` at the root, say), the inspection above was that very
+    // query; otherwise (a request from a subdirectory) ask once here, before
+    // anything is written.
+    let repository = verified_prune_repository(
+        &git,
+        &repository_root,
+        same_directory(&request.repository, &repository_root).then_some(repository),
+    )?;
+    verify_repository_prune_safe(&git, &repository, &state_directory, &repository_root, None)?;
 
     let store = PruneJournalStore::create(&state_directory)?;
     let operation_id = allocate_prune_operation_id(&store)?;
@@ -3597,6 +3727,7 @@ fn prune_worktrees_inner(
         &store,
         journal.decode(journal_path.clone())?,
         fail_after,
+        Some(repository),
     )?;
     Ok(PruneWorktreesResult { journal_path })
 }
@@ -5262,6 +5393,12 @@ fn ascii_lowercase_path(path: &Path) -> PathBuf {
     ))
 }
 
+/// Unsupported builds and tests judge any revision; `doctor` judges HEAD
+/// through [`inspect_head_compatibility`].
+#[cfg(any(
+    test,
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
 pub(crate) fn inspect_repository_compatibility(
     git: &Git,
     repository: &Path,
@@ -5288,6 +5425,51 @@ pub(crate) fn inspect_repository_compatibility(
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     Ok(analyze_repository_compatibility(git, repository, common_git_dir, revision)?.report)
+}
+
+/// [`inspect_repository_compatibility`] for `HEAD`, reusing what `doctor`
+/// has already asked Git: the version it reports, and `head` when its
+/// inspection resolved HEAD's commit and tree. The sparse settings and the
+/// compatibility values come from one configuration snapshot, as an add
+/// reads them. Without `head` (a bare repository's report omits the tree),
+/// HEAD is resolved here exactly as before.
+pub(crate) fn inspect_head_compatibility(
+    git: &Git,
+    git_info: Option<&riftri_git::GitInfo>,
+    repository: &Path,
+    common_git_dir: &Path,
+    head: Option<ResolvedRevision>,
+) -> Result<RepositoryCompatibilityReport, WorktreeError> {
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        validate_lifecycle_git_environment()?;
+        let resolved = match head {
+            Some(head) => head,
+            None => resolve_requested_revision(git, repository, OsStr::new("HEAD"))?,
+        };
+        let checkout_config = git.config_values(repository, CHECKOUT_CONFIG_KEYS)?;
+        let sparse_directories =
+            resolve_sparse_profile(git, repository, &[], Some(&checkout_config))?;
+        let git_info = match git_info {
+            Some(git_info) => git_info.clone(),
+            None => git.detect()?,
+        };
+        Ok(analyze_compatibility_with_git_info(
+            git,
+            &git_info,
+            repository,
+            common_git_dir,
+            &resolved,
+            &sparse_directories,
+            Some(checkout_config),
+        )?
+        .report)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (git_info, head);
+        inspect_repository_compatibility(git, repository, common_git_dir, OsStr::new("HEAD"))
+    }
 }
 
 /// Resolve a revision the caller supplied, reporting a name that resolves to
@@ -5520,7 +5702,26 @@ fn analyze_resolved_repository_compatibility(
     sparse_directories: &[String],
     captured_config: Option<ConfigValues>,
 ) -> Result<CompatibilityAnalysis, WorktreeError> {
-    let git_info = git.detect()?;
+    analyze_compatibility_with_git_info(
+        git,
+        &git.detect()?,
+        repository,
+        common_git_dir,
+        resolved,
+        sparse_directories,
+        captured_config,
+    )
+}
+
+fn analyze_compatibility_with_git_info(
+    git: &Git,
+    git_info: &riftri_git::GitInfo,
+    repository: &Path,
+    common_git_dir: &Path,
+    resolved: &ResolvedRevision,
+    sparse_directories: &[String],
+    captured_config: Option<ConfigValues>,
+) -> Result<CompatibilityAnalysis, WorktreeError> {
     let entries = git.list_tree(repository, &resolved.tree)?;
     let paths = entries
         .iter()
@@ -5607,7 +5808,7 @@ fn analyze_resolved_repository_compatibility(
             &resolved.tree,
             &paths,
             has_in_tree_attribute_file,
-            &git_info,
+            git_info,
         )?;
         match classify_in_tree_attributes(&in_tree) {
             Ok(paths) => lfs_paths = paths,
@@ -9588,7 +9789,7 @@ pub fn recover_incomplete_operations(
             kind: "move",
             operation_id: journal.operation_id.clone(),
         });
-        match resume_move(&git, &move_store, journal.clone(), None) {
+        match resume_move(&git, &move_store, journal.clone(), None, None) {
             Ok(MoveResumption::Moved) => {
                 report.recovered_moves += 1;
                 report.completed_moves += 1;
@@ -9670,7 +9871,7 @@ pub fn recover_incomplete_operations(
             kind: "prune",
             operation_id: journal.operation_id.clone(),
         });
-        if let Err(error) = resume_prune(&git, &prune_store, journal.clone(), None) {
+        if let Err(error) = resume_prune(&git, &prune_store, journal.clone(), None, None) {
             report
                 .errors
                 .push(format!("prune operation {}: {error}", journal.operation_id));
@@ -10022,6 +10223,7 @@ fn resume_move(
     store: &MoveJournalStore,
     journal: DecodedMoveJournal,
     fail_after: Option<MoveWorktreePhase>,
+    common_git_dir: Option<&Path>,
 ) -> Result<MoveResumption, WorktreeError> {
     let state_directory = lifecycle_state_directory(&journal.journal_path, "move")?;
     if store.path_for(&journal.operation_id) != journal.journal_path {
@@ -10040,8 +10242,10 @@ fn resume_move(
     }
 
     if record.phase == MoveWorktreePhase::IntentRecorded {
-        let metadata_lock =
-            acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
+        let metadata_lock = match common_git_dir {
+            Some(common_git_dir) => acquire_git_worktree_metadata_lock(common_git_dir)?,
+            None => acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?,
+        };
         let (source_registered, destination_registered) = move_registration(git, &journal)?;
         let source_exists = journal.source.exists();
         let destination_exists = journal.destination.exists();
@@ -11149,6 +11353,7 @@ fn resume_prune(
     store: &PruneJournalStore,
     journal: DecodedPruneJournal,
     fail_after: Option<PruneWorktreesPhase>,
+    inspected: Option<riftri_git::RepositoryInfo>,
 ) -> Result<(), WorktreeError> {
     let state_directory = lifecycle_state_directory(&journal.journal_path, "prune")?;
     if store.path_for(&journal.operation_id) != journal.journal_path {
@@ -11164,11 +11369,20 @@ fn resume_prune(
         )));
     }
     let mut record = store.reload(&journal)?;
+    if record.phase == PruneWorktreesPhase::Complete {
+        return Ok(());
+    }
+    // One inspection serves the metadata lock and both verification passes:
+    // where the repository and its common Git directory are does not change
+    // under the metadata lock. What can change, a concurrently registered
+    // state directory or worktree, is still re-read by every pass.
+    let repository = verified_prune_repository(git, &journal.repository, inspected)?;
     if record.phase == PruneWorktreesPhase::IntentRecorded {
         let metadata_lock =
-            acquire_git_worktree_metadata_lock_for_repository(git, &journal.repository)?;
+            acquire_git_worktree_metadata_lock(&repository.identity.common_git_dir)?;
         verify_repository_prune_safe(
             git,
+            &repository,
             &state_directory,
             &journal.repository,
             Some(&journal.operation_id),
@@ -11185,6 +11399,7 @@ fn resume_prune(
     if record.phase == PruneWorktreesPhase::GitMetadataPruned {
         verify_repository_prune_safe(
             git,
+            &repository,
             &state_directory,
             &journal.repository,
             Some(&journal.operation_id),
@@ -11199,21 +11414,67 @@ fn resume_prune(
     Ok(())
 }
 
+/// Inspect the repository a prune journal names, or adopt `inspected` when
+/// the caller already inspected that exact path, and confirm Git resolves it
+/// to that same directory. Every Git command of the prune runs there, so a
+/// path that now resolves elsewhere (a moved repository, a `core.worktree`
+/// pointing into another one) is refused before anything is pruned.
+/// Whether two paths name one existing directory, so that Git run from
+/// either one discovers and reports exactly the same repository.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn same_directory(left: &Path, right: &Path) -> bool {
+    left == right
+        || matches!(
+            (fs::canonicalize(left), fs::canonicalize(right)),
+            (Ok(left), Ok(right)) if left == right
+        )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn verified_prune_repository(
+    git: &Git,
+    repository: &Path,
+    inspected: Option<riftri_git::RepositoryInfo>,
+) -> Result<riftri_git::RepositoryInfo, WorktreeError> {
+    let repository_info = match inspected {
+        Some(repository_info) => repository_info,
+        None => git.inspect_repository(repository)?,
+    };
+    let repository_root = git_command_root(&repository_info).ok_or_else(|| {
+        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
+    })?;
+    if repository_root != repository {
+        return Err(WorktreeError::InvalidRequest(format!(
+            "prune journal repository {} does not match Git's worktree root {}",
+            repository.display(),
+            repository_root.display()
+        )));
+    }
+    Ok(repository_info)
+}
+
+/// One verification pass. `repository_info` is the inspection of `repository`
+/// that [`verified_prune_repository`] checked; the registered state
+/// directories and Git's worktree inventory are read afresh on every pass.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn verify_repository_prune_safe(
     git: &Git,
+    repository_info: &riftri_git::RepositoryInfo,
     current_state_directory: &Path,
     repository: &Path,
     current_prune: Option<&str>,
 ) -> Result<(), WorktreeError> {
-    let repository_info = git.inspect_repository(repository)?;
-    let mut state_directories = repository_state_directories_with_git(git, &repository_info)?;
+    let mut state_directories = repository_state_directories_with_git(git, repository_info)?;
     if !state_directories
         .iter()
         .any(|state_directory| state_directory == current_state_directory)
     {
         state_directories.push(current_state_directory.to_path_buf());
     }
+    // Listed when the first state directory needs it, so a pending operation
+    // is still reported before any listing failure, and then shared: one
+    // inventory names every worktree, whichever state directory manages it.
+    let mut inventory = None;
     for state_directory in state_directories {
         verify_prune_safe(
             git,
@@ -11224,6 +11485,7 @@ fn verify_repository_prune_safe(
             } else {
                 None
             },
+            &mut inventory,
         )?;
     }
     Ok(())
@@ -11235,18 +11497,8 @@ fn verify_prune_safe(
     state_directory: &Path,
     repository: &Path,
     current_prune: Option<&str>,
+    inventory: &mut Option<Vec<riftri_git::WorktreeInfo>>,
 ) -> Result<(), WorktreeError> {
-    let repository_info = git.inspect_repository(repository)?;
-    let repository_root = git_command_root(&repository_info).ok_or_else(|| {
-        WorktreeError::InvalidRequest("Git did not report a repository directory".to_owned())
-    })?;
-    if repository_root != repository {
-        return Err(WorktreeError::InvalidRequest(format!(
-            "prune journal repository {} does not match Git's worktree root {}",
-            repository.display(),
-            repository_root.display()
-        )));
-    }
     let adds = JournalStore::open(state_directory).load_all()?;
     let removals = RemovalJournalStore::open(state_directory).load_all()?;
     let completed_removals = validated_completed_removal_ids(state_directory, &adds, &removals)?;
@@ -11282,7 +11534,10 @@ fn verify_prune_safe(
             state_directory,
         ));
     }
-    let inventory = git.list_worktrees(repository)?;
+    if inventory.is_none() {
+        *inventory = Some(git.list_worktrees(repository)?);
+    }
+    let inventory = inventory.as_deref().unwrap_or_default();
     let claimed = claimed_destinations(&adds);
     for journal in adds.iter().filter(|journal| {
         journal.phase == AddWorktreePhase::Active
@@ -11300,7 +11555,7 @@ fn verify_prune_safe(
             // the worktree vanished, so this asks the same question rather
             // than suggesting a repair that would do nothing (#437).
             return Err(
-                match classify_active_destination(&inventory, &claimed, journal)? {
+                match classify_active_destination(inventory, &claimed, journal)? {
                     ActiveDestinationState::Vanished => recovery_pending_error(
                         format!(
                             "managed worktree {} no longer exists, but its Riftri add is still recorded as active; prune was not run",
@@ -16721,7 +16976,7 @@ mod tests {
             .expect("journal");
         record.phase = PruneWorktreesPhase::Complete;
         store.persist(&record).expect("concurrent replacement");
-        let error = super::resume_prune(&riftri_git::Git::default(), &store, snapshot, None)
+        let error = super::resume_prune(&riftri_git::Git::default(), &store, snapshot, None, None)
             .expect_err("recovery must reject a changed snapshot");
         assert!(error.to_string().contains("changed"), "{error}");
     }

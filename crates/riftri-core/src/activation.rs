@@ -12,12 +12,13 @@ use std::{fs::File, io};
 
 pub use riftri_git::SHIM_ACTIVE_ENV;
 use riftri_git::termination::TerminationError;
-use riftri_git::{Git, GitError};
+use riftri_git::{Git, GitError, RepositoryInfo};
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::worktree::{
-    git_command_root, managed_worktree_state_directory, repository_state_directories,
+    git_command_root, managed_worktree_state_directory_in, move_worktree_inspected,
+    prune_worktrees_inspected, remove_worktree_inspected, repository_state_directories_with_git,
 };
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
@@ -225,23 +226,45 @@ pub fn plan_git_command(
     current_directory: &Path,
     arguments: &[OsString],
 ) -> Result<GitProxyPlan, ActivationError> {
+    plan_git_command_recording(current_directory, arguments, &mut None)
+}
+
+/// The directory the proxy inspected while planning, and that inspection.
+type InspectedRepository = (PathBuf, RepositoryInfo);
+
+/// [`plan_git_command`], also handing back the repository inspection an
+/// optimized remove, move, or prune was planned from. That inspection already
+/// health-checked HEAD, and the lifecycle command reuses it instead of
+/// inspecting the same directory again.
+fn plan_git_command_recording(
+    current_directory: &Path,
+    arguments: &[OsString],
+    inspected: &mut Option<InspectedRepository>,
+) -> Result<GitProxyPlan, ActivationError> {
     if environment_truthy(BYPASS_ENV) {
         return Ok(GitProxyPlan::Passthrough);
     }
 
-    plan_git_command_inner(current_directory, arguments, true)
+    plan_git_command_inner(current_directory, arguments, true, inspected)
 }
 
 fn plan_git_command_inner(
     current_directory: &Path,
     arguments: &[OsString],
     expand_aliases: bool,
+    inspected: &mut Option<InspectedRepository>,
 ) -> Result<GitProxyPlan, ActivationError> {
     // More than one reading exists only behind an unrecognized global option,
     // which already rules out the optimized paths, so the first reading that
     // is not ordinary Git is a refusal and decides the plan.
     for context in command_contexts(current_directory, arguments) {
-        let plan = plan_command_reading(current_directory, arguments, context, expand_aliases)?;
+        let plan = plan_command_reading(
+            current_directory,
+            arguments,
+            context,
+            expand_aliases,
+            inspected,
+        )?;
         if !matches!(plan, GitProxyPlan::Passthrough) {
             return Ok(plan);
         }
@@ -254,6 +277,7 @@ fn plan_command_reading(
     arguments: &[OsString],
     context: CommandContext,
     expand_aliases: bool,
+    inspected: &mut Option<InspectedRepository>,
 ) -> Result<GitProxyPlan, ActivationError> {
     if arguments
         .get(context.command_index)
@@ -266,7 +290,9 @@ fn plan_command_reading(
         return match expand_alias_chain(&context, arguments, true) {
             // Re-plan the command Git will actually run. Aliases are not
             // expanded recursively, so one pass is enough and terminates.
-            Ok(Some(expanded)) => plan_git_command_inner(current_directory, &expanded, false),
+            Ok(Some(expanded)) => {
+                plan_git_command_inner(current_directory, &expanded, false, inspected)
+            }
             Ok(None) => Ok(GitProxyPlan::Passthrough),
             // An alias that cannot be resolved might run any worktree
             // command, so only a repository that is provably absent or never
@@ -335,9 +361,9 @@ fn plan_command_reading(
     // `repository` let `git --git-dir=<repository>/.git worktree remove
     // --force ./view` from elsewhere be checked against the wrong path.
     let directory = context.repository.as_path();
-    let activation = match proxy {
+    let (activation, repository_info) = match proxy {
         ProxyRepository::Absent => return Ok(GitProxyPlan::Passthrough),
-        ProxyRepository::Inspected(activation) => activation,
+        ProxyRepository::Inspected(activation, repository_info) => (activation, repository_info),
         ProxyRepository::Unhealthy { enabled, error } => {
             let subcommand = arguments
                 .get(context.command_index + 1)
@@ -360,39 +386,64 @@ fn plan_command_reading(
     let Some(subcommand) = arguments.get(context.command_index + 1) else {
         return Ok(GitProxyPlan::Passthrough);
     };
-    match subcommand.to_string_lossy().as_ref() {
+    let plan = match subcommand.to_string_lossy().as_ref() {
         "add" => plan_enabled_add(
             &repository,
             directory,
             &arguments[context.command_index + 2..],
             context.global_options,
-        ),
+        )?,
         "remove" => plan_enabled_remove(
             &repository,
+            &repository_info,
             directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
-        ),
+        )?,
         "move" => plan_enabled_move(
             &repository,
+            &repository_info,
             directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
-        ),
+        )?,
         "prune" => plan_enabled_prune(
             &repository,
+            &repository_info,
             &arguments[context.command_index + 2..],
             context.global_options,
-        ),
-        _ => Ok(GitProxyPlan::Passthrough),
+        )?,
+        _ => GitProxyPlan::Passthrough,
+    };
+    // An optimized request names `repository`, the very directory just
+    // inspected, so the lifecycle command can reuse the inspection.
+    if matches!(
+        plan,
+        GitProxyPlan::OptimizedRemove(_)
+            | GitProxyPlan::OptimizedForceRemove(_)
+            | GitProxyPlan::OptimizedMove(_)
+            | GitProxyPlan::OptimizedPrune(_)
+    ) {
+        *inspected = Some((repository, repository_info));
     }
+    Ok(plan)
 }
 
 pub fn proxy_git_command(
     current_directory: &Path,
     arguments: &[OsString],
 ) -> Result<GitProxyOutcome, ActivationError> {
-    match plan_git_command(current_directory, arguments)? {
+    let mut inspected = None;
+    let plan = plan_git_command_recording(current_directory, arguments, &mut inspected)?;
+    // Reuse the planning inspection only for a request that names the very
+    // directory it inspected; anything else is inspected afresh.
+    let mut inspected_for = |repository: &Path| {
+        inspected
+            .take()
+            .filter(|(path, _): &InspectedRepository| path == repository)
+            .map(|(_, info)| info)
+    };
+    match plan {
         GitProxyPlan::Passthrough => Ok(GitProxyOutcome::Passthrough(exit_status_code(
             Git::default().passthrough(arguments)?,
         ))),
@@ -407,18 +458,30 @@ pub fn proxy_git_command(
             )),
             Err(error) => Err(error.into()),
         },
-        GitProxyPlan::OptimizedRemove(request) => {
-            Ok(GitProxyOutcome::OptimizedRemove(remove_worktree(request)?))
-        }
-        GitProxyPlan::OptimizedForceRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
-            force_remove_worktree(request)?,
+        GitProxyPlan::OptimizedRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
+            match inspected_for(&request.repository) {
+                Some(repository) => remove_worktree_inspected(request, repository, false)?,
+                None => remove_worktree(request)?,
+            },
         )),
-        GitProxyPlan::OptimizedMove(request) => {
-            Ok(GitProxyOutcome::OptimizedMove(move_worktree(request)?))
-        }
-        GitProxyPlan::OptimizedPrune(request) => {
-            Ok(GitProxyOutcome::OptimizedPrune(prune_worktrees(request)?))
-        }
+        GitProxyPlan::OptimizedForceRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
+            match inspected_for(&request.repository) {
+                Some(repository) => remove_worktree_inspected(request, repository, true)?,
+                None => force_remove_worktree(request)?,
+            },
+        )),
+        GitProxyPlan::OptimizedMove(request) => Ok(GitProxyOutcome::OptimizedMove(
+            match inspected_for(&request.repository) {
+                Some(repository) => move_worktree_inspected(request, repository)?,
+                None => move_worktree(request)?,
+            },
+        )),
+        GitProxyPlan::OptimizedPrune(request) => Ok(GitProxyOutcome::OptimizedPrune(
+            match inspected_for(&request.repository) {
+                Some(repository) => prune_worktrees_inspected(request, repository)?,
+                None => prune_worktrees(request)?,
+            },
+        )),
     }
 }
 
@@ -1221,8 +1284,8 @@ fn repository_identity_with_git(
 enum ProxyRepository {
     /// No repository here at all: every command is ordinary Git.
     Absent,
-    /// A healthy repository, inspected.
-    Inspected(RepositoryActivation),
+    /// A healthy repository, inspected, with the inspection itself.
+    Inspected(RepositoryActivation, RepositoryInfo),
     /// A repository exists but could not be inspected. For an enabled
     /// repository this must fail closed on lifecycle commands: treating the
     /// error as "no repository" let `git worktree remove --force <managed>`
@@ -1255,11 +1318,14 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
                 });
             }
         };
-    Ok(ProxyRepository::Inspected(RepositoryActivation {
-        repository: root,
-        common_git_dir: repository.identity.common_git_dir,
-        enabled,
-    }))
+    Ok(ProxyRepository::Inspected(
+        RepositoryActivation {
+            repository: root,
+            common_git_dir: repository.identity.common_git_dir.clone(),
+            enabled,
+        },
+        repository,
+    ))
 }
 
 /// A directory inside the repository `--git-dir` names. The option may name
@@ -2102,6 +2168,7 @@ fn is_short_option_cluster(argument: &OsStr) -> bool {
 
 fn parse_enabled_remove(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<(RemoveWorktreeRequest, bool)>, ActivationError> {
@@ -2123,7 +2190,8 @@ fn parse_enabled_remove(
         return Ok(None);
     };
     let destination = Git::default().resolve_worktree_path(repository, directory, path)?;
-    let Some(state_directory) = managed_worktree_state_directory(repository, &destination)? else {
+    let Some(state_directory) = managed_worktree_state_directory_in(repository_info, &destination)?
+    else {
         return Ok(None);
     };
     Ok(Some((
@@ -2138,12 +2206,14 @@ fn parse_enabled_remove(
 
 fn plan_enabled_remove(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
     if optimization_compatible
-        && let Some((request, force)) = parse_enabled_remove(repository, directory, arguments)?
+        && let Some((request, force)) =
+            parse_enabled_remove(repository, repository_info, directory, arguments)?
     {
         return Ok(if force {
             GitProxyPlan::OptimizedForceRemove(request)
@@ -2151,12 +2221,13 @@ fn plan_enabled_remove(
             GitProxyPlan::OptimizedRemove(request)
         });
     }
-    guard_managed_path_lifecycle(repository, directory, arguments, "remove")?;
+    guard_managed_path_lifecycle(repository, repository_info, directory, arguments, "remove")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
 fn parse_enabled_move(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<MoveWorktreeRequest>, ActivationError> {
@@ -2166,7 +2237,8 @@ fn parse_enabled_move(
         _ => return Ok(None),
     };
     let source = Git::default().resolve_worktree_path(repository, directory, source)?;
-    let Some(state_directory) = managed_worktree_state_directory(repository, &source)? else {
+    let Some(state_directory) = managed_worktree_state_directory_in(repository_info, &source)?
+    else {
         return Ok(None);
     };
     Ok(Some(MoveWorktreeRequest {
@@ -2179,16 +2251,18 @@ fn parse_enabled_move(
 
 fn plan_enabled_move(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
     if optimization_compatible
-        && let Some(request) = parse_enabled_move(repository, directory, arguments)?
+        && let Some(request) =
+            parse_enabled_move(repository, repository_info, directory, arguments)?
     {
         return Ok(GitProxyPlan::OptimizedMove(request));
     }
-    guard_managed_path_lifecycle(repository, directory, arguments, "move")?;
+    guard_managed_path_lifecycle(repository, repository_info, directory, arguments, "move")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
@@ -2228,6 +2302,7 @@ fn is_recognized_prune_argument(argument: &OsString) -> bool {
 
 fn plan_enabled_prune(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     arguments: &[OsString],
     global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
@@ -2258,7 +2333,8 @@ fn plan_enabled_prune(
     }
 
     let mut managed_states = Vec::new();
-    for state_directory in repository_state_directories(repository)? {
+    for state_directory in repository_state_directories_with_git(&Git::default(), repository_info)?
+    {
         let status = storage_accounting(&state_directory)?;
         if status.active_views > 0
             || status.pending_adds > 0
@@ -2300,6 +2376,7 @@ fn plan_enabled_prune(
 
 fn guard_managed_path_lifecycle(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
     operation: &str,
@@ -2308,7 +2385,7 @@ fn guard_managed_path_lifecycle(
         return Ok(());
     };
     let path = Git::default().resolve_worktree_path(repository, directory, path)?;
-    if managed_worktree_state_directory(repository, &path)?.is_some() {
+    if managed_worktree_state_directory_in(repository_info, &path)?.is_some() {
         return Err(unsupported(format!(
             "refusing `git worktree {operation}` options that would bypass the journal for managed Riftri worktree {}; use a supported Riftri lifecycle command instead",
             path.display()
@@ -4752,24 +4829,36 @@ mod tests {
         })
         .expect("create managed worktree");
         let arguments = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        let inspected = riftri_git::Git::default()
+            .inspect_repository(&repository)
+            .expect("inspect repository");
 
         // From the repository root `./view` is not a worktree at all.
         assert!(
-            super::parse_enabled_remove(&repository, &repository, &arguments(&["./view"]))
-                .expect("parse removal from the repository root")
-                .is_none()
+            super::parse_enabled_remove(
+                &repository,
+                &inspected,
+                &repository,
+                &arguments(&["./view"])
+            )
+            .expect("parse removal from the repository root")
+            .is_none()
         );
         let (removal, _) =
-            super::parse_enabled_remove(&repository, &parent, &arguments(&["./view"]))
+            super::parse_enabled_remove(&repository, &inspected, &parent, &arguments(&["./view"]))
                 .expect("parse removal")
                 .expect("the managed view, named from its parent directory");
         assert_eq!(removal.repository, repository);
         assert_eq!(removal.destination, parent.join("./view"));
 
-        let relocation =
-            super::parse_enabled_move(&repository, &parent, &arguments(&["./view", "./moved"]))
-                .expect("parse move")
-                .expect("the managed view, named from its parent directory");
+        let relocation = super::parse_enabled_move(
+            &repository,
+            &inspected,
+            &parent,
+            &arguments(&["./view", "./moved"]),
+        )
+        .expect("parse move")
+        .expect("the managed view, named from its parent directory");
         assert_eq!(relocation.repository, repository);
         assert_eq!(relocation.source, parent.join("./view"));
         assert_eq!(relocation.destination, parent.join("./moved"));
@@ -4782,6 +4871,7 @@ mod tests {
 
         let error = super::guard_managed_path_lifecycle(
             &repository,
+            &inspected,
             &parent,
             &arguments(&["--force", "./view"]),
             "remove",
