@@ -9,6 +9,9 @@ use tempfile::tempdir;
 
 mod support;
 use support::{WritableTempDir, writable_tempdir};
+#[cfg(unix)]
+#[path = "support/real_git.rs"]
+mod real_git;
 
 fn fresh_shell_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     // These fixtures test initial activation, not the caller's active session.
@@ -3238,6 +3241,243 @@ fn enabled_add_refuses_a_non_branch_revision_before_mutating_anything() {
     }
 }
 
+/// The Git commands one `git <arguments>` starts through the process-scoped
+/// shim, recorded by a wrapper that `riftri exec` captures as the real Git,
+/// and the command's own output. The log is cleared inside the scope, so it
+/// holds only what the shim and Git start for this command.
+#[cfg(unix)]
+fn git_processes_through_the_shim(directory: &Path, arguments: &[&str]) -> (Vec<String>, Output) {
+    let counter = tempdir().expect("counting Git directory");
+    let log = counter.path().join("git-invocations");
+    let counting = counter.path().join("git");
+    fs::write(
+        &counting,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RIFTRI_TEST_GIT_LOG\"\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .expect("write counting Git");
+    fs::set_permissions(&counting, fs::Permissions::from_mode(0o755))
+        .expect("make counting Git executable");
+    let path = std::env::var_os("PATH").expect("PATH is set");
+    let path = std::env::join_paths(
+        std::iter::once(counter.path().to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .expect("counting PATH");
+    let output = fresh_shell_command(env!("CARGO_BIN_EXE_riftri"))
+        .args([
+            "exec",
+            "--",
+            "sh",
+            "-c",
+            ": > \"$RIFTRI_TEST_GIT_LOG\"; exec git \"$@\"",
+            "sh",
+        ])
+        .args(arguments)
+        .current_dir(directory)
+        .env("PATH", path)
+        .env("RIFTRI_TEST_REAL_GIT", real_git::real_git())
+        .env("RIFTRI_TEST_GIT_LOG", &log)
+        .output()
+        .expect("run Git through the shim");
+    let calls = fs::read_to_string(&log)
+        .expect("read Git invocation log")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    (calls, output)
+}
+
+/// Riftri plans only `git worktree add`, `remove`, `move`, and `prune`. Every
+/// other worktree subcommand goes straight to Git: one Git process, the
+/// command itself, however the repository and the command are named, and in
+/// enabled and disabled repositories alike.
+#[cfg(unix)]
+#[test]
+fn non_lifecycle_worktree_commands_start_one_git_process() {
+    let enabled = RepositoryFixture::new();
+    assert!(riftri(&enabled.repository, &["enable"]).status.success());
+    let disabled = RepositoryFixture::new();
+    for fixture in [&enabled, &disabled] {
+        let repository = fixture.repository.to_str().expect("UTF-8 fixture path");
+        let git_dir = format!("--git-dir={repository}/.git");
+        let outside = fixture.directory.path();
+        for (directory, arguments) in [
+            (fixture.repository.as_path(), &["worktree", "list"][..]),
+            (
+                fixture.repository.as_path(),
+                &["worktree", "list", "--porcelain", "-z"][..],
+            ),
+            (fixture.repository.as_path(), &["worktree", "repair"][..]),
+            (
+                fixture.repository.as_path(),
+                &["--no-optional-locks", "worktree", "list"][..],
+            ),
+            (outside, &["-C", repository, "worktree", "list"][..]),
+            (outside, &[git_dir.as_str(), "worktree", "list"][..]),
+            (
+                fixture.repository.as_path(),
+                &["-c", "alias.wtl=worktree list", "wtl"][..],
+            ),
+            (
+                fixture.repository.as_path(),
+                &["-c", "alias.wt=worktree", "wt", "list"][..],
+            ),
+        ] {
+            let (calls, output) = git_processes_through_the_shim(directory, arguments);
+            assert!(
+                output.status.success(),
+                "git {arguments:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(calls, [arguments.join(" ")], "git {arguments:?}");
+        }
+
+        // A stored alias still costs the one read that finds it, and nothing
+        // more: the expansion is a passthrough before Git is asked which of
+        // its commands run ahead of aliases.
+        assert!(
+            git(
+                &fixture.repository,
+                &["config", "alias.wtl", "worktree list"]
+            )
+            .status
+            .success()
+        );
+        let (calls, output) = git_processes_through_the_shim(&fixture.repository, &["wtl"]);
+        assert!(output.status.success());
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert!(calls[0].contains("alias.wtl"), "{calls:?}");
+        assert_eq!(calls[1], "wtl");
+    }
+}
+
+/// `git worktree` without a subcommand, with only `-h`, or with an option or
+/// `--` in front of a lifecycle name is a usage error in Git, and stays
+/// exactly that through the shim.
+#[cfg(unix)]
+#[test]
+fn worktree_usage_errors_reach_git_unchanged() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    for arguments in [
+        &["worktree"][..],
+        &["worktree", "-h"][..],
+        &["worktree", "--end-of-options", "add", "../view"][..],
+        &["worktree", "--", "remove", "../view"][..],
+        &["worktree", "ADD", "../view"][..],
+        &["worktree", "ad", "../view"][..],
+    ] {
+        let direct = git(&fixture.repository, arguments);
+        let (calls, scoped) = git_processes_through_the_shim(&fixture.repository, arguments);
+        assert_eq!(direct.status.code(), Some(129), "{arguments:?}");
+        assert_eq!(scoped.status.code(), direct.status.code(), "{arguments:?}");
+        assert_eq!(scoped.stdout, direct.stdout, "{arguments:?}");
+        assert_eq!(scoped.stderr, direct.stderr, "{arguments:?}");
+        assert_eq!(calls, [arguments.join(" ")], "{arguments:?}");
+    }
+    assert!(!fixture.directory.path().join("view").exists());
+}
+
+/// The lifecycle subcommands are still planned however they are reached:
+/// spelled out, behind `-C` or `--git-dir`, or through an alias. Planning
+/// inspects the repository before Git runs, and an alias that leads to one
+/// still asks Git which of its commands would run ahead of the alias.
+#[cfg(unix)]
+#[test]
+fn lifecycle_worktree_commands_are_still_planned() {
+    let fixture = RepositoryFixture::new();
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    assert!(
+        git(
+            &fixture.repository,
+            &["config", "alias.wtp", "worktree prune"]
+        )
+        .status
+        .success()
+    );
+    let repository = fixture.repository.to_str().expect("UTF-8 fixture path");
+    let git_dir = format!("--git-dir={repository}/.git");
+    let outside = fixture.directory.path();
+    for (directory, arguments, alias) in [
+        (
+            fixture.repository.as_path(),
+            &["worktree", "prune", "-n"][..],
+            false,
+        ),
+        (
+            outside,
+            &["-C", repository, "worktree", "prune", "-n"][..],
+            false,
+        ),
+        (
+            outside,
+            &[git_dir.as_str(), "worktree", "prune", "-n"][..],
+            false,
+        ),
+        (
+            fixture.repository.as_path(),
+            &["-c", "alias.wt=worktree", "wt", "prune", "-n"][..],
+            true,
+        ),
+        (
+            fixture.repository.as_path(),
+            &["-c", "alias.p=worktree prune", "p", "-n"][..],
+            true,
+        ),
+        (fixture.repository.as_path(), &["wtp", "-n"][..], true),
+    ] {
+        let (calls, output) = git_processes_through_the_shim(directory, arguments);
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            calls.iter().any(|call| call.starts_with("rev-parse")),
+            "git {arguments:?} was not planned: {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().any(|call| call.starts_with("--list-cmds")),
+            alias,
+            "git {arguments:?}: {calls:?}"
+        );
+    }
+
+    // An enabled repository that cannot be inspected still refuses every
+    // lifecycle form before Git runs, and still leaves the rest to Git.
+    let head = git(&fixture.repository, &["rev-parse", "HEAD"]);
+    let head = String::from_utf8(head.stdout).expect("UTF-8 object ID");
+    let head = head.trim();
+    fs::remove_file(
+        fixture
+            .repository
+            .join(".git/objects")
+            .join(&head[..2])
+            .join(&head[2..]),
+    )
+    .expect("remove the HEAD commit object");
+    for arguments in [
+        &["worktree", "prune", "-n"][..],
+        &["-c", "alias.wt=worktree", "wt", "prune", "-n"][..],
+        &["wtp", "-n"][..],
+    ] {
+        let (calls, refused) = git_processes_through_the_shim(&fixture.repository, arguments);
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "git {arguments:?}");
+        assert!(
+            stderr.contains("could not be inspected") && stderr.contains("RIFTRI_BYPASS=1"),
+            "git {arguments:?}: {stderr}"
+        );
+        assert!(
+            !calls.iter().any(|call| call.ends_with("prune -n")),
+            "git {arguments:?} reached Git: {calls:?}"
+        );
+    }
+    let (calls, listed) =
+        git_processes_through_the_shim(&fixture.repository, &["worktree", "list"]);
+    assert!(listed.status.success());
+    assert_eq!(calls, ["worktree list"]);
+}
+
 /// `git worktree prune` must keep working for ordinary callers once managed
 /// Riftri state exists: IDEs pass `--no-optional-locks` unconditionally, and
 /// `--dry-run` only reports. Options that could remove metadata outside the
@@ -3690,4 +3930,131 @@ fn doctor_without_a_destination_does_not_judge_the_repository_as_one() {
         .map(|blocker| blocker["kind"].as_str().expect("kind").to_owned())
         .collect::<Vec<_>>();
     assert!(!kinds.iter().any(|kind| kind == "destination"), "{kinds:?}");
+}
+
+/// A directory whose `git` reports `version` for `git --version` and hands
+/// every other command to the real Git.
+#[cfg(unix)]
+fn git_reporting_version(directory: &Path, version: &str) -> PathBuf {
+    let bin = directory.join(format!("git-{version}"));
+    fs::create_dir_all(&bin).expect("create fake Git directory");
+    let git = bin.join("git");
+    fs::write(
+        &git,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'git version {version}'; exit 0; fi\nexec \"$RIFTRI_TEST_REAL_GIT\" \"$@\"\n"
+        ),
+    )
+    .expect("write fake Git");
+    fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).expect("make fake Git executable");
+    bin
+}
+
+/// A fresh, unactivated Riftri whose `PATH` finds `bin` first.
+#[cfg(unix)]
+fn riftri_with_git_first(bin: &Path, directory: &Path, arguments: &[&str]) -> Output {
+    let real_git = real_git::real_git();
+    let path = std::env::var_os("PATH").expect("PATH is set");
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&path)),
+    )
+    .expect("fixture PATH");
+    let mut command = fresh_shell_command(env!("CARGO_BIN_EXE_riftri"));
+    command
+        .args(arguments)
+        .current_dir(directory)
+        .env("PATH", path)
+        .env("RIFTRI_TEST_REAL_GIT", real_git)
+        .env("RIFTRI_CACHE_DIR", bin.with_file_name("cache"))
+        .output()
+        .expect("run Riftri CLI")
+}
+
+/// Activation records the Git every later shim call delegates to, and the shim
+/// trusts that Git to run its own builtins before any alias. A Git older than
+/// the supported minimum is refused there, before anything starts or changes:
+/// on Git 2.22 `switch` is not a builtin, so `alias.switch` could run a
+/// lifecycle command the shim never planned.
+#[cfg(unix)]
+#[test]
+fn activation_refuses_a_git_older_than_the_supported_minimum() {
+    let fixture = RepositoryFixture::new();
+    let old = git_reporting_version(fixture.directory.path(), "2.35.8");
+    let marker = fixture.directory.path().join("ran");
+    let touch = format!("touch '{}'", marker.display());
+    let cache = fixture.directory.path().join("cache");
+
+    for arguments in [
+        &["exec", "--", "sh", "-c", touch.as_str()][..],
+        &["shell", "hook", "sh"][..],
+        &["enable"][..],
+    ] {
+        let output = riftri_with_git_first(&old, &fixture.repository, arguments);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(3), "{arguments:?}: {stderr}");
+        assert!(
+            stderr.contains("requires Git 2.36 or later") && stderr.contains("git version 2.35.8"),
+            "{arguments:?}: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+    }
+    assert!(!marker.exists(), "the scoped command must not start");
+    let enabled = git(
+        &fixture.repository,
+        &["config", "--local", "--get", "riftri.enabled"],
+    );
+    assert!(enabled.stdout.is_empty(), "enable must not write consent");
+    assert!(!cache.exists());
+
+    let json = riftri_with_git_first(
+        &old,
+        &fixture.repository,
+        &["--json-errors", "exec", "--", "sh", "-c", touch.as_str()],
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&json.stderr).expect("JSON failure receipt");
+    assert_eq!(receipt["code"], "unsupported-git-version", "{receipt}");
+    assert_eq!(receipt["category"], "policy", "{receipt}");
+
+    let doctor = riftri_with_git_first(&old, &fixture.repository, &["doctor", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).expect("doctor JSON");
+    assert_eq!(report["git"]["available"], false, "{report}");
+    assert_eq!(report["git"]["value"]["version"], "git version 2.35.8");
+    assert!(
+        report["destination_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|blocker| blocker["kind"] == "git"
+                && blocker["explanation"]
+                    .as_str()
+                    .is_some_and(|explanation| explanation.contains("2.36"))),
+        "{report}"
+    );
+
+    // Disabling stays available on any Git, so consent can always be withdrawn.
+    assert!(riftri(&fixture.repository, &["enable"]).status.success());
+    let disable = riftri_with_git_first(&old, &fixture.repository, &["disable"]);
+    assert!(
+        disable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disable.stderr)
+    );
+}
+
+/// The minimum itself, and the vendor and platform suffixes real Git builds
+/// print, are accepted.
+#[cfg(unix)]
+#[test]
+fn activation_accepts_the_supported_minimum_and_vendor_versions() {
+    let fixture = RepositoryFixture::new();
+    for version in ["2.36.0", "2.50.1 (Apple Git-155)", "2.47.1.windows.1"] {
+        let bin = git_reporting_version(fixture.directory.path(), version);
+        let output = riftri_with_git_first(&bin, &fixture.repository, &["exec", "--", "true"]);
+        assert!(
+            output.status.success(),
+            "{version}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

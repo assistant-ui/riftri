@@ -1348,7 +1348,7 @@ impl JournalStore {
     pub fn persist(&self, record: &JournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
+        let (file, temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
@@ -1359,17 +1359,14 @@ impl JournalStore {
         writer
             .write_all(b"\n")
             .map_err(|source| io("write operation journal", &temporary, source))?;
-        writer
-            .flush()
-            .map_err(|source| io("flush operation journal", &temporary, source))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|source| io("sync operation journal", &temporary, source))?;
-        drop(writer);
-        atomic_replace(&temporary, &path)?;
-        temporary.disable_cleanup(true);
-        sync_parent(&path)?;
+        let file = writer
+            .into_inner()
+            .map_err(|error| io("flush operation journal", &temporary, error.into_error()))?;
+        publish_journal(file, temporary, &path, "sync operation journal")?;
+        #[cfg(test)]
+        crate::test_hooks::record_journal_persist(crate::test_hooks::PersistedPhase::Add(
+            record.phase,
+        ));
         Ok(path)
     }
 
@@ -1720,7 +1717,7 @@ impl RemovalJournalStore {
     pub fn persist(&self, record: &RemovalJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
+        let (file, temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
@@ -1731,17 +1728,14 @@ impl RemovalJournalStore {
         writer
             .write_all(b"\n")
             .map_err(|source| io("write removal journal", &temporary, source))?;
-        writer
-            .flush()
-            .map_err(|source| io("flush removal journal", &temporary, source))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|source| io("sync removal journal", &temporary, source))?;
-        drop(writer);
-        atomic_replace(&temporary, &path)?;
-        temporary.disable_cleanup(true);
-        sync_parent(&path)?;
+        let file = writer
+            .into_inner()
+            .map_err(|error| io("flush removal journal", &temporary, error.into_error()))?;
+        publish_journal(file, temporary, &path, "sync removal journal")?;
+        #[cfg(test)]
+        crate::test_hooks::record_journal_persist(crate::test_hooks::PersistedPhase::Removal(
+            record.phase,
+        ));
         Ok(path)
     }
 
@@ -1810,7 +1804,7 @@ impl MoveJournalStore {
     pub fn persist(&self, record: &MoveJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
+        let (file, temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
@@ -1821,17 +1815,10 @@ impl MoveJournalStore {
         writer
             .write_all(b"\n")
             .map_err(|source| io("write move journal", &temporary, source))?;
-        writer
-            .flush()
-            .map_err(|source| io("flush move journal", &temporary, source))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|source| io("sync move journal", &temporary, source))?;
-        drop(writer);
-        atomic_replace(&temporary, &path)?;
-        temporary.disable_cleanup(true);
-        sync_parent(&path)?;
+        let file = writer
+            .into_inner()
+            .map_err(|error| io("flush move journal", &temporary, error.into_error()))?;
+        publish_journal(file, temporary, &path, "sync move journal")?;
         Ok(path)
     }
 
@@ -1903,7 +1890,7 @@ impl CompactJournalStore {
     pub fn persist(&self, record: &CompactJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
+        let (file, temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
@@ -1914,17 +1901,10 @@ impl CompactJournalStore {
         writer
             .write_all(b"\n")
             .map_err(|source| io("write compaction journal", &temporary, source))?;
-        writer
-            .flush()
-            .map_err(|source| io("flush compaction journal", &temporary, source))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|source| io("sync compaction journal", &temporary, source))?;
-        drop(writer);
-        atomic_replace(&temporary, &path)?;
-        temporary.disable_cleanup(true);
-        sync_parent(&path)?;
+        let file = writer
+            .into_inner()
+            .map_err(|error| io("flush compaction journal", &temporary, error.into_error()))?;
+        publish_journal(file, temporary, &path, "sync compaction journal")?;
         Ok(path)
     }
 
@@ -1996,7 +1976,7 @@ impl PruneJournalStore {
     pub fn persist(&self, record: &PruneJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
+        let (file, temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
@@ -2007,17 +1987,10 @@ impl PruneJournalStore {
         writer
             .write_all(b"\n")
             .map_err(|source| io("write prune journal", &temporary, source))?;
-        writer
-            .flush()
-            .map_err(|source| io("flush prune journal", &temporary, source))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|source| io("sync prune journal", &temporary, source))?;
-        drop(writer);
-        atomic_replace(&temporary, &path)?;
-        temporary.disable_cleanup(true);
-        sync_parent(&path)?;
+        let file = writer
+            .into_inner()
+            .map_err(|error| io("flush prune journal", &temporary, error.into_error()))?;
+        publish_journal(file, temporary, &path, "sync prune journal")?;
         Ok(path)
     }
 
@@ -2089,7 +2062,7 @@ impl CollectionJournalStore {
     pub fn persist(&self, record: &CollectionJournalRecord) -> Result<PathBuf, JournalError> {
         let path = self.path_for(&record.operation_id);
         validate_operation_id(&record.operation_id, &path)?;
-        let (file, mut temporary) = journal_temporary(&self.directory, &record.operation_id)?;
+        let (file, temporary) = journal_temporary(&self.directory, &record.operation_id)?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, record).map_err(|source| {
             JournalError::Serialize {
@@ -2100,17 +2073,10 @@ impl CollectionJournalStore {
         writer
             .write_all(b"\n")
             .map_err(|source| io("write collection journal", &temporary, source))?;
-        writer
-            .flush()
-            .map_err(|source| io("flush collection journal", &temporary, source))?;
-        writer
-            .get_ref()
-            .sync_all()
-            .map_err(|source| io("sync collection journal", &temporary, source))?;
-        drop(writer);
-        atomic_replace(&temporary, &path)?;
-        temporary.disable_cleanup(true);
-        sync_parent(&path)?;
+        let file = writer
+            .into_inner()
+            .map_err(|error| io("flush collection journal", &temporary, error.into_error()))?;
+        publish_journal(file, temporary, &path, "sync collection journal")?;
         Ok(path)
     }
 
@@ -2137,6 +2103,27 @@ impl CollectionJournalStore {
         validate_operation_identity(&self.directory, &record.operation_id, &path)?;
         record.decode(path)
     }
+}
+
+/// Make a fully written temporary journal the record at `path`, durably.
+///
+/// The one sequence every journal write shares: order the content before the
+/// rename, replace the record atomically, then flush the directory to stable
+/// storage. At every power-loss point `path` names either the previous
+/// complete record or the new one, and both the content and the rename are
+/// durable when this returns (decision D046).
+fn publish_journal(
+    file: File,
+    mut temporary: tempfile::TempPath,
+    path: &Path,
+    sync_operation: &'static str,
+) -> Result<(), JournalError> {
+    crate::durability::sync_before_rename(&file)
+        .map_err(|source| io(sync_operation, &temporary, source))?;
+    drop(file);
+    atomic_replace(&temporary, path)?;
+    temporary.disable_cleanup(true);
+    sync_parent(path)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -2199,7 +2186,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> Result<(), JournalError>
 fn sync_parent(path: &Path) -> Result<(), JournalError> {
     let parent = path.parent().unwrap_or(path);
     File::open(parent)
-        .and_then(|directory| directory.sync_all())
+        .and_then(|directory| crate::durability::sync_full(&directory))
         .map_err(|source| io("sync journal directory", parent, source))
 }
 
@@ -3162,6 +3149,36 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Every journal write flushes its temporary file before the rename and
+    /// its directory to stable storage after it. On macOS the first is a
+    /// barrier and only the second a full flush (decision D046); other
+    /// platforms keep two full flushes.
+    #[test]
+    fn a_journal_write_orders_its_content_then_flushes_its_directory() {
+        use crate::test_hooks::{Flush, take_flushes};
+
+        let directory = tempdir().expect("fixture");
+        let store = PruneJournalStore::create(directory.path()).expect("store");
+        let mut record = PruneJournalRecord::new("flushes".to_owned(), Path::new("/repository"));
+        take_flushes();
+        store.persist(&record).expect("persist intent");
+        record
+            .transition(PruneWorktreesPhase::GitMetadataPruned)
+            .expect("advance");
+        store.persist(&record).expect("persist update");
+        #[cfg(target_os = "macos")]
+        let file_flush = Flush::Barrier;
+        #[cfg(not(target_os = "macos"))]
+        let file_flush = Flush::Full;
+        assert_eq!(
+            take_flushes(),
+            [file_flush, Flush::Full, file_flush, Flush::Full]
+        );
+        let loaded = store.load_all().expect("load");
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].phase, PruneWorktreesPhase::GitMetadataPruned);
     }
 
     #[test]

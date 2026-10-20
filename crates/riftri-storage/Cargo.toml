@@ -29,6 +29,12 @@ rustix.workspace = true
 
 [dev-dependencies]
 fs2.workspace = true
-hegeltest = { version = "0.49.2", features = ["static-engine"] }
+hegeltest = { version = "0.50.1", features = ["static-engine"] }
 serde_json.workspace = true
 tempfile.workspace = true
+
+# Reading the umask by setting it is only sound in a single-threaded process,
+# and libtest always runs a test beside its own main thread.
+[[test]]
+name = "umask_capture"
+harness = false

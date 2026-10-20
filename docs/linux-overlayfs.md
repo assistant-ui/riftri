@@ -1,9 +1,10 @@
 # Linux OverlayFS backend
 
-Riftri has a destination-specific active capability probe and a user-facing,
-journaled persistent mount lifecycle. On Linux it prefers reflinks, then selects
-OverlayFS only when the caller's current mount namespace passes the persistent
-probe directly or through Riftri's explicitly installed mount helper.
+Riftri supports OverlayFS on Linux with a journaled persistent mount lifecycle.
+It prefers native reflinks, then selects OverlayFS only when the caller's
+current mount namespace passes the destination-specific persistent probe,
+directly or through Riftri's explicitly installed mount helper. Mounted moves
+and compaction remain unsupported.
 
 For a normal shell that cannot mount OverlayFS directly, install the helper
 once from the same Riftri release:

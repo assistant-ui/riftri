@@ -25,9 +25,23 @@ fn test_wrappers_resolve_git_in_active_and_stripped_shells() {
     let shim = fixture.path().join("shim");
     fs::create_dir(&shim).unwrap();
     symlink(env!("CARGO_BIN_EXE_riftri"), shim.join("git")).unwrap();
-    // Spaces and a trailing newline must survive discovery intact.
+    // Spaces and a trailing newline must survive discovery intact. `riftri
+    // exec` runs the discovered Git once to check its version, and
+    // `/usr/bin/git` is an `xcrun` trampoline that picks its tool by the name
+    // it was started as, so link the developer tool it dispatches to.
     let native_git = fixture.path().join("real Git\n");
-    symlink("/usr/bin/git", &native_git).unwrap();
+    let developer_git = Command::new("/usr/bin/xcrun")
+        .args(["--find", "git"])
+        .output()
+        .unwrap();
+    assert!(developer_git.status.success());
+    let developer_git = std::ffi::OsStr::from_bytes(
+        developer_git
+            .stdout
+            .strip_suffix(b"\n")
+            .expect("xcrun prints one path"),
+    );
+    symlink(developer_git, &native_git).unwrap();
     fs::write(
         shim.join("riftri-real-git"),
         native_git.as_os_str().as_bytes(),

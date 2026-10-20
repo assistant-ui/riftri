@@ -93,6 +93,13 @@ The coordinator invokes the installed Git executable. Git remains responsible
 for linked-worktree metadata, per-worktree `HEAD` and index files, branch rules,
 configuration, filters, and hooks.
 
+On macOS, when that executable is Apple's `/usr/bin/git` trampoline, read-only
+queries that start no other program (repository layout, refs, commits, and
+configuration) run the developer binary the trampoline would run, found once
+per command with `xcrun --find git`. Everything that can run a hook, filter, or
+helper, and everything the shim passes through, still goes through the
+trampoline. See D047.
+
 ### Immutable base cache
 
 A base represents the checked-out files for an exact Git tree and checkout
@@ -311,12 +318,22 @@ intent-recorded
 Every incomplete forward state may transition to `rollback-pending`, followed
 by `rolled-back`. `active` and `rolled-back` are terminal for an add operation.
 
+Each durable write costs a file flush and a directory flush, so a state that no
+reader can tell apart from its predecessor is taken in memory without its own
+write. `clean-verified` is such a state: nothing happens between it and
+`active`, and recovery, status, and every other reader treat it exactly like
+`index-synchronized`. An add therefore records `index-synchronized` and then
+`active`. A journal that an earlier Riftri left at `clean-verified` still
+decodes and recovers as before.
+
 A journal records the repository by its main worktree, the first entry of
 `git worktree list` (the directory itself for a bare repository), and lifecycle
 commands run Git from there. Revisions such as `HEAD` still resolve in the
 worktree the command was run in, as with Git. Recording that worktree instead
 would strand every journal naming it once it is removed, and would make a
-removal run Git from the very directory it deletes.
+removal run Git from the very directory it deletes. A removal finds the main
+worktree in the inventory it lists under the metadata lock anyway, rather than
+listing once more beforehand; the worktree it was run from still exists then.
 
 From its destination claim check until `git-metadata-created` is recorded, an
 add holds the repository's Git worktree-metadata lock. Under that lock it
@@ -358,6 +375,14 @@ intent-recorded
   -> complete
 intent-recorded | clean-verified -> cancelled
 ```
+
+Like `clean-verified` on add, `base-released` is taken in memory without its
+own durable write. The base is released by the completed journal itself, and
+every reader treats `base-released` exactly like `worktree-removed`: both are
+unfinished, and recovering either verifies the worktree is gone and completes.
+A removal therefore records `worktree-removed` and then `complete`, and a
+journal that an earlier Riftri left at `base-released` still completes as
+before.
 
 A removal is `cancelled` when it is refused after recording intent but before
 anything was removed: the native view is back at its path, Git still
@@ -526,6 +551,13 @@ is registered and that no add, removal, move, or compaction is incomplete. Repea
 prune after an interruption is safe because managed registrations are
 revalidated first.
 
+A prune inspects its repository once and requires Git to resolve the recorded
+directory to itself. Each verification pass, before the journal is written,
+under the metadata lock, and after Git's prune, then re-reads the registered
+state directories and lists Git's worktrees once, an inventory every state
+directory is checked against: a concurrent add can register either between
+passes.
+
 ## Base-collection journal state machine
 
 Garbage collection is read-only unless the user passes `--apply`. Each selected
@@ -549,6 +581,9 @@ journaled quarantine path and leaves a newly rebuilt base untouched.
 Before Milestone 2 performs its first mutation, journal persistence must write
 the intent first and replace each state atomically using a temporary file,
 `fsync`, rename, and parent-directory `fsync` where the platform supports them.
+On macOS the temporary file's flush is `F_BARRIERFSYNC`, which orders its
+content before the rename, and the directory's `F_FULLFSYNC` makes both durable
+before the write returns. See D046 in [decisions.md](decisions.md).
 The persisted path encoding must round-trip platform-native paths, including
 non-UTF-8 Unix bytes. Recovery may repeat the cleanup associated with a recorded
 state, so every rollback action must be idempotent and validate its exact target.

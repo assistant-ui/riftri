@@ -12,12 +12,13 @@ use std::{fs::File, io};
 
 pub use riftri_git::SHIM_ACTIVE_ENV;
 use riftri_git::termination::TerminationError;
-use riftri_git::{Git, GitError};
+use riftri_git::{Git, GitError, RepositoryInfo};
 use serde::Serialize;
 use thiserror::Error;
 
 use crate::worktree::{
-    git_command_root, managed_worktree_state_directory, repository_state_directories,
+    git_command_root, managed_worktree_state_directory_in, move_worktree_inspected,
+    prune_worktrees_inspected, remove_worktree_inspected, repository_state_directories_with_git,
 };
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
@@ -114,10 +115,21 @@ pub enum ActivationError {
 
     #[error("shell activation failed: {0}")]
     Shell(String),
+
+    #[error(
+        "Riftri requires Git {minimum} or later, but {} reports `{version}`; upgrade Git, or run Git without Riftri",
+        .git.display()
+    )]
+    UnsupportedGitVersion {
+        git: PathBuf,
+        version: String,
+        minimum: &'static str,
+    },
 }
 
 pub fn enable_repository(path: &Path) -> Result<RepositoryActivation, ActivationError> {
     let git = Git::default();
+    require_supported_git(&git)?;
     let status = repository_identity_with_git(&git, path)?;
     git.set_local_config(
         &status.common_git_dir,
@@ -139,6 +151,29 @@ pub fn disable_repository(path: &Path) -> Result<RepositoryActivation, Activatio
     Ok(RepositoryActivation {
         enabled: false,
         ..status
+    })
+}
+
+/// Refuse to enable a repository or to start a Git shim scope on a Git older
+/// than [`riftri_git::MINIMUM_GIT_VERSION`].
+///
+/// The shim decides on its hot path, without starting Git, that an alias
+/// cannot replace a command in [`COMMON_GIT_BUILTINS`]. That holds only on a
+/// Git where every one of those commands is a builtin: on an older Git, an
+/// `alias.switch` that runs `worktree remove --force` would reach Git
+/// unplanned. Checking the version once, when the scope records the real Git
+/// it delegates to, keeps that guarantee without adding a Git process to any
+/// delegated command. Riftri's lifecycle commands already fail on an older
+/// Git, so the refusal only makes that failure early and explicit.
+fn require_supported_git(git: &Git) -> Result<(), ActivationError> {
+    let info = git.detect()?;
+    if info.meets_minimum_version() {
+        return Ok(());
+    }
+    Err(ActivationError::UnsupportedGitVersion {
+        git: info.command,
+        version: info.version,
+        minimum: riftri_git::MINIMUM_GIT_VERSION_TEXT,
     })
 }
 
@@ -191,23 +226,45 @@ pub fn plan_git_command(
     current_directory: &Path,
     arguments: &[OsString],
 ) -> Result<GitProxyPlan, ActivationError> {
+    plan_git_command_recording(current_directory, arguments, &mut None)
+}
+
+/// The directory the proxy inspected while planning, and that inspection.
+type InspectedRepository = (PathBuf, RepositoryInfo);
+
+/// [`plan_git_command`], also handing back the repository inspection an
+/// optimized remove, move, or prune was planned from. That inspection already
+/// health-checked HEAD, and the lifecycle command reuses it instead of
+/// inspecting the same directory again.
+fn plan_git_command_recording(
+    current_directory: &Path,
+    arguments: &[OsString],
+    inspected: &mut Option<InspectedRepository>,
+) -> Result<GitProxyPlan, ActivationError> {
     if environment_truthy(BYPASS_ENV) {
         return Ok(GitProxyPlan::Passthrough);
     }
 
-    plan_git_command_inner(current_directory, arguments, true)
+    plan_git_command_inner(current_directory, arguments, true, inspected)
 }
 
 fn plan_git_command_inner(
     current_directory: &Path,
     arguments: &[OsString],
     expand_aliases: bool,
+    inspected: &mut Option<InspectedRepository>,
 ) -> Result<GitProxyPlan, ActivationError> {
     // More than one reading exists only behind an unrecognized global option,
     // which already rules out the optimized paths, so the first reading that
     // is not ordinary Git is a refusal and decides the plan.
     for context in command_contexts(current_directory, arguments) {
-        let plan = plan_command_reading(current_directory, arguments, context, expand_aliases)?;
+        let plan = plan_command_reading(
+            current_directory,
+            arguments,
+            context,
+            expand_aliases,
+            inspected,
+        )?;
         if !matches!(plan, GitProxyPlan::Passthrough) {
             return Ok(plan);
         }
@@ -220,6 +277,7 @@ fn plan_command_reading(
     arguments: &[OsString],
     context: CommandContext,
     expand_aliases: bool,
+    inspected: &mut Option<InspectedRepository>,
 ) -> Result<GitProxyPlan, ActivationError> {
     if arguments
         .get(context.command_index)
@@ -229,10 +287,12 @@ fn plan_command_reading(
         if !expand_aliases {
             return Ok(GitProxyPlan::Passthrough);
         }
-        return match expand_worktree_alias(&context, arguments) {
+        return match expand_alias_chain(&context, arguments, true) {
             // Re-plan the command Git will actually run. Aliases are not
             // expanded recursively, so one pass is enough and terminates.
-            Ok(Some(expanded)) => plan_git_command_inner(current_directory, &expanded, false),
+            Ok(Some(expanded)) => {
+                plan_git_command_inner(current_directory, &expanded, false, inspected)
+            }
             Ok(None) => Ok(GitProxyPlan::Passthrough),
             // An alias that cannot be resolved might run any worktree
             // command, so only a repository that is provably absent or never
@@ -253,6 +313,23 @@ fn plan_command_reading(
             Err(error) => Err(error),
         };
     }
+
+    // Only the lifecycle subcommands are ever planned or refused below, so
+    // any other one is Git's alone. Deciding that before the repository is
+    // inspected saves `git worktree list` and friends three to four Git
+    // processes, and changes no outcome: every later branch passes a
+    // non-lifecycle subcommand through, healthy repository or not.
+    let subcommand = arguments.get(context.command_index + 1);
+    if !subcommand.is_some_and(|subcommand| is_lifecycle_subcommand(subcommand.as_encoded_bytes()))
+    {
+        return Ok(GitProxyPlan::Passthrough);
+    }
+    // A lifecycle subcommand is planned with at least four read-only Git
+    // queries and usually carried out with many more, which repays finding
+    // the developer Git behind Apple's trampoline once (D047). Commands that
+    // returned above start at most a couple of queries and keep the
+    // trampoline; the command itself always goes to the recorded Git.
+    riftri_git::allow_direct_queries();
 
     let git = Git::default();
     let root = match context.git_directory.as_deref() {
@@ -284,9 +361,9 @@ fn plan_command_reading(
     // `repository` let `git --git-dir=<repository>/.git worktree remove
     // --force ./view` from elsewhere be checked against the wrong path.
     let directory = context.repository.as_path();
-    let activation = match proxy {
+    let (activation, repository_info) = match proxy {
         ProxyRepository::Absent => return Ok(GitProxyPlan::Passthrough),
-        ProxyRepository::Inspected(activation) => activation,
+        ProxyRepository::Inspected(activation, repository_info) => (activation, repository_info),
         ProxyRepository::Unhealthy { enabled, error } => {
             let subcommand = arguments
                 .get(context.command_index + 1)
@@ -309,39 +386,64 @@ fn plan_command_reading(
     let Some(subcommand) = arguments.get(context.command_index + 1) else {
         return Ok(GitProxyPlan::Passthrough);
     };
-    match subcommand.to_string_lossy().as_ref() {
+    let plan = match subcommand.to_string_lossy().as_ref() {
         "add" => plan_enabled_add(
             &repository,
             directory,
             &arguments[context.command_index + 2..],
             context.global_options,
-        ),
+        )?,
         "remove" => plan_enabled_remove(
             &repository,
+            &repository_info,
             directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
-        ),
+        )?,
         "move" => plan_enabled_move(
             &repository,
+            &repository_info,
             directory,
             &arguments[context.command_index + 2..],
             context.global_options.optimization_compatible(),
-        ),
+        )?,
         "prune" => plan_enabled_prune(
             &repository,
+            &repository_info,
             &arguments[context.command_index + 2..],
             context.global_options,
-        ),
-        _ => Ok(GitProxyPlan::Passthrough),
+        )?,
+        _ => GitProxyPlan::Passthrough,
+    };
+    // An optimized request names `repository`, the very directory just
+    // inspected, so the lifecycle command can reuse the inspection.
+    if matches!(
+        plan,
+        GitProxyPlan::OptimizedRemove(_)
+            | GitProxyPlan::OptimizedForceRemove(_)
+            | GitProxyPlan::OptimizedMove(_)
+            | GitProxyPlan::OptimizedPrune(_)
+    ) {
+        *inspected = Some((repository, repository_info));
     }
+    Ok(plan)
 }
 
 pub fn proxy_git_command(
     current_directory: &Path,
     arguments: &[OsString],
 ) -> Result<GitProxyOutcome, ActivationError> {
-    match plan_git_command(current_directory, arguments)? {
+    let mut inspected = None;
+    let plan = plan_git_command_recording(current_directory, arguments, &mut inspected)?;
+    // Reuse the planning inspection only for a request that names the very
+    // directory it inspected; anything else is inspected afresh.
+    let mut inspected_for = |repository: &Path| {
+        inspected
+            .take()
+            .filter(|(path, _): &InspectedRepository| path == repository)
+            .map(|(_, info)| info)
+    };
+    match plan {
         GitProxyPlan::Passthrough => Ok(GitProxyOutcome::Passthrough(exit_status_code(
             Git::default().passthrough(arguments)?,
         ))),
@@ -356,18 +458,30 @@ pub fn proxy_git_command(
             )),
             Err(error) => Err(error.into()),
         },
-        GitProxyPlan::OptimizedRemove(request) => {
-            Ok(GitProxyOutcome::OptimizedRemove(remove_worktree(request)?))
-        }
-        GitProxyPlan::OptimizedForceRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
-            force_remove_worktree(request)?,
+        GitProxyPlan::OptimizedRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
+            match inspected_for(&request.repository) {
+                Some(repository) => remove_worktree_inspected(request, repository, false)?,
+                None => remove_worktree(request)?,
+            },
         )),
-        GitProxyPlan::OptimizedMove(request) => {
-            Ok(GitProxyOutcome::OptimizedMove(move_worktree(request)?))
-        }
-        GitProxyPlan::OptimizedPrune(request) => {
-            Ok(GitProxyOutcome::OptimizedPrune(prune_worktrees(request)?))
-        }
+        GitProxyPlan::OptimizedForceRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
+            match inspected_for(&request.repository) {
+                Some(repository) => remove_worktree_inspected(request, repository, true)?,
+                None => force_remove_worktree(request)?,
+            },
+        )),
+        GitProxyPlan::OptimizedMove(request) => Ok(GitProxyOutcome::OptimizedMove(
+            match inspected_for(&request.repository) {
+                Some(repository) => move_worktree_inspected(request, repository)?,
+                None => move_worktree(request)?,
+            },
+        )),
+        GitProxyPlan::OptimizedPrune(request) => Ok(GitProxyOutcome::OptimizedPrune(
+            match inspected_for(&request.repository) {
+                Some(repository) => prune_worktrees_inspected(request, repository)?,
+                None => prune_worktrees(request)?,
+            },
+        )),
     }
 }
 
@@ -546,6 +660,7 @@ fn execute_scoped_command_from(
         .split_first()
         .ok_or_else(|| process_error("no process-scoped command was supplied"))?;
     let real_git = locate_real_git()?;
+    require_supported_git(&Git::new(&real_git))?;
     let current_executable = env::current_exe()
         .map_err(|error| process_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = tempfile::Builder::new()
@@ -706,6 +821,7 @@ pub fn shell_activation_status() -> Result<ShellActivationStatus, ActivationErro
 #[cfg(unix)]
 fn prepare_posix_shell_hook_inner() -> Result<String, ActivationError> {
     let real_git = locate_real_git()?;
+    require_supported_git(&Git::new(&real_git))?;
     let current_executable = env::current_exe()
         .map_err(|error| shell_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = shell_shim_directory()?;
@@ -754,6 +870,7 @@ fn prepare_posix_shell_deactivation_inner() -> Result<String, ActivationError> {
 #[cfg(target_os = "windows")]
 fn prepare_powershell_hook_inner() -> Result<String, ActivationError> {
     let real_git = locate_real_git()?;
+    require_supported_git(&Git::new(&real_git))?;
     let current_executable = env::current_exe()
         .map_err(|error| shell_error(format!("locate the Riftri executable: {error}")))?;
     let shim_directory = shell_shim_directory()?;
@@ -1167,8 +1284,8 @@ fn repository_identity_with_git(
 enum ProxyRepository {
     /// No repository here at all: every command is ordinary Git.
     Absent,
-    /// A healthy repository, inspected.
-    Inspected(RepositoryActivation),
+    /// A healthy repository, inspected, with the inspection itself.
+    Inspected(RepositoryActivation, RepositoryInfo),
     /// A repository exists but could not be inspected. For an enabled
     /// repository this must fail closed on lifecycle commands: treating the
     /// error as "no repository" let `git worktree remove --force <managed>`
@@ -1201,11 +1318,14 @@ fn activation_for_proxy(path: &Path) -> Result<ProxyRepository, ActivationError>
                 });
             }
         };
-    Ok(ProxyRepository::Inspected(RepositoryActivation {
-        repository: root,
-        common_git_dir: repository.identity.common_git_dir,
-        enabled,
-    }))
+    Ok(ProxyRepository::Inspected(
+        RepositoryActivation {
+            repository: root,
+            common_git_dir: repository.identity.common_git_dir.clone(),
+            enabled,
+        },
+        repository,
+    ))
 }
 
 /// A directory inside the repository `--git-dir` names. The option may name
@@ -1361,39 +1481,111 @@ fn record_environment_alias(aliases: &mut Vec<(String, Vec<u8>)>, assignment: &O
 /// Git commands common enough that resolving an alias for them would add a
 /// configuration read to the hot path. Git never lets an alias shadow a
 /// built-in command that is not deprecated, and none of these is, so skipping
-/// the lookup for them is correct as well as cheap. This is a shortcut, not
-/// the full set: a built-in missing from the list costs that one read, and
+/// the lookup for them is correct as well as cheap. Every entry is a builtin in
+/// every Git from [`riftri_git::MINIMUM_GIT_VERSION`] on, which a shim scope
+/// checks before it starts: `switch` and `restore`, for example, became
+/// builtins only in Git 2.23, so on an older Git an alias of that name would
+/// run. Programs Git runs from its exec-path (`git-bisect` before Git 2.40,
+/// `git-submodule`) are not builtins and stay out. This is a shortcut, not the
+/// full set: a built-in missing from the list costs that one read, and
 /// [`expand_worktree_alias`] asks Git for the real set before it trusts an
 /// alias that leads to a worktree command.
 const COMMON_GIT_BUILTINS: &[&str] = &[
     "add",
+    "am",
+    "apply",
+    "archive",
+    "blame",
     "branch",
+    "cat-file",
+    "check-attr",
+    "check-ignore",
+    "check-ref-format",
     "checkout",
     "cherry-pick",
+    "clean",
     "clone",
     "commit",
+    "commit-tree",
     "config",
+    "count-objects",
+    "describe",
     "diff",
+    "diff-files",
+    "diff-index",
+    "diff-tree",
     "fetch",
+    "for-each-ref",
+    "format-patch",
+    "fsck",
+    "gc",
     "grep",
+    "hash-object",
+    "help",
     "init",
+    "interpret-trailers",
     "log",
     "ls-files",
+    "ls-remote",
+    "ls-tree",
     "merge",
+    "merge-base",
+    "mktree",
+    "mv",
+    "name-rev",
+    "notes",
+    "patch-id",
     "pull",
     "push",
+    "read-tree",
     "rebase",
+    "reflog",
     "remote",
     "reset",
     "restore",
+    "rev-list",
     "rev-parse",
+    "revert",
+    "rm",
+    "shortlog",
     "show",
+    "show-ref",
     "stash",
     "status",
     "switch",
+    "symbolic-ref",
     "tag",
+    "update-index",
+    "update-ref",
+    "var",
+    "version",
     WORKTREE_SUBCOMMAND,
+    "write-tree",
 ];
+
+/// Whether `git worktree <word>` is one of the lifecycle subcommands Riftri
+/// plans. Every other subcommand is left to Git unplanned.
+///
+/// Git reads the subcommand only from the argument right after `worktree` and
+/// matches it exactly: no abbreviation, no case folding, and no option or
+/// `--` in front of it (`git worktree -q add` and `git worktree -- add` both
+/// stop with a usage error). Git 2.36 compares `argv[1]` with `strcmp`, and
+/// later releases parse it with `OPT_SUBCOMMAND`, which behaves the same way
+/// for these inputs (probed on Git 2.50.1). So no other word in that position
+/// can reach a lifecycle subcommand.
+fn is_lifecycle_subcommand(word: &[u8]) -> bool {
+    matches!(word, b"add" | b"remove" | b"move" | b"prune")
+}
+
+/// [`expand_alias_chain`] for the exact command Git runs, whatever its
+/// worktree subcommand.
+#[cfg(test)]
+fn expand_worktree_alias(
+    context: &CommandContext,
+    arguments: &[OsString],
+) -> Result<Option<Vec<OsString>>, ActivationError> {
+    expand_alias_chain(context, arguments, false)
+}
 
 /// Resolve a `git` alias that ultimately runs `git worktree ...`.
 ///
@@ -1405,9 +1597,16 @@ const COMMON_GIT_BUILTINS: &[&str] = &[
 /// Shell aliases (`!command`) are deliberately left alone: they spawn a new
 /// process that resolves `git` through `PATH`, so any worktree command inside
 /// one already re-enters the proxy on its own.
-fn expand_worktree_alias(
+///
+/// With `lifecycle_only`, an alias that reaches any other worktree subcommand
+/// is reported as `None`, which the planner passes through, as it would the
+/// full expansion: the planner acts only on lifecycle subcommands. That skips
+/// the Git process that asks whether a builtin earlier in the chain would run
+/// instead, which can only turn the outcome into a passthrough as well.
+fn expand_alias_chain(
     context: &CommandContext,
     arguments: &[OsString],
+    lifecycle_only: bool,
 ) -> Result<Option<Vec<OsString>>, ActivationError> {
     let Some(token) = arguments.get(context.command_index) else {
         return Ok(None);
@@ -1506,6 +1705,17 @@ fn expand_worktree_alias(
         tail.append(&mut pending);
         pending = tail;
         if first == WORKTREE_SUBCOMMAND.as_bytes() {
+            // The word after `worktree` in the command Git will run: the
+            // body's next word, or else the caller's first argument.
+            let subcommand = match pending.first() {
+                Some(word) => word.as_slice(),
+                None => arguments
+                    .get(context.command_index + 1)
+                    .map_or(&[][..], |argument| argument.as_encoded_bytes()),
+            };
+            if lifecycle_only && !is_lifecycle_subcommand(subcommand) {
+                return Ok(None);
+            }
             // Git runs a builtin or a `git-<name>` program before it looks
             // for an alias of that name, so a chain that passes through one
             // never reaches this worktree command. A deprecated builtin is
@@ -1958,6 +2168,7 @@ fn is_short_option_cluster(argument: &OsStr) -> bool {
 
 fn parse_enabled_remove(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<(RemoveWorktreeRequest, bool)>, ActivationError> {
@@ -1979,7 +2190,8 @@ fn parse_enabled_remove(
         return Ok(None);
     };
     let destination = Git::default().resolve_worktree_path(repository, directory, path)?;
-    let Some(state_directory) = managed_worktree_state_directory(repository, &destination)? else {
+    let Some(state_directory) = managed_worktree_state_directory_in(repository_info, &destination)?
+    else {
         return Ok(None);
     };
     Ok(Some((
@@ -1994,12 +2206,14 @@ fn parse_enabled_remove(
 
 fn plan_enabled_remove(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
     if optimization_compatible
-        && let Some((request, force)) = parse_enabled_remove(repository, directory, arguments)?
+        && let Some((request, force)) =
+            parse_enabled_remove(repository, repository_info, directory, arguments)?
     {
         return Ok(if force {
             GitProxyPlan::OptimizedForceRemove(request)
@@ -2007,12 +2221,13 @@ fn plan_enabled_remove(
             GitProxyPlan::OptimizedRemove(request)
         });
     }
-    guard_managed_path_lifecycle(repository, directory, arguments, "remove")?;
+    guard_managed_path_lifecycle(repository, repository_info, directory, arguments, "remove")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
 fn parse_enabled_move(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
 ) -> Result<Option<MoveWorktreeRequest>, ActivationError> {
@@ -2022,7 +2237,8 @@ fn parse_enabled_move(
         _ => return Ok(None),
     };
     let source = Git::default().resolve_worktree_path(repository, directory, source)?;
-    let Some(state_directory) = managed_worktree_state_directory(repository, &source)? else {
+    let Some(state_directory) = managed_worktree_state_directory_in(repository_info, &source)?
+    else {
         return Ok(None);
     };
     Ok(Some(MoveWorktreeRequest {
@@ -2035,16 +2251,18 @@ fn parse_enabled_move(
 
 fn plan_enabled_move(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
     optimization_compatible: bool,
 ) -> Result<GitProxyPlan, ActivationError> {
     if optimization_compatible
-        && let Some(request) = parse_enabled_move(repository, directory, arguments)?
+        && let Some(request) =
+            parse_enabled_move(repository, repository_info, directory, arguments)?
     {
         return Ok(GitProxyPlan::OptimizedMove(request));
     }
-    guard_managed_path_lifecycle(repository, directory, arguments, "move")?;
+    guard_managed_path_lifecycle(repository, repository_info, directory, arguments, "move")?;
     Ok(GitProxyPlan::Passthrough)
 }
 
@@ -2084,6 +2302,7 @@ fn is_recognized_prune_argument(argument: &OsString) -> bool {
 
 fn plan_enabled_prune(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     arguments: &[OsString],
     global_options: GlobalOptionScope,
 ) -> Result<GitProxyPlan, ActivationError> {
@@ -2114,7 +2333,8 @@ fn plan_enabled_prune(
     }
 
     let mut managed_states = Vec::new();
-    for state_directory in repository_state_directories(repository)? {
+    for state_directory in repository_state_directories_with_git(&Git::default(), repository_info)?
+    {
         let status = storage_accounting(&state_directory)?;
         if status.active_views > 0
             || status.pending_adds > 0
@@ -2156,6 +2376,7 @@ fn plan_enabled_prune(
 
 fn guard_managed_path_lifecycle(
     repository: &Path,
+    repository_info: &RepositoryInfo,
     directory: &Path,
     arguments: &[OsString],
     operation: &str,
@@ -2164,7 +2385,7 @@ fn guard_managed_path_lifecycle(
         return Ok(());
     };
     let path = Git::default().resolve_worktree_path(repository, directory, path)?;
-    if managed_worktree_state_directory(repository, &path)?.is_some() {
+    if managed_worktree_state_directory_in(repository_info, &path)?.is_some() {
         return Err(unsupported(format!(
             "refusing `git worktree {operation}` options that would bypass the journal for managed Riftri worktree {}; use a supported Riftri lifecycle command instead",
             path.display()
@@ -3292,6 +3513,215 @@ mod tests {
         ));
     }
 
+    /// Every builtin in Git 2.36, the oldest supported release, as listed by
+    /// the `commands[]` table in its `git.c`. Entries in
+    /// [`super::COMMON_GIT_BUILTINS`] must come from here, because the shim
+    /// skips their alias lookup on any Git a scope accepts.
+    const GIT_2_36_BUILTINS: &[&str] = &[
+        "add",
+        "am",
+        "annotate",
+        "apply",
+        "archive",
+        "bisect--helper",
+        "blame",
+        "branch",
+        "bugreport",
+        "bundle",
+        "cat-file",
+        "check-attr",
+        "check-ignore",
+        "check-mailmap",
+        "check-ref-format",
+        "checkout",
+        "checkout--worker",
+        "checkout-index",
+        "cherry",
+        "cherry-pick",
+        "clean",
+        "clone",
+        "column",
+        "commit",
+        "commit-graph",
+        "commit-tree",
+        "config",
+        "count-objects",
+        "credential",
+        "credential-cache",
+        "credential-cache--daemon",
+        "credential-store",
+        "describe",
+        "diff",
+        "diff-files",
+        "diff-index",
+        "diff-tree",
+        "difftool",
+        "env--helper",
+        "fast-export",
+        "fast-import",
+        "fetch",
+        "fetch-pack",
+        "fmt-merge-msg",
+        "for-each-ref",
+        "for-each-repo",
+        "format-patch",
+        "fsck",
+        "fsck-objects",
+        "fsmonitor--daemon",
+        "gc",
+        "get-tar-commit-id",
+        "grep",
+        "hash-object",
+        "help",
+        "hook",
+        "index-pack",
+        "init",
+        "init-db",
+        "interpret-trailers",
+        "log",
+        "ls-files",
+        "ls-remote",
+        "ls-tree",
+        "mailinfo",
+        "mailsplit",
+        "maintenance",
+        "merge",
+        "merge-base",
+        "merge-file",
+        "merge-index",
+        "merge-ours",
+        "merge-recursive",
+        "merge-recursive-ours",
+        "merge-recursive-theirs",
+        "merge-subtree",
+        "merge-tree",
+        "mktag",
+        "mktree",
+        "multi-pack-index",
+        "mv",
+        "name-rev",
+        "notes",
+        "pack-objects",
+        "pack-redundant",
+        "pack-refs",
+        "patch-id",
+        "pickaxe",
+        "prune",
+        "prune-packed",
+        "pull",
+        "push",
+        "range-diff",
+        "read-tree",
+        "rebase",
+        "receive-pack",
+        "reflog",
+        "remote",
+        "remote-ext",
+        "remote-fd",
+        "repack",
+        "replace",
+        "rerere",
+        "reset",
+        "restore",
+        "rev-list",
+        "rev-parse",
+        "revert",
+        "rm",
+        "send-pack",
+        "shortlog",
+        "show",
+        "show-branch",
+        "show-index",
+        "show-ref",
+        "sparse-checkout",
+        "stage",
+        "stash",
+        "status",
+        "stripspace",
+        "submodule--helper",
+        "switch",
+        "symbolic-ref",
+        "tag",
+        "unpack-file",
+        "unpack-objects",
+        "update-index",
+        "update-ref",
+        "update-server-info",
+        "upload-archive",
+        "upload-archive--writer",
+        "upload-pack",
+        "var",
+        "verify-commit",
+        "verify-pack",
+        "verify-tag",
+        "version",
+        "whatchanged",
+        "worktree",
+        "write-tree",
+    ];
+
+    /// The shim skips the alias lookup for these names, which is correct only
+    /// while Git runs each of them itself. Check that against the oldest
+    /// supported Git and against the installed one: each must be a builtin,
+    /// and none may be deprecated, because Git lets an alias replace a
+    /// deprecated builtin. A Git without the `deprecated` listing has no
+    /// deprecated builtins to exclude.
+    #[test]
+    fn skipped_alias_lookups_name_builtins_of_every_supported_git() {
+        let list = |kind: &str| {
+            let output = Command::new("git")
+                .arg(format!("--list-cmds={kind}"))
+                .output()
+                .expect("list Git commands");
+            if !output.status.success() {
+                return Vec::new();
+            }
+            String::from_utf8(output.stdout)
+                .expect("UTF-8 command names")
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        let installed = list("builtins");
+        assert!(installed.iter().any(|builtin| builtin == "worktree"));
+        let deprecated = list("deprecated");
+        for name in super::COMMON_GIT_BUILTINS {
+            assert!(
+                GIT_2_36_BUILTINS.contains(name),
+                "`{name}` is not a builtin in Git 2.36"
+            );
+            assert!(
+                installed.iter().any(|builtin| builtin == name),
+                "`{name}` is not a builtin in the installed Git"
+            );
+            assert!(
+                !deprecated.iter().any(|builtin| builtin == name),
+                "`{name}` is deprecated in the installed Git, so an alias can replace it"
+            );
+        }
+        for legacy in [
+            "annotate",
+            "init-db",
+            "fsck-objects",
+            "stage",
+            "pickaxe",
+            "show-branch",
+            "whatchanged",
+            "pack-redundant",
+            "get-tar-commit-id",
+        ] {
+            assert!(
+                !super::COMMON_GIT_BUILTINS.contains(&legacy),
+                "`{legacy}` is a legacy name Git may deprecate"
+            );
+        }
+        assert_eq!(
+            riftri_git::MINIMUM_GIT_VERSION,
+            (2, 36),
+            "update GIT_2_36_BUILTINS with the minimum version"
+        );
+    }
+
     /// Alias resolution must not capture anything else. A shell alias spawns a
     /// process that resolves `git` through `PATH`, so a worktree command inside
     /// one already re-enters the proxy on its own and must be left alone.
@@ -4399,24 +4829,36 @@ mod tests {
         })
         .expect("create managed worktree");
         let arguments = |words: &[&str]| words.iter().map(OsString::from).collect::<Vec<_>>();
+        let inspected = riftri_git::Git::default()
+            .inspect_repository(&repository)
+            .expect("inspect repository");
 
         // From the repository root `./view` is not a worktree at all.
         assert!(
-            super::parse_enabled_remove(&repository, &repository, &arguments(&["./view"]))
-                .expect("parse removal from the repository root")
-                .is_none()
+            super::parse_enabled_remove(
+                &repository,
+                &inspected,
+                &repository,
+                &arguments(&["./view"])
+            )
+            .expect("parse removal from the repository root")
+            .is_none()
         );
         let (removal, _) =
-            super::parse_enabled_remove(&repository, &parent, &arguments(&["./view"]))
+            super::parse_enabled_remove(&repository, &inspected, &parent, &arguments(&["./view"]))
                 .expect("parse removal")
                 .expect("the managed view, named from its parent directory");
         assert_eq!(removal.repository, repository);
         assert_eq!(removal.destination, parent.join("./view"));
 
-        let relocation =
-            super::parse_enabled_move(&repository, &parent, &arguments(&["./view", "./moved"]))
-                .expect("parse move")
-                .expect("the managed view, named from its parent directory");
+        let relocation = super::parse_enabled_move(
+            &repository,
+            &inspected,
+            &parent,
+            &arguments(&["./view", "./moved"]),
+        )
+        .expect("parse move")
+        .expect("the managed view, named from its parent directory");
         assert_eq!(relocation.repository, repository);
         assert_eq!(relocation.source, parent.join("./view"));
         assert_eq!(relocation.destination, parent.join("./moved"));
@@ -4429,6 +4871,7 @@ mod tests {
 
         let error = super::guard_managed_path_lifecycle(
             &repository,
+            &inspected,
             &parent,
             &arguments(&["--force", "./view"]),
             "remove",
