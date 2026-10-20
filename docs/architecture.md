@@ -93,6 +93,13 @@ The coordinator invokes the installed Git executable. Git remains responsible
 for linked-worktree metadata, per-worktree `HEAD` and index files, branch rules,
 configuration, filters, and hooks.
 
+On macOS, when that executable is Apple's `/usr/bin/git` trampoline, read-only
+queries that start no other program (repository layout, refs, commits, and
+configuration) run the developer binary the trampoline would run, found once
+per command with `xcrun --find git`. Everything that can run a hook, filter, or
+helper, and everything the shim passes through, still goes through the
+trampoline. See D047.
+
 ### Immutable base cache
 
 A base represents the checked-out files for an exact Git tree and checkout
