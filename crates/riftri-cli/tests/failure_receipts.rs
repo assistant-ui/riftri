@@ -1551,3 +1551,109 @@ fn an_invalid_exec_worktree_binding_is_a_policy_refusal() {
         assert!(!marker.exists(), "{binding_arg}: the command must not run");
     }
 }
+
+/// Removal and move no longer list Git's worktrees before reading Riftri's
+/// own state; the one listing they keep runs once the worktree is claimed.
+/// So when that listing would fail, a path Riftri does not manage is refused
+/// as the caller's mistake it is, rather than as the Git failure that used to
+/// be reported first, and a managed worktree still reports the Git failure.
+/// Either way nothing is journaled or changed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn an_unmanaged_path_is_refused_before_a_failing_worktree_listing() {
+    let fixture = support::writable_tempdir().expect("fixture directory");
+    if !native_cow_supported(fixture.path()) {
+        return;
+    }
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let managed = fixture.path().join("managed");
+    let plain = fixture.path().join("plain");
+    init_repository_with_commit(&repository);
+    add_managed_worktree(&repository, &managed, &state);
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            plain.to_str().unwrap(),
+        ],
+    );
+    // Git cannot read a lock reason that is a directory, so every
+    // `git worktree list` now fails while repository inspection still works.
+    let lock_reason = repository.join(".git/worktrees/plain/locked");
+    std::fs::create_dir(&lock_reason).expect("break the worktree listing");
+    let state_arg = state.to_str().unwrap();
+
+    for arguments in [
+        vec!["worktree", "remove", plain.to_str().unwrap()],
+        vec![
+            "worktree",
+            "move",
+            plain.to_str().unwrap(),
+            fixture.path().join("plain-moved").to_str().unwrap(),
+        ],
+    ] {
+        let mut arguments = arguments;
+        arguments.extend(["--state-dir", state_arg]);
+        let (receipt, exit_code) = riftri_json_error(&repository, &arguments);
+        assert_eq!(exit_code, Some(3), "{arguments:?}: {receipt}");
+        assert_eq!(receipt["code"], "invalid-request", "{receipt}");
+        assert_eq!(receipt["cleanup"], "not-needed", "{receipt}");
+        assert!(
+            receipt["message"]
+                .as_str()
+                .unwrap()
+                .contains("is not an active Riftri-managed worktree"),
+            "{receipt}"
+        );
+    }
+    for arguments in [
+        vec!["worktree", "remove", managed.to_str().unwrap()],
+        vec![
+            "worktree",
+            "move",
+            managed.to_str().unwrap(),
+            fixture.path().join("managed-moved").to_str().unwrap(),
+        ],
+    ] {
+        let mut arguments = arguments;
+        arguments.extend(["--state-dir", state_arg]);
+        let (receipt, exit_code) = riftri_json_error(&repository, &arguments);
+        assert_eq!(exit_code, Some(1), "{arguments:?}: {receipt}");
+        assert_eq!(receipt["code"], "git-failed", "{receipt}");
+        assert!(
+            receipt["message"].as_str().unwrap().contains("locked"),
+            "{receipt}"
+        );
+    }
+
+    std::fs::remove_dir(&lock_reason).expect("repair the worktree listing");
+    assert!(plain.is_dir() && managed.is_dir());
+    assert!(!fixture.path().join("plain-moved").exists());
+    assert!(!fixture.path().join("managed-moved").exists());
+    for journals in ["removals", "moves"] {
+        let directory = state.join(journals);
+        assert!(
+            !directory.exists()
+                || std::fs::read_dir(&directory)
+                    .expect("read journal directory")
+                    .next()
+                    .is_none(),
+            "{journals} must stay empty"
+        );
+    }
+    let removed = Command::new(env!("CARGO_BIN_EXE_riftri"))
+        .args(["worktree", "remove", managed.to_str().unwrap()])
+        .args(["--state-dir", state_arg])
+        .current_dir(&repository)
+        .output()
+        .expect("run riftri worktree remove");
+    assert!(
+        removed.status.success(),
+        "the refused removal must leave the worktree removable: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+}

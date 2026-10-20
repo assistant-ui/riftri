@@ -1,6 +1,5 @@
 //! High-level, non-destructive orchestration and product policy.
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use riftri_git::{Git, GitInfo, ObjectId, RepositoryIdentity, RepositoryInfo};
@@ -645,11 +644,20 @@ fn doctor_inner(repository_path: &Path, destination: &Path, explicit: bool) -> D
     let repository_compatibility = match repository_check.value.as_ref() {
         Some(repository) => match worktree::git_command_root(repository) {
             Some(root) if repository.head_commit.is_some() => {
-                match worktree::inspect_repository_compatibility(
+                // The checks above already ran `git --version` and resolved
+                // HEAD's commit and tree; judging that same HEAD with them
+                // also keeps the report about one commit.
+                let head = repository
+                    .head_commit
+                    .clone()
+                    .zip(repository.head_tree.clone())
+                    .map(|(commit, tree)| riftri_git::ResolvedRevision { commit, tree });
+                match worktree::inspect_head_compatibility(
                     &git,
+                    git_check.value.as_ref(),
                     root,
                     &repository.identity.common_git_dir,
-                    OsStr::new("HEAD"),
+                    head,
                 ) {
                     Ok(report) => Diagnostic::success(report),
                     Err(error) => Diagnostic::failure(error.to_string()),

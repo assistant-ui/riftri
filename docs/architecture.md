@@ -331,7 +331,9 @@ A journal records the repository by its main worktree, the first entry of
 commands run Git from there. Revisions such as `HEAD` still resolve in the
 worktree the command was run in, as with Git. Recording that worktree instead
 would strand every journal naming it once it is removed, and would make a
-removal run Git from the very directory it deletes.
+removal run Git from the very directory it deletes. A removal finds the main
+worktree in the inventory it lists under the metadata lock anyway, rather than
+listing once more beforehand; the worktree it was run from still exists then.
 
 From its destination claim check until `git-metadata-created` is recorded, an
 add holds the repository's Git worktree-metadata lock. Under that lock it
@@ -548,6 +550,13 @@ Before invoking Git, Riftri verifies that every active managed view exists and
 is registered and that no add, removal, move, or compaction is incomplete. Repeating Git's
 prune after an interruption is safe because managed registrations are
 revalidated first.
+
+A prune inspects its repository once and requires Git to resolve the recorded
+directory to itself. Each verification pass, before the journal is written,
+under the metadata lock, and after Git's prune, then re-reads the registered
+state directories and lists Git's worktrees once, an inventory every state
+directory is checked against: a concurrent add can register either between
+passes.
 
 ## Base-collection journal state machine
 
