@@ -7,6 +7,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Changed
 
+- On macOS, order each journal write's content before its rename with
+  `F_BARRIERFSYNC` instead of a full `F_FULLFSYNC` flush. The directory flush
+  after the rename stays full, so the record and its rename are on stable
+  storage when the write returns, as before, and a power loss still leaves
+  either the previous or the new complete record. A warm add now makes 11
+  full flushes and 7 barriers instead of 18 full flushes, and a removal 7 and
+  4 instead of 11. A filesystem without the barrier gets a full flush. Linux
+  and Windows are unchanged.
 - On macOS, start Riftri's own read-only Git queries (`rev-parse`,
   configuration reads, `worktree list`, and commit lookups) from the developer
   binary that `xcrun --find git` names, when Git is Apple's `/usr/bin/git`

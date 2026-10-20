@@ -832,6 +832,53 @@ A name joins the list only when it is a builtin in Git 2.36 and is not
 deprecated in current Git, and a test checks both. Raising the minimum is a new
 decision.
 
+### D046: on macOS, a barrier orders journal content before its rename
+
+Every journal write is the same sequence: write a temporary file, flush it,
+rename it over the journal, and flush the directory. The directory flush is the
+durability point; the file flush only has to keep a device from persisting the
+rename without the content it names. On macOS, `File::sync_all` is
+`fcntl(F_FULLFSYNC)`, which empties the drive's write cache, so each journal
+write cost two cache drains (about 4 to 6 ms each on an Apple SSD).
+
+The file flush is now `fcntl(F_BARRIERFSYNC)` (about 0.5 ms), and the directory
+flush stays `F_FULLFSYNC`. `fcntl(2)` documents `F_BARRIERFSYNC` as an
+`fsync(2)` followed by a barrier: the flushed I/O is persisted before any I/O
+that follows it, so no file can be persisted with the effect of a later phase
+without the earlier one. The rename is issued after the barrier returns, so at
+every power-loss point the journal path holds either the previous complete
+record or the new one. `fcntl(2)` also documents that `F_FULLFSYNC` drains the
+entire device queue, so data fsync'd on the same device before it is persisted
+when it returns. The temporary file lives in the journal directory, so when a
+write returns, its content and its rename are both on stable storage, exactly
+as before. Nothing that depends on the new state starts earlier.
+
+The difference is where the guarantee comes from inside that window. Before,
+the content was on stable storage before the rename was issued, which relied
+on the device honoring a cache flush. Now the order relies on the device
+honoring the barrier, which `fcntl(2)` says requires hardware support that
+Apple SSDs are guaranteed to provide. Whether APFS reports an error or issues a
+plain `fsync` on a device without that support is not documented (HFS, whose
+source is public, takes a full flush). A device that ignores barriers is in
+the same class as one that ignores the cache flush `F_FULLFSYNC` already
+depends on, and every reader refuses a torn journal that does not decode
+rather than act on it. A barrier the filesystem does not implement
+(`ENOTSUP`, `EOPNOTSUPP`, `EINVAL`, `ENOTTY`, or `ENOSYS`) falls back to
+`F_FULLFSYNC`, so durability never drops silently; an interrupted barrier is
+retried, and any other failure is reported as a failed flush, not retried
+as a full flush that could report success for writes the failed attempt
+dropped.
+
+All six journal kinds share one write path, so the pairing of barrier and
+directory flush cannot be separated. Other flushes stay full: the state,
+journal, base, and destination parent directories, and the base completion
+marker. A parent-directory flush is not skipped when the directory already
+existed. Another process may have created it and crashed before its own flush,
+and an observer cannot tell that directory from a durable one; a durable "layout
+flushed" marker would close that gap, but it is a new state file that every
+released Riftri reports as unexplained. Linux and Windows keep `fsync` and
+`FlushFileBuffers`, which offer no comparable split.
+
 ### D047: Riftri's own read-only Git queries skip Apple's xcrun trampoline
 
 On macOS, `/usr/bin/git` is not Git. It is one of Apple's `xcrun` stubs on the
