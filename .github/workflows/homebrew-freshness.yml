@@ -58,6 +58,7 @@ jobs:
           # the pre-release one. The question is always whether main tracks the
           # latest release.
           ref: main
+          persist-credentials: false
 
       - name: Compare the checked-in formula against the latest release
         id: compare
@@ -163,7 +164,9 @@ jobs:
       SYNC_BRANCH: automation/homebrew-formula-sync
 
     steps:
-      - name: Check out main
+      # The push step below authenticates with the token checkout persists, and
+      # this job uploads no artifacts for it to leak through.
+      - name: Check out main # zizmor: ignore[artipacked]
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
@@ -172,6 +175,8 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          # This job can write, so it never restores a cache another run wrote.
+          package-manager-cache: false
 
       - name: Regenerate every formula copy
         run: node package/scripts/sync-homebrew-tap.mjs "${LATEST_TAG}"

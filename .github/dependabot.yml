@@ -1,9 +1,14 @@
 version: 2
 updates:
+  # Every ecosystem waits a week before proposing a new release, which gives a
+  # compromised one time to be caught and yanked. Security updates skip the
+  # cooldown.
   - package-ecosystem: cargo
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       rust-dependencies:
         patterns: ["*"]
@@ -12,6 +17,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       github-actions:
         patterns: ["*"]
@@ -20,6 +27,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       npm-launcher-dependencies:
         patterns: ["*"]
@@ -37,6 +46,8 @@ updates:
     directory: /website
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       website-dependencies:
         patterns: ["*"]
