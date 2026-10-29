@@ -48,7 +48,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26.13.0
 
       - name: Test evidence gates
         run: node --test candidate/docs/benchmarks/cold-lfs-ci.test.mjs candidate/docs/benchmarks/cold-lfs-summary.test.mjs candidate/docs/benchmarks/startup-profile.test.mjs
