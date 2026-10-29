@@ -48,7 +48,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24
+          node-version: 26.13.0
 
       - name: Test evidence gates
         run: node --test candidate/docs/benchmarks/cold-lfs-ci.test.mjs candidate/docs/benchmarks/cold-lfs-summary.test.mjs candidate/docs/benchmarks/startup-profile.test.mjs
@@ -82,12 +82,30 @@ jobs:
             cargo build --release --locked -p riftri-cli --message-format=json \
             | tee "$COLD_LFS_ROOT/candidate-build.jsonl"
 
+      # A PR that edits only the study or its workflow (a Node or action bump)
+      # builds a byte-identical candidate, which can never satisfy the
+      # "candidate must differ" gate. There is nothing to measure then: the
+      # evidence-gate tests above still ran, so finish without a study.
+      - name: Detect a changed candidate binary
+        id: binary
+        run: |
+          baseline="$(shasum -a 256 "$RUNNER_TEMP/baseline-target/release/riftri" | cut -d' ' -f1)"
+          candidate="$(shasum -a 256 "$RUNNER_TEMP/candidate-target/release/riftri" | cut -d' ' -f1)"
+          if [ "$baseline" = "$candidate" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Candidate binary is identical to baseline ($candidate); no study to run."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Verify fresh release identities
+        if: steps.binary.outputs.changed == 'true'
         run: |
           node candidate/docs/benchmarks/cold-lfs-ci.mjs identity "$COLD_LFS_ROOT" \
             "$RUNNER_TEMP/baseline-target/release/riftri" "$RUNNER_TEMP/candidate-target/release/riftri"
 
       - name: Run one predeclared sequential study
+        if: steps.binary.outputs.changed == 'true'
         timeout-minutes: 32
         run: |
           for lane in control-before candidate control-after; do
@@ -101,7 +119,7 @@ jobs:
           done
 
       - name: Evaluate every sample and raw Git trace
-        if: always()
+        if: always() && steps.binary.outputs.changed != 'false'
         run: node candidate/docs/benchmarks/cold-lfs-ci.mjs evaluate "$COLD_LFS_ROOT"
 
       - name: Retain evidence even when qualification fails

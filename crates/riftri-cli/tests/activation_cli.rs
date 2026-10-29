@@ -3352,7 +3352,8 @@ fn non_lifecycle_worktree_commands_start_one_git_process() {
 
 /// `git worktree` without a subcommand, with only `-h`, or with an option or
 /// `--` in front of a lifecycle name is a usage error in Git, and stays
-/// exactly that through the shim.
+/// exactly that through the shim. Git 2.56 made `-h` print usage and exit 0
+/// instead of 129; either is accepted as long as the shim matches Git.
 #[cfg(unix)]
 #[test]
 fn worktree_usage_errors_reach_git_unchanged() {
@@ -3368,7 +3369,23 @@ fn worktree_usage_errors_reach_git_unchanged() {
     ] {
         let direct = git(&fixture.repository, arguments);
         let (calls, scoped) = git_processes_through_the_shim(&fixture.repository, arguments);
-        assert_eq!(direct.status.code(), Some(129), "{arguments:?}");
+        let usage_codes: &[i32] = if arguments == ["worktree", "-h"] {
+            &[0, 129]
+        } else {
+            &[129]
+        };
+        assert!(
+            direct
+                .status
+                .code()
+                .is_some_and(|code| usage_codes.contains(&code)),
+            "{arguments:?}: {:?}",
+            direct.status
+        );
+        assert!(
+            !direct.stdout.is_empty() || !direct.stderr.is_empty(),
+            "{arguments:?}"
+        );
         assert_eq!(scoped.status.code(), direct.status.code(), "{arguments:?}");
         assert_eq!(scoped.stdout, direct.stdout, "{arguments:?}");
         assert_eq!(scoped.stderr, direct.stderr, "{arguments:?}");
