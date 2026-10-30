@@ -1456,6 +1456,26 @@ fn acquire_coordination_lock(
     Ok(lock)
 }
 
+/// `acquire_coordination_lock` without waiting: `None` while another owner
+/// holds the lock.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn try_acquire_coordination_lock(
+    lock_path: &Path,
+    open_operation: &'static str,
+    lock_operation: &'static str,
+) -> Result<Option<File>, WorktreeError> {
+    let lock = open_coordination_lock(lock_path, open_operation)?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            return Ok(None);
+        }
+        Err(source) => return Err(io(lock_operation, lock_path, source)),
+    }
+    validate_coordination_lock(&lock, lock_path)?;
+    Ok(Some(lock))
+}
+
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn open_coordination_lock(
     lock_path: &Path,
@@ -2267,46 +2287,235 @@ fn garbage_collect_inner(
     }
 
     let store = CollectionJournalStore::create(&state_directory)?;
-    for candidate in candidates {
-        let operation_id = format!("gc-{}", next_operation_id(current_timestamp()?));
-        let parent = candidate.base_path.expect_parent()?.to_path_buf();
-        let quarantine_path = parent.join(format!(".riftri-gc-{operation_id}"));
-        let marker_path = candidate.base_path.with_extension("complete");
-        let mut journal = CollectionJournalRecord::new(
-            operation_id,
-            CollectionJournalPaths {
-                base_path: &candidate.base_path,
-                quarantine_path: &quarantine_path,
-                marker_path: &marker_path,
-            },
-        );
-        let journal_path = store.path_for(&journal.operation_id);
-        let decoded = journal.clone().decode(journal_path.clone())?;
-        // The same checks the journaled steps repeat under the base lock. A
-        // marker whose base directory is gone is still collected: the plan
-        // lists it, and removing the marker is all that is left to do.
-        validate_collection_paths(&state_directory, &decoded)?;
-        validate_collectible_base(&decoded)?;
-        let journal_path = store.persist(&journal)?;
-        progress::emit(ProgressEvent::GcPhase {
-            phase: journal.phase,
-        });
-        fail_collection_if_requested(journal.phase, fail_after)?;
-        let decoded = journal.clone().decode(journal_path)?;
-        if resume_collection(&state_directory, &store, &mut journal, &decoded, fail_after)? {
-            report.removed_logical_bytes = report
-                .removed_logical_bytes
-                .saturating_add(candidate.logical_bytes);
-            report.removed_allocated_bytes = report
-                .removed_allocated_bytes
-                .saturating_add(candidate.allocated_bytes);
-            report.collected.push(candidate.base_path);
-        } else {
-            report.skipped_in_use.push(candidate.base_path);
+    let mut candidates = candidates.into_iter();
+    let mut carried = None;
+    loop {
+        let mut batch = Vec::new();
+        // A candidate that fails before its batch runs stops the run only
+        // after the bases ahead of it are collected, as one-at-a-time
+        // collection did, so they are not left with pending journals.
+        let mut stopped = None;
+        while batch.len() < COLLECTION_LOCK_BATCH {
+            let member = match carried.take() {
+                Some(member) => member,
+                None => match candidates.next().map(|candidate| {
+                    record_collection_intent(&state_directory, &store, candidate, fail_after)
+                }) {
+                    Some(Ok(member)) => member,
+                    Some(Err(error)) => {
+                        stopped = Some(error);
+                        break;
+                    }
+                    None => break,
+                },
+            };
+            match lock_collection_base(&member.journal, batch.is_empty()) {
+                Ok(Some(lock)) => batch.push((member, Some(lock))),
+                // Busy: it starts the next batch, waiting then.
+                Ok(None) => {
+                    carried = Some(member);
+                    break;
+                }
+                Err(error) => {
+                    stopped = Some(error);
+                    break;
+                }
+            }
+        }
+        let empty = batch.is_empty();
+        if !empty {
+            collect_locked_batch(&state_directory, &store, &mut batch, fail_after)?;
+        }
+        for (member, _) in batch {
+            if member.record.phase == GarbageCollectionPhase::Complete {
+                report.removed_logical_bytes = report
+                    .removed_logical_bytes
+                    .saturating_add(member.candidate.logical_bytes);
+                report.removed_allocated_bytes = report
+                    .removed_allocated_bytes
+                    .saturating_add(member.candidate.allocated_bytes);
+                report.collected.push(member.candidate.base_path);
+            } else {
+                report.skipped_in_use.push(member.candidate.base_path);
+            }
+        }
+        if let Some(error) = stopped {
+            return Err(error);
+        }
+        if empty {
+            break;
         }
     }
     report.retired_journals = retired_journals;
     Ok(report)
+}
+
+/// The most immutable-base locks one collection batch holds at once. Each is
+/// an open file, and the batch shares one protection read per step. Unit
+/// tests use a small batch so that their fixtures cross batch boundaries.
+#[cfg(all(
+    not(test),
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+const COLLECTION_LOCK_BATCH: usize = 16;
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+const COLLECTION_LOCK_BATCH: usize = 2;
+
+/// One planned base whose collection intent is durable.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct CollectionMember {
+    candidate: GarbageCollectionCandidate,
+    record: CollectionJournalRecord,
+    journal: DecodedCollectionJournal,
+}
+
+/// Record the durable intent to collect one planned base, before its lock is
+/// taken, as collection always has.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn record_collection_intent(
+    state_directory: &Path,
+    store: &CollectionJournalStore,
+    candidate: GarbageCollectionCandidate,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<CollectionMember, WorktreeError> {
+    let operation_id = format!("gc-{}", next_operation_id(current_timestamp()?));
+    let parent = candidate.base_path.expect_parent()?.to_path_buf();
+    let quarantine_path = parent.join(format!(".riftri-gc-{operation_id}"));
+    let marker_path = candidate.base_path.with_extension("complete");
+    let record = CollectionJournalRecord::new(
+        operation_id,
+        CollectionJournalPaths {
+            base_path: &candidate.base_path,
+            quarantine_path: &quarantine_path,
+            marker_path: &marker_path,
+        },
+    );
+    let journal_path = store.path_for(&record.operation_id);
+    let decoded = record.clone().decode(journal_path.clone())?;
+    // The same checks the journaled steps repeat under the base lock. A
+    // marker whose base directory is gone is still collected: the plan
+    // lists it, and removing the marker is all that is left to do.
+    validate_collection_paths(state_directory, &decoded)?;
+    validate_collectible_base(&decoded)?;
+    let journal_path = store.persist(&record)?;
+    progress::emit(ProgressEvent::GcPhase {
+        phase: record.phase,
+    });
+    fail_collection_if_requested(record.phase, fail_after)?;
+    let journal = record.clone().decode(journal_path)?;
+    validate_collection_paths(state_directory, &journal)?;
+    Ok(CollectionMember {
+        candidate,
+        record,
+        journal,
+    })
+}
+
+/// Take a collection's base lock. Only the first lock of a batch waits:
+/// holding one lock while waiting for another could deadlock with a process
+/// that takes two base locks, so a busy base (`None`) starts the next batch.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn lock_collection_base(
+    journal: &DecodedCollectionJournal,
+    wait: bool,
+) -> Result<Option<File>, WorktreeError> {
+    let lock_path = journal.base_path.with_extension("lock");
+    if wait {
+        acquire_coordination_lock(
+            &lock_path,
+            "open immutable-base lock",
+            "lock immutable base",
+        )
+        .map(Some)
+    } else {
+        try_acquire_coordination_lock(
+            &lock_path,
+            "open immutable-base lock",
+            "lock immutable base",
+        )
+    }
+}
+
+/// Run every step of the collections in `batch`, whose base locks are held.
+///
+/// Each step reads the protecting journals once for the whole batch, after
+/// every lock is held and after every earlier step of every member, instead
+/// of once per base. Each decision is therefore still made from journals
+/// read under that base's lock and, for the second check, after that base's
+/// marker was removed. A reference recorded after the first read is caught
+/// by the second; one recorded after the second is handled by the add, which
+/// waits for this lock and rebuilds the quarantined base, as it did when
+/// collection held one lock at a time. A member's lock is released once its
+/// collection finishes. An error stops the batch as it stopped a lone
+/// collection; the members it did not reach keep durable journals that the
+/// next `gc --apply` or `riftri repair` resumes, as after an interruption.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn collect_locked_batch(
+    state_directory: &Path,
+    store: &CollectionJournalStore,
+    batch: &mut [(CollectionMember, Option<File>)],
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<(), WorktreeError> {
+    let finished = |phase| {
+        matches!(
+            phase,
+            GarbageCollectionPhase::Complete | GarbageCollectionPhase::Cancelled
+        )
+    };
+    let mut protections = None;
+    for (member, lock) in batch.iter_mut() {
+        let base_path = member.journal.base_path.clone();
+        let protections = &mut protections;
+        remove_collection_marker(
+            store,
+            &mut member.record,
+            &member.journal,
+            &mut || cached_protection(state_directory, protections, &base_path),
+            fail_after,
+        )?;
+        if finished(member.record.phase) {
+            lock.take();
+        }
+    }
+    // Read again: the check before quarantine must follow the marker removal.
+    let mut protections = None;
+    for (member, lock) in batch.iter_mut() {
+        let base_path = member.journal.base_path.clone();
+        let protections = &mut protections;
+        quarantine_collected_base(
+            store,
+            &mut member.record,
+            &member.journal,
+            &mut || cached_protection(state_directory, protections, &base_path),
+            fail_after,
+        )?;
+        if finished(member.record.phase) {
+            lock.take();
+        }
+    }
+    for (member, lock) in batch.iter_mut() {
+        delete_quarantined_base(store, &mut member.record, &member.journal, fail_after)?;
+        lock.take();
+    }
+    Ok(())
+}
+
+/// Whether `base_path` is protected, reading the protecting journals on the
+/// first call of a batch step and reusing them for the rest of that step.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn cached_protection(
+    state_directory: &Path,
+    protections: &mut Option<HashSet<PathBuf>>,
+    base_path: &Path,
+) -> Result<bool, WorktreeError> {
+    let protections = match protections {
+        Some(protections) => protections,
+        None => protections.insert(protected_base_paths(state_directory)?),
+    };
+    Ok(protections.contains(base_path))
 }
 
 /// The journals of one finished lineage, read while its add lock is held.
@@ -2317,30 +2526,52 @@ struct RetirableLineage {
     dependents: Vec<PathBuf>,
 }
 
+/// The removal, move, and compaction journals of a state directory, read
+/// once after every add lock of a retirement batch is held.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+struct LockedLifecycleJournals {
+    removals: Vec<DecodedRemovalJournal>,
+    moves: Vec<DecodedMoveJournal>,
+    compactions: Vec<DecodedCompactJournal>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+impl LockedLifecycleJournals {
+    fn load(state_directory: &Path) -> Result<Self, WorktreeError> {
+        Ok(Self {
+            removals: RemovalJournalStore::open(state_directory).load_all()?,
+            moves: MoveJournalStore::open(state_directory).load_all()?,
+            compactions: CompactJournalStore::open(state_directory).load_all()?,
+        })
+    }
+}
+
 /// Re-read one add operation's lineage under its lock and return it only if
 /// it is still finished: the worktree is gone for good and nothing of its
-/// history is unfinished. `None` leaves it for a later run.
+/// history is unfinished. `None` leaves it for a later run. `lifecycle` must
+/// have been read after this add's lock was taken.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn locked_retirable_lineage(
     state_directory: &Path,
     add_operation_id: &str,
+    lifecycle: &LockedLifecycleJournals,
 ) -> Result<Option<RetirableLineage>, WorktreeError> {
     let Ok(add) = JournalStore::open(state_directory).load_operation(add_operation_id) else {
         return Ok(None);
     };
-    let removals = RemovalJournalStore::open(state_directory)
-        .load_all()?
-        .into_iter()
+    let removals = lifecycle
+        .removals
+        .iter()
         .filter(|journal| journal.source_add_operation_id == add_operation_id)
         .collect::<Vec<_>>();
-    let moves = MoveJournalStore::open(state_directory)
-        .load_all()?
-        .into_iter()
+    let moves = lifecycle
+        .moves
+        .iter()
         .filter(|journal| journal.source_add_operation_id == add_operation_id)
         .collect::<Vec<_>>();
-    let compactions = CompactJournalStore::open(state_directory)
-        .load_all()?
-        .into_iter()
+    let compactions = lifecycle
+        .compactions
+        .iter()
         .filter(|journal| journal.source_add_operation_id == add_operation_id)
         .collect::<Vec<_>>();
     let removal_completed = removals
@@ -2362,12 +2593,16 @@ fn locked_retirable_lineage(
     Ok(Some(RetirableLineage {
         removals: removals
             .into_iter()
-            .map(|journal| journal.journal_path)
+            .map(|journal| journal.journal_path.clone())
             .collect(),
         dependents: moves
             .into_iter()
-            .map(|journal| journal.journal_path)
-            .chain(compactions.into_iter().map(|journal| journal.journal_path))
+            .map(|journal| journal.journal_path.clone())
+            .chain(
+                compactions
+                    .into_iter()
+                    .map(|journal| journal.journal_path.clone()),
+            )
             .collect(),
     }))
 }
@@ -2430,6 +2665,10 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
     // Finish retirements an earlier run started.
     let operations = state_directory.join("operations");
     if is_real_directory_if_present(&operations)? {
+        // Read on the first marker and shared by the rest. No lock guards
+        // this step, before or now: once an add journal is renamed to its
+        // marker, no new removal can name that operation.
+        let mut removal_journals = None;
         for marker in child_paths(&operations, "read Riftri journal directory")? {
             let Some(operation_id) = marker
                 .extension()
@@ -2440,8 +2679,13 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
             else {
                 continue;
             };
-            let leftovers = RemovalJournalStore::open(state_directory)
-                .load_all()?
+            let removal_journals = match removal_journals.as_mut() {
+                Some(journals) => journals,
+                None => {
+                    removal_journals.insert(RemovalJournalStore::open(state_directory).load_all()?)
+                }
+            };
+            let leftovers = removal_journals
                 .iter()
                 .filter(|removal| {
                     removal.source_add_operation_id == operation_id && removal.phase.is_finished()
@@ -2460,6 +2704,7 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
         }
     }
 
+    let mut retirable = Vec::new();
     for add in &adds.journals {
         let own_removals = removals_by_add
             .get(add.operation_id.as_str())
@@ -2495,41 +2740,10 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
             retired += 1 + own_removals.len() + own_moves.len() + own_compactions.len();
             continue;
         }
-        // Another process may still be finishing this operation.
-        let Some(_lock) = try_lock_add_operation(&add.journal_path)? else {
-            continue;
-        };
-        #[cfg(test)]
-        crate::test_hooks::fire(
-            crate::test_hooks::FilesystemRacePoint::JournalRetirementLocked,
-            &add.journal_path,
-        );
-        // Decide again under the lock, from journals read now. The snapshot
-        // above predates it: a concurrent repair may since have recorded
-        // another removal of this worktree, and deleting only what the
-        // snapshot knew left that one behind with no add journal, which then
-        // failed every lifecycle command in the state directory.
-        let Some(lineage) = locked_retirable_lineage(state_directory, &add.operation_id)? else {
-            continue;
-        };
-        for path in &lineage.dependents {
-            remove_file_if_present(path)?;
-        }
-        let marker = retiring_add_marker(&add.journal_path);
-        if lineage.removals.is_empty() {
-            remove_file_if_present(&add.journal_path)?;
-        } else {
-            fs::rename(&add.journal_path, &marker)
-                .map_err(|source| io("mark add journal for retirement", &marker, source))?;
-            sync_parent(&marker)?;
-            for removal in &lineage.removals {
-                remove_file_if_present(removal)?;
-            }
-            remove_file_if_present(&marker)?;
-        }
-        remove_file_if_present(&add.journal_path.with_extension("lock"))?;
-        sync_parent(&add.journal_path)?;
-        retired += 1 + lineage.removals.len() + lineage.dependents.len();
+        retirable.push(add);
+    }
+    for batch in retirable.chunks(RETIREMENT_LOCK_BATCH) {
+        retired += retire_locked_lineages(state_directory, batch)?;
     }
 
     for path in prunes
@@ -2554,6 +2768,86 @@ fn retire_finished_journals(state_directory: &Path, apply: bool) -> Result<usize
         if apply {
             remove_file_if_present(path)?;
         }
+    }
+    Ok(retired)
+}
+
+/// The most add-operation locks one retirement batch holds at once. Each is
+/// an open file, and a batch shares one read of the lifecycle journals. Unit
+/// tests use a small batch so that their fixtures cross batch boundaries.
+#[cfg(all(
+    not(test),
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+const RETIREMENT_LOCK_BATCH: usize = 64;
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
+const RETIREMENT_LOCK_BATCH: usize = 4;
+
+/// Retire the finished lineages in `batch` whose add locks are free.
+///
+/// Every lock is taken first, without waiting, and the removal, move, and
+/// compaction journals are read once after that, so each lineage is still
+/// decided from journals read under its own lock, as when each add read
+/// them alone. A journal written for an add of a later batch is read by that
+/// batch, whose read follows its locks. One written for an add of this batch
+/// is written under that add's lock, which the per-add read already relied
+/// on, and this batch holds it until that lineage is done.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn retire_locked_lineages(
+    state_directory: &Path,
+    batch: &[&DecodedJournal],
+) -> Result<usize, WorktreeError> {
+    let mut locked = Vec::with_capacity(batch.len());
+    for add in batch {
+        // Another process may still be finishing this operation.
+        let Some(lock) = try_lock_add_operation(&add.journal_path)? else {
+            continue;
+        };
+        #[cfg(test)]
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::JournalRetirementLocked,
+            &add.journal_path,
+        );
+        locked.push((*add, lock));
+    }
+    if locked.is_empty() {
+        return Ok(0);
+    }
+    // Decide again under the locks, from journals read now. The snapshot the
+    // batch came from predates them: a concurrent repair may since have
+    // recorded another removal of this worktree, and deleting only what the
+    // snapshot knew left that one behind with no add journal, which then
+    // failed every lifecycle command in the state directory.
+    let lifecycle = LockedLifecycleJournals::load(state_directory)?;
+    let mut retired = 0;
+    for (add, lock) in locked {
+        let Some(lineage) =
+            locked_retirable_lineage(state_directory, &add.operation_id, &lifecycle)?
+        else {
+            continue;
+        };
+        for path in &lineage.dependents {
+            remove_file_if_present(path)?;
+        }
+        let marker = retiring_add_marker(&add.journal_path);
+        if lineage.removals.is_empty() {
+            remove_file_if_present(&add.journal_path)?;
+        } else {
+            fs::rename(&add.journal_path, &marker)
+                .map_err(|source| io("mark add journal for retirement", &marker, source))?;
+            sync_parent(&marker)?;
+            for removal in &lineage.removals {
+                remove_file_if_present(removal)?;
+            }
+            remove_file_if_present(&marker)?;
+        }
+        remove_file_if_present(&add.journal_path.with_extension("lock"))?;
+        sync_parent(&add.journal_path)?;
+        retired += 1 + lineage.removals.len() + lineage.dependents.len();
+        drop(lock);
     }
     Ok(retired)
 }
@@ -2586,21 +2880,32 @@ fn garbage_collection_candidates(
     // A base skipped here is storage the user cannot reclaim, so name every
     // skip and the journal responsible for it instead of silently dropping it.
     let mut skipped = Vec::new();
+    let mut usage_requests = Vec::new();
+    let mut usage_indices = Vec::new();
     for base_path in retained_base_paths(state_directory, UnsafeBaseInventory::Reject)? {
         if let Some(reasons) = protected.remove(&base_path) {
             skipped.extend(reasons);
             continue;
         }
-        let (logical_bytes, allocated_bytes) = if base_path.is_dir() {
-            tree_usage(&base_path)?
-        } else {
-            (0, 0)
-        };
+        usage_indices.push(base_path.is_dir().then(|| {
+            usage_requests.push(TreeUsageRequest {
+                path: base_path.clone(),
+                allocated_path: None,
+            });
+            usage_requests.len() - 1
+        }));
         candidates.push(GarbageCollectionCandidate {
             base_path,
-            logical_bytes,
-            allocated_bytes,
+            logical_bytes: 0,
+            allocated_bytes: 0,
         });
+    }
+    // Bases are disjoint trees, measured concurrently as `status` measures them.
+    let usages = tree_usages(&usage_requests)?;
+    for (candidate, index) in candidates.iter_mut().zip(usage_indices) {
+        if let Some(index) = index {
+            (candidate.logical_bytes, candidate.allocated_bytes) = usages[index];
+        }
     }
     skipped.sort_unstable_by(|left, right| {
         (&left.base_path, &left.operation_id).cmp(&(&right.base_path, &right.operation_id))
@@ -2743,97 +3048,145 @@ fn resume_collection(
         "open immutable-base lock",
         "lock immutable base",
     )?;
+    let mut protected = || -> Result<bool, WorktreeError> {
+        Ok(protected_base_paths(state_directory)?.contains(&journal.base_path))
+    };
+    remove_collection_marker(store, record, journal, &mut protected, fail_after)?;
+    quarantine_collected_base(store, record, journal, &mut protected, fail_after)?;
+    delete_quarantined_base(store, record, journal, fail_after)?;
+    Ok(record.phase == GarbageCollectionPhase::Complete)
+}
 
-    if record.phase == GarbageCollectionPhase::IntentRecorded {
-        if journal.quarantine_path.exists() {
-            if !journal.base_path.exists() {
-                validate_collection_marker(journal)?;
-                remove_file_if_present(&journal.marker_path)?;
-                sync_parent(&journal.marker_path)?;
-            }
-            advance_collection(
-                store,
-                record,
-                GarbageCollectionPhase::MarkerRemoved,
-                fail_after,
-            )?;
-        } else if protected_base_paths(state_directory)?.contains(&journal.base_path) {
-            advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
-            return Ok(false);
-        } else {
-            if let Err(error) = validate_collectible_base(journal) {
-                advance_collection(store, record, GarbageCollectionPhase::Cancelled, None)?;
-                return Err(error);
-            }
+/// Whether a durable journal protects this collection's base, from journals
+/// read while the caller holds the base lock.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+type CollectionProtection<'a> = dyn FnMut() -> Result<bool, WorktreeError> + 'a;
+
+/// The `intent-recorded` step: remove the completion marker, or cancel a
+/// collection whose base a journal protects. The caller holds the base lock.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn remove_collection_marker(
+    store: &CollectionJournalStore,
+    record: &mut CollectionJournalRecord,
+    journal: &DecodedCollectionJournal,
+    protected: &mut CollectionProtection<'_>,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<(), WorktreeError> {
+    if record.phase != GarbageCollectionPhase::IntentRecorded {
+        return Ok(());
+    }
+    if journal.quarantine_path.exists() {
+        if !journal.base_path.exists() {
+            validate_collection_marker(journal)?;
             remove_file_if_present(&journal.marker_path)?;
             sync_parent(&journal.marker_path)?;
-            advance_collection(
-                store,
-                record,
-                GarbageCollectionPhase::MarkerRemoved,
-                fail_after,
-            )?;
         }
-    }
-
-    if record.phase == GarbageCollectionPhase::MarkerRemoved {
-        if journal.quarantine_path.exists() {
-            advance_collection(
-                store,
-                record,
-                GarbageCollectionPhase::BaseQuarantined,
-                fail_after,
-            )?;
-        } else if protected_base_paths(state_directory)?.contains(&journal.base_path)
-            || journal.marker_path.exists()
-        {
-            // A new reference appeared after this journal removed the
-            // completion marker. `retained_base_paths` enumerates only via
-            // markers, so cancelling without restoring it would leave a fully
-            // materialized base that no later `gc` or `status` inventory can
-            // ever see again. Rebuild the marker from the base content in the
-            // same journaled step as the cancellation; on failure the journal
-            // stays at `MarkerRemoved`, which keeps the base explained and
-            // makes recovery retry the restore.
-            restore_completion_marker(journal)?;
-            advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)?;
-            return Ok(false);
-        } else {
-            if let Err(error) = validate_collectible_base(journal) {
-                advance_collection(store, record, GarbageCollectionPhase::Cancelled, None)?;
-                return Err(error);
-            }
-            if journal.base_path.exists() {
-                make_directory_owner_writable(&journal.base_path)?;
-                fs::rename(&journal.base_path, &journal.quarantine_path).map_err(|source| {
-                    io(
-                        "quarantine immutable base",
-                        &journal.quarantine_path,
-                        source,
-                    )
-                })?;
-                sync_parent(&journal.base_path)?;
-            }
-            advance_collection(
-                store,
-                record,
-                GarbageCollectionPhase::BaseQuarantined,
-                fail_after,
-            )?;
+        advance_collection(
+            store,
+            record,
+            GarbageCollectionPhase::MarkerRemoved,
+            fail_after,
+        )
+    } else if protected()? {
+        advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)
+    } else {
+        if let Err(error) = validate_collectible_base(journal) {
+            advance_collection(store, record, GarbageCollectionPhase::Cancelled, None)?;
+            return Err(error);
         }
+        remove_file_if_present(&journal.marker_path)?;
+        sync_parent(&journal.marker_path)?;
+        #[cfg(test)]
+        crate::test_hooks::fire(
+            crate::test_hooks::FilesystemRacePoint::CollectionMarkerRemoved,
+            &journal.marker_path,
+        );
+        advance_collection(
+            store,
+            record,
+            GarbageCollectionPhase::MarkerRemoved,
+            fail_after,
+        )
     }
+}
 
-    if record.phase == GarbageCollectionPhase::BaseQuarantined {
-        remove_tree_if_present(&journal.quarantine_path)?;
-        clear_damaged_base_marker(&journal.base_path)?;
-        // An interrupted marker restore may have staged a marker before the
-        // protecting reference disappeared again; the collection is finishing
-        // now, so retire that leftover instead of reporting it forever.
-        remove_file_if_present(&restored_marker_staging_path(journal)?)?;
-        sync_parent(&journal.quarantine_path)?;
-        advance_collection(store, record, GarbageCollectionPhase::Complete, fail_after)?;
+/// The `marker-removed` step: quarantine the base, or restore its marker and
+/// cancel when a reference appeared after the marker was removed. `protected`
+/// must read journals after that removal. The caller holds the base lock.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn quarantine_collected_base(
+    store: &CollectionJournalStore,
+    record: &mut CollectionJournalRecord,
+    journal: &DecodedCollectionJournal,
+    protected: &mut CollectionProtection<'_>,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<(), WorktreeError> {
+    if record.phase != GarbageCollectionPhase::MarkerRemoved {
+        return Ok(());
     }
-    Ok(record.phase == GarbageCollectionPhase::Complete)
+    if journal.quarantine_path.exists() {
+        advance_collection(
+            store,
+            record,
+            GarbageCollectionPhase::BaseQuarantined,
+            fail_after,
+        )
+    } else if protected()? || journal.marker_path.exists() {
+        // A new reference appeared after this journal removed the
+        // completion marker. `retained_base_paths` enumerates only via
+        // markers, so cancelling without restoring it would leave a fully
+        // materialized base that no later `gc` or `status` inventory can
+        // ever see again. Rebuild the marker from the base content in the
+        // same journaled step as the cancellation; on failure the journal
+        // stays at `MarkerRemoved`, which keeps the base explained and
+        // makes recovery retry the restore.
+        restore_completion_marker(journal)?;
+        advance_collection(store, record, GarbageCollectionPhase::Cancelled, fail_after)
+    } else {
+        if let Err(error) = validate_collectible_base(journal) {
+            advance_collection(store, record, GarbageCollectionPhase::Cancelled, None)?;
+            return Err(error);
+        }
+        if journal.base_path.exists() {
+            make_directory_owner_writable(&journal.base_path)?;
+            fs::rename(&journal.base_path, &journal.quarantine_path).map_err(|source| {
+                io(
+                    "quarantine immutable base",
+                    &journal.quarantine_path,
+                    source,
+                )
+            })?;
+            sync_parent(&journal.base_path)?;
+        }
+        advance_collection(
+            store,
+            record,
+            GarbageCollectionPhase::BaseQuarantined,
+            fail_after,
+        )
+    }
+}
+
+/// The `base-quarantined` step: delete the quarantine and complete. The
+/// caller holds the base lock.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn delete_quarantined_base(
+    store: &CollectionJournalStore,
+    record: &mut CollectionJournalRecord,
+    journal: &DecodedCollectionJournal,
+    fail_after: Option<GarbageCollectionPhase>,
+) -> Result<(), WorktreeError> {
+    if record.phase != GarbageCollectionPhase::BaseQuarantined {
+        return Ok(());
+    }
+    remove_tree_if_present(&journal.quarantine_path)?;
+    clear_damaged_base_marker(&journal.base_path)?;
+    // An interrupted marker restore may have staged a marker before the
+    // protecting reference disappeared again; the collection is finishing
+    // now, so retire that leftover instead of reporting it forever.
+    remove_file_if_present(&restored_marker_staging_path(journal)?)?;
+    sync_parent(&journal.quarantine_path)?;
+    advance_collection(store, record, GarbageCollectionPhase::Complete, fail_after)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
@@ -9713,11 +10066,9 @@ pub fn recover_incomplete_operations(
                 continue;
             }
         };
-        let journal = match removal_store
-            .load_all()?
-            .into_iter()
-            .find(|candidate| candidate.operation_id == journal.operation_id)
-        {
+        // Only this journal: listing the whole store per pending removal made
+        // repair quadratic in the number of removal journals.
+        let journal = match removal_store.load_listed(&journal.operation_id)? {
             Some(journal) if !journal.phase.is_finished() => journal,
             Some(journal) => {
                 if journal.phase == RemoveWorktreePhase::Complete {
@@ -9771,11 +10122,7 @@ pub fn recover_incomplete_operations(
                 continue;
             }
         };
-        let journal = match move_store
-            .load_all()?
-            .into_iter()
-            .find(|candidate| candidate.operation_id == journal.operation_id)
-        {
+        let journal = match move_store.load_listed(&journal.operation_id)? {
             Some(journal) if !journal.phase.is_finished() => journal,
             Some(journal) => {
                 if journal.phase == MoveWorktreePhase::Complete {
@@ -9850,9 +10197,7 @@ pub fn recover_incomplete_operations(
             ));
         } else {
             let phase = compact_store
-                .load_all()?
-                .into_iter()
-                .find(|candidate| candidate.operation_id == journal.operation_id)
+                .load_listed(&journal.operation_id)?
                 .map(|candidate| candidate.phase);
             if phase == Some(CompactWorktreePhase::Complete) {
                 report.recovered_compactions += 1;
@@ -9937,14 +10282,6 @@ pub fn recover_incomplete_operations(
         }
     }
     Ok(report)
-}
-
-fn validate_removal_paths(
-    state_directory: &Path,
-    journal: &DecodedRemovalJournal,
-) -> Result<(), WorktreeError> {
-    let adds = JournalStore::open(state_directory).load_all()?;
-    validate_removal_against_add_journals(state_directory, journal, &adds)
 }
 
 fn validated_completed_removal_ids(
@@ -10076,9 +10413,11 @@ fn resume_removal(
             ))
         })?
         .to_path_buf();
-    validate_removal_paths(&state_directory, &journal)?;
-    let managed = JournalStore::open(&state_directory)
-        .load_all()?
+    // One read of the add journals serves both the path validation and the
+    // lookup of the add this removal belongs to.
+    let adds = JournalStore::open(&state_directory).load_all()?;
+    validate_removal_against_add_journals(&state_directory, &journal, &adds)?;
+    let managed = adds
         .into_iter()
         .find(|candidate| candidate.operation_id == journal.source_add_operation_id)
         .ok_or_else(|| {
@@ -19790,6 +20129,260 @@ mod tests {
         fs::write(state.join("moves/corrupt.json"), b"invalid").unwrap();
         assert!(super::managed_worktree_state_directory(&repository, &alias).is_err());
         assert!(super::find_managed_add_journal(&state, &moved).is_err());
+    }
+
+    /// A repository with `active` live Riftri worktrees on its first commit and
+    /// `finished` worktrees, each on its own later commit, added and removed
+    /// again: `finished` retirable lineages and as many unreferenced bases.
+    #[cfg(unix)]
+    fn journal_scan_fixture(fixture: &Path, active: usize, finished: usize) -> (PathBuf, PathBuf) {
+        let (repository, _, state) = committed_repository(fixture);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        let add = |destination: PathBuf| {
+            add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination,
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("add worktree")
+        };
+        for index in 0..active {
+            add(fixture.join(format!("active-{index}")));
+        }
+        for index in 0..finished {
+            fs::write(repository.join("tracked.txt"), format!("{index}\n")).unwrap();
+            git(&repository, &["commit", "--quiet", "-am", "next"]);
+            let destination = fixture.join(format!("finished-{index}"));
+            add(destination.clone());
+            remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository: repository.clone(),
+                    destination,
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("remove worktree");
+        }
+        (repository, state)
+    }
+
+    /// `gc --apply` reads each journal a bounded number of times. Retiring a
+    /// lineage re-read every removal, move, and compaction journal, and
+    /// collecting a base read every add, removal, and compaction journal
+    /// twice, so loads grew with lineages x journals and bases x journals.
+    #[cfg(unix)]
+    #[test]
+    fn garbage_collection_reads_each_journal_a_bounded_number_of_times() {
+        const ACTIVE: usize = 4;
+        const FINISHED: usize = 6;
+        let fixture = tempdir().unwrap();
+        let (_repository, state) = journal_scan_fixture(fixture.path(), ACTIVE, FINISHED);
+        let before = crate::test_hooks::journal_open_count();
+        let report = garbage_collect_inner(&state, true, None).expect("collect");
+        let opens = crate::test_hooks::journal_open_count() - before;
+        assert_eq!(report.collected.len(), FINISHED, "{report:?}");
+        assert_eq!(report.retired_journals, 2 * FINISHED, "{report:?}");
+        assert!(report.skipped_in_use.is_empty(), "{report:?}");
+        // Retirement: one status read of every journal, then each retired add
+        // again, and per lock batch one read of the removals still present.
+        // The plan reads the live adds once, and each collection batch reads
+        // them again before removing markers and again before quarantining.
+        // Unit tests use small batches, so both kinds take several here.
+        let retirement_batches = FINISHED.div_ceil(super::RETIREMENT_LOCK_BATCH);
+        let collection_batches = FINISHED.div_ceil(super::COLLECTION_LOCK_BATCH);
+        assert!(retirement_batches > 1 && collection_batches > 1);
+        let removal_reads = (0..retirement_batches)
+            .map(|batch| FINISHED - batch * super::RETIREMENT_LOCK_BATCH)
+            .sum::<usize>();
+        let journals = ACTIVE + 2 * FINISHED;
+        assert_eq!(
+            opens,
+            journals + FINISHED + removal_reads + ACTIVE + 2 * ACTIVE * collection_batches
+        );
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.active_views, ACTIVE);
+        assert_eq!(accounting.bases.len(), 1, "{accounting:?}");
+    }
+
+    /// One collection batch reads the protecting journals once per step. A
+    /// reference recorded after the first read, while another base of the
+    /// batch loses its marker, is still caught by the read before quarantine:
+    /// that base gets its marker back and is kept, and the other is collected.
+    #[cfg(unix)]
+    #[test]
+    fn a_collection_batch_rechecks_references_before_quarantine() {
+        let fixture = tempdir().unwrap();
+        let (repository, _, state) = committed_repository(fixture.path());
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        let mut bases = Vec::new();
+        for index in 0..2 {
+            fs::write(repository.join("tracked.txt"), format!("{index}\n")).unwrap();
+            git(&repository, &["commit", "--quiet", "-am", "next"]);
+            let destination = fixture.path().join(format!("finished-{index}"));
+            let added = add_worktree_inner(
+                AddWorktreeRequest {
+                    repository: repository.clone(),
+                    destination: destination.clone(),
+                    revision: OsString::from("HEAD"),
+                    mode: WorktreeMode::Detached,
+                    state_dir: Some(state.clone()),
+                    sparse_directories: Vec::new(),
+                },
+                None,
+                true,
+            )
+            .expect("add worktree");
+            remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository: repository.clone(),
+                    destination,
+                    state_dir: Some(state.clone()),
+                },
+                None,
+            )
+            .expect("remove worktree");
+            bases.push(added.base_path);
+        }
+        // HEAD's tree is the second base. Whichever base of the batch loses
+        // its marker first, an add then records its intent to use HEAD's.
+        let referenced = bases[1].clone();
+        let racing_repository = repository.clone();
+        let racing_state = state.clone();
+        let racing_destination = fixture.path().join("racing");
+        let _hook = crate::test_hooks::install(
+            crate::test_hooks::FilesystemRacePoint::CollectionMarkerRemoved,
+            move |_| {
+                add_worktree_inner(
+                    AddWorktreeRequest {
+                        repository: racing_repository,
+                        destination: racing_destination,
+                        revision: OsString::from("HEAD"),
+                        mode: WorktreeMode::NewBranch(OsString::from("feature/racing")),
+                        state_dir: Some(racing_state),
+                        sparse_directories: Vec::new(),
+                    },
+                    Some(AddWorktreePhase::IntentRecorded),
+                    false,
+                )
+                .expect_err("record a racing reference");
+            },
+        );
+        let report = garbage_collect_inner(&state, true, None).expect("collect");
+        assert_eq!(
+            report.collected.as_slice(),
+            std::slice::from_ref(&bases[0]),
+            "{report:?}"
+        );
+        assert_eq!(
+            report.skipped_in_use.as_slice(),
+            std::slice::from_ref(&referenced),
+            "{report:?}"
+        );
+        assert!(!bases[0].exists());
+        assert!(referenced.is_dir());
+        assert!(referenced.with_extension("complete").is_file());
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_collections, 0, "{accounting:?}");
+        assert_eq!(accounting.cancelled_collections, 1, "{accounting:?}");
+    }
+
+    /// A busy base ends a collection batch instead of being waited for while
+    /// the batch's other locks are held; it starts the next batch, which
+    /// waits for it, and is then collected like the rest.
+    #[cfg(unix)]
+    #[test]
+    fn a_busy_base_starts_the_next_collection_batch() {
+        use fs2::FileExt;
+
+        let fixture = tempdir().unwrap();
+        let (_repository, state) = journal_scan_fixture(fixture.path(), 0, 3);
+        let plan = garbage_collect_inner(&state, false, None).expect("plan");
+        let mut bases = plan
+            .candidates
+            .iter()
+            .map(|candidate| candidate.base_path.clone())
+            .collect::<Vec<_>>();
+        bases.sort();
+        assert_eq!(bases.len(), 3);
+        // The second base is the first batch's second member.
+        let busy = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(bases[1].with_extension("lock"))
+            .expect("open base lock");
+        busy.lock_exclusive().expect("hold base lock");
+        let collecting = {
+            let state = state.clone();
+            thread::spawn(move || garbage_collect_inner(&state, true, None))
+        };
+        // The first base is collected without waiting for the busy one.
+        let started = std::time::Instant::now();
+        while bases[0].exists() {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "collection waited for a busy base while holding another lock"
+            );
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            bases[1].is_dir(),
+            "the busy base was collected under its lock"
+        );
+        FileExt::unlock(&busy).expect("release base lock");
+        let report = collecting.join().unwrap().expect("collect");
+        assert_eq!(report.collected, bases, "{report:?}");
+        let accounting = storage_accounting(&state).expect("status");
+        assert_eq!(accounting.pending_collections, 0, "{accounting:?}");
+        assert!(accounting.bases.is_empty(), "{accounting:?}");
+    }
+
+    /// `repair` reads a pending removal again by itself under its add lock,
+    /// and reads the add journals once to resume it, instead of re-reading
+    /// every removal journal and every add journal twice.
+    #[cfg(unix)]
+    #[test]
+    fn repair_reads_each_pending_removal_alone() {
+        const ACTIVE: usize = 3;
+        const FINISHED: usize = 3;
+        const PENDING: usize = 3;
+        let fixture = tempdir().unwrap();
+        let (repository, state) = journal_scan_fixture(fixture.path(), ACTIVE, FINISHED);
+        for index in 0..PENDING {
+            let destination = fixture.path().join(format!("active-{index}"));
+            let interrupted = remove_worktree_inner(
+                RemoveWorktreeRequest {
+                    repository: repository.clone(),
+                    destination,
+                    state_dir: Some(state.clone()),
+                },
+                Some(RemoveWorktreePhase::CleanVerified),
+            );
+            assert!(interrupted.is_err());
+        }
+        let before = crate::test_hooks::journal_open_count();
+        let report = recover_incomplete_operations(&state).expect("repair");
+        let opens = crate::test_hooks::journal_open_count() - before;
+        assert!(report.errors.is_empty(), "{report:?}");
+        assert_eq!(report.recovered_removals, PENDING, "{report:?}");
+        let adds = ACTIVE + FINISHED;
+        let removals = FINISHED + PENDING;
+        // Re-homing, reconciliation, and the inventory each read every add
+        // and removal journal once; each add is read again under its lock,
+        // and reaping reads the removals once more. Each pending removal adds
+        // one read of itself under its add lock, the reload of its record,
+        // and one read of the add journals.
+        assert_eq!(
+            opens,
+            3 * (adds + removals) + adds + removals + PENDING * (2 + adds)
+        );
     }
 
     /// Git commands ran in an add's complete view before the add finished: a

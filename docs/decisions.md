@@ -769,6 +769,9 @@ Completed prune and finished collection journals are deleted too. A plan
 worktree or to an unfinished operation is touched, each add operation is
 retired under its own lock, and nothing is retired while any journal cannot
 be read, since an unreadable journal may still hold a claim.
+Lineages are retired in batches of up to 64: a batch takes each add lock
+without waiting, then reads the removal, move, and compaction journals once,
+so every lineage is still decided from journals read under its own lock.
 
 The deletion order keeps every interrupted state explained. Finished moves
 and compactions go first, leaving a valid add-and-removal history; the add

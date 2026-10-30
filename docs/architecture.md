@@ -578,6 +578,21 @@ before the base is made writable for atomic quarantine, preventing another add
 from reusing a base once collection starts. Recovery deletes only the exact
 journaled quarantine path and leaves a newly rebuilt base untouched.
 
+`gc --apply` collects its planned bases in batches of up to 16, in sorted base
+order. It records each base's intent, then takes its lock; only the first lock
+of a batch waits, and a busy base starts the next batch, so collection never
+waits for a lock while holding another. Each step then reads the protecting
+add, removal, and compaction journals once for the whole batch: once after
+every lock is held, before the markers are removed, and once more after every
+marker removal, before any base is quarantined. Every decision is therefore
+made from journals read under that base's lock, and a reference that appears
+after a marker was removed is still found before quarantine. A reference
+recorded after the second read is handled as it always was: the add waits for
+the lock and rebuilds the base. A candidate that fails before its batch runs
+stops the run after the bases ahead of it are collected; a failure inside a
+batch leaves its other members with durable journals that the next
+`gc --apply` or `riftri repair` resumes, exactly as an interruption would.
+
 Before Milestone 2 performs its first mutation, journal persistence must write
 the intent first and replace each state atomically using a temporary file,
 `fsync`, rename, and parent-directory `fsync` where the platform supports them.
