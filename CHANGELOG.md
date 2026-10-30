@@ -80,6 +80,19 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   1.15 s instead of 1.85 s in an interleaved local run; collecting a
   5,000-file base took 0.34 s instead of 0.52 s. Windows still clears the
   read-only attribute on every entry, which deletion there requires.
+- Read each kind of journal once per `riftri gc --apply` step and once per
+  pending operation in `riftri repair`, instead of once per retired lineage,
+  per collected base, or per lookup. Retirement locks up to 64 finished add
+  operations, then reads their removal, move, and compaction journals once;
+  collection locks up to 16 bases, then reads the protecting journals once
+  before removing their markers and once before quarantining them, so every
+  decision still comes from journals read under the relevant lock. Repair
+  reads a pending removal, move, or compaction by its own name, and resuming
+  a removal reads the add journals once instead of twice. Candidate bases are
+  measured concurrently, as `status` measures them. With 20 live worktrees,
+  50 finished lineages, and 20 collectible bases, `gc --apply` reads 320
+  journal files instead of 2,265, and `repair` of 20 pending removals 1,940
+  instead of 4,320.
 
 ### Fixed
 

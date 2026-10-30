@@ -415,6 +415,35 @@ fn load_listed_journals<T>(
     Ok(journals)
 }
 
+/// Read the one journal `load_listed_journals` would have found under
+/// `operation_id`, with the same in-flight retry, without reading the rest of
+/// the directory. `None` means no journal holds that name: the directory is
+/// absent, or `gc --apply` retired the journal.
+fn load_listed_operation<T>(
+    directory: &Path,
+    operation_id: &str,
+    mut load: impl FnMut(PathBuf) -> Result<T, JournalError>,
+) -> Result<Option<T>, JournalError> {
+    let path = directory.join(format!("{operation_id}.json"));
+    validate_operation_id(operation_id, &path)?;
+    // The same directory checks a listing makes first.
+    match fs::symlink_metadata(directory) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(JournalError::InvalidStateDirectory {
+                path: directory.to_path_buf(),
+            });
+        }
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(io("inspect journal directory", directory, source)),
+    }
+    match read_listed_journal(&path, &mut load) {
+        ListedJournal::Loaded(journal) => Ok(Some(journal)),
+        ListedJournal::Retired => Ok(None),
+        ListedJournal::Failed(error) => Err(error),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "encoding", content = "units", rename_all = "kebab-case")]
 enum NativeOsString {
@@ -1743,6 +1772,14 @@ impl RemovalJournalStore {
         load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
     }
 
+    /// The journal `load_all` would list under `operation_id`, read alone.
+    pub fn load_listed(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<DecodedRemovalJournal>, JournalError> {
+        load_listed_operation(&self.directory, operation_id, |path| self.load_path(path))
+    }
+
     pub fn load_all_for_status(
         &self,
     ) -> Result<StatusJournalLoad<DecodedRemovalJournal>, JournalError> {
@@ -1824,6 +1861,15 @@ impl MoveJournalStore {
 
     pub fn load_all(&self) -> Result<Vec<DecodedMoveJournal>, JournalError> {
         load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
+    }
+
+    /// The journal `load_all` would list under `operation_id`, read alone.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn load_listed(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<DecodedMoveJournal>, JournalError> {
+        load_listed_operation(&self.directory, operation_id, |path| self.load_path(path))
     }
 
     pub fn load_all_for_status(
@@ -1910,6 +1956,15 @@ impl CompactJournalStore {
 
     pub fn load_all(&self) -> Result<Vec<DecodedCompactJournal>, JournalError> {
         load_listed_journals(journal_paths(&self.directory)?, |path| self.load_path(path))
+    }
+
+    /// The journal `load_all` would list under `operation_id`, read alone.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn load_listed(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<DecodedCompactJournal>, JournalError> {
+        load_listed_operation(&self.directory, operation_id, |path| self.load_path(path))
     }
 
     pub fn load_all_for_status(
