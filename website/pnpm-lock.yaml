@@ -62,9 +62,6 @@ importers:
       typescript:
         specifier: 7.0.2
         version: 7.0.2
-      vite:
-        specifier: 8.3.5
-        version: 8.3.5(@types/node@26.6.5)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)
 
 packages:
 
@@ -8368,6 +8365,7 @@ snapshots:
       fsevents: 2.3.3
       jiti: 2.7.0
       yaml: 2.9.1
+    optional: true
 
   web-namespaces@2.0.1: {}
 
