@@ -492,3 +492,105 @@ fn garbage_collection_requires_apply_and_never_collects_an_in_use_base() {
     assert_eq!(rebuilt.base_path, first_add.base_path);
     assert!(git(&rebuilt_path, &["status", "--porcelain=v1"]).is_empty());
 }
+
+/// Deletion grants permission only on directories. A clean removal must still
+/// delete ignored read-only files under read-only directories, without
+/// following a symlink out of the view, and collection must still delete an
+/// immutable base whose nested directories and files are all read-only.
+#[cfg(unix)]
+#[test]
+fn removal_and_collection_delete_read_only_trees_without_following_links() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = |path: &Path| fs::symlink_metadata(path).unwrap().permissions().mode() & 0o7777;
+    let set_mode = |path: &Path, mode: u32| {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let worktree = fixture.path().join("worktree");
+    let outside = fixture.path().join("outside");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::create_dir_all(repository.join("src/nested/deeper")).unwrap();
+    fs::write(repository.join("src/nested/deeper/leaf.txt"), "leaf\n").unwrap();
+    fs::write(repository.join("src/tool.sh"), "#!/bin/sh\n").unwrap();
+    set_mode(&repository.join("src/tool.sh"), 0o755);
+    fs::write(repository.join(".gitignore"), "node_modules/\n").unwrap();
+    git(&repository, &["add", "--all"]);
+    git(&repository, &["commit", "--quiet", "-m", "initial"]);
+
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("target.txt"), "outside\n").unwrap();
+    set_mode(&outside.join("target.txt"), 0o444);
+    set_mode(&outside, 0o555);
+    let outside_modes = (mode(&outside), mode(&outside.join("target.txt")));
+
+    let added = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/read-only-trees")),
+        state_dir: Some(state.clone()),
+        sparse_directories: Vec::new(),
+    })
+    .expect("create Riftri worktree");
+    // The immutable base is read-only all the way down.
+    for relative in ["src", "src/nested", "src/nested/deeper"] {
+        assert_eq!(
+            mode(&added.base_path.join(relative)) & 0o222,
+            0,
+            "{relative}"
+        );
+    }
+    assert_eq!(
+        mode(&added.base_path.join("src/nested/deeper/leaf.txt")) & 0o222,
+        0
+    );
+
+    let package = worktree.join("node_modules/package/lib");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(package.join("index.js"), "module.exports = 1;\n").unwrap();
+    set_mode(&package.join("index.js"), 0o444);
+    symlink(&outside, worktree.join("node_modules/outside-dir")).unwrap();
+    symlink(outside.join("target.txt"), package.join("outside-file")).unwrap();
+    symlink("index.js", package.join("inside")).unwrap();
+    set_mode(&package, 0o555);
+    set_mode(&worktree.join("node_modules/package"), 0o500);
+    assert!(git(&worktree, &["status", "--porcelain=v1"]).is_empty());
+
+    remove_worktree(RemoveWorktreeRequest {
+        repository: repository.clone(),
+        destination: worktree.clone(),
+        state_dir: Some(state.clone()),
+    })
+    .expect("remove a clean view holding read-only ignored files");
+    assert!(!worktree.exists());
+    assert_eq!(
+        (mode(&outside), mode(&outside.join("target.txt"))),
+        outside_modes
+    );
+    assert_eq!(
+        fs::read_to_string(outside.join("target.txt")).unwrap(),
+        "outside\n"
+    );
+
+    let applied = garbage_collect(&state, true).expect("collect the read-only base");
+    assert_eq!(
+        applied.collected.as_slice(),
+        std::slice::from_ref(&added.base_path)
+    );
+    assert!(!added.base_path.exists());
+    assert_eq!(
+        (mode(&outside), mode(&outside.join("target.txt"))),
+        outside_modes
+    );
+    set_mode(&outside, 0o755);
+}

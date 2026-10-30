@@ -410,6 +410,17 @@ Git still registers the view, recovery renames it back and decides again as if
 it had never moved. Otherwise recovery finishes deleting it. A quarantine that
 exists beside a reappeared destination is preserved together with it.
 
+Every tree Riftri deletes, such as a removal or compaction quarantine, a
+collected base, or an add's rollback staging, is prepared and then deleted
+with a recursive delete that does not follow symlinks. On macOS and Linux,
+unlinking an entry needs write and search permission on its parent directory,
+never on the entry, so preparation changes only real directories that lack
+owner read, write, or search permission. Files are neither inspected nor
+changed, and symlinks are never followed. On Windows the read-only attribute
+itself blocks deletion, so every file and directory is made writable first. A
+delete that stops partway leaves a partial tree under the same journaled name,
+which a retry or recovery finishes deleting.
+
 An explicit forced removal snapshots the complete native view, or the complete
 OverlayFS private layer, before recording durable intent. The journal records
 both the force choice and snapshot. The snapshot includes Git HEAD, its symbolic branch, and structured
