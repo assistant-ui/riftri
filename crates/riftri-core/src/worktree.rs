@@ -13763,7 +13763,7 @@ fn remove_tree_if_present(path: &Path) -> Result<(), WorktreeError> {
             path.display()
         )));
     }
-    NativeCowCloner::make_tree_owner_writable(path)?;
+    riftri_storage::make_tree_removable(path)?;
     fs::remove_dir_all(path).map_err(|source| io("remove rollback directory", path, source))
 }
 

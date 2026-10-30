@@ -52,6 +52,15 @@ fn exercise(phase: &str, test: &str) {
                 Native::make_tree_owner_writable(&source).unwrap();
                 fs::write(source.join(&relative), b"updated").unwrap();
             }
+            "removable" => {
+                riftri_storage::make_tree_removable(&source).unwrap();
+                let leaf = source.join(&relative);
+                let mode = |path: &std::path::Path| {
+                    fs::symlink_metadata(path).unwrap().permissions().mode() & 0o777
+                };
+                assert_eq!(mode(leaf.parent().unwrap()) & 0o700, 0o700);
+                assert_eq!(mode(&leaf) & 0o222, 0);
+            }
             _ => unreachable!(),
         }
         return;
@@ -100,4 +109,9 @@ fn deep_readonly_walk_bounds_directory_handles() {
 #[test]
 fn deep_writable_walk_bounds_directory_handles() {
     exercise("writable", "deep_writable_walk_bounds_directory_handles");
+}
+
+#[test]
+fn deep_removal_walk_bounds_directory_handles() {
+    exercise("removable", "deep_removal_walk_bounds_directory_handles");
 }

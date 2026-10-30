@@ -9,6 +9,33 @@ use thiserror::Error;
 mod exact_copy;
 #[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod parallel;
+#[cfg(unix)]
+mod tree_removal;
+
+/// Grant what deleting the directory tree at `path` needs, without deleting
+/// anything. Symlinks are never followed or changed.
+///
+/// On Unix, unlinking an entry needs write and search permission on its
+/// parent directory, never on the entry, so only directories missing an owner
+/// `rwx` bit are changed and files are not inspected at all. On Windows the
+/// read-only attribute blocks deletion itself, so every directory and file
+/// becomes writable, as [`RefsBlockCloner::make_tree_owner_writable`] does.
+#[cfg(unix)]
+pub fn make_tree_removable(path: &Path) -> Result<(), StorageError> {
+    tree_removal::make_tree_removable(path)
+}
+
+#[cfg(target_os = "windows")]
+pub fn make_tree_removable(path: &Path) -> Result<(), StorageError> {
+    refs::make_tree_owner_writable(path)
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+pub fn make_tree_removable(_path: &Path) -> Result<(), StorageError> {
+    Err(StorageError::UnsupportedPlatform {
+        backend: "tree removal",
+    })
+}
 
 /// Errors from concrete native storage operations.
 #[derive(Debug, Error)]

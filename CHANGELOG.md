@@ -70,6 +70,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   each prune pass still re-reads the state directories and Git's worktrees.
   Removing or moving a path Riftri does not manage while `git worktree list`
   fails now reports the path as unmanaged instead of the Git failure.
+- On macOS and Linux, change only directory permissions before deleting a
+  tree. Unlinking a file needs write access to its directory, never to the
+  file, so removal, rollback, compaction, and `riftri gc --apply` no longer
+  stat and chmod every file first. A directory is changed only when it lacks
+  owner read, write, or search permission, and symlinks are never followed.
+  Removing a view of 25,000 files (5,000 tracked, 20,000 ignored) now makes
+  913 `lstat` calls and no `chmod` calls instead of 25,915 of each, and took
+  1.15 s instead of 1.85 s in an interleaved local run; collecting a
+  5,000-file base took 0.34 s instead of 0.52 s. Windows still clears the
+  read-only attribute on every entry, which deletion there requires.
 - Read each kind of journal once per `riftri gc --apply` step and once per
   pending operation in `riftri repair`, instead of once per retired lineage,
   per collected base, or per lookup. Retirement locks up to 64 finished add
