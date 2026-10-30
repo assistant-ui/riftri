@@ -142,20 +142,27 @@ Public visibility is required for npm provenance from this repository.
 
 ## npm authentication
 
-The first publication needs a short-lived, least-privilege npm token because a
-trusted publisher can only be attached after each package exists. Add it as the
-`NPM_TOKEN` GitHub Actions secret immediately before the bootstrap release.
-
-After all nine packages exist, configure the same GitHub Actions trusted
-publisher on each npm package:
+npm packages publish only through npm trusted publishing. The publish job's
+`id-token: write` permission lets the npm CLI exchange the job's OIDC token for
+a short-lived publish credential, so no npm token is stored in GitHub. Each of
+the nine packages has this trusted publisher on npmjs.com (package Settings,
+Trusted Publisher, GitHub Actions):
 
 - organization or user: `assistant-ui`
 - repository: `riftri`
-- workflow: `release.yml`
+- workflow filename: `release.yml`
+- environment: none
 
-The workflow grants only its publish job `id-token: write`. Once a trusted
-publishing release succeeds, delete `NPM_TOKEN`. The publishing script is
-restartable: package versions already present in npm are detected and skipped.
+The workflow never reads an npm token, and
+`package/test/release-workflow.test.js` fails if one is added back. The
+publishing script is restartable: package versions already present in npm are
+detected and skipped, so a publish that failed on authentication can be rerun
+after the trusted publisher is fixed.
+
+A trusted publisher can only be attached to a package that already exists. A
+new platform package therefore needs a one-time manual first publish by a
+maintainer (`npm publish --access public` from the staged package with 2FA),
+after which it gets the same trusted publisher before the next release.
 
 ## Homebrew tap
 
