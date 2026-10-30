@@ -158,6 +158,13 @@ test("npm publication stays opt-in, and GitHub releases never depend on it", asy
   assert.doesNotMatch(githubRelease, /NPM_PUBLISH_ENABLED/);
 });
 
+test("npm packages publish through trusted publishing, never a stored token", async () => {
+  const workflow = await releaseWorkflow();
+  const publish = jobSource(workflow, "publish");
+  assert.match(publish, /^      id-token: write$/m);
+  assert.doesNotMatch(workflow, /NPM_TOKEN|NODE_AUTH_TOKEN|_authToken/);
+});
+
 test("direct downloads publish independently of npm from the inspected staged assets", async () => {
   const workflow = await releaseWorkflow();
   const stage = jobSource(workflow, "stage");
