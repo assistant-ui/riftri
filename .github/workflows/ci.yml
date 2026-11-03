@@ -486,6 +486,15 @@ jobs:
       - name: Audit deployed website dependencies
         run: pnpm --dir website audit --prod
 
+      - name: Check generated website files
+        # Staging rewrites the committed sitemap from content/docs.json, and the
+        # build regenerates Farm's route types, so stale copies would only show
+        # up as an unrelated diff on someone's later checkout.
+        run: |
+          pnpm --dir website stage
+          pnpm --dir website exec farm generate --check
+          git diff --exit-code -- website
+
       - name: Check website types
         run: pnpm --dir website type-check
 

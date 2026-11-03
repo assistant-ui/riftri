@@ -59,14 +59,22 @@ After changing `docs.config.ts`, restart the dev server.
 The build keeps the adapter's Vercel function for public `/docs` pages, their
 Markdown mirrors, and `/api/docs` search. Static agent companions resolve before
 that runtime. All other routes retain the existing static handling.
+Every docs page also links the adapter's `/__farm_docs/browser.css`, a
+lowest-layer copy of the theme CSS the site bundle already compiles. Only the
+runtime serves it, so finalization publishes the runtime's response as a static
+file with the runtime's immutable caching. The browser suite fails on any
+same-origin 4xx while loading docs pages, and `pnpm verify:production` checks
+every stylesheet the deployed docs link.
 Docs responses are not CDN-cached because HTML and client navigation payloads
 share URLs. `pnpm preview:static` now previews both parts of this finalized
 output; it imports the built function, not the source dev server.
 `RIFTRI_PREVIEW_PORT` overrides the default preview/browser-test port.
 
 `pnpm stage && pnpm generate` refreshes Farm's route types when the page map
-changes. Browser tests exercise every generated page, Markdown mirrors,
-search, copying, sidebar navigation, and responsive layout.
+changes; commit them with the sitemap that staging rewrites. CI stages, runs
+`farm generate --check`, and fails if either committed file is stale. Browser
+tests exercise every generated page, Markdown mirrors, search, copying, sidebar
+navigation, and responsive layout.
 
 The visual system keeps Riftri's dark canvas and orange accent, with a shared
 page frame, fine stacked section rules, and a plain dark surface behind the storage
