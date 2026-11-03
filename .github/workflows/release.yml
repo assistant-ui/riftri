@@ -239,17 +239,9 @@ jobs:
         working-directory: dist/release
         run: sha256sum --check SHA256SUMS
 
-      - name: Configure bootstrap npm token when present
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        shell: bash
-        run: |
-          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
-            npm config set //registry.npmjs.org/:_authToken "${NODE_AUTH_TOKEN}"
-          else
-            echo "Using npm trusted publishing"
-          fi
-
+      # npm trusted publishing: the CLI exchanges this job's OIDC token for a
+      # short-lived publish credential, so no npm token exists to leak. Each
+      # package's trusted publisher names this repository and release.yml.
       - name: Publish npm packages
         run: node package/scripts/publish-packages.mjs
 
