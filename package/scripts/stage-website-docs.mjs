@@ -51,9 +51,9 @@ export function renderWebsiteDoc(page, original) {
   // Inject the "View .md / Copy .md" page actions as plain Markdown links that
   // both open the page's `.md` (served with frontmatter). They sit as one row
   // below the page's intro paragraph — the description leads — and are styled
-  // as compact links in docs-theme.css. The docs framework runs no custom
-  // JavaScript on rendered pages, so the actions are links, not a clipboard
-  // button; the native button is disabled in docs.config.ts.
+  // as compact links in docs-theme.css. The docs page shell
+  // (website/src/components/docs-shell.tsx) upgrades "Copy .md" into a
+  // clipboard copy; the native button is disabled in docs.config.ts.
   const markdownUrl = `${pageUrl(page)}.md`;
   if (!/^# .+(?:\r?\n|$)/.test(markdown)) throw new Error(`Docs page needs a leading title: ${page.content}`);
   const action = `[View .md](${markdownUrl} "View this page as Markdown") / [Copy .md](${markdownUrl} "Copy this page as Markdown")`;

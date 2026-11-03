@@ -38,11 +38,16 @@ Only public guides enter the sidebar, search index, and sitemap. Full references
 are static plain text, served inline with `nosniff` and `X-Robots-Tag: noindex`.
 Benchmark reports, allocation evidence, and design-decision logs remain linked
 on GitHub rather than becoming extra public pages.
-The pinned adapter currently imports all project Markdown eagerly. A narrow
-Vite transform in `farm.config.ts` restricts its module map to `src/app/docs`
-so source copies and full agent references never enter browser JavaScript.
-Revisit that guarded workaround when upgrading the adapter; browser tests
-check that reference-only content is absent from the shipped scripts.
+The pinned adapter globs every Markdown file in the project into its page
+module map and has no option to scope it. A narrow Vite transform in
+`farm.config.ts` restricts that map to `src/app/docs` so source copies and full
+agent references never enter browser JavaScript. Revisit that guarded
+workaround when upgrading the adapter; browser tests check that reference-only
+content is absent from the shipped scripts.
+`src/components/docs-shell.tsx` is the adapter's docs page shell; it turns
+`Copy .md` into a clipboard copy of the page's full `.md` and falls back to
+opening it. The theme's built-in copy button stays disabled because it renders
+a separate button and silently does nothing when the clipboard is unavailable.
 Each sidebar entry also names a Lucide icon in `content/docs.json`.
 Staging regenerates `content/docs-icons.json` as SVG strings for the adapter;
 it also generates small action-icon masks in `public/docs-icons/`. The icon
