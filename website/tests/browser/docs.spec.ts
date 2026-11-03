@@ -303,6 +303,23 @@ test("docs render the real adapter with matching styles and no errors", async ({
   expect(errors).toEqual([]);
 });
 
+test("every docs page loads without failed same-origin requests", async ({ page, baseURL }) => {
+  // The adapter links /__farm_docs/browser.css from every page's <head>; the
+  // production routes once sent only the pages themselves to its runtime, so
+  // the stylesheet 404ed silently. Catch any request the build cannot serve.
+  const failed: string[] = [];
+  page.on("response", (response) => {
+    if (new URL(response.url()).origin === new URL(baseURL!).origin && response.status() >= 400) failed.push(`${response.status()} ${response.url()}`);
+  });
+  const stylesheets = new Set<string>();
+  for (const doc of groups.flatMap((group) => group.pages)) {
+    await page.goto(`/docs${doc.slug ? `/${doc.slug}` : ""}`);
+    for (const href of await page.locator('link[rel="stylesheet"]').evaluateAll((links) => links.map((link) => (link as HTMLLinkElement).href))) stylesheets.add(new URL(href).pathname);
+  }
+  expect([...stylesheets]).toContain("/__farm_docs/browser.css");
+  expect(failed).toEqual([]);
+});
+
 test("docs navigation works on desktop and mobile, including history", async ({ page }, info) => {
   await page.goto("/docs");
   if (info.project.name === "mobile") await page.getByRole("button", { name: /Open Sidebar/i }).click();

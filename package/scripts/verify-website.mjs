@@ -40,10 +40,19 @@ export async function verifyWebsite({ baseUrl = "https://riftri.dev", revision =
   }
   const missing = await get("/__riftri_deployment_check_missing__", 404, "text/html");
   assert.ok((await missing.text()).includes("THAT PAGE DOES NOT EXIST_"), "expected the branded 404 page");
+  const stylesheets = new Set();
   for (const route of ["/docs", "/docs/installation"]) {
     const html = await (await get(route, 200, "text/html")).text();
     assert.ok(html.includes("@farming-labs/farmjs") && html.includes("farm-docs-root") && !html.includes("Page module missing"), `${route}: expected rendered Farm.js docs`);
+    for (const tag of html.match(/<link\b[^>]*>/g) || []) {
+      const href = tag.includes('rel="stylesheet"') && tag.match(/href="([^"]+)"/)?.[1];
+      if (href && new URL(href, baseUrl).origin === new URL(baseUrl).origin) stylesheets.add(new URL(href, baseUrl).pathname);
+    }
   }
+  // Includes the adapter's /__farm_docs/browser.css, which the docs runtime
+  // routes never reach; finalization publishes it as a static file.
+  assert.ok(stylesheets.size > 0, "docs pages link no same-origin stylesheets");
+  for (const route of stylesheets) await get(route, 200, "text/css");
   const search = await (await get("/api/docs?query=OverlayFS", 200, "application/json")).json();
   assert.ok(Array.isArray(search) && search.length > 0, "expected documentation search results");
   for (const page of pages) {

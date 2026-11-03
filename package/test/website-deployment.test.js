@@ -18,7 +18,8 @@ async function fixture() {
   files.set("/", { body: '<html><link rel="canonical" href="https://riftri.dev/"/><meta property="og:image" content="https://riftri.dev/og.png"/>WORKTREE EXAMPLE Windows / PowerShell</html>', type: "text/html" });
   files.set("/build-info.json", { body: JSON.stringify({ revision }), type: "application/json" });
   files.set("/__riftri_deployment_check_missing__", { body: "<html>THAT PAGE DOES NOT EXIST_</html>", type: "text/html", status: 404 });
-  for (const route of ["/docs", "/docs/installation"]) files.set(route, { body: '<html><meta name="generator" content="@farming-labs/farmjs"/><div id="farm-docs-root">Docs</div></html>', type: "text/html" });
+  for (const route of ["/docs", "/docs/installation"]) files.set(route, { body: '<html><meta name="generator" content="@farming-labs/farmjs"/><link rel="stylesheet" href="/__farm_docs/browser.css"><link rel="stylesheet" href="/assets/farm-client-h0123abcd.css"><div id="farm-docs-root">Docs</div></html>', type: "text/html" });
+  for (const route of ["/__farm_docs/browser.css", "/assets/farm-client-h0123abcd.css"]) files.set(route, { body: "@layer theme{}", type: "text/css; charset=utf-8" });
   files.set("/api/docs", { body: JSON.stringify([{ content: "OverlayFS", url: "/docs/linux-overlayfs" }]), type: "application/json" });
   const { pages, agentDocUrl, renderAgentDoc } = await import("../scripts/stage-website-docs.mjs");
   for (const page of pages) files.set(agentDocUrl(page), {
@@ -56,6 +57,8 @@ for (const [name, mutate, error] of [
   ["stale installer", (f) => { f.get("/install.sh").body = "outdated"; }, /install.sh.*differs/],
   ["generic 404", (f) => { f.get("/__riftri_deployment_check_missing__").body = "Not found"; }, /branded 404/],
   ["missing docs runtime", (f) => f.delete("/docs"), /docs.*404/],
+  ["missing docs stylesheet", (f) => f.delete("/__farm_docs/browser.css"), /browser\.css.*404/],
+  ["docs stylesheet served as another type", (f) => { f.get("/assets/farm-client-h0123abcd.css").type = "text/html"; }, /farm-client.*text\/css/],
   ["broken docs search", (f) => { f.get("/api/docs").body = "[]"; }, /search results/],
   ["missing agent reference", (f) => f.delete("/docs/installation.md"), /installation\.md.*404/],
   ["abridged agent reference", (f) => { f.get("/docs/installation.md").body = "# Short version"; }, /full agent reference differs/],
