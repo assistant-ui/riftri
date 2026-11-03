@@ -167,7 +167,10 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   const runtime = path.join(output, "functions/__nitro.func");
   // Farm.js 0.1.0 places content beside the web-format Nitro entry point.
   fs.mkdirSync(path.join(runtime, "farm-docs-content"), { recursive: true });
-  fs.writeFileSync(path.join(runtime, "index.mjs"), "export default {};");
+  // Like the adapter runtime, the fixture serves only its stylesheet as CSS.
+  fs.writeFileSync(path.join(runtime, "index.mjs"), `export default { fetch: (request) => new URL(request.url).pathname === "/__farm_docs/browser.css"
+    ? new Response("@layer farm-docs-adapter{}", { headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "public, max-age=31536000, immutable" } })
+    : new Response("missing", { status: 404 }) };`);
   fs.writeFileSync(path.join(runtime, "farm-docs-content/page.md"), "# Docs");
   await assert.rejects(finalizeStaticWebsite(output, { docs: true }), { code: "ENOENT" });
   const { pages } = await import("../scripts/stage-website-docs.mjs");
@@ -199,4 +202,40 @@ test("docs finalization retains only the narrow docs runtime routes", async (t) 
   assert.match(route.headers.Vary, /x-farm-docs-navigation/);
   assert.ok(config.routes.indexOf(route) > config.routes.findIndex((entry) => entry.handle === "filesystem"));
   assert.ok(config.routes.indexOf(route) < config.routes.findIndex((entry) => entry.handle === "error"));
+  // Every docs page links the adapter's stylesheet, which the narrow runtime
+  // route above never reaches, so it ships as a static file instead.
+  assert.ok(!pattern.test("/__farm_docs/browser.css"));
+  assert.equal(fs.readFileSync(path.join(output, "static/__farm_docs/browser.css"), "utf8"), "@layer farm-docs-adapter{}");
+  const stylesheetRoute = config.routes.find((entry) => entry.src === "^/__farm_docs/browser\\.css$");
+  assert.deepEqual(stylesheetRoute, {
+    src: "^/__farm_docs/browser\\.css$",
+    headers: { "Cache-Control": "public, max-age=31536000, immutable", "Content-Type": "text/css; charset=utf-8" },
+    continue: true,
+  });
+  assert.ok(config.routes.indexOf(stylesheetRoute) < config.routes.findIndex((entry) => entry.handle === "filesystem"));
+});
+
+test("docs finalization fails closed when the runtime does not serve the docs stylesheet", async (t) => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), "riftri-docs-css-output-"));
+  t.after(() => fs.rmSync(output, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(output, "static/404"), { recursive: true });
+  for (const name of ["index.html", "index.md", "install.sh", "install.ps1", "robots.txt", "sitemap.xml", "404/index.html"]) {
+    fs.writeFileSync(path.join(output, "static", name), name);
+  }
+  fs.writeFileSync(path.join(output, "config.json"), JSON.stringify({ version: 3, routes: [
+    { src: "^/assets/(.*)$", headers: { "Cache-Control": "public, max-age=31536000, immutable" }, continue: true },
+  ] }));
+  const runtime = path.join(output, "functions/__nitro.func");
+  fs.mkdirSync(path.join(runtime, "farm-docs-content"), { recursive: true });
+  fs.writeFileSync(path.join(runtime, "index.mjs"), 'export default { fetch: () => new Response("missing", { status: 404 }) };');
+  fs.writeFileSync(path.join(runtime, "farm-docs-content/page.md"), "# Docs");
+  const { pages } = await import("../scripts/stage-website-docs.mjs");
+  for (const page of pages) {
+    const reference = page.slug ? path.join(output, "static/docs", `${page.slug}.md`) : path.join(output, "static/docs.md");
+    fs.mkdirSync(path.dirname(reference), { recursive: true });
+    fs.writeFileSync(reference, "# Full reference");
+  }
+  const { finalizeStaticWebsite } = await import("../scripts/finalize-static-website.mjs");
+  await assert.rejects(finalizeStaticWebsite(output, { docs: true }), /browser\.css as CSS \(HTTP 404/);
+  assert.ok(!fs.existsSync(path.join(output, "static/__farm_docs")));
 });

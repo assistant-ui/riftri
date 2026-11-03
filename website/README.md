@@ -38,11 +38,16 @@ Only public guides enter the sidebar, search index, and sitemap. Full references
 are static plain text, served inline with `nosniff` and `X-Robots-Tag: noindex`.
 Benchmark reports, allocation evidence, and design-decision logs remain linked
 on GitHub rather than becoming extra public pages.
-The pinned adapter currently imports all project Markdown eagerly. A narrow
-Vite transform in `farm.config.ts` restricts its module map to `src/app/docs`
-so source copies and full agent references never enter browser JavaScript.
-Revisit that guarded workaround when upgrading the adapter; browser tests
-check that reference-only content is absent from the shipped scripts.
+The pinned adapter globs every Markdown file in the project into its page
+module map and has no option to scope it. A narrow Vite transform in
+`farm.config.ts` restricts that map to `src/app/docs` so source copies and full
+agent references never enter browser JavaScript. Revisit that guarded
+workaround when upgrading the adapter; browser tests check that reference-only
+content is absent from the shipped scripts.
+`src/components/docs-shell.tsx` is the adapter's docs page shell; it turns
+`Copy .md` into a clipboard copy of the page's full `.md` and falls back to
+opening it. The theme's built-in copy button stays disabled because it renders
+a separate button and silently does nothing when the clipboard is unavailable.
 Each sidebar entry also names a Lucide icon in `content/docs.json`.
 Staging regenerates `content/docs-icons.json` as SVG strings for the adapter;
 it also generates small action-icon masks in `public/docs-icons/`. The icon
@@ -54,14 +59,22 @@ After changing `docs.config.ts`, restart the dev server.
 The build keeps the adapter's Vercel function for public `/docs` pages, their
 Markdown mirrors, and `/api/docs` search. Static agent companions resolve before
 that runtime. All other routes retain the existing static handling.
+Every docs page also links the adapter's `/__farm_docs/browser.css`, a
+lowest-layer copy of the theme CSS the site bundle already compiles. Only the
+runtime serves it, so finalization publishes the runtime's response as a static
+file with the runtime's immutable caching. The browser suite fails on any
+same-origin 4xx while loading docs pages, and `pnpm verify:production` checks
+every stylesheet the deployed docs link.
 Docs responses are not CDN-cached because HTML and client navigation payloads
 share URLs. `pnpm preview:static` now previews both parts of this finalized
 output; it imports the built function, not the source dev server.
 `RIFTRI_PREVIEW_PORT` overrides the default preview/browser-test port.
 
 `pnpm stage && pnpm generate` refreshes Farm's route types when the page map
-changes. Browser tests exercise every generated page, Markdown mirrors,
-search, copying, sidebar navigation, and responsive layout.
+changes; commit them with the sitemap that staging rewrites. CI stages, runs
+`farm generate --check`, and fails if either committed file is stale. Browser
+tests exercise every generated page, Markdown mirrors, search, copying, sidebar
+navigation, and responsive layout.
 
 The visual system keeps Riftri's dark canvas and orange accent, with a shared
 page frame, fine stacked section rules, and a plain dark surface behind the storage
