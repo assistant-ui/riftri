@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.6] - 2026-11-05
+
 ### Changed
 
 - Describe Riftri and its backends by their supported capabilities rather than
