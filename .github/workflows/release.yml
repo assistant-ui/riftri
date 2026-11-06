@@ -401,7 +401,7 @@ jobs:
           npm run check:packages
           node package/scripts/prepare-release.mjs v0.6.6 artifacts
           node --test package/test/prepare-release.test.js package/test/publish-packages.test.js
-          for package_directory in package/platforms/* dist/npm-root; do
+          for package_directory in ./package/platforms/* ./dist/npm-root; do
             npm pack "$package_directory" --dry-run --ignore-scripts
           done
 
