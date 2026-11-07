@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.7] - 2026-11-07
+
 ### Changed
 
 - Allow lifecycle commands to run while `GIT_CONFIG_COUNT` injects only

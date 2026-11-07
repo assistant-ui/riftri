@@ -1,6 +1,6 @@
 {
   "name": "riftri",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "Native copy-on-write Git worktrees for parallel development",
   "license": "MIT",
   "author": "Assistant UI contributors",
