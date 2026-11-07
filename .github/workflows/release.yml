@@ -13,6 +13,7 @@ permissions:
 jobs:
   verify-tag:
     name: Verify release tag signature
+    if: github.event_name != 'workflow_dispatch' || github.ref_name != 'release/npm-v0.6.7'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
 
@@ -326,3 +327,90 @@ jobs:
           fi
           # An existing release fails safely: never replace published assets.
           gh release create "${GITHUB_REF_NAME}" dist/release/SHA256SUMS dist/release/*.tar.gz "${release_options[@]}"
+
+  recover-npm-067:
+    name: Recover npm v0.6.7 with the maintainer credential
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'assistant-ui/riftri' && github.ref_name == 'release/npm-v0.6.7'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    concurrency:
+      group: npm-recovery-v0.6.7
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out the recovery commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the signed release and unchanged package source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse v0.6.7)" = 382f3e0a37a4843f4903b279aa73c4481d797cff
+          test "$(git rev-parse 'v0.6.7^{}')" = 593f02fc9b53dd023c104fdbde62cf631cb13bdb
+          gh api repos/assistant-ui/riftri/git/tags/382f3e0a37a4843f4903b279aa73c4481d797cff \
+            --jq '.verification.verified' | grep -qx true
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              .github/workflows/release.yml|Formula/riftri.rb|package/homebrew/Formula/riftri.rb) ;;
+              *) echo "Unexpected change from the signed release: $changed_path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only v0.6.7 HEAD)
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.13.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify and extract the published release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download v0.6.7 --repo assistant-ui/riftri --dir published-assets
+          echo '849d2158029ad607eaa59af9c37edd7908c80be0a30cfd2778c0bd4f96db7154  published-assets/SHA256SUMS' | sha256sum --check
+          gh attestation verify published-assets/SHA256SUMS --repo assistant-ui/riftri \
+            --signer-workflow assistant-ui/riftri/.github/workflows/release.yml
+          (cd published-assets && sha256sum --check SHA256SUMS)
+          for package_directory in package/platforms/*; do
+            package_name="$(basename "$package_directory")"
+            executable=riftri
+            if [[ "$package_name" == riftri-win32-* ]]; then executable=riftri.exe; fi
+            archive="published-assets/${package_name}-v0.6.7.tar.gz"
+            test "$(tar -tzf "$archive")" = "$executable"
+            mkdir -p "artifacts/$package_name"
+            tar -xzf "$archive" -C "artifacts/$package_name" --no-same-owner
+            test -f "artifacts/$package_name/$executable"
+            test ! -L "artifacts/$package_name/$executable"
+          done
+
+      - name: Stage and inspect the npm packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --omit=optional
+          npm run check:packages
+          node package/scripts/prepare-release.mjs v0.6.7 artifacts
+          node --test package/test/prepare-release.test.js package/test/publish-packages.test.js
+          for package_directory in ./package/platforms/* ./dist/npm-root; do
+            npm pack "$package_directory" --dry-run --ignore-scripts
+          done
+
+      - name: Publish the existing version with provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.RIFTRI_V066_RECOVERY_NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$NODE_AUTH_TOKEN"
+          npm whoami --registry=https://registry.npmjs.org/
+          node package/scripts/publish-packages.mjs
