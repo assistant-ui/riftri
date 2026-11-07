@@ -5,6 +5,16 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- Allow lifecycle commands to run while `GIT_CONFIG_COUNT` injects only
+  network configuration: `credential.*`, `http.*`, and
+  `url.<base>.insteadOf` or `pushInsteadOf`. Cloud agent sandboxes set
+  these so Git can reach a remote, which used to stop every add, removal,
+  repair, and doctor check there. Any other injected key, a count Git would
+  reject, a missing key, and `GIT_CONFIG_PARAMETERS` are still refused before
+  mutation, and the refusal now names the key.
+
 ## [0.6.6] - 2026-11-05
 
 ### Changed

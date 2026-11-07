@@ -953,6 +953,42 @@ toolchain rules; and replicating the stub's environment for every command
 would need a second `xcrun` call and depend on which variables Apple adds,
 where any difference would reach the user's hooks.
 
+### D048: network-only injected configuration doesn't block lifecycle commands
+
+Lifecycle commands refuse environment-based configuration injection because
+it reaches every internal Git command like `-c` options would (see
+`validate_lifecycle_git_environment`). Hosted agent sandboxes set
+`GIT_CONFIG_COUNT` in every process so Git can reach a remote. A typical set
+is `credential.interactive` plus `url.<base>.insteadOf` rewrites. With the
+blanket refusal, Riftri could not create or remove a single view there, and
+doctor reported the repository as incompatible.
+
+`GIT_CONFIG_COUNT` is now accepted when every `GIT_CONFIG_KEY_n` below the
+count names a key in one of three families:
+
+- `credential.*`: how Git asks for and stores credentials.
+- `http.*`: transport settings such as proxies, headers, and TLS.
+- `url.<base>.insteadOf` and `url.<base>.pushInsteadOf`: remote URL rewriting.
+
+Section and variable names compare case-insensitively, as Git's do. None of
+these families can change what an internal command reads from the object
+store, the index, attributes, filters, hooks, or the checkout. They matter
+only when Git contacts a remote, for example a lazy fetch in a partial clone,
+whose objects are still verified by ID.
+
+Everything else stays refused before mutation, and the refusal names the
+first offending key: any other key, a count that isn't plain decimal digits
+(including an empty one), a count naming a key that isn't set, a key that
+isn't valid Unicode, and `GIT_CONFIG_PARAMETERS`, whose quoting is Git's
+private format. Values are not inspected, because none of the allowed
+variables can redirect local Git state whatever their value.
+
+Rejected alternatives: unsetting the variables for internal commands would
+silently drop the caller's credential configuration from any fetch Riftri
+causes; a general allowlist would need its own review for every key Git
+adds; and asking callers to unset the variables pushes the same judgement
+onto every harness.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

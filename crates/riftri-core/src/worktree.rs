@@ -802,16 +802,163 @@ fn validate_lifecycle_git_environment() -> Result<(), WorktreeError> {
             )));
         }
     }
+    // `GIT_CONFIG_PARAMETERS` uses Git's private quoting; it stays refused.
+    if std::env::var_os("GIT_CONFIG_PARAMETERS").is_some() {
+        return Err(WorktreeError::Unsupported(
+            "GIT_CONFIG_PARAMETERS is set and can inject Git configuration into internal Git operations; unset GIT_CONFIG_PARAMETERS before using Riftri lifecycle commands".to_owned(),
+        ));
+    }
     // `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` entries only take effect through
-    // `GIT_CONFIG_COUNT`, so refusing the count refuses the whole family.
-    for name in ["GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"] {
-        if std::env::var_os(name).is_some() {
-            return Err(WorktreeError::Unsupported(format!(
-                "{name} is set and can inject Git configuration into internal Git operations; unset {name} before using Riftri lifecycle commands"
-            )));
-        }
+    // `GIT_CONFIG_COUNT`. Entries that can only change how Git reaches a
+    // remote are allowed (D048); anything else refuses the whole family.
+    if let Some(count) = std::env::var_os("GIT_CONFIG_COUNT")
+        && let Some(problem) = injected_configuration_problem(&count, std::env::var_os)
+    {
+        return Err(WorktreeError::Unsupported(format!(
+            "GIT_CONFIG_COUNT is set and {problem}; unset GIT_CONFIG_COUNT before using Riftri lifecycle commands (only credential.*, http.*, and url.<base>.insteadOf or pushInsteadOf entries are allowed)"
+        )));
     }
     Ok(())
+}
+
+/// Why the `GIT_CONFIG_COUNT` family can't be allowed, or `None` when every
+/// injected entry only affects how Git reaches a remote. A count Git would
+/// reject, or one naming a missing key, is refused rather than guessed at.
+fn injected_configuration_problem(
+    count: &OsStr,
+    var: impl Fn(String) -> Option<OsString>,
+) -> Option<String> {
+    let count = count
+        .to_str()
+        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|text| text.parse::<usize>().ok());
+    let Some(count) = count else {
+        return Some("has a count Git can't use".to_owned());
+    };
+    for index in 0..count {
+        let Some(key) = var(format!("GIT_CONFIG_KEY_{index}")) else {
+            return Some(format!("names GIT_CONFIG_KEY_{index}, which is not set"));
+        };
+        let Some(key) = key.to_str() else {
+            return Some(format!("GIT_CONFIG_KEY_{index} is not valid Unicode"));
+        };
+        if !network_only_config_key(key) {
+            return Some(format!(
+                "injects `{key}`, which can reach internal Git operations"
+            ));
+        }
+    }
+    None
+}
+
+/// Configuration that only changes how Git authenticates to or addresses a
+/// remote: `credential.*`, `http.*`, and `url.<base>.insteadOf` /
+/// `pushInsteadOf`. Section and variable names are case-insensitive; the
+/// subsection (a URL here) is not inspected.
+fn network_only_config_key(key: &str) -> bool {
+    let Some((section, rest)) = key.split_once('.') else {
+        return false;
+    };
+    let (subsection, variable) = match rest.rsplit_once('.') {
+        Some((subsection, variable)) => (Some(subsection), variable),
+        None => (None, rest),
+    };
+    if variable.is_empty() {
+        return false;
+    }
+    match section.to_ascii_lowercase().as_str() {
+        "credential" | "http" => true,
+        "url" => {
+            subsection.is_some_and(|base| !base.is_empty())
+                && matches!(
+                    variable.to_ascii_lowercase().as_str(),
+                    "insteadof" | "pushinsteadof"
+                )
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod injected_configuration_tests {
+    use super::*;
+
+    #[test]
+    fn network_only_keys_are_the_credential_http_and_url_rewrite_families() {
+        for key in [
+            "credential.interactive",
+            "credential.helper",
+            "Credential.https://example.invalid.useHttpPath",
+            "http.proxy",
+            "HTTP.https://example.invalid/.extraHeader",
+            "url.https://github.com/.insteadOf",
+            "url.git@github.com:.PUSHINSTEADOF",
+        ] {
+            assert!(network_only_config_key(key), "{key}");
+        }
+        for key in [
+            "credential",
+            "credential.",
+            "http",
+            "core.hooksPath",
+            "filter.lfs.smudge",
+            "riftri.enabled",
+            "url.insteadOf",
+            "url..insteadOf",
+            "url.https://example.invalid/.other",
+            "credentials.helper",
+            "httpx.proxy",
+            "include.path",
+        ] {
+            assert!(!network_only_config_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn every_injected_entry_must_be_network_only() {
+        fn env(
+            entries: &'static [(&'static str, &'static str)],
+        ) -> impl Fn(String) -> Option<OsString> {
+            move |name| {
+                entries
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        }
+        const ALLOWED: &[(&str, &str)] = &[
+            ("GIT_CONFIG_KEY_0", "credential.interactive"),
+            ("GIT_CONFIG_KEY_1", "url.https://github.com/.insteadOf"),
+        ];
+        assert_eq!(
+            injected_configuration_problem(OsStr::new("2"), env(ALLOWED)),
+            None
+        );
+        assert_eq!(
+            injected_configuration_problem(OsStr::new("0"), env(ALLOWED)),
+            None
+        );
+        assert!(
+            injected_configuration_problem(OsStr::new("3"), env(ALLOWED))
+                .unwrap()
+                .contains("GIT_CONFIG_KEY_2")
+        );
+        for count in ["", " 1", "+1", "-1", "1x", "99999999999999999999999"] {
+            assert!(
+                injected_configuration_problem(OsStr::new(count), env(ALLOWED)).is_some(),
+                "{count:?}"
+            );
+        }
+        const MIXED: &[(&str, &str)] = &[
+            ("GIT_CONFIG_KEY_0", "credential.interactive"),
+            ("GIT_CONFIG_KEY_1", "core.fsmonitor"),
+        ];
+        assert!(
+            injected_configuration_problem(OsStr::new("2"), env(MIXED))
+                .unwrap()
+                .contains("`core.fsmonitor`")
+        );
+    }
 }
 
 /// The directory Riftri runs Git in for a repository: its working-tree root,
