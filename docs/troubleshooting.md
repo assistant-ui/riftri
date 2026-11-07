@@ -20,6 +20,11 @@ reach every internal Git command exactly like `-c` options would. Unset them
 in the calling process and select the repository with `--repository` where
 supported, or run from that repository. Doctor reports the same compatibility
 blocker.
+
+One exception keeps hosted agent sandboxes working: `GIT_CONFIG_COUNT` is
+accepted when every injected key only changes how Git reaches a remote, that
+is `credential.*`, `http.*`, or `url.<base>.insteadOf` / `pushInsteadOf`
+(see D048). The refusal names the first key outside that set.
 Ordinary Git commands inside `riftri exec` still receive the original
 environment unchanged; this restriction applies to Riftri lifecycle work.
 

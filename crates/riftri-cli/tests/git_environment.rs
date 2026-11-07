@@ -268,3 +268,135 @@ fn normal_git_passthrough_preserves_repository_overrides() {
     );
     assert_eq!(output.stdout, b"private staged data\n");
 }
+
+/// What cloud agent sandboxes inject so Git can reach a remote: no
+/// credential prompts, and a URL rewrite. None of it can change what a
+/// lifecycle operation reads or writes locally (D048).
+const NETWORK_ONLY: [(&str, &str); 4] = [
+    ("credential.interactive", "false"),
+    ("url.https://github.com/.insteadOf", "git@github.com:"),
+    (
+        "HTTP.https://example.invalid/.extraHeader",
+        "X-Riftri-Test: 1",
+    ),
+    ("Credential.https://example.invalid.useHttpPath", "true"),
+];
+
+fn inject(command: &mut Command, entries: &[(&str, &str)]) {
+    command.env("GIT_CONFIG_COUNT", entries.len().to_string());
+    for (index, (key, value)) in entries.iter().enumerate() {
+        command
+            .env(format!("GIT_CONFIG_KEY_{index}"), key)
+            .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+    }
+}
+
+#[test]
+fn lifecycle_commands_accept_network_only_injected_configuration() {
+    let fixture_dir = tempfile::tempdir().unwrap();
+    let repository = fixture(fixture_dir.path());
+
+    let mut doctor = isolated(env!("CARGO_BIN_EXE_riftri"), &repository);
+    doctor.args(["doctor", "--json"]);
+    inject(&mut doctor, &NETWORK_ONLY);
+    let output = doctor.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["repository_compatibility"]["available"], true,
+        "{report:#}"
+    );
+
+    let state = fixture_dir.path().join("state");
+    fs::create_dir(&state).unwrap();
+    let mut gc = isolated(env!("CARGO_BIN_EXE_riftri"), &repository);
+    gc.args(["gc", "--json", "--state-dir"]).arg(&state);
+    inject(&mut gc, &NETWORK_ONLY);
+    let output = gc.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Whether this volume can make the view depends on the machine; the
+    // configuration guard must not be what stops it.
+    let mut add = isolated(env!("CARGO_BIN_EXE_riftri"), &repository);
+    add.args(["worktree", "add"])
+        .arg(fixture_dir.path().join("view"))
+        .args(["-b", "feature/network-only", "HEAD"]);
+    inject(&mut add, &NETWORK_ONLY);
+    let output = add.output().unwrap();
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(!message.contains("GIT_CONFIG_COUNT"), "{message}");
+}
+
+#[test]
+fn injected_configuration_that_can_reach_local_operations_is_still_refused() {
+    let refused = [
+        ("core.hooksPath", "/nonexistent"),
+        ("filter.lfs.smudge", "cat"),
+        ("riftri.enabled", "true"),
+        // `insteadOf` needs the URL it rewrites, and only names its own variables
+        ("url.insteadOf", "https://example.invalid/"),
+        ("url.https://example.invalid/.other", "x"),
+        // a section name that only starts like an allowed one
+        ("credentials.helper", "store"),
+        ("httpx.proxy", "http://127.0.0.1:1"),
+    ];
+    for extra in refused {
+        let fixture_dir = tempfile::tempdir().unwrap();
+        let repository = fixture(fixture_dir.path());
+        let destination = fixture_dir.path().join("view");
+        let mut entries = NETWORK_ONLY.to_vec();
+        entries.push(extra);
+        let mut command = isolated(env!("CARGO_BIN_EXE_riftri"), &repository);
+        command.args(["worktree", "add"]).arg(&destination).args([
+            "-b",
+            "feature/environment",
+            "HEAD",
+        ]);
+        inject(&mut command, &entries);
+        let output = command.output().unwrap();
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{extra:?}: {message}");
+        assert!(
+            message.contains("GIT_CONFIG_COUNT") && message.contains("unset"),
+            "{extra:?}: {message}"
+        );
+        assert!(message.contains(extra.0), "{extra:?}: {message}");
+        assert!(!destination.exists(), "{extra:?}");
+        assert!(!repository.join(".git/riftri").exists(), "{extra:?}");
+        assert!(!repository.join(".git/worktrees").exists(), "{extra:?}");
+    }
+
+    // A count Git would reject, or one naming a key that isn't there, is
+    // refused rather than guessed at.
+    for (count, keys) in [("2", 1), ("one", 1), (" 1", 1), ("-1", 0)] {
+        let fixture_dir = tempfile::tempdir().unwrap();
+        let repository = fixture(fixture_dir.path());
+        let mut command = isolated(env!("CARGO_BIN_EXE_riftri"), &repository);
+        command
+            .args(["worktree", "add"])
+            .arg(fixture_dir.path().join("view"))
+            .args(["-b", "feature/environment", "HEAD"])
+            .env("GIT_CONFIG_COUNT", count);
+        for index in 0..keys {
+            command
+                .env(format!("GIT_CONFIG_KEY_{index}"), "credential.interactive")
+                .env(format!("GIT_CONFIG_VALUE_{index}"), "false");
+        }
+        let output = command.output().unwrap();
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{count:?}: {message}");
+        assert!(
+            message.contains("GIT_CONFIG_COUNT") && message.contains("unset"),
+            "{count:?}: {message}"
+        );
+        assert!(!repository.join(".git/worktrees").exists(), "{count:?}");
+    }
+}
