@@ -5,6 +5,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Accept the `whitespace` attribute in committed `.gitattributes` files. Only
+  `git diff --check` and `git apply` read it, so it can't change checkout
+  bytes, but it used to block every optimized add in the repository.
+
 ## [0.6.7] - 2026-11-07
 
 ### Changed

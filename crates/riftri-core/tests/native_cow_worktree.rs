@@ -740,6 +740,69 @@ fn creates_a_clean_worktree_with_checkout_neutral_linguist_attributes() {
 }
 
 #[test]
+fn creates_a_clean_worktree_with_checkout_neutral_whitespace_attributes() {
+    let fixture = tempdir().expect("fixture directory");
+    let repository = fixture.path().join("repository");
+    let state = fixture.path().join("state");
+    let destination = fixture.path().join("worktree");
+    fs::create_dir(&repository).expect("create repository");
+    git(&repository, &["init", "--quiet"]);
+    git(&repository, &["config", "user.name", "Riftri Tests"]);
+    git(
+        &repository,
+        &["config", "user.email", "riftri@example.invalid"],
+    );
+    git(&repository, &["config", "core.autocrlf", "false"]);
+    fs::create_dir(repository.join("fixtures")).expect("create fixtures");
+    fs::write(
+        repository.join(".gitattributes"),
+        "fixtures/*.pdb whitespace=-blank-at-eol\n\
+         *.diff whitespace=cr-at-eol,tabwidth=4\n\
+         *.rs whitespace\n\
+         *.raw -whitespace\n",
+    )
+    .expect("write whitespace attributes");
+    // Trailing blanks and a carriage return would expose any byte conversion.
+    let structure = b"ATOM      1  N   ALA A   1      \t  \r\nEND   \n";
+    fs::write(repository.join("fixtures/structure.pdb"), structure).expect("write fixture");
+    fs::write(repository.join("record.diff"), b"+line  \r\n").expect("write record");
+    git(
+        &repository,
+        &[
+            "add",
+            "--",
+            ".gitattributes",
+            "fixtures/structure.pdb",
+            "record.diff",
+        ],
+    );
+    git(
+        &repository,
+        &["commit", "--quiet", "-m", "whitespace attributes"],
+    );
+
+    let result = add_worktree(AddWorktreeRequest {
+        repository: repository.clone(),
+        destination: destination.clone(),
+        revision: OsString::from("HEAD"),
+        mode: WorktreeMode::NewBranch(OsString::from("feature/whitespace")),
+        state_dir: Some(state),
+        sparse_directories: Vec::new(),
+    })
+    .expect("the whitespace attribute must not block Riftri worktree creation");
+
+    assert!(git(&destination, &["status", "--porcelain=v1"]).is_empty());
+    assert_eq!(
+        fs::read(destination.join("fixtures/structure.pdb")).expect("read worktree fixture"),
+        structure,
+    );
+    assert_eq!(
+        fs::read(result.base_path.join("record.diff")).expect("read immutable base"),
+        b"+line  \r\n",
+    );
+}
+
+#[test]
 fn rejects_effective_attributes_before_creating_state_or_git_metadata() {
     let fixture = tempdir().expect("fixture directory");
     let repository = fixture.path().join("repository");

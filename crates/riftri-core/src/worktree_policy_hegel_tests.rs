@@ -101,6 +101,8 @@ fn attribute(tc: &TestCase, path: &Path) -> GitAttribute {
         "linguist-detectable",
         "linguist-language",
         "linguist-generate",
+        "whitespace",
+        "whitespaces",
         "Text",
         "",
     ];
@@ -118,6 +120,7 @@ fn attribute(tc: &TestCase, path: &Path) -> GitAttribute {
         "unspecified",
         "SET",
         "utf-16",
+        "-blank-at-eol",
     ];
     // Mostly records that are fine on their own, so a single stray name or
     // value is what decides the verdict.
@@ -131,6 +134,7 @@ fn attribute(tc: &TestCase, path: &Path) -> GitAttribute {
         ("merge", "unset"),
         ("linguist-vendored", "true"),
         ("linguist-language", "Rust"),
+        ("whitespace", "-blank-at-eol"),
     ];
     let (name, value) = if tc.draw(gs::integers::<u8>().max_value(3)) > 0 {
         tc.draw(gs::sampled_from(USUAL))
@@ -172,6 +176,9 @@ fn allowed(name: &[u8], value: &[u8]) -> bool {
     ];
     if name == b"linguist-language" {
         return !value.is_empty();
+    }
+    if name == b"whitespace" {
+        return true;
     }
     table
         .iter()

@@ -885,7 +885,7 @@ fn quote_shell_argument(value: &str) -> String {
 fn compatibility_remedy(kind: RepositoryCompatibilityBlockerKind) -> &'static str {
     match kind {
         RepositoryCompatibilityBlockerKind::InTreeAttributes => {
-            "Use only Riftri's documented deterministic `text`, `eol`, and `binary` attributes plus checkout-neutral `linguist-*` metadata, or use ordinary Git for this worktree."
+            "Use only Riftri's documented deterministic `text`, `eol`, and `binary` attributes plus checkout-neutral `linguist-*` and `whitespace` metadata, or use ordinary Git for this worktree."
         }
         RepositoryCompatibilityBlockerKind::EffectiveAttributes => {
             "Remove the external attributes or custom filters affecting tracked paths, or use ordinary Git for this worktree."
