@@ -29,7 +29,7 @@ rustix.workspace = true
 
 [dev-dependencies]
 fs2.workspace = true
-hegeltest = { version = "0.51.0", features = ["static-engine"] }
+hegeltest = { version = "0.52.0", features = ["static-engine"] }
 serde_json.workspace = true
 tempfile.workspace = true
 
