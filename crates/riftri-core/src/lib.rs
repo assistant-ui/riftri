@@ -728,8 +728,8 @@ fn destination_readiness(
     match repository_enabled {
         Some(false) => blockers.push(DestinationReadinessBlocker {
             kind: "repository-activation",
-            explanation: "transparent Git interception is disabled for this repository".to_owned(),
-            remedy: "Run `riftri enable` from this repository; activation remains opt-in one repository at a time."
+            explanation: "transparent Git interception is disabled for this repository; explicit `riftri worktree add` does not need it".to_owned(),
+            remedy: "Only ordinary `git worktree add` needs this: run `riftri enable` from this repository; activation remains opt-in one repository at a time."
                 .to_owned(),
         }),
         // A bare repository offers no transparent interception, but explicit

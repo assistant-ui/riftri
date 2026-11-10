@@ -486,6 +486,74 @@ fn doctor_explains_destination_readiness_and_repository_activation() {
     assert!(!destination.exists());
 }
 
+/// Activation gates only transparent interception, so doctor must not present
+/// it as something the explicit add needs, and that add must then succeed.
+#[test]
+fn doctor_activation_notice_does_not_gate_the_explicit_add() {
+    let fixture = RepositoryFixture::new();
+    let destination = fixture.directory.path().join("explicit-add");
+
+    let doctor = riftri(
+        &fixture.repository,
+        &[
+            "doctor",
+            "--destination",
+            destination.to_str().expect("UTF-8 fixture destination"),
+            "--json",
+        ],
+    );
+    assert!(doctor.status.success());
+    let report: serde_json::Value =
+        serde_json::from_slice(&doctor.stdout).expect("parse doctor JSON");
+    let readiness = &report["destination_readiness"];
+    let activation = readiness["blockers"]
+        .as_array()
+        .expect("readiness blockers")
+        .iter()
+        .find(|blocker| blocker["kind"] == "repository-activation")
+        .expect("activation notice for a repository that is not enabled");
+    for (field, command) in [
+        (
+            "explanation",
+            "explicit `riftri worktree add` does not need it",
+        ),
+        ("remedy", "Only ordinary `git worktree add` needs this"),
+    ] {
+        let text = activation[field].as_str().expect("activation text");
+        assert!(text.contains(command), "{field}: {text}");
+    }
+    if readiness["status"] != "needs-activation" {
+        return;
+    }
+
+    let add = riftri(
+        &fixture.repository,
+        &[
+            "worktree",
+            "add",
+            destination.to_str().expect("UTF-8 fixture destination"),
+            "--detach",
+            "HEAD",
+        ],
+    );
+    assert!(
+        add.status.success(),
+        "explicit add after needs-activation failed: {}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    assert!(
+        git(&destination, &["status", "--porcelain"])
+            .stdout
+            .is_empty()
+    );
+    assert!(
+        git(&fixture.repository, &["config", "--get", "riftri.enabled"])
+            .stdout
+            .is_empty(),
+        "the explicit add must not enable the repository"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn doctor_json_preserves_non_utf8_destination_paths() {

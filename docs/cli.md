@@ -300,7 +300,14 @@ Write one troff man page per riftri command (`riftri.1`,
 ### `riftri doctor [OPTIONS] [PATH]`
 
 Inspect Git and show the planned storage path without changing anything.
-`PATH` defaults to `.`.
+`PATH` defaults to `.`. Doctor judges the destination for that repository, the
+same one `riftri worktree add` uses from that directory or with
+`--repository`. Where the destination lives never selects a repository, so run
+doctor from the source repository or pass it explicitly.
+
+A `needs activation` verdict means only the `repository-activation` notice is
+left. That notice concerns transparent interception of ordinary `git worktree
+add`; explicit `riftri worktree add` works without `riftri enable`.
 
 | Flag | Effect |
 | --- | --- |
