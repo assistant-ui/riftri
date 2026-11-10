@@ -5,6 +5,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- `riftri doctor` now says its `repository-activation` notice applies only to
+  ordinary `git worktree add`. Explicit `riftri worktree add` never needed
+  `riftri enable`, but the notice and its fix line didn't say so.
+
 ## [0.6.8] - 2026-11-09
 
 ### Fixed
