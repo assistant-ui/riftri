@@ -6712,6 +6712,10 @@ fn checkout_config_source_diagnostic(git: &Git, repository: &Path, key: &str) ->
 /// consults them, so they cannot change materialized worktree bytes. Values
 /// are restricted to linguist's documented forms so typos and lookalike
 /// attributes still fail closed.
+///
+/// Git passes `whitespace` only to the rule parser behind `git diff --check`
+/// and `git apply`, and checkout never reads it. Every value is accepted
+/// because Git tolerates unknown rules and none can reach worktree bytes.
 fn is_checkout_neutral_metadata_attribute(name: &[u8], value: &[u8]) -> bool {
     match name {
         b"linguist-generated"
@@ -6721,6 +6725,7 @@ fn is_checkout_neutral_metadata_attribute(name: &[u8], value: &[u8]) -> bool {
             matches!(value, b"set" | b"unset" | b"true" | b"false")
         }
         b"linguist-language" => !value.is_empty(),
+        b"whitespace" => true,
         _ => false,
     }
 }
@@ -15290,6 +15295,38 @@ mod tests {
                 "accepted unsupported attribute {:?}={:?}",
                 String::from_utf8_lossy(&rejected.name),
                 String::from_utf8_lossy(&rejected.value),
+            );
+        }
+    }
+
+    #[test]
+    fn attribute_allowlist_accepts_every_whitespace_value_but_not_lookalikes() {
+        let attribute = |name: &str, value: &str| riftri_git::GitAttribute {
+            path: PathBuf::from("fixtures/structure.pdb"),
+            name: name.as_bytes().to_vec(),
+            value: value.as_bytes().to_vec(),
+        };
+
+        for value in [
+            "set",
+            "unset",
+            "",
+            "-blank-at-eol",
+            "cr-at-eol,tabwidth=4",
+            "not-a-rule",
+        ] {
+            let accepted = attribute("whitespace", value);
+            assert!(
+                classify_in_tree_attributes(std::slice::from_ref(&accepted)).is_ok(),
+                "rejected checkout-neutral whitespace value {value:?}",
+            );
+        }
+
+        for name in ["Whitespace", "whitespaces", "whitespace-rule"] {
+            let rejected = attribute(name, "set");
+            assert!(
+                classify_in_tree_attributes(std::slice::from_ref(&rejected)).is_err(),
+                "accepted lookalike attribute {name:?}",
             );
         }
     }
