@@ -16,8 +16,8 @@
     "generate": "farm generate"
   },
   "devDependencies": {
-    "@farm.js/cli": "0.1.61",
-    "@farm.js/core": "0.1.61",
+    "@farm.js/cli": "0.1.66",
+    "@farm.js/core": "0.1.66",
     "@farming-labs/docs": "0.2.143",
     "@farming-labs/farmjs": "0.2.143",
     "@farming-labs/theme": "0.2.143",
