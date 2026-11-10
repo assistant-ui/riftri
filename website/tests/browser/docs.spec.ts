@@ -63,10 +63,15 @@ test("page actions are one View/Copy row below the intro, above the first sectio
       const c = document.querySelectorAll('#nd-page a[title="Copy this page as Markdown"]')[0] as HTMLElement;
       const row = v.closest("p") as HTMLElement;
       const vr = v.getBoundingClientRect(), cr = c.getBoundingClientRect();
+      const rr = row.getBoundingClientRect(), style = getComputedStyle(row);
+      const contentLeft = rr.left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft);
+      const contentRight = rr.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
       return {
         sameRow: Math.abs((vr.top + vr.height / 2) - (cr.top + cr.height / 2)) <= 1,
         viewLeftOfCopy: vr.right <= cr.left,
-        rightAligned: getComputedStyle(row).justifyContent === "flex-end",
+        // Measured, not read from `justify-content`: Chromium 158 reports
+        // `flex-end` as `flow-end`, while the rendered row is unchanged.
+        rightAligned: Math.abs(cr.right - contentRight) <= 1 && vr.left > contentLeft + 1,
         aligned: getComputedStyle(row).alignItems === "center",
       };
     });
