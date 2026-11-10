@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.6.8] - 2026-11-09
+
 ### Fixed
 
 - Accept the `whitespace` attribute in committed `.gitattributes` files. Only
