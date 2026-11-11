@@ -141,6 +141,13 @@ let failed;
 try {
   report.version = ok(binary, ['--version']).stdout.toString().trim();
   report.git = git(['--version']).stdout.toString().trim();
+  // Before 2.47.1, Git's macOS daemon accepted queries before its FSEvents stream
+  // started, so a query sent right after a watcher start could wait forever for
+  // a cookie event it would never see. Every watcher start here races that.
+  // https://github.com/git/git/commit/51907f8feeae9ae4af1722e973f44ff10aa168dc
+  const [, major, minor, patch] = (report.git.match(/^git version (\d+)\.(\d+)\.(\d+)/) ?? []).map(Number);
+  assert.ok(major > 2 || (major === 2 && (minor > 47 || (minor === 47 && patch >= 1))),
+    `${report.git} can hang on FSMonitor startup; use Git 2.47.1 or later.`);
   git(['init', '--quiet', '-b', 'main']);
   // Long Unix socket paths otherwise make Git fall back to HOME. Keep the
   // daemon's IPC files in a separate, short, task-owned native directory.
@@ -215,6 +222,10 @@ try {
       }
     }
     for (const item of views) {
+      // A sampled status may already have written the index with a newer
+      // token, so the next query reports no edits. Edit again so the traced
+      // query is the first one after them.
+      if (scenario === 'three-edits') for (const name of editNames) fs.writeFileSync(path.join(item.view, name), Buffer.alloc(8192, 'z'));
       rememberTrace(item.view, item.variant, scenario);
       if (scenario === 'three-edits') git(['restore', '--source=HEAD', '--worktree', '--', ...editNames], item.view);
       if (scenario === 'three-untracked') for (let index = 0; index < 3; index++) fs.unlinkSync(path.join(item.view, `untracked-${index}.txt`));

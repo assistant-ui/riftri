@@ -111,6 +111,24 @@ impl Fixture {
             .prefix("rf-fsm-")
             .tempdir_in("/tmp")
             .unwrap();
+        // Before 2.47.1, Git's macOS daemon accepted queries before its FSEvents
+        // stream started, so a query sent right after a watcher start could
+        // wait forever for a cookie event it would never see. These tests
+        // start and restart watchers.
+        // https://github.com/git/git/commit/51907f8feeae9ae4af1722e973f44ff10aa168dc
+        let output = String::from_utf8(git(root.path(), &["--version"])).unwrap();
+        let version = output.trim_end();
+        let release: Vec<u32> = version
+            .strip_prefix("git version ")
+            .unwrap()
+            .split(['.', ' '])
+            .take(3)
+            .map(|number| number.parse().unwrap())
+            .collect();
+        assert!(
+            release >= vec![2, 47, 1],
+            "{version} can hang on FSMonitor startup; use Git 2.47.1 or later"
+        );
         let repository = root.path().join("repository");
         fs::create_dir(&repository).unwrap();
         git(&repository, &["init", "--quiet"]);
