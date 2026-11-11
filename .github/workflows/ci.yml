@@ -102,6 +102,10 @@ jobs:
         env:
           RIFTRI_BENCH_TEST_BINARY: ${{ github.workspace }}/target/release/riftri
           TMPDIR: ${{ runner.temp }}/riftri-apfs
+          # These harnesses run /usr/bin/git. The default Xcode 16's Apple Git
+          # predates 2.47.1, so its FSMonitor daemon can hang a query sent
+          # right after it starts. The FSMonitor harness refuses such a Git.
+          DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
         run: |
           if ! command -v git-lfs >/dev/null; then
             brew install git-lfs

@@ -26,6 +26,8 @@ their own validation; storage-backend support alone does not prove FSMonitor
 support. Use current Git versions in both your terminal and IDE. Old Git can
 misinterpret boolean `core.fsmonitor` values; see
 [Git's compatibility warning](https://git-scm.com/docs/git-config#Documentation/git-config.txt-corefsmonitor).
+On macOS, Git before 2.47.1 can hang a command that starts the watcher
+([fix](https://github.com/git/git/commit/51907f8feeae9ae4af1722e973f44ff10aa168dc)).
 Do not bypass Git's network-filesystem restrictions.
 
 Inspect existing settings before overriding them, especially a custom watcher:

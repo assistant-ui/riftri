@@ -15,7 +15,8 @@ These are synthetic results, not an automatic size threshold. See the
 
 ## Try without saving a setting
 
-Use current Git in your terminal and IDE. This guide's tested profile is local
+Use current Git in your terminal and IDE: on macOS, Git before 2.47.1 can hang
+a command that starts the watcher. This guide's tested profile is local
 macOS/APFS; other Git builds and filesystems need validation. Inspect any existing
 watcher setting before overriding it:
 
