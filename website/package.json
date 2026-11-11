@@ -10,8 +10,8 @@
     "preview:static": "node scripts/serve-static.mjs",
     "generate:sharing-card": "node scripts/generate-sharing-card.mjs",
     "stage": "node ../package/scripts/stage-website-installer.mjs && node ../package/scripts/stage-website-docs.mjs && node scripts/stage-doc-icons.mjs",
-    "dev": "pnpm stage && farm dev",
-    "build": "pnpm stage && farm build && node ../package/scripts/finalize-static-website.mjs",
+    "dev": "pnpm run stage && farm dev",
+    "build": "pnpm run stage && farm build && node ../package/scripts/finalize-static-website.mjs",
     "type-check": "tsc --noEmit",
     "generate": "farm generate"
   },
@@ -35,15 +35,5 @@
   "engines": {
     "node": ">=22.13.0"
   },
-  "packageManager": "pnpm@10.18.3",
-  "pnpm": {
-    "overrides": {
-      "nanoid@>=5.0.0 <5.1.16": "5.1.16",
-      "srvx": "1.0.4",
-      "toml@<5.0.1": "5.0.1",
-      "uuid": "11.1.1",
-      "@vercel/og@<1.0.3": "1.0.3",
-      "yaml": "2.9.1"
-    }
-  }
+  "packageManager": "pnpm@11.28.9+sha512.35421cea2720eca3f5ad722b67e8ef18f4d3cd4745ed2fcfeb0dc288d4e9437fad3870d91ee6e83f268f0f6f7e0f62723317b19617bb45ee4333172ef51159f8"
 }

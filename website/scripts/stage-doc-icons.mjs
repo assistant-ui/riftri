@@ -14,7 +14,7 @@ const icons = Object.fromEntries(names.map((name) => {
 const output = new URL("../content/docs-icons.json", import.meta.url);
 const json = `${JSON.stringify(icons, null, 2)}\n`;
 if (process.argv.includes("--check")) {
-  if (await readFile(output, "utf8") !== json) throw new Error("Docs icons are stale. Run pnpm stage.");
+  if (await readFile(output, "utf8") !== json) throw new Error("Docs icons are stale. Run pnpm run stage.");
 } else {
   await writeFile(output, json);
 }

@@ -484,7 +484,9 @@ jobs:
           node-version: 26.13.0
 
       - name: Set up pnpm
-        run: corepack enable && corepack prepare pnpm@10.18.3 --activate
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: website/package.json
 
       - name: Install website dependencies
         run: pnpm --dir website install --frozen-lockfile
@@ -497,7 +499,7 @@ jobs:
         # build regenerates Farm's route types, so stale copies would only show
         # up as an unrelated diff on someone's later checkout.
         run: |
-          pnpm --dir website stage
+          pnpm --dir website run stage
           pnpm --dir website exec farm generate --check
           git diff --exit-code -- website
 

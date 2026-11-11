@@ -52,7 +52,7 @@ test("website stages the canonical installer without maintaining another copy", 
   assert.deepEqual(fs.readFileSync(path.join(destination, "install.ps1")), fs.readFileSync(path.join(root, "package/install.ps1")));
   const { scripts } = JSON.parse(fs.readFileSync(path.join(root, "website/package.json"), "utf8"));
   assert.match(scripts.stage, /stage-website-installer\.mjs/);
-  for (const name of ["dev", "build"]) assert.match(scripts[name], /^pnpm stage && farm/);
+  for (const name of ["dev", "build"]) assert.match(scripts[name], /^pnpm run stage && farm/);
 });
 
 test("hero and quick start reuse one install command and the same quick-start column styling", () => {

@@ -26,7 +26,7 @@ There are two reading paths for every topic:
   `/docs.md`, which also links to every topic's full reference.
 
 `content/docs.json` pairs each public `content` file with its full `source`.
-`pnpm stage` generates the public pages in ignored `src/app/docs/` and the
+`pnpm run stage` generates the public pages in ignored `src/app/docs/` and the
 full-reference companions in ignored `public/docs/<topic>.md` (plus
 `public/docs.md` for the introduction). It rewrites links, adds a right-aligned
 `View .md` / `Copy .md` action row, and links public edits to the concise source
@@ -53,7 +53,7 @@ Staging regenerates `content/docs-icons.json` as SVG strings for the adapter;
 it also generates small action-icon masks in `public/docs-icons/`. The icon
 library and SVG renderer run at build time, not in the browser.
 Use `node scripts/stage-doc-icons.mjs --check` to check the generated registry.
-After editing a canonical Markdown file during development, rerun `pnpm stage`.
+After editing a canonical Markdown file during development, rerun `pnpm run stage`.
 After changing `docs.config.ts`, restart the dev server.
 
 The build keeps the adapter's Vercel function for public `/docs` pages, their
@@ -70,7 +70,7 @@ share URLs. `pnpm preview:static` now previews both parts of this finalized
 output; it imports the built function, not the source dev server.
 `RIFTRI_PREVIEW_PORT` overrides the default preview/browser-test port.
 
-`pnpm stage && pnpm generate` refreshes Farm's route types when the page map
+`pnpm run stage && pnpm generate` refreshes Farm's route types when the page map
 changes; commit them with the sitemap that staging rewrites. CI stages, runs
 `farm generate --check`, and fails if either committed file is stale. Browser
 tests exercise every generated page, Markdown mirrors, search, copying, sidebar
