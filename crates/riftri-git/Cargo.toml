@@ -21,4 +21,4 @@ thiserror.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
-hegeltest = { version = "0.51.0", features = ["static-engine"] }
+hegeltest = { version = "0.52.0", features = ["static-engine"] }

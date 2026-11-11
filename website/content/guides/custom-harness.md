@@ -58,7 +58,7 @@ Branch on `cow_backend_active`, `repository_enabled`, and
 `destination_readiness.status`:
 
 - Ready → use `riftri worktree add`
-- `needs-activation` → run `riftri enable` once, then use Riftri
+- `needs-activation` → also `riftri worktree add`; no `enable` needed
 - No supported backend, or exit `3` → fall back to `git worktree add`
 
 That fallback is well-defined because a policy refusal changed nothing.
