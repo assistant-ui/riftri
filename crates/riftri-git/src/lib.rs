@@ -352,6 +352,9 @@ pub struct Git {
     query: Arc<OnceLock<Option<PathBuf>>>,
     #[cfg(test)]
     process_attempts: Arc<AtomicUsize>,
+    /// Starts refused with ETXTBSY and retried; see [`Git::start`].
+    #[cfg(test)]
+    busy_starts: Arc<AtomicUsize>,
 }
 
 /// One operation-scoped `cat-file --batch` process. Call `finish` to validate
@@ -472,7 +475,29 @@ impl Git {
             query: Arc::new(OnceLock::new()),
             #[cfg(test)]
             process_attempts: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            busy_starts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Start one process. This crate's tests write shell stand-ins for Git
+    /// and start them while sibling tests fork. A child forked before a
+    /// stand-in's writer closes holds a writable descriptor until it execs,
+    /// and Linux refuses to exec the stand-in meanwhile (ETXTBSY). A refused
+    /// start ran nothing, so the test build retries it here, below every
+    /// route choice and attempt count. Release builds start exactly once.
+    fn start<T>(&self, mut start: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+        #[cfg(test)]
+        for _ in 0..50 {
+            match start() {
+                Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy => {
+                    self.busy_starts.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                result => return result,
+            }
+        }
+        start()
     }
 
     /// A handle whose read-only queries start `query` and everything else
@@ -1100,8 +1125,8 @@ impl Git {
             );
         #[cfg(test)]
         self.process_attempts.fetch_add(1, Ordering::Relaxed);
-        let mut child = command
-            .spawn()
+        let mut child = self
+            .start(|| command.spawn())
             .map_err(|source| self.start_error(Some(path), source))?;
         let input = child.stdin.take();
         let output = child.stdout.take();
@@ -1951,8 +1976,8 @@ impl Git {
                     command.env_remove(name);
                 }
             }
-            let output = command
-                .output()
+            let output = self
+                .start(|| command.output())
                 .map_err(|source| self.start_error(Some(destination), source))?;
             if output.status.success() {
                 Ok(())
@@ -2848,12 +2873,11 @@ impl Git {
             // under a new `xcode-select` choice, say) starts no process, so
             // retrying it through the recorded Git changes nothing but which
             // error, if any, the caller sees.
-            if let Ok(output) = command(program).output() {
+            if let Ok(output) = self.start(|| command(program).output()) {
                 return Ok(output);
             }
         }
-        command(&self.command)
-            .output()
+        self.start(|| command(&self.command).output())
             .map_err(|source| self.start_error(path, source))
     }
 
@@ -2894,8 +2918,8 @@ impl Git {
             command.current_dir(path);
         }
 
-        let mut child = command
-            .spawn()
+        let mut child = self
+            .start(|| command.spawn())
             .map_err(|source| self.start_error(path, source))?;
         let mut stdin = child.stdin.take().ok_or_else(|| GitError::InvalidOutput {
             context: "Git command input",
@@ -3721,11 +3745,7 @@ mod tests {
             .unwrap();
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
             let git = Git::new(&script);
-            // A freshly written test script can still have a writer inherited
-            // by another test's pre-exec child. Retry only a failed spawn;
-            // protocol reads and finish errors below must never be retried.
-            let mut reader =
-                retry_while_wrapper_is_busy(|| git.small_blob_reader(fixture.path())).unwrap();
+            let mut reader = git.small_blob_reader(fixture.path()).unwrap();
             assert_eq!(
                 reader.read(std::slice::from_ref(&id), 1).unwrap(),
                 vec![b"x".to_vec()]
@@ -4156,7 +4176,8 @@ mod tests {
         fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("chmod");
 
         let git = super::Git::new(&stand_in);
-        let listed = retry_while_wrapper_is_busy(|| git.list_worktrees(&repository))
+        let listed = git
+            .list_worktrees(&repository)
             .expect("the retried listing succeeds");
 
         assert!(marker.exists(), "the first listing did fail");
@@ -4787,10 +4808,9 @@ mod tests {
     fn command_failures_name_the_terminating_signal() {
         let directory = tempdir().expect("temporary directory");
         let git = Git::new(self_killing_git_stand_in(directory.path()));
-        let error = retry_while_wrapper_is_busy(|| {
-            git.run(Some(directory.path()), &["status", "--porcelain=v1"])
-        })
-        .expect_err("a signal death must be an error");
+        let error = git
+            .run(Some(directory.path()), &["status", "--porcelain=v1"])
+            .expect_err("a signal death must be an error");
         let message = error.to_string();
         assert!(
             message.contains("killed by signal 9 (SIGKILL)"),
@@ -4804,10 +4824,9 @@ mod tests {
     fn a_signal_killed_probe_is_not_reported_as_an_absent_revision() {
         let directory = tempdir().expect("temporary directory");
         let git = Git::new(self_killing_git_stand_in(directory.path()));
-        let error = retry_while_wrapper_is_busy(|| {
-            git.resolve_optional_object(directory.path(), "HEAD^{commit}")
-        })
-        .expect_err("a signal death must not resolve to an absent revision");
+        let error = git
+            .resolve_optional_object(directory.path(), "HEAD^{commit}")
+            .expect_err("a signal death must not resolve to an absent revision");
         let message = error.to_string();
         assert!(
             message.contains("killed by signal 9 (SIGKILL)"),
@@ -5066,7 +5085,7 @@ mod tests {
             .unwrap();
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
             let git = Git::new(&wrapper);
-            retry_while_wrapper_is_busy(|| git.detect()).unwrap();
+            git.detect().unwrap();
             let before = git.process_attempts();
             let error = git
                 .inspect_repository_for_add(fixture.path(), OsStr::new("HEAD~0"))
@@ -5121,63 +5140,72 @@ mod tests {
         }
     }
 
-    /// Spawning a freshly written script can fail with ETXTBSY when a
-    /// concurrent test forks while the writer's descriptor is still duplicated
-    /// into a not-yet-exec'd child. A busy failure means the script never ran,
-    /// so retrying the whole attempt is safe, and one success proves the racy
-    /// descriptor is gone for the rest of the test.
-    #[cfg(unix)]
-    fn retry_while_wrapper_is_busy<T>(
-        mut attempt: impl FnMut() -> Result<T, crate::GitError>,
-    ) -> Result<T, crate::GitError> {
-        let mut retries = 0;
-        loop {
-            match attempt() {
-                Err(crate::GitError::Start { ref source, .. })
-                    if source.kind() == std::io::ErrorKind::ExecutableFileBusy && retries < 50 =>
-                {
-                    retries += 1;
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                result => break result,
-            }
-        }
-    }
-
-    #[cfg(unix)]
     #[test]
-    fn wrapper_busy_retry_is_bounded_and_does_not_mask_other_errors() {
-        let start_error = |kind| crate::GitError::Start {
-            command: "test wrapper".into(),
-            source: std::io::Error::from(kind),
-        };
+    fn busy_start_retry_is_bounded_and_does_not_mask_other_errors() {
+        let git = Git::new("git");
+        let busy = || std::io::Error::from(std::io::ErrorKind::ExecutableFileBusy);
         let mut attempts = 0;
-        let value = retry_while_wrapper_is_busy(|| {
-            attempts += 1;
-            if attempts < 3 {
-                Err(start_error(std::io::ErrorKind::ExecutableFileBusy))
-            } else {
-                Ok(42)
-            }
-        })
-        .unwrap();
+        let value = git
+            .start(|| {
+                attempts += 1;
+                if attempts < 3 { Err(busy()) } else { Ok(42) }
+            })
+            .unwrap();
         assert_eq!((value, attempts), (42, 3));
 
         let mut attempts = 0;
-        let result: Result<(), _> = retry_while_wrapper_is_busy(|| {
+        let result: std::io::Result<()> = git.start(|| {
             attempts += 1;
-            Err(start_error(std::io::ErrorKind::PermissionDenied))
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
         });
         assert!(result.is_err());
         assert_eq!(attempts, 1);
 
         let mut attempts = 0;
-        let result: Result<(), _> = retry_while_wrapper_is_busy(|| {
+        let result: std::io::Result<()> = git.start(|| {
             attempts += 1;
-            Err(start_error(std::io::ErrorKind::ExecutableFileBusy))
+            Err(busy())
         });
-        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
         assert_eq!(attempts, 51);
+    }
+
+    /// A stand-in held open for writing makes Linux refuse every exec of it
+    /// with ETXTBSY, as a sibling test's fork does for a moment. The query
+    /// must wait that out on its own route: falling back to the recorded Git
+    /// instead is how this race surfaced as a routing failure (#784).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_busy_query_stand_in_is_retried_on_the_query_route() {
+        use std::sync::atomic::Ordering;
+
+        let routed = RoutedGit::new();
+        let git = routed.git();
+        let writer = fs::OpenOptions::new()
+            .append(true)
+            .open(&routed.query)
+            .expect("hold the query stand-in open for writing");
+
+        let detected = std::thread::scope(|scope| {
+            let detect = scope.spawn(|| git.detect());
+            // Release the stand-in only once a start has been refused, so the
+            // retry is proven rather than raced.
+            while git.busy_starts.load(Ordering::Relaxed) == 0 && !detect.is_finished() {
+                std::thread::yield_now();
+            }
+            drop(writer);
+            detect.join().expect("detect thread")
+        });
+
+        assert!(
+            git.busy_starts.load(Ordering::Relaxed) > 0,
+            "the held stand-in was never refused"
+        );
+        detected.expect("detect once the stand-in is closed");
+        routed.assert_routes("busy detect", "query");
     }
 
     #[cfg(unix)]
@@ -5197,16 +5225,13 @@ mod tests {
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("executable");
 
         let moving_git = Git::new(wrapper);
-        let resolved = retry_while_wrapper_is_busy(|| {
-            // Re-pin the moving ref so the scenario is intact even if a retry
-            // follows a partial resolution.
-            git(
-                fixture.path(),
-                &["branch", "--force", "moving", original.commit.as_str()],
-            );
-            moving_git.resolve_revision(fixture.path(), OsStr::new("moving"))
-        })
-        .expect("resolve moving ref");
+        git(
+            fixture.path(),
+            &["branch", "--force", "moving", original.commit.as_str()],
+        );
+        let resolved = moving_git
+            .resolve_revision(fixture.path(), OsStr::new("moving"))
+            .expect("resolve moving ref");
         assert_eq!(resolved.commit, original.commit);
         assert_eq!(resolved.tree, original.tree);
     }
@@ -5384,7 +5409,7 @@ mod tests {
         .unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
         let client = Git::new(&wrapper);
-        retry_while_wrapper_is_busy(|| client.detect()).unwrap();
+        client.detect().unwrap();
         let tree = client
             .resolve_revision(fixture.path(), OsStr::new("HEAD"))
             .unwrap()
@@ -6676,7 +6701,8 @@ mod tests {
         fs::write(&wrapper, "#!/bin/sh\nfixture=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd) || exit\nexport GIT_CONFIG_NOSYSTEM=1\nexport GIT_CONFIG_GLOBAL=\"$fixture/global-config\"\nexport GIT_CONFIG_COUNT=1\nexport GIT_CONFIG_KEY_0=riftri-test.command\nexport GIT_CONFIG_VALUE_0=environment\nexec git -c riftri-test.command=command-line \"$@\"\n").unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
         let scoped = Git::new(wrapper);
-        retry_while_wrapper_is_busy(|| scoped.config_value(fixture.path(), "riftri.enabled"))
+        scoped
+            .config_value(fixture.path(), "riftri.enabled")
             .expect("warm up the scoped Git wrapper");
         let keys = [
             "riftri-test.scope",
@@ -8072,7 +8098,7 @@ mod tests {
             fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' '{size}'\n")).unwrap();
             fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
             let git = Git::new(&script);
-            let parsed = retry_while_wrapper_is_busy(|| git.blob_size(fixture.path(), &id));
+            let parsed = git.blob_size(fixture.path(), &id);
             match expected {
                 Some(expected) => assert_eq!(parsed.unwrap(), expected),
                 None => assert!(
