@@ -1,0 +1,142 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      '@types/node':
+        specifier: 18.19.130
+        version: 18.19.130
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      yaml:
+        specifier: 2.9.1
+        version: 2.9.1
+    optionalDependencies:
+      riftri-darwin-arm64:
+        specifier: file:package/platforms/riftri-darwin-arm64
+        version: file:package/platforms/riftri-darwin-arm64
+      riftri-darwin-x64:
+        specifier: file:package/platforms/riftri-darwin-x64
+        version: file:package/platforms/riftri-darwin-x64
+      riftri-linux-arm64-gnu:
+        specifier: file:package/platforms/riftri-linux-arm64-gnu
+        version: file:package/platforms/riftri-linux-arm64-gnu
+      riftri-linux-arm64-musl:
+        specifier: file:package/platforms/riftri-linux-arm64-musl
+        version: file:package/platforms/riftri-linux-arm64-musl
+      riftri-linux-x64-gnu:
+        specifier: file:package/platforms/riftri-linux-x64-gnu
+        version: file:package/platforms/riftri-linux-x64-gnu
+      riftri-linux-x64-musl:
+        specifier: file:package/platforms/riftri-linux-x64-musl
+        version: file:package/platforms/riftri-linux-x64-musl
+      riftri-win32-arm64:
+        specifier: file:package/platforms/riftri-win32-arm64
+        version: file:package/platforms/riftri-win32-arm64
+      riftri-win32-x64:
+        specifier: file:package/platforms/riftri-win32-x64
+        version: file:package/platforms/riftri-win32-x64
+
+packages:
+
+  '@types/node@18.19.130':
+    resolution: {integrity: sha512-GRaXQx6jGfL8sKfaIDD6OupbIHBr9jv7Jnaml9tB7l4v068PAOXqfcujMMo5PhbIs6ggR1XODELqahT2R8v0fg==}
+
+  riftri-darwin-arm64@file:package/platforms/riftri-darwin-arm64:
+    resolution: {directory: package/platforms/riftri-darwin-arm64, type: directory}
+    cpu: [arm64]
+    os: [darwin]
+
+  riftri-darwin-x64@file:package/platforms/riftri-darwin-x64:
+    resolution: {directory: package/platforms/riftri-darwin-x64, type: directory}
+    cpu: [x64]
+    os: [darwin]
+
+  riftri-linux-arm64-gnu@file:package/platforms/riftri-linux-arm64-gnu:
+    resolution: {directory: package/platforms/riftri-linux-arm64-gnu, type: directory}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  riftri-linux-arm64-musl@file:package/platforms/riftri-linux-arm64-musl:
+    resolution: {directory: package/platforms/riftri-linux-arm64-musl, type: directory}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  riftri-linux-x64-gnu@file:package/platforms/riftri-linux-x64-gnu:
+    resolution: {directory: package/platforms/riftri-linux-x64-gnu, type: directory}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  riftri-linux-x64-musl@file:package/platforms/riftri-linux-x64-musl:
+    resolution: {directory: package/platforms/riftri-linux-x64-musl, type: directory}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  riftri-win32-arm64@file:package/platforms/riftri-win32-arm64:
+    resolution: {directory: package/platforms/riftri-win32-arm64, type: directory}
+    cpu: [arm64]
+    os: [win32]
+
+  riftri-win32-x64@file:package/platforms/riftri-win32-x64:
+    resolution: {directory: package/platforms/riftri-win32-x64, type: directory}
+    cpu: [x64]
+    os: [win32]
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  undici-types@5.26.5:
+    resolution: {integrity: sha512-JlCMO+ehdEIKqlFxk6IfVoAUVmgz7cU7zD/h9XZ0qzeosSHmUJVOzSQvvYSYWXkFXC+IfLKSIffhv0sVZup6pA==}
+
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
+snapshots:
+
+  '@types/node@18.19.130':
+    dependencies:
+      undici-types: 5.26.5
+
+  riftri-darwin-arm64@file:package/platforms/riftri-darwin-arm64:
+    optional: true
+
+  riftri-darwin-x64@file:package/platforms/riftri-darwin-x64:
+    optional: true
+
+  riftri-linux-arm64-gnu@file:package/platforms/riftri-linux-arm64-gnu:
+    optional: true
+
+  riftri-linux-arm64-musl@file:package/platforms/riftri-linux-arm64-musl:
+    optional: true
+
+  riftri-linux-x64-gnu@file:package/platforms/riftri-linux-x64-gnu:
+    optional: true
+
+  riftri-linux-x64-musl@file:package/platforms/riftri-linux-x64-musl:
+    optional: true
+
+  riftri-win32-arm64@file:package/platforms/riftri-win32-arm64:
+    optional: true
+
+  riftri-win32-x64@file:package/platforms/riftri-win32-x64:
+    optional: true
+
+  typescript@5.9.3: {}
+
+  undici-types@5.26.5: {}
+
+  yaml@2.9.1: {}

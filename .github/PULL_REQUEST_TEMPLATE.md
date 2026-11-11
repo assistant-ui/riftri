@@ -14,5 +14,5 @@ Describe the behavior or documentation changed by this pull request.
 - [ ] `cargo fmt --all --check`
 - [ ] `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - [ ] `cargo test --workspace`
-- [ ] `npm test`
-- [ ] `npm run pack:check`
+- [ ] `pnpm test`
+- [ ] `pnpm run pack:check`

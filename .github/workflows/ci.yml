@@ -36,17 +36,20 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.13.0
-          cache: npm
+          cache: pnpm
 
       - name: Install Rust quality components
         run: rustup component add clippy rustfmt
 
-      - name: Install npm metadata only
-        run: npm ci --ignore-scripts --omit=optional
+      - name: Install dev dependencies only
+        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
 
       - name: Test offline startup profiling
         run: node --test docs/benchmarks/startup-profile.test.mjs
@@ -75,7 +78,7 @@ jobs:
 
       # The tui feature deselects crates/riftri-cli/src/ui/plain.rs, so the
       # default/plain build shipped by `cargo install riftri-cli` and
-      # `npm run build:native` is never test-executed by the run above. Exercise
+      # `pnpm run build:native` is never test-executed by the run above. Exercise
       # it explicitly on one runner so plain.rs and the non-interactive setup
       # fallback stay covered.
       - name: Run Rust tests (default/plain features)
@@ -235,10 +238,10 @@ jobs:
           exit 1
 
       - name: Run npm launcher tests
-        run: npm test
+        run: pnpm test
 
       - name: Inspect npm package contents
-        run: npm run pack:check
+        run: pnpm run pack:check
 
   supply-chain:
     name: Supply chain (cargo-deny)
@@ -334,7 +337,7 @@ jobs:
           RIFTRI_BINARY: ${{ github.workspace }}/target/debug/riftri
         run: |
           set -euo pipefail
-          # The dev suite cannot run here: npm test passes --test-timeout,
+          # The dev suite cannot run here: pnpm test passes --test-timeout,
           # which Node rejects before 20. This covers the surface that
           # actually ships instead.
           cat <<'CHECK' > floor-check.cjs
@@ -409,11 +412,14 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
       - name: Set up Node.js
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26.13.0
-          cache: npm
+          cache: pnpm
 
       - name: Install Rust coverage components
         run: rustup component add llvm-tools-preview
@@ -423,8 +429,8 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: Install npm metadata only
-        run: npm ci --ignore-scripts --omit=optional
+      - name: Install dev dependencies only
+        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
 
       - name: Measure workspace test coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
@@ -537,6 +543,12 @@ jobs:
         with:
           node-version: 26.13.0
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install dev dependencies only
+        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
+
       - name: Install filesystem tools
         run: sudo apt-get update && sudo apt-get install --yes btrfs-progs xfsprogs
 
@@ -562,7 +574,7 @@ jobs:
         env:
           RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
           TMPDIR: ${{ runner.temp }}/riftri-reflink
-        run: npm run smoke:installed
+        run: pnpm run smoke:installed
 
       - name: Record native COW benchmark
         env:
@@ -631,6 +643,12 @@ jobs:
         with:
           node-version: 26.13.0
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install dev dependencies only
+        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
+
       - name: Enable unprivileged test namespaces
         run: |
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
@@ -681,7 +699,7 @@ jobs:
         env:
           RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
           TMPDIR: ${{ runner.temp }}/riftri-overlayfs
-        run: npm run smoke:installed
+        run: pnpm run smoke:installed
 
       - name: Record native COW benchmark through the OverlayFS helper
         env:
@@ -750,6 +768,12 @@ jobs:
         with:
           node-version: 26.13.0
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install dev dependencies only
+        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
+
       - name: Create disposable ReFS test volume
         shell: pwsh
         run: |
@@ -788,7 +812,7 @@ jobs:
           RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
           TEMP: R:\riftri-temp
           TMP: R:\riftri-temp
-        run: npm run smoke:installed
+        run: pnpm run smoke:installed
 
       - name: Record native COW benchmark
         shell: pwsh

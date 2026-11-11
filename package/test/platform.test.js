@@ -173,6 +173,8 @@ test("stages the public package with conventional root directories", async (t) =
   assert.equal(manifest.name, "riftri");
   assert.equal(manifest.bin.riftri, "bin/riftri.js");
   assert.deepEqual(manifest.files, ["bin", "lib", "README.md", "LICENSE"]);
+  // The pnpm pin is for working on this repository, not for installing riftri.
+  assert.equal(manifest.packageManager, undefined);
   await access(path.join(destination, "bin", "riftri.js"));
   await access(path.join(destination, "lib", "platform.js"));
   await assert.rejects(access(path.join(destination, "package")));

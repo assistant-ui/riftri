@@ -218,8 +218,8 @@ Run the complete local quality gate before opening a pull request:
 $ cargo fmt --all --check
 $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo test --workspace
-$ npm test
-$ npm run smoke:installed
+$ pnpm test
+$ pnpm run smoke:installed
 ```
 
 Riftri is licensed under the [MIT License](LICENSE).

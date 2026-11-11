@@ -47,10 +47,9 @@ function run(command, arguments_, options = {}) {
   return result.stdout;
 }
 
+// Always npm, never `npm_execpath`: this smoke test checks the npm install
+// path users take, and under `pnpm run` that variable points at pnpm.
 function runNpm(arguments_, options = {}) {
-  if (process.env.npm_execpath) {
-    return run(process.execPath, [process.env.npm_execpath, ...arguments_], options);
-  }
   return run("npm", arguments_, {
     ...options,
     shell: process.platform === "win32",

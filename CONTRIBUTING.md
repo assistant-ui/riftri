@@ -12,16 +12,16 @@ can agree on the direction first.
 
 ## Development setup
 
-Install stable Rust with Rustfmt and Clippy, Git, and Node.js 20 or newer.
-Then run:
+Install stable Rust with Rustfmt and Clippy, Git, Node.js 22.13 or newer, and
+pnpm 11 (`packageManager` in `package.json` pins the exact version). Then run:
 
 ```console
-$ npm ci --ignore-scripts --omit=optional
+$ pnpm install --frozen-lockfile --ignore-scripts --no-optional
 $ cargo fmt --all --check
 $ cargo clippy --workspace --all-targets --all-features -- -D warnings
 $ cargo test --workspace
-$ npm test
-$ npm run pack:check
+$ pnpm test
+$ pnpm run pack:check
 ```
 
 `.cargo/config.toml` gives every Cargo-run process the repository's own

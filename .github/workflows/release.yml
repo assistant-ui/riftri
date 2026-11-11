@@ -153,11 +153,14 @@ jobs:
           pattern: riftri-*
           path: artifacts
 
-      - name: Install npm metadata only
-        run: npm ci --ignore-scripts --omit=optional
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install dev dependencies only
+        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
 
       - name: Validate package versions
-        run: npm run check:packages
+        run: pnpm run check:packages
 
       - name: Select release version
         shell: bash
@@ -226,11 +229,14 @@ jobs:
           pattern: riftri-*
           path: artifacts
 
-      - name: Install npm metadata only
-        run: npm ci --ignore-scripts --omit=optional
+      - name: Set up pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+
+      - name: Install dev dependencies only
+        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
 
       - name: Validate package versions
-        run: npm run check:packages
+        run: pnpm run check:packages
 
       - name: Stage npm packages and GitHub assets
         run: node package/scripts/prepare-release.mjs "${GITHUB_REF_NAME}" artifacts

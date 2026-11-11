@@ -17,17 +17,18 @@
   "scripts": {
     "build:native": "cargo build --locked -p riftri-cli",
     "check:packages": "node package/scripts/check-packages.mjs",
-    "test": "npm run build:native && node --test --test-timeout=120000 package/test/*.test.js",
-    "smoke:installed": "npm run build:native && node package/scripts/smoke-installed-package.mjs",
+    "test": "pnpm run build:native && node --test --test-timeout=120000 package/test/*.test.js",
+    "smoke:installed": "pnpm run build:native && node package/scripts/smoke-installed-package.mjs",
     "test:release": "node --test --test-timeout=120000 package/test/prepare-release.test.js",
-    "pack:check": "npm run check:packages && node package/scripts/stage-root-package.mjs && npm pack ./dist/npm-root --dry-run"
+    "pack:check": "pnpm run check:packages && node package/scripts/stage-root-package.mjs && npm pack ./dist/npm-root --dry-run"
   },
   "engines": {
     "node": ">=18.18"
   },
   "devDependencies": {
     "@types/node": "18.19.130",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "yaml": "2.9.1"
   },
   "optionalDependencies": {
     "riftri-darwin-arm64": "file:package/platforms/riftri-darwin-arm64",
@@ -66,5 +67,6 @@
       "require": "./package/lib/client.js",
       "default": "./package/lib/client.js"
     }
-  }
+  },
+  "packageManager": "pnpm@11.28.9+sha512.35421cea2720eca3f5ad722b67e8ef18f4d3cd4745ed2fcfeb0dc288d4e9437fad3870d91ee6e83f268f0f6f7e0f62723317b19617bb45ee4333172ef51159f8"
 }
