@@ -43,6 +43,7 @@ export async function stageRootPackage(
   );
   manifest.files = ["bin", "lib", "README.md", "LICENSE"];
   delete manifest.scripts;
+  delete manifest.packageManager;
 
   await rm(destination, { recursive: true, force: true });
   await mkdir(destination, { recursive: true });

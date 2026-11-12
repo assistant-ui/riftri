@@ -3,6 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const defaultRepositoryRoot = path.resolve(path.dirname(scriptPath), "..", "..");
@@ -68,7 +69,9 @@ export async function checkPackages({
   repositoryRoot = defaultRepositoryRoot,
 } = {}) {
   const rootPackage = await readJson(repositoryRoot, "package.json");
-  const packageLock = await readJson(repositoryRoot, "package-lock.json");
+  const lockfile = parseYaml(
+    await readFile(path.join(repositoryRoot, "pnpm-lock.yaml"), "utf8"),
+  );
   const cargoManifest = await readFile(
     path.join(repositoryRoot, "Cargo.toml"),
     "utf8",
@@ -92,16 +95,6 @@ export async function checkPackages({
     cargoVersion,
     rootPackage.version,
     "Cargo and npm versions must match",
-  );
-  assert.equal(
-    packageLock.version,
-    rootPackage.version,
-    "package-lock version must match package.json",
-  );
-  assert.equal(
-    packageLock.packages[""].version,
-    rootPackage.version,
-    "package-lock root package version must match package.json",
   );
 
   const crates = await checkCrateVersions(repositoryRoot);
@@ -160,6 +153,17 @@ export async function checkPackages({
     assert.ok(
       Array.isArray(manifest.files) && manifest.files.includes(binary),
       `${packageName} must ship ${binary}; a published tarball without it installs cleanly and then cannot run`,
+    );
+
+    // pnpm-lock.yaml copies each local package's os, cpu and libc, and a
+    // frozen install does not notice when a manifest changes under it, so a
+    // stale entry would quietly pick the wrong optional package on install.
+    const locked =
+      lockfile.packages?.[`${packageName}@file:package/platforms/${packageName}`];
+    assert.deepEqual(
+      { os: locked?.os, cpu: locked?.cpu, libc: locked?.libc },
+      { os: manifest.os, cpu: manifest.cpu, libc: manifest.libc },
+      `pnpm-lock.yaml is stale for ${packageName}; run pnpm install`,
     );
   }
 

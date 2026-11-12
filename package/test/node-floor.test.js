@@ -84,6 +84,6 @@ test("the floor job exercises what ships, not the dev suite", () => {
     .filter((line) => !/^\s*#/.test(line))
     .join("\n");
 
-  // npm test passes --test-timeout, which Node rejects before 20.
-  assert.doesNotMatch(commands, /\bnpm (?:run )?test\b/, "the dev suite cannot run on the floor");
+  // pnpm test passes --test-timeout, which Node rejects before 20.
+  assert.doesNotMatch(commands, /\bp?npm (?:run )?test\b/, "the dev suite cannot run on the floor");
 });

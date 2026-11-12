@@ -15,7 +15,7 @@ async function manifestFixture(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "riftri-check-packages-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(path.join(root, "package"), { recursive: true });
-  for (const entry of ["package.json", "package-lock.json", "Cargo.toml"]) {
+  for (const entry of ["package.json", "pnpm-lock.yaml", "Cargo.toml"]) {
     await cp(path.join(sourceRoot, entry), path.join(root, entry));
   }
   await cp(path.join(sourceRoot, "crates"), path.join(root, "crates"), {
@@ -138,6 +138,26 @@ test("libc is checked in npm's spelling, not the launcher's", async (t) => {
   await assert.rejects(
     checkPackages({ repositoryRoot }),
     /riftri-linux-arm64-gnu must declare libc glibc/,
+  );
+});
+
+test("a lockfile entry left stale by a manifest change is rejected", async (t) => {
+  // A frozen pnpm install accepts the stale entry, so only this gate sees it.
+  const repositoryRoot = await manifestFixture(t);
+  const lockfile = path.join(repositoryRoot, "pnpm-lock.yaml");
+  const source = await readFile(lockfile, "utf8");
+  await writeFile(
+    lockfile,
+    source.replace(
+      /(riftri-linux-x64-musl@file:[^\n]*\n(?:[^\n]+\n)*?\s+libc: )\[musl\]/,
+      "$1[glibc]",
+    ),
+  );
+  const { checkPackages } = await import("../scripts/check-packages.mjs");
+
+  await assert.rejects(
+    checkPackages({ repositoryRoot }),
+    /pnpm-lock\.yaml is stale for riftri-linux-x64-musl/,
   );
 });
 

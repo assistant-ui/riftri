@@ -229,8 +229,8 @@ be one GitHub knows for the account.
 
 ## Cutting a release
 
-1. Update the version in the root `Cargo.toml`, root `package.json`, every
-   `package/platforms/*/package.json`, and `package-lock.json`. Source optional
+1. Update the version in the root `Cargo.toml`, root `package.json`, and
+   every `package/platforms/*/package.json`. Source optional
    dependencies remain local `file:` references; release staging converts them
    to exact registry versions in the published manifest.
 2. Move relevant entries from `Unreleased` in `CHANGELOG.md` to a dated version.
@@ -243,21 +243,21 @@ be one GitHub knows for the account.
    local checks:
 
    ```console
-   $ npm install --package-lock-only --ignore-scripts
-   $ npm ci --ignore-scripts --omit=optional
+   $ pnpm install --lockfile-only --ignore-scripts
+   $ pnpm install --frozen-lockfile --ignore-scripts --no-optional
    $ cargo fmt --all --check
    $ cargo clippy --workspace --all-targets --all-features -- -D warnings
    $ cargo test --workspace
-   $ npm test
-   $ npm run pack:check
+   $ pnpm test
+   $ pnpm run pack:check
    ```
 
-   `npm test` includes an installed-package smoke check using locally generated
+   `pnpm test` includes an installed-package smoke check using locally generated
    npm tarballs, an isolated global npm prefix, and no registry access. On
    macOS it also runs the complete managed APFS lifecycle against a disposable
    real Git repository. Native-backend CI repeats that installed lifecycle on
    Btrfs, reflink-enabled XFS, helper-backed OverlayFS, and ReFS. Run it
-   separately with `npm run smoke:installed` when diagnosing release packaging.
+   separately with `pnpm run smoke:installed` when diagnosing release packaging.
 
 4. Open and squash-merge a conventional release pull request such as
    `chore: release v0.1.0`. The pull request title becomes the release commit

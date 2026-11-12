@@ -28,7 +28,7 @@ test("native backend jobs exercise the globally installed npm command", async ()
   for (const jobName of ["linux-reflink", "linux-overlayfs", "windows-refs"]) {
     const job = jobSource(workflow, jobName);
     assert.match(job, /RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"/);
-    assert.match(job, /npm run smoke:installed/);
+    assert.match(job, /pnpm run smoke:installed/);
   }
 });
 
@@ -38,7 +38,7 @@ test("quality job test-executes both the tui and default/plain builds", async ()
 
   // The tui feature deselects crates/riftri-cli/src/ui/plain.rs, so testing only
   // that config leaves the default build (what `cargo install` and
-  // `npm run build:native` produce) unexecuted. Guard that both configurations
+  // `pnpm run build:native` produce) unexecuted. Guard that both configurations
   // are actually run by CI.
   assert.match(quality, /cargo test --workspace --locked --features riftri-cli\/tui/);
   assert.match(quality, /^        run: cargo test --workspace --locked$/m);

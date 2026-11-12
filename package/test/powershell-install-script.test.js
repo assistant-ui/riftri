@@ -51,7 +51,7 @@ function windowsFixture(t, { corrupt = false, downgrade = false } = {}) {
   fs.mkdirSync(files);
   fs.mkdirSync(installDir);
   const binary = path.join(root, "target/debug/riftri.exe");
-  assert.ok(fs.existsSync(binary), "npm test must build the Windows binary first");
+  assert.ok(fs.existsSync(binary), "pnpm test must build the Windows binary first");
   fs.copyFileSync(binary, path.join(files, "riftri.exe"));
   const archiveName = `riftri-win32-x64-v${packageVersion}.tar.gz`;
   const archive = path.join(directory, archiveName);

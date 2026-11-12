@@ -164,6 +164,6 @@ test("docs links stay local where possible without changing command examples", a
 test("homepage links to the docs site and builds stage canonical content", () => {
   const { scripts } = JSON.parse(fs.readFileSync(path.join(root, "website/package.json")));
   assert.match(scripts.stage, /stage-website-docs\.mjs/);
-  for (const name of ["dev", "build"]) assert.match(scripts[name], /^pnpm stage && farm/);
+  for (const name of ["dev", "build"]) assert.match(scripts[name], /^pnpm run stage && farm/);
   assert.match(fs.readFileSync(path.join(root, "website/src/app/page.tsx"), "utf8"), /href="\/docs">Docs/);
 });
