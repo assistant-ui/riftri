@@ -11,6 +11,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   ordinary `git worktree add`. Explicit `riftri worktree add` never needed
   `riftri enable`, but the notice and its fix line didn't say so.
 
+### Documentation
+
+- The agent integration guide shows how to point Claude Code's
+  `WorktreeCreate` and `WorktreeRemove` hooks at `riftri worktree add` and
+  `riftri worktree remove`, and adds rules for apps that launch agents and
+  ship their own Riftri: launch through `riftri exec`, ask before
+  `riftri enable`, read state from the JSON reports rather than the journals,
+  and refresh with `worktree inspect` (#788).
+
 ## [0.6.8] - 2026-11-09
 
 ### Fixed
