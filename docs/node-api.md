@@ -28,8 +28,8 @@ no separate download or path to configure. TypeScript types ship with it.
 | `doctor({ destination })` | Backend, readiness, blockers. Creates nothing |
 | `isOptimizable(destination)` | `boolean` — the common `doctor` question |
 | `enable()` / `disable()` | Per-repository opt-in |
-| `worktree.add(path, opts)` | Backend, base, `reused_base`, journal path |
-| `worktree.list()` | Managed worktrees with `allocated_bytes` |
+| `worktree.add(path, opts)` | Backend, base, `reused_base`, journal path, `metadata` |
+| `worktree.list()` | Managed worktrees with `allocated_bytes` and `metadata` |
 | `worktree.owner(path)` | Managing `state_directory`, or `null` for an unmanaged path; no disk-usage walk |
 | `worktree.inspect(paths)` | Ordered batch of ownership, backend, and mount readiness; no content or disk-usage walk |
 | `worktree.remove(path, { force })` | Refuses a dirty worktree unless forced |
@@ -39,6 +39,11 @@ no separate download or path to configure. TypeScript types ship with it.
 | `gc({ apply })` | Plan, or reclaim unreferenced bases |
 
 `run(args)` is the escape hatch for anything not wrapped.
+
+`worktree.add(path, { meta: { agent: "codex" } })` records labels with the
+worktree, passed to the CLI as `--meta agent=codex`. `worktree.list()` and
+`status()` report them in each worktree's `metadata`. See
+[worktree labels](cli.md#worktree-labels) for the rules.
 
 `worktree.owner(path)` always consults the default and every repository-registered
 state directory, even when the client has a `stateDir` configured. A missing or

@@ -356,6 +356,17 @@ test("listing every state never also names the configured one", { skip: onWindow
   assert.ok(stub.argv().includes("--state-dir=state"), stub.argv().join(" "));
 });
 
+test("worktree labels become --meta flags ahead of the path boundary", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary });
+  await riftri.worktree.add("-task", { branch: "task", meta: { agent: "codex", note: "a=b" } });
+  assert.deepEqual(stub.argv(), [
+    "worktree", "add", "--branch=task", "--meta=agent=codex", "--meta=note=a=b",
+    "--json", "--json-errors", "--", "-task",
+  ]);
+});
+
 test("ownership looks across registered states and protects option-like paths", { skip: onWindows }, async (t) => {
   const directory = scratch(t);
   const stub = argvBinary(directory);

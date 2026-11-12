@@ -175,6 +175,7 @@ fn add_result(spec: &Value) -> riftri_core::AddWorktreeResult {
                     .map(|code| i32::try_from(code).expect("exit code")),
                 started: hook["started"].as_bool().expect("started"),
             }),
+        metadata: riftri_core::WorktreeMetadata::new(),
     }
 }
 

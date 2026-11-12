@@ -23,8 +23,9 @@ use crate::worktree::{
 use crate::{
     AddWorktreeRequest, AddWorktreeResult, MoveWorktreeRequest, MoveWorktreeResult,
     PruneWorktreesRequest, PruneWorktreesResult, RemoveWorktreeRequest, RemoveWorktreeResult,
-    WorktreeError, WorktreeMode, add_worktree, force_remove_worktree, move_worktree,
-    prune_worktrees, remove_worktree, storage_accounting,
+    WORKTREE_METADATA_ENV, WorktreeError, WorktreeMetadata, WorktreeMode,
+    add_worktree_with_metadata, force_remove_worktree, move_worktree, prune_worktrees,
+    remove_worktree, storage_accounting,
 };
 
 pub const ENABLED_CONFIG_KEY: &str = "riftri.enabled";
@@ -447,17 +448,19 @@ pub fn proxy_git_command(
         GitProxyPlan::Passthrough => Ok(GitProxyOutcome::Passthrough(exit_status_code(
             Git::default().passthrough(arguments)?,
         ))),
-        GitProxyPlan::OptimizedAdd { request, quiet } => match add_worktree(request) {
-            Ok(result) => Ok(GitProxyOutcome::OptimizedAdd { result, quiet }),
-            // `HEAD` has no commit, so there is nothing to clone. The refusal
-            // comes before anything is recorded or created, so let Git decide,
-            // as it would without Riftri: a new repository gets an orphan
-            // worktree, and anything else gets Git's own error.
-            Err(WorktreeError::UnbornHead(_)) => Ok(GitProxyOutcome::Passthrough(
-                exit_status_code(Git::default().passthrough(arguments)?),
-            )),
-            Err(error) => Err(error.into()),
-        },
+        GitProxyPlan::OptimizedAdd { request, quiet } => {
+            match add_worktree_with_metadata(request, WorktreeMetadata::from_environment()?) {
+                Ok(result) => Ok(GitProxyOutcome::OptimizedAdd { result, quiet }),
+                // `HEAD` has no commit, so there is nothing to clone. The refusal
+                // comes before anything is recorded or created, so let Git decide,
+                // as it would without Riftri: a new repository gets an orphan
+                // worktree, and anything else gets Git's own error.
+                Err(WorktreeError::UnbornHead(_)) => Ok(GitProxyOutcome::Passthrough(
+                    exit_status_code(Git::default().passthrough(arguments)?),
+                )),
+                Err(error) => Err(error.into()),
+            }
+        }
         GitProxyPlan::OptimizedRemove(request) => Ok(GitProxyOutcome::OptimizedRemove(
             match inspected_for(&request.repository) {
                 Some(repository) => remove_worktree_inspected(request, repository, false)?,
@@ -485,8 +488,14 @@ pub fn proxy_git_command(
     }
 }
 
-pub fn execute_scoped_command(command: &[OsString]) -> Result<i32, ActivationError> {
-    execute_scoped_command_from(command, None)
+/// Run `command` with process-scoped Git interception. Non-empty `metadata`
+/// is passed to the command in [`WORKTREE_METADATA_ENV`], so every worktree
+/// its process tree creates through Riftri records it.
+pub fn execute_scoped_command(
+    command: &[OsString],
+    metadata: &WorktreeMetadata,
+) -> Result<i32, ActivationError> {
+    execute_scoped_command_from(command, None, metadata)
 }
 
 /// Install a root-owned, set-user-ID copy of the current Riftri executable
@@ -647,14 +656,16 @@ fn validate_root_install_directory(directory: &Path) -> Result<(), ActivationErr
 pub fn execute_scoped_command_in_worktree(
     worktree: &Path,
     command: &[OsString],
+    metadata: &WorktreeMetadata,
 ) -> Result<i32, ActivationError> {
     let worktree = resolve_worktree_binding(worktree)?;
-    execute_scoped_command_from(command, Some(&worktree))
+    execute_scoped_command_from(command, Some(&worktree), metadata)
 }
 
 fn execute_scoped_command_from(
     command: &[OsString],
     working_directory: Option<&Path>,
+    metadata: &WorktreeMetadata,
 ) -> Result<i32, ActivationError> {
     let (program, arguments) = command
         .split_first()
@@ -683,6 +694,9 @@ fn execute_scoped_command_from(
         .env(riftri_git::REAL_GIT_ENV, real_git)
         .env(PROCESS_SHIM_DIR_ENV, shim_directory.path())
         .env(SHIM_ACTIVE_ENV, "1");
+    if !metadata.is_empty() {
+        child.env(WORKTREE_METADATA_ENV, metadata.to_environment_value());
+    }
     if let Some(working_directory) = working_directory {
         child.current_dir(working_directory);
     }

@@ -990,6 +990,26 @@ causes; a general allowlist would need its own review for every key Git
 adds; and asking callers to unset the variables pushes the same judgement
 onto every harness.
 
+### D049: caller labels are reporting only
+
+`riftri worktree add --meta KEY=VALUE` and `riftri exec --meta` let a caller
+record which agent, task, or tool asked for a worktree without making Riftri
+agent-specific: keys and values are the caller's own. Labels live in the add
+journal as an optional `metadata` object, so a journal without labels keeps
+exactly the shape earlier releases wrote, and they are reported by
+`worktree add`, `worktree list`, and `status`.
+
+Labels never select a base, change the checkout profile, or feed recovery,
+garbage collection, or any lifecycle decision. They are validated on write
+(bounded ASCII keys, bounded text values without control characters, at most
+32 per worktree) and escaped again when printed, because a journal is a file.
+`riftri exec` passes them to its command through `RIFTRI_WORKTREE_METADATA`
+so worktrees made through the Git shim carry them too.
+
+Rejected alternatives: a fixed `--agent` flag would name one kind of caller
+in Riftri's interface; a side file next to the journals would be a second
+record to keep consistent through move, compaction, and retirement.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

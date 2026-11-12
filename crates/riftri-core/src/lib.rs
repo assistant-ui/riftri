@@ -12,6 +12,7 @@ mod activation;
 mod base_integrity;
 mod durability;
 mod journal;
+mod metadata;
 pub mod progress;
 mod shell;
 #[cfg(test)]
@@ -39,6 +40,10 @@ pub use activation::{
     prepare_posix_shell_hook, prepare_powershell_deactivation, prepare_powershell_hook,
     proxy_git_command, repository_activation, shell_activation_status, shim_environment_complete,
     stripped_shim_scope_detected,
+};
+pub use metadata::{
+    MAX_METADATA_ENTRIES, MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES, WORKTREE_METADATA_ENV,
+    WorktreeMetadata, display_metadata_value,
 };
 pub use riftri_git::{GitError, REAL_GIT_ENV, allow_direct_queries as allow_direct_git_queries};
 
@@ -164,12 +169,12 @@ pub use worktree::{
     PruneWorktreesRequest, PruneWorktreesResult, RecoveryReport, RelocatedWorktree,
     RemoveWorktreeRequest, RemoveWorktreeResult, StateDiagnosticIssue, StateDirectorySource,
     StateWorktreeInventory, StorageAccountingReport, ViewStorageAccounting, WorktreeError,
-    WorktreeMode, WorktreeMountStatus, add_worktree, compact_worktree, default_state_directory,
-    force_remove_worktree, forget_missing_state_directory, garbage_collect,
-    inspect_managed_worktrees, is_managed_worktree, managed_worktree_state_directory,
-    move_worktree, prune_worktrees, recover_incomplete_operations, recovery_pending_error,
-    remove_worktree, storage_accounting, validate_new_worktree_destination,
-    worktree_inventory_across_states,
+    WorktreeMode, WorktreeMountStatus, add_worktree, add_worktree_with_metadata, compact_worktree,
+    default_state_directory, force_remove_worktree, forget_missing_state_directory,
+    garbage_collect, inspect_managed_worktrees, is_managed_worktree,
+    managed_worktree_state_directory, move_worktree, prune_worktrees,
+    recover_incomplete_operations, recovery_pending_error, remove_worktree, storage_accounting,
+    validate_new_worktree_destination, worktree_inventory_across_states,
 };
 
 /// A diagnostic check and its optional failure explanation.

@@ -101,6 +101,7 @@ fn view(spec: &Value) -> riftri_core::ViewStorageAccounting {
         prunable_reason: git_bytes("prunable"),
         logical_bytes: spec["logical"].as_u64().expect("logical"),
         allocated_bytes: spec["allocated"].as_u64().expect("allocated"),
+        metadata: Default::default(),
     }
 }
 
