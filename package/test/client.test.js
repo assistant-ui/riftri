@@ -356,6 +356,14 @@ test("listing every state never also names the configured one", { skip: onWindow
   assert.ok(stub.argv().includes("--state-dir=state"), stub.argv().join(" "));
 });
 
+test("history asks for JSON from the configured state directory", { skip: onWindows }, async (t) => {
+  const directory = scratch(t);
+  const stub = argvBinary(directory);
+  const riftri = new Riftri({ repository: directory, binary: stub.binary, stateDir: "state" });
+  await riftri.history();
+  assert.deepEqual(stub.argv(), ["history", "--state-dir=state", "--json", "--json-errors"]);
+});
+
 test("worktree labels become --meta flags ahead of the path boundary", { skip: onWindows }, async (t) => {
   const directory = scratch(t);
   const stub = argvBinary(directory);

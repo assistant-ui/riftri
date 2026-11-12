@@ -2267,6 +2267,253 @@ fn io(operation: &'static str, path: &Path, source: std::io::Error) -> JournalEr
     }
 }
 
+/// How a worktree recorded in the history file ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum HistoryOutcome {
+    /// A removal of the worktree completed.
+    Removed,
+    /// Its add was rolled back, so the worktree never became usable.
+    RolledBack,
+}
+
+/// One worktree whose journals `riftri gc --apply` retired (D050).
+///
+/// The history file is a record for reporting, never recovery authority:
+/// nothing reads it to decide a lifecycle step. Times are not stored; they are
+/// derived from the operation IDs, which begin with the time each operation
+/// started.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct HistoryRecord {
+    pub format_version: u16,
+    pub operation_id: String,
+    repository: NativeOsString,
+    destination: NativeOsString,
+    branch: Option<NativeOsString>,
+    pub backend: BackendKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sparse_directories: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+    pub outcome: HistoryOutcome,
+    /// The completed removal's operation ID, for a removed worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removal_operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecodedHistoryRecord {
+    pub operation_id: String,
+    pub repository: PathBuf,
+    pub destination: PathBuf,
+    pub branch: Option<OsString>,
+    pub backend: BackendKind,
+    pub metadata: BTreeMap<String, String>,
+    pub outcome: HistoryOutcome,
+    pub removal_operation_id: Option<String>,
+}
+
+impl HistoryRecord {
+    pub const FORMAT_VERSION: u16 = 1;
+
+    pub fn for_retired_add(
+        add: &DecodedJournal,
+        outcome: HistoryOutcome,
+        removal_operation_id: Option<&str>,
+    ) -> Self {
+        Self {
+            format_version: Self::FORMAT_VERSION,
+            operation_id: add.operation_id.clone(),
+            repository: NativeOsString::encode(add.repository.as_os_str()),
+            destination: NativeOsString::encode(add.destination.as_os_str()),
+            branch: add.branch.as_deref().map(NativeOsString::encode),
+            backend: add.backend,
+            sparse_directories: add.sparse_directories.clone(),
+            metadata: add.metadata.clone(),
+            outcome,
+            removal_operation_id: removal_operation_id.map(str::to_owned),
+        }
+    }
+
+    fn decode(self, history_path: &Path) -> Result<DecodedHistoryRecord, JournalError> {
+        if self.format_version != Self::FORMAT_VERSION {
+            return Err(JournalError::UnsupportedVersion {
+                path: history_path.to_path_buf(),
+                version: self.format_version,
+            });
+        }
+        Ok(DecodedHistoryRecord {
+            operation_id: self.operation_id,
+            repository: PathBuf::from(self.repository.decode(history_path)?),
+            destination: PathBuf::from(self.destination.decode(history_path)?),
+            branch: self
+                .branch
+                .map(|branch| branch.decode(history_path))
+                .transpose()?,
+            backend: self.backend,
+            metadata: self.metadata,
+            outcome: self.outcome,
+            removal_operation_id: self.removal_operation_id,
+        })
+    }
+}
+
+/// Records read from the history file, and the lines that could not be read.
+#[derive(Debug, Default)]
+pub(crate) struct HistoryLoad {
+    pub records: Vec<DecodedHistoryRecord>,
+    pub issues: Vec<JournalLoadIssue>,
+}
+
+/// The append-only history file, `<state>/history/v1.jsonl`: one JSON record
+/// per line for each worktree whose journals were retired.
+pub(crate) struct HistoryStore {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl HistoryStore {
+    pub fn open(state_directory: &Path) -> Self {
+        let directory = state_directory.join("history");
+        let path = directory.join("v1.jsonl");
+        Self { directory, path }
+    }
+
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Append `records` and flush them to stable storage before returning, so
+    /// a caller may delete the journals they summarize. A record appended
+    /// twice, because a retirement was interrupted after this call, is
+    /// harmless: readers keep one record per operation.
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    pub fn append(&self, records: &[HistoryRecord]) -> Result<(), JournalError> {
+        use fs2::FileExt;
+
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut lines = Vec::new();
+        for record in records {
+            serde_json::to_writer(&mut lines, record).map_err(|source| {
+                JournalError::Serialize {
+                    path: self.path.clone(),
+                    source,
+                }
+            })?;
+            lines.push(b'\n');
+        }
+        ensure_real_state_directory(&self.directory, "create Riftri history directory")?;
+        let created = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) if metadata.file_type().is_file() => false,
+            Ok(_) => {
+                return Err(JournalError::InvalidRecord {
+                    path: self.path.clone(),
+                    detail: "the history file is not a regular file".to_owned(),
+                });
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => true,
+            Err(source) => return Err(io("inspect Riftri history", &self.path, source)),
+        };
+        // Read access too: Windows refuses to lock a handle that can only
+        // append.
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&self.path)
+            .map_err(|source| io("open Riftri history", &self.path, source))?;
+        // Concurrent collectors append whole lines, never interleaved ones.
+        file.lock_exclusive()
+            .map_err(|source| io("lock Riftri history", &self.path, source))?;
+        file.write_all(&lines)
+            .map_err(|source| io("append Riftri history", &self.path, source))?;
+        crate::durability::sync_full(&file)
+            .map_err(|source| io("sync Riftri history", &self.path, source))?;
+        drop(file);
+        if created {
+            sync_parent(&self.path)?;
+        }
+        Ok(())
+    }
+
+    /// Every readable record, later lines replacing earlier ones for the same
+    /// operation. A line that cannot be read, such as one torn by a crash
+    /// mid-append, is reported rather than failing the whole read.
+    pub fn load(&self) -> Result<HistoryLoad, JournalError> {
+        let contents = match fs::symlink_metadata(&self.path) {
+            Ok(metadata) if metadata.file_type().is_file() => fs::read(&self.path)
+                .map_err(|source| io("read Riftri history", &self.path, source))?,
+            Ok(_) => {
+                return Ok(HistoryLoad {
+                    records: Vec::new(),
+                    issues: vec![JournalLoadIssue {
+                        path: self.path.clone(),
+                        reason: "the history file is not a regular file".to_owned(),
+                    }],
+                });
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(HistoryLoad::default());
+            }
+            Err(source) => return Err(io("inspect Riftri history", &self.path, source)),
+        };
+        let mut by_operation = BTreeMap::<String, DecodedHistoryRecord>::new();
+        let mut issues = Vec::new();
+        for (index, line) in contents.split(|byte| *byte == b'\n').enumerate() {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let decoded = serde_json::from_slice::<HistoryRecord>(line)
+                .map_err(|source| JournalError::Deserialize {
+                    path: self.path.clone(),
+                    source,
+                })
+                .and_then(|record| record.decode(&self.path));
+            match decoded {
+                Ok(record) => {
+                    by_operation.insert(record.operation_id.clone(), record);
+                }
+                Err(error) => issues.push(JournalLoadIssue {
+                    path: self.path.clone(),
+                    reason: format!("line {}: {error}", index + 1),
+                }),
+            }
+        }
+        Ok(HistoryLoad {
+            records: by_operation.into_values().collect(),
+            issues,
+        })
+    }
+}
+
+/// When the operation that wrote `operation_id` started, in milliseconds
+/// since the Unix epoch. Operation IDs begin with the start time in
+/// nanoseconds as hexadecimal, after a `remove-`-style prefix for lifecycle
+/// operations other than an add. None for an ID that doesn't, or whose time
+/// is implausible.
+pub(crate) fn operation_started_unix_ms(operation_id: &str) -> Option<u64> {
+    let mut parts = operation_id.split('-');
+    let mut timestamp = parts.next()?;
+    if timestamp.bytes().all(|byte| byte.is_ascii_lowercase()) {
+        timestamp = parts.next()?;
+    }
+    if timestamp.is_empty()
+        || timestamp.len() > 32
+        || !timestamp.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let nanoseconds = u128::from_str_radix(timestamp, 16).ok()?;
+    let milliseconds = u64::try_from(nanoseconds / 1_000_000).ok()?;
+    // 2020-01-01 to 2200-01-01: anything else did not come from a clock.
+    (1_577_836_800_000..7_258_118_400_000)
+        .contains(&milliseconds)
+        .then_some(milliseconds)
+}
+
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 #[path = "journal_hegel_tests.rs"]
 pub(crate) mod hegel_tests;
@@ -2277,17 +2524,20 @@ mod state_hegel_tests;
 
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
+    use std::ffi::OsStr;
+    use std::io::Write;
     use std::os::unix::fs::symlink;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use tempfile::tempdir;
 
     use super::{
         CollectionJournalPaths, CollectionJournalRecord, CollectionJournalStore,
-        CompactJournalPaths, CompactJournalRecord, CompactJournalStore, JournalError, JournalPaths,
-        JournalRecord, JournalStore, MoveJournalPaths, MoveJournalRecord, MoveJournalStore,
-        PruneJournalRecord, PruneJournalStore, RemovalJournalPaths, RemovalJournalRecord,
-        RemovalJournalStore,
+        CompactJournalPaths, CompactJournalRecord, CompactJournalStore, HistoryOutcome,
+        HistoryRecord, HistoryStore, JournalError, JournalPaths, JournalRecord, JournalStore,
+        MoveJournalPaths, MoveJournalRecord, MoveJournalStore, PruneJournalRecord,
+        PruneJournalStore, RemovalJournalPaths, RemovalJournalRecord, RemovalJournalStore,
+        operation_started_unix_ms,
     };
     #[cfg(target_os = "linux")]
     use crate::AddWorktreePhase;
@@ -2482,6 +2732,115 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
+    }
+
+    #[test]
+    fn operation_ids_carry_their_start_time() {
+        // 0x18e75f9389d538bd ns is 2026-11-12T18:27:43.807Z.
+        assert_eq!(
+            operation_started_unix_ms("18e75f9389d538bd-2d68-0"),
+            Some(1_794_508_063_807)
+        );
+        assert_eq!(
+            operation_started_unix_ms("remove-18e75f9389d538bd-2d68-0"),
+            Some(1_794_508_063_807)
+        );
+        for unrelated in [
+            "operation",
+            "replaced-open",
+            "",
+            "-",
+            "remove-",
+            "1-2-3",
+            "zz-1-1",
+        ] {
+            assert_eq!(operation_started_unix_ms(unrelated), None, "{unrelated}");
+        }
+    }
+
+    #[test]
+    fn history_keeps_one_record_per_operation_and_reports_unreadable_lines() {
+        let directory = tempdir().expect("history fixture");
+        let state = directory.path();
+        let store = HistoryStore::open(state);
+        assert!(
+            store
+                .load()
+                .expect("load missing history")
+                .records
+                .is_empty()
+        );
+
+        let add = |operation_id: &str, destination: &str| {
+            let mut record = JournalRecord::new(
+                operation_id.to_owned(),
+                JournalPaths {
+                    repository: Path::new("/repository"),
+                    destination: Path::new(destination),
+                    scratch: Path::new("/scratch"),
+                    base_staging: Path::new("/base-staging"),
+                    base_path: Path::new("/base"),
+                    temporary_index: Path::new("/index"),
+                    branch: Some(OsStr::new("feature")),
+                    branch_created: true,
+                    sparse_directories: &[],
+                },
+                "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                riftri_storage::BackendKind::Reflink,
+            );
+            record.metadata =
+                std::collections::BTreeMap::from([("agent".to_owned(), "codex".to_owned())]);
+            record.decode(PathBuf::from("/journal.json")).unwrap()
+        };
+        let first = HistoryRecord::for_retired_add(
+            &add("first", "/first"),
+            HistoryOutcome::Removed,
+            Some("remove-1"),
+        );
+        let second = HistoryRecord::for_retired_add(
+            &add("second", "/second"),
+            HistoryOutcome::RolledBack,
+            None,
+        );
+        store.append(&[first.clone(), second]).expect("append");
+        // An interrupted retirement appends the same record again.
+        store.append(&[first]).expect("append again");
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(store.path())
+            .unwrap()
+            .write_all(b"{\"format_version\":1,\"operation_id\"")
+            .expect("tear the last line");
+
+        let load = store.load().expect("load history");
+        assert_eq!(load.records.len(), 2, "{load:?}");
+        assert_eq!(load.records[0].operation_id, "first");
+        assert_eq!(load.records[0].destination, Path::new("/first"));
+        assert_eq!(
+            load.records[0].branch.as_deref(),
+            Some(OsStr::new("feature"))
+        );
+        assert_eq!(load.records[0].metadata["agent"], "codex");
+        assert_eq!(load.records[0].outcome, HistoryOutcome::Removed);
+        assert_eq!(
+            load.records[0].removal_operation_id.as_deref(),
+            Some("remove-1")
+        );
+        assert_eq!(load.records[1].outcome, HistoryOutcome::RolledBack);
+        assert_eq!(load.issues.len(), 1, "{load:?}");
+        assert!(load.issues[0].reason.starts_with("line 4:"), "{load:?}");
+
+        // A symlink in place of the history file is never followed.
+        std::fs::remove_file(store.path()).unwrap();
+        symlink("/etc/hostname", store.path()).unwrap();
+        assert!(store.append(&[]).is_ok(), "an empty append touches nothing");
+        let refused =
+            HistoryRecord::for_retired_add(&add("third", "/third"), HistoryOutcome::Removed, None);
+        assert!(matches!(
+            store.append(&[refused]),
+            Err(JournalError::InvalidRecord { .. })
+        ));
+        assert_eq!(store.load().unwrap().issues.len(), 1);
     }
 
     /// Labels are additive: an unlabeled add journal keeps exactly the shape

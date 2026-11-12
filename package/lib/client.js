@@ -23,6 +23,7 @@ const REPORTING = new Set([
   "doctor",
   "backends",
   "status",
+  "history",
   "repair",
   "gc",
   "worktree",
@@ -289,6 +290,11 @@ class Riftri {
   /** Bases, reference counts, storage use, and pending operations. */
   status() {
     return this.run(["status", ...this.#stateFlag()]);
+  }
+
+  /** Every worktree the state directory has recorded, including removed ones. */
+  history() {
+    return this.run(["history", ...this.#stateFlag()]);
   }
 
   /** Resume or roll back interrupted operations. Safe to run repeatedly. */

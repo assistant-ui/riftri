@@ -15,6 +15,14 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   the Git shim, by passing `RIFTRI_WORKTREE_METADATA` to the command. Labels
   are reporting only and survive move and compaction. The Node client takes
   `worktree.add(path, { meta })` (#788, D049).
+- `riftri history` lists every worktree a state directory has recorded, oldest
+  first, with its state (`active`, `pending`, `removed`, `rolled-back`),
+  branch, labels, `created_at`, and `ended_at`. `riftri gc --apply` now
+  appends a line for each worktree whose journals it retires to
+  `<state>/history/v1.jsonl` before deleting them, so removed worktrees stay
+  listed after collection. `worktree list --json` and `status --json` report
+  `created_at` for each worktree. The Node client adds `history()`
+  (#788, D050).
 
 ### Changed
 

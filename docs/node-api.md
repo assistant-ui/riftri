@@ -35,6 +35,7 @@ no separate download or path to configure. TypeScript types ship with it.
 | `worktree.remove(path, { force })` | Refuses a dirty worktree unless forced |
 | `worktree.move` / `compact` / `prune` | Lifecycle operations |
 | `status()` | Bases, totals, pending operations, diagnostics |
+| `history()` | Every worktree recorded, including removed and rolled-back ones, with `created_at` and `ended_at` |
 | `repair()` | Resume or roll back after an interrupted run |
 | `gc({ apply })` | Plan, or reclaim unreferenced bases |
 
