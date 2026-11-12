@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.7.0] - 2026-11-12
+
 ### Added
 
 - `riftri worktree add --meta KEY=VALUE` records labels, such as which agent
