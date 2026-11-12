@@ -2,12 +2,15 @@
 //! `status`, inherited through `riftri exec`, and refused before anything is
 //! created when malformed.
 
+#[cfg(unix)]
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(unix)]
+use serde_json::json;
 
 mod support;
 use support::writable_tempdir as tempdir;
@@ -50,6 +53,7 @@ fn initialize_repository(repository: &Path) {
     git(repository, &["commit", "--quiet", "-m", "initial"]);
 }
 
+#[cfg(unix)]
 fn json_stdout(output: &Output) -> Value {
     assert!(
         output.status.success(),
@@ -71,6 +75,7 @@ fn receipt(output: &Output) -> Value {
 /// Whether doctor selects a copy-on-write backend for `destination`. Skips
 /// the caller on volumes without one, unless CI said the volume must have
 /// one.
+#[cfg(unix)]
 fn copy_on_write_available(repository: &Path, destination: &Path) -> bool {
     let doctor = json_stdout(&riftri(
         repository,
@@ -95,6 +100,7 @@ fn copy_on_write_available(repository: &Path, destination: &Path) -> bool {
     false
 }
 
+#[cfg(unix)]
 fn metadata_by_path(report: &Value) -> Value {
     let mut entries = serde_json::Map::new();
     for worktree in report["worktrees"].as_array().expect("worktrees array") {
