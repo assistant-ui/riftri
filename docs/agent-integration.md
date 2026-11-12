@@ -73,6 +73,64 @@ per repository. Child processes inherit interception; no Riftri-specific
 prompt or skill is required. The activation test matrix explicitly covers
 `claude`-named child harnesses.
 
+**Claude Code worktree hooks.** When Claude Code creates a worktree itself
+(`claude --worktree`, or a subagent with `isolation: "worktree"`), a
+`WorktreeCreate` hook replaces its `git worktree add`, and a `WorktreeRemove`
+hook replaces the removal of a worktree that hook created. Pointing both at
+Riftri gives optimized worktrees without `riftri enable` or a shim, because the
+hooks call the explicit interface. In `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "WorktreeCreate": [{ "hooks": [{ "type": "command",
+      "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/riftri-worktree-create.sh" }] }],
+    "WorktreeRemove": [{ "hooks": [{ "type": "command",
+      "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/riftri-worktree-remove.sh" }] }]
+  }
+}
+```
+
+`.claude/hooks/riftri-worktree-create.sh` reads the requested name from the
+hook's JSON input (with `jq`) and prints only the new worktree's path:
+
+```sh
+#!/bin/sh
+set -eu
+name=$(jq -r .name)
+destination="$CLAUDE_PROJECT_DIR/.claude/worktrees/$name"
+# Claude Code reads the worktree path from stdout, so the report goes to stderr.
+riftri worktree add "$destination" -b "worktree-$name" HEAD \
+  --repository "$CLAUDE_PROJECT_DIR" --json-errors >&2
+printf '%s\n' "$destination"
+```
+
+`.claude/hooks/riftri-worktree-remove.sh` removes it through Riftri's journal:
+
+```sh
+#!/bin/sh
+set -eu
+riftri worktree remove "$(jq -r .worktree_path)" \
+  --repository "$CLAUDE_PROJECT_DIR" --json-errors >&2
+```
+
+- Stdout carries the path and nothing else. `riftri worktree add` prints its
+  report on stdout, so the hook sends it to stderr; extra stdout breaks the
+  path Claude Code reads.
+- A refused or failed add exits non-zero, which fails the worktree creation,
+  and the `--json-errors` receipt on stderr says why. Nothing is left to clean
+  up after a policy refusal.
+- The remove hook keeps uncommitted work. `riftri worktree remove` refuses a
+  dirty worktree, so the directory stays where it is. Don't add `--force`.
+- Change `HEAD` and the branch name to match how your project starts task
+  branches.
+- Claude Code doesn't call `WorktreeRemove` on every path, and some versions
+  remove a hook-created worktree with plain `git worktree remove`. A Riftri
+  worktree removed by plain Git leaves its add journal behind and keeps its
+  immutable base referenced: `riftri status` reports it and `riftri repair`
+  retires it. Launching Claude Code through `riftri exec` in an enabled
+  repository sends those Git calls through Riftri as well.
+
 **Codex and other CLI harnesses.** Identical pattern:
 `riftri exec -- codex`, or shell activation. Harnesses that manage worktrees
 themselves can instead call `riftri worktree add`/`remove` explicitly and skip
@@ -86,6 +144,53 @@ supported volume for the worktree destinations and run
 Linux shells without mount capability, a narrow root-owned helper can be
 installed once with `sudo riftri overlayfs install-helper`; unsupported
 volumes stop before mutation rather than silently copying.
+
+## Apps that launch agents
+
+An app that starts agents for the user (a terminal, an editor, an agent
+manager) often ships its own Riftri binary and shows the user's worktrees.
+These rules keep it in step with the CLI and with any Riftri the user installed
+separately:
+
+- **Launch each agent through `riftri exec`.** Run
+  `<path-to-riftri> exec [--worktree <root>] -- <agent> <args>` with the
+  absolute path of the binary you ship. Only that process tree gets the Git
+  shim. `riftri exec` forwards termination signals and exits with the agent's
+  own status, so your process supervision works unchanged; see
+  [`riftri exec`](cli.md#riftri-exec-options-command) for the details.
+- **Ask before enabling a repository.** The shim optimizes `git worktree add`
+  only in repositories that ran `riftri enable`, which is the user's consent
+  for that one repository. Ask before running it; `riftri disable` reverses
+  it. Without it, every Git command goes to the real Git, and an explicit
+  `riftri worktree add` still works.
+- **Put Riftri on the agent's `PATH` if the agent calls it.** `riftri exec`
+  adds only a `git` shim. An agent that runs `riftri worktree list`, or follows
+  the Riftri skill, needs the bundled binary's directory on its `PATH` too.
+- **Keep the bundled release current.** Your copy and one the user installed
+  with Homebrew or npm work on the same state directory. Journals carry a
+  format version that an older binary refuses rather than misreads, but a
+  recovery or collection fix only helps the binary that has it.
+- **Read state through the JSON reports, not the state directory.**
+  `riftri status --json` and `riftri worktree list --all-states --json` are
+  versioned. The files under `<common-git-dir>/riftri` are recovery journals:
+  they include rolled-back and pending operations, carry no timestamps, change
+  between releases, and `riftri gc --apply` deletes the finished ones
+  ([D043](decisions.md#d043-gc-retires-finished-journal-history)). Totals
+  counted from them are wrong and reset after every collection. Worktrees
+  made with `--state-dir` live in another directory altogether, which
+  `--all-states` finds.
+- **Refresh cheaply.** `status` and `worktree list` read every file of every
+  worktree to measure disk use. For a view that refreshes often, use
+  `riftri worktree inspect --json -- <path>...`, which reports ownership and
+  backend without reading user files, and measure disk use less often or on
+  request.
+- **Run actions on the machine-readable path.** Pass `--json --json-errors`
+  to `worktree remove`, `gc --apply`, and `repair`, show the receipt's
+  message, and offer its `nextCommand`. A `"category": "policy"` refusal
+  changed nothing. Before offering `riftri gc --apply`, run `riftri gc --json`
+  to show what it would delete. Don't offer collection while `status --json`
+  reports `counts_complete: false` or a pending operation; offer
+  `riftri repair --json` instead.
 
 ## Machine-readable contract
 
