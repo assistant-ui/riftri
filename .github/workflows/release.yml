@@ -1,269 +1,26 @@
 name: Release
 
+# Temporary diagnostic for npm trusted publishing. npm matches the trust
+# policy against this file name, so the diagnostic has to live in
+# `release.yml`. It publishes nothing and never prints a token.
+
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-*"
 
 permissions:
   contents: read
 
 jobs:
-  verify-tag:
-    name: Verify release tag signature
+  oidc-diagnostic:
+    name: Diagnose npm OIDC exchange
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
-
-    steps:
-      # First job in the workflow, so an unsigned tag costs seconds instead of
-      # eight platform builds. A rehearsal has no tag to check, but the job
-      # must still succeed then: a skipped job skips everything that needs it.
-      - name: Require a verified signature on the release tag
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          reference=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}")
-          if [[ "$(jq -r '.object.type' <<<"${reference}")" != "tag" ]]; then
-            echo "::error::${TAG} is a lightweight tag. A release tag must be annotated and signed."
-            exit 1
-          fi
-          tag_sha=$(jq -r '.object.sha' <<<"${reference}")
-          object=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_sha}")
-          reason=$(jq -r '.verification.reason' <<<"${object}")
-          if [[ "$(jq -r '.verification.verified' <<<"${object}")" != "true" ]]; then
-            echo "::error::${TAG} carries no verified signature (${reason}). Sign it with a key registered on the tagger's GitHub account, then delete and re-push the tag."
-            exit 1
-          fi
-          echo "${TAG} carries a verified signature (${reason})."
-
-  build:
-    name: Build ${{ matrix.package }}
-    needs: verify-tag
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            target: aarch64-apple-darwin
-            package: riftri-darwin-arm64
-            executable: riftri
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            package: riftri-darwin-x64
-            executable: riftri
-          # GNU builds pin the oldest supported glibc. Building on a newer
-          # image makes std link symbols that image happens to have, which is
-          # how v0.4.0 shipped needing GLIBC_2.39. See docs/install.md.
-          - os: ubuntu-22.04-arm
-            target: aarch64-unknown-linux-gnu
-            package: riftri-linux-arm64-gnu
-            executable: riftri
-            glibc: true
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            package: riftri-linux-arm64-musl
-            executable: riftri
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            package: riftri-linux-x64-gnu
-            executable: riftri
-            glibc: true
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            package: riftri-linux-x64-musl
-            executable: riftri
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            package: riftri-win32-arm64
-            executable: riftri.exe
-          - os: windows-2025
-            target: x86_64-pc-windows-msvc
-            package: riftri-win32-x64
-            executable: riftri.exe
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust target
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Install musl linker
-        if: endsWith(matrix.target, '-musl')
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
-
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }} -p riftri-cli --features tui
-
-      - name: Smoke-test native binary
-        shell: bash
-        run: '"target/${{ matrix.target }}/release/${{ matrix.executable }}" --version'
-
-      # A GNU binary that needs a newer glibc than the floor installs cleanly
-      # and then cannot start, so the release must fail here instead.
-      - name: Verify glibc compatibility floor
-        if: matrix.glibc
-        run: node package/scripts/check-glibc-floor.mjs "target/${{ matrix.target }}/release/${{ matrix.executable }}"
-
-      # Symbol versions prove what the loader will accept; this proves the
-      # binary actually runs on the oldest distribution we claim to support.
-      - name: Run on the oldest supported glibc
-        if: matrix.glibc
-        run: |
-          docker run --rm \
-            --volume "$PWD/target/${{ matrix.target }}/release:/riftri:ro" \
-            rockylinux:9 /riftri/${{ matrix.executable }} --version
-
-      - name: Upload native binary
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ${{ matrix.package }}
-          path: target/${{ matrix.target }}/release/${{ matrix.executable }}
-          if-no-files-found: error
-          retention-days: 2
-
-  stage:
-    name: Stage and inspect release
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out source and tags
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 26.13.0
-
-      - name: Download native binaries
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: riftri-*
-          path: artifacts
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-
-      - name: Install dev dependencies only
-        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
-
-      - name: Validate package versions
-        run: pnpm run check:packages
-
-      - name: Select release version
-        shell: bash
-        run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            release_tag="${GITHUB_REF_NAME}"
-          else
-            release_tag="v$(node -p "require('./package.json').version")"
-          fi
-          echo "RELEASE_TAG=${release_tag}" >> "${GITHUB_ENV}"
-          echo "Staging ${release_tag} for ${GITHUB_EVENT_NAME}"
-
-      - name: Stage npm packages and GitHub assets
-        run: node package/scripts/prepare-release.mjs "${RELEASE_TAG}" artifacts
-
-      - name: Verify GitHub release checksums
-        working-directory: dist/release
-        run: sha256sum --check SHA256SUMS
-
-      - name: Upload GitHub release assets
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: github-release-assets
-          path: dist/release/
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Inspect all npm tarballs
-        shell: bash
-        run: |
-          mkdir -p dist/npm
-          for package_directory in package/platforms/*; do
-            npm pack "${package_directory}" --pack-destination dist/npm
-          done
-          npm pack ./dist/npm-root --pack-destination dist/npm
-
-      - name: Confirm non-publishing rehearsal
-        if: github.event_name == 'workflow_dispatch'
-        run: echo "Release rehearsal completed without publishing npm packages or a GitHub release."
-
-  publish:
-    name: Publish npm packages
-    # NPM_PUBLISH_ENABLED keeps a deliberate off switch for npm publication.
-    if: github.event_name == 'push' && vars.NPM_PUBLISH_ENABLED == 'true'
-    needs: stage
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 10
     permissions:
       contents: read
       id-token: write
 
     steps:
-      - name: Check out source and tags
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 26.13.0
-
-      - name: Download native binaries
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: riftri-*
-          path: artifacts
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
-
-      - name: Install dev dependencies only
-        run: pnpm install --frozen-lockfile --ignore-scripts --no-optional
-
-      - name: Validate package versions
-        run: pnpm run check:packages
-
-      - name: Stage npm packages and GitHub assets
-        run: node package/scripts/prepare-release.mjs "${GITHUB_REF_NAME}" artifacts
-
-      - name: Verify GitHub release checksums
-        working-directory: dist/release
-        run: sha256sum --check SHA256SUMS
-
-      # npm trusted publishing: the CLI exchanges this job's OIDC token for a
-      # short-lived publish credential, so no npm token exists to leak. Each
-      # package's trusted publisher names this repository and release.yml.
-      - name: Publish npm packages
-        run: node package/scripts/publish-packages.mjs
-
-  github-release:
-    name: Publish direct downloads
-    if: github.event_name == 'push'
-    needs: stage
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    permissions:
-      contents: write
-      id-token: write
-      attestations: write
-
-    steps:
-      - name: Check out tagged source
+      - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js
@@ -271,64 +28,30 @@ jobs:
         with:
           node-version: 26.13.0
 
-      - name: Download inspected GitHub release assets
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: github-release-assets
-          path: dist/release
-
-      - name: Verify exact GitHub release assets
-        working-directory: dist/release
-        shell: bash
+      - name: Show npm version and non-secret OIDC claims
         run: |
-          node <<'NODE'
-          const assert = require('node:assert/strict');
-          const { createHash } = require('node:crypto');
-          const { lstatSync, readFileSync, readdirSync } = require('node:fs');
-          const tag = process.env.GITHUB_REF_NAME;
-          assert.match(tag, /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
-          const archives = [
-            'riftri-darwin-arm64', 'riftri-darwin-x64',
-            'riftri-linux-arm64-gnu', 'riftri-linux-arm64-musl',
-            'riftri-linux-x64-gnu', 'riftri-linux-x64-musl',
-            'riftri-win32-arm64', 'riftri-win32-x64',
-          ].map(name => `${name}-${tag}.tar.gz`).sort();
-          const expected = ['SHA256SUMS', ...archives].sort();
-          assert.deepEqual(readdirSync('.').sort(), expected, 'unexpected release asset set');
-          for (const name of expected) {
-            assert.ok(lstatSync(name).isFile(), `${name} is not a regular file`);
-          }
-          const checksums = readFileSync('SHA256SUMS', 'utf8').trimEnd().split('\n');
-          assert.equal(checksums.length, archives.length, 'expected one checksum per archive');
-          const verified = [];
-          for (const line of checksums) {
-            const match = /^([0-9a-f]{64})  ([^/\\]+)$/.exec(line);
-            assert.ok(match, 'invalid checksum line');
-            const [, checksum, name] = match;
-            assert.ok(archives.includes(name), `unexpected checksum target: ${name}`);
-            assert.equal(createHash('sha256').update(readFileSync(name)).digest('hex'), checksum,
-              `checksum mismatch: ${name}`);
-            verified.push(name);
-          }
-          assert.deepEqual(verified.sort(), archives, 'missing or duplicate archive checksum');
-          console.log(`Verified all ${archives.length} native archives for ${tag}`);
-          NODE
+          npm --version
+          id_token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" | jq -r .value)"
+          echo "::add-mask::$id_token"
+          payload="$(printf '%s' "$id_token" | cut -d. -f2 | tr '_-' '/+')"
+          while [ $(( ${#payload} % 4 )) -ne 0 ]; do payload="$payload="; done
+          printf '%s' "$payload" | base64 -d | jq '{aud, iss, repository, repository_owner, workflow_ref, job_workflow_ref, ref, ref_type, event_name, environment, runner_environment}'
 
-      - name: Attest build provenance for release assets
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: |
-            dist/release/*.tar.gz
-            dist/release/SHA256SUMS
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
+      - name: Exchange the OIDC token directly (status and error body only)
         run: |
-          release_options=(--verify-tag --generate-notes)
-          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
-            release_options+=(--prerelease)
-          fi
-          # An existing release fails safely: never replace published assets.
-          gh release create "${GITHUB_REF_NAME}" dist/release/SHA256SUMS dist/release/*.tar.gz "${release_options[@]}"
+          id_token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" | jq -r .value)"
+          echo "::add-mask::$id_token"
+          for name in riftri-darwin-arm64 riftri; do
+            status="$(curl -sS -o response.json -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $id_token" \
+              "https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/$name")"
+            echo "$name: HTTP $status"
+            if [ "${status#2}" = "$status" ]; then cat response.json; echo; fi
+            rm -f response.json
+          done
+
+      - name: Dry-run publish with verbose npm logs
+        working-directory: package/platforms/riftri-darwin-arm64
+        run: npm publish --dry-run --access public --tag latest --loglevel verbose 2>&1 | grep -iE "oidc|token|auth|exchange|provenance|npm verbose (cli|title)" || true
