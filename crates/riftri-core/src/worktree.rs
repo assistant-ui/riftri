@@ -299,6 +299,10 @@ pub struct ViewStorageAccounting {
     /// When its add started, in milliseconds since the Unix epoch, from the
     /// add's operation ID. None for an ID that does not carry a time.
     pub created_unix_ms: Option<u64>,
+    /// Bytes of this view's file data that no clone shares: what it costs on
+    /// top of its base. For OverlayFS, its private upper layer. None where the
+    /// filesystem cannot say (ReFS, or a volume without the query).
+    pub private_bytes: Option<u64>,
 }
 
 /// Where one worktree stands in a state directory's history.
@@ -450,6 +454,11 @@ pub struct StorageAccountingReport {
     pub diagnostic_issues: Vec<StateDiagnosticIssue>,
     pub total_logical_bytes: u64,
     pub total_allocated_bytes: u64,
+    /// Bytes the active views save against one plain checkout each: their
+    /// logical bytes, minus their private bytes, minus the logical bytes of
+    /// each base they use, counted once. Negative when the views and their
+    /// bases cost more. None when any view's private bytes are unknown.
+    pub saved_bytes: Option<i64>,
 }
 
 /// A journaled worktree that Git no longer registers at the journal's
@@ -2242,6 +2251,7 @@ pub fn storage_accounting(
                 allocated_bytes: 0,
                 metadata: journal.metadata.clone(),
                 created_unix_ms: operation_started_unix_ms(&journal.operation_id),
+                private_bytes: None,
             });
         }
     }
@@ -2250,6 +2260,18 @@ pub fn storage_accounting(
     {
         view.logical_bytes = logical_bytes;
         view.allocated_bytes = allocated_bytes;
+    }
+    for (view, private_bytes) in views
+        .iter_mut()
+        .zip(views_private_bytes(&view_usage_requests)?)
+    {
+        // An OverlayFS view's private bytes are its upper layer, which is
+        // what its allocated bytes already measure.
+        view.private_bytes = if view.backend == BackendKind::OverlayFs {
+            Some(view.allocated_bytes)
+        } else {
+            private_bytes
+        };
     }
     views.sort_unstable_by(|left, right| left.destination.cmp(&right.destination));
 
@@ -2293,6 +2315,7 @@ pub fn storage_accounting(
         .chain(views.iter().map(|view| view.logical_bytes))
         .fold(0_u64, u64::saturating_add);
     let total_allocated_bytes = cow_aware_allocated_total(&bases, &views);
+    let saved_bytes = saved_bytes(&bases, &views);
     let mut state_diagnosis = diagnose_state_paths(
         &state_directory,
         &add_journals,
@@ -2403,6 +2426,7 @@ pub fn storage_accounting(
         diagnostic_issues: state_diagnosis.issues,
         total_logical_bytes,
         total_allocated_bytes,
+        saved_bytes,
     })
 }
 
@@ -9308,10 +9332,93 @@ struct TreeUsageRequest {
 /// stored by request index so an error is still reported in journal order.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 fn tree_usages(requests: &[TreeUsageRequest]) -> Result<Vec<(u64, u64)>, WorktreeError> {
+    measure_trees(requests, &measure_tree_usage)
+}
+
+/// Each view's private bytes, concurrently as [`tree_usages`] measures them.
+/// OverlayFS views are measured from their upper layer by the caller, so
+/// their requests are skipped here.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn views_private_bytes(requests: &[TreeUsageRequest]) -> Result<Vec<Option<u64>>, WorktreeError> {
+    measure_trees(requests, &|request: &TreeUsageRequest| {
+        if request.allocated_path.is_some() {
+            return Ok(None);
+        }
+        Ok(tree_private_bytes(&request.path))
+    })
+}
+
+/// The private bytes of every regular file below `path`, or None as soon as
+/// one of them cannot be measured. Reporting only, so an unreadable entry
+/// makes the answer unknown rather than failing the report. Entries that
+/// vanish while the walk runs are skipped, as [`tree_usage`] skips them.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn tree_private_bytes(path: &Path) -> Option<u64> {
+    let vanished = |source: &std::io::Error| source.kind() == std::io::ErrorKind::NotFound;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if vanished(&source) => return Some(0),
+        Err(_) => return None,
+    };
+    if metadata.is_file() {
+        return match riftri_storage::private_data_bytes(path) {
+            Ok(bytes) => bytes,
+            Err(source) if vanished(&source) => Some(0),
+            Err(_) => None,
+        };
+    }
+    if !metadata.is_dir() {
+        return Some(0);
+    }
+    let names = match fs::read_dir(path) {
+        Ok(entries) => entries
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?,
+        Err(source) if vanished(&source) => return Some(0),
+        Err(_) => return None,
+    };
+    let mut total = 0_u64;
+    let mut child = path.to_path_buf();
+    for name in names {
+        child.push(name);
+        let bytes = tree_private_bytes(&child);
+        child.pop();
+        total = total.saturating_add(bytes?);
+    }
+    Some(total)
+}
+
+/// See [`StorageAccountingReport::saved_bytes`].
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn saved_bytes(bases: &[BaseStorageAccounting], views: &[ViewStorageAccounting]) -> Option<i64> {
+    let mut saved = 0_i128;
+    for view in views {
+        saved += i128::from(view.logical_bytes) - i128::from(view.private_bytes?);
+    }
+    let used = views
+        .iter()
+        .map(|view| view.base_path.as_path())
+        .collect::<BTreeSet<_>>();
+    for base in bases
+        .iter()
+        .filter(|base| used.contains(base.path.as_path()))
+    {
+        saved -= i128::from(base.logical_bytes);
+    }
+    Some(i64::try_from(saved).unwrap_or(if saved < 0 { i64::MIN } else { i64::MAX }))
+}
+
+/// Measure independent trees with a bounded set of workers, in request order.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn measure_trees<T: Send>(
+    requests: &[TreeUsageRequest],
+    measure: &(impl Fn(&TreeUsageRequest) -> Result<T, WorktreeError> + Sync),
+) -> Result<Vec<T>, WorktreeError> {
     const MAX_WORKERS: usize = 4;
 
     if requests.len() <= 1 {
-        return requests.iter().map(measure_tree_usage).collect();
+        return requests.iter().map(measure).collect();
     }
 
     let worker_count = std::thread::available_parallelism()
@@ -9319,15 +9426,15 @@ fn tree_usages(requests: &[TreeUsageRequest]) -> Result<Vec<(u64, u64)>, Worktre
         .unwrap_or(1)
         .min(MAX_WORKERS)
         .min(requests.len());
-    scheduled_tree_usages(requests, worker_count, &measure_tree_usage)
+    scheduled_tree_usages(requests, worker_count, measure)
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn scheduled_tree_usages(
+fn scheduled_tree_usages<T: Send>(
     requests: &[TreeUsageRequest],
     worker_count: usize,
-    measure: &(impl Fn(&TreeUsageRequest) -> Result<(u64, u64), WorktreeError> + Sync),
-) -> Result<Vec<(u64, u64)>, WorktreeError> {
+    measure: &(impl Fn(&TreeUsageRequest) -> Result<T, WorktreeError> + Sync),
+) -> Result<Vec<T>, WorktreeError> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     if worker_count == 1 {
         // Keep measuring every request before returning the first error, just
@@ -15020,7 +15127,7 @@ mod tests {
             }
         }
         assert!(
-            super::scheduled_tree_usages(&[], 1, &|_| panic!("empty request"))
+            super::scheduled_tree_usages::<(u64, u64)>(&[], 1, &|_| panic!("empty request"))
                 .unwrap()
                 .is_empty()
         );
@@ -15361,6 +15468,55 @@ mod tests {
         );
     }
 
+    /// Saved bytes compare the views with one plain checkout each: their
+    /// logical bytes, less what they own, less one copy of each base in use.
+    #[test]
+    fn saved_bytes_count_each_used_base_once_and_need_every_view_measured() {
+        let head = ObjectId::parse("0".repeat(40)).expect("null object id");
+        let base = |path: &str, logical: u64| BaseStorageAccounting {
+            path: PathBuf::from(path),
+            reference_count: 1,
+            logical_bytes: logical,
+            allocated_bytes: logical,
+            damaged: false,
+        };
+        let view = |base_path: &str, logical: u64, private: Option<u64>| ViewStorageAccounting {
+            repository: PathBuf::from("/repo"),
+            destination: PathBuf::from("/view"),
+            base_path: PathBuf::from(base_path),
+            backend: BackendKind::ApfsClone,
+            head: head.clone(),
+            branch: None,
+            detached: false,
+            locked_reason: None,
+            prunable_reason: None,
+            logical_bytes: logical,
+            allocated_bytes: logical,
+            metadata: Default::default(),
+            created_unix_ms: None,
+            private_bytes: private,
+        };
+        // Base A (100) under three views, base B (40) under one, and base C
+        // (500) retained but unused: C is reclaimable, not part of the cost.
+        let bases = [base("/a", 100), base("/b", 40), base("/c", 500)];
+        let views = [
+            view("/a", 100, Some(0)),
+            view("/a", 100, Some(8)),
+            view("/a", 130, Some(30)),
+            view("/b", 40, Some(0)),
+        ];
+        assert_eq!(super::saved_bytes(&bases, &views), Some(370 - 38 - 140));
+
+        // One worktree on its own base costs its private bytes.
+        let views = [view("/b", 40, Some(16))];
+        assert_eq!(super::saved_bytes(&bases, &views), Some(-16));
+
+        // Nothing is claimed while any view could not be measured.
+        let views = [view("/a", 100, Some(0)), view("/a", 100, None)];
+        assert_eq!(super::saved_bytes(&bases, &views), None);
+        assert_eq!(super::saved_bytes(&bases, &[]), Some(0));
+    }
+
     #[test]
     fn cow_aware_total_counts_shared_base_blocks_once() {
         // A null (all-zero) object ID is a valid 40-char hex string.
@@ -15390,6 +15546,7 @@ mod tests {
             allocated_bytes: base_allocated,
             metadata: Default::default(),
             created_unix_ms: None,
+            private_bytes: None,
         };
 
         // One base plus three fresh views that share all of the base's blocks.
@@ -15495,6 +15652,7 @@ mod tests {
             allocated_bytes: private_layers,
             metadata: Default::default(),
             created_unix_ms: None,
+            private_bytes: None,
         };
         assert_eq!(
             cow_aware_allocated_total(&bases, std::slice::from_ref(&overlay_view)),

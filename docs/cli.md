@@ -354,7 +354,25 @@ Report retained bases, active views, reference counts, and disk use for one
 repository's Riftri state. Supports `--state-dir` and `--json`.
 
 Each worktree in `status --json` and `worktree list --json` carries
-`created_at`, when its add started (see [`riftri history`](#riftri-history-options-repository)).
+`created_at`, when its add started (see [`riftri history`](#riftri-history-options-repository)),
+and `private_bytes`: the bytes of its file data that no clone shares, which is
+what the worktree costs on top of its base. On APFS that is the
+`ATTR_CMNEXT_PRIVATESIZE` of each file, on Linux reflink volumes the extents
+`FIEMAP` does not mark shared, and on OverlayFS the private upper layer.
+`allocated_bytes` cannot tell these apart, because it counts a shared block in
+full for every clone. `private_bytes` is `null` where the filesystem cannot say
+(ReFS, or a volume without the query), and only regular files' data is counted.
+
+`status --json` also reports `saved_bytes`: the active worktrees' logical
+bytes, minus their private bytes, minus the logical bytes of each base they
+use, counted once. That is what they save against one plain `git worktree`
+checkout each; it is negative when the worktrees and their bases cost more,
+as one worktree with private changes does. Retained bases no worktree uses are
+not counted; `riftri gc` reclaims them. `saved_bytes` is `null` when any
+worktree's private bytes are unknown. Measuring private bytes reads every
+file's extent or clone information once more, so `status` and `worktree list`
+take longer on large worktrees; use `riftri worktree inspect` for frequent
+checks.
 
 ### `riftri history [OPTIONS] [REPOSITORY]`
 

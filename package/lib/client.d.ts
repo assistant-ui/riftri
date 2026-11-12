@@ -110,6 +110,11 @@ export interface ManagedWorktree {
   metadata: Record<string, string>;
   /** When its add started (RFC 3339, UTC), or null when unknown. */
   created_at: string | null;
+  /**
+   * Bytes of its file data no clone shares: what it costs on top of its base.
+   * Null where the filesystem cannot say (ReFS).
+   */
+  private_bytes: number | null;
 }
 
 /** One worktree in `history()`, live or retired. */
@@ -238,6 +243,11 @@ export interface StatusReport {
   diagnostic_issues: unknown[];
   total_allocated_bytes: number;
   total_logical_bytes: number;
+  /**
+   * Bytes the worktrees save against one plain checkout each; negative when
+   * they cost more. Null when any worktree's private bytes are unknown.
+   */
+  saved_bytes: number | null;
   [key: string]: unknown;
 }
 
