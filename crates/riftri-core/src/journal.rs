@@ -2379,7 +2379,7 @@ impl HistoryStore {
         Self { directory, path }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -2417,8 +2417,11 @@ impl HistoryStore {
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => true,
             Err(source) => return Err(io("inspect Riftri history", &self.path, source)),
         };
+        // Read access too: Windows refuses to lock a handle that can only
+        // append.
         let mut file = OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)
             .map_err(|source| io("open Riftri history", &self.path, source))?;
