@@ -1038,6 +1038,32 @@ add a durable write to each and need its own recovery; keeping completed
 journals forever brings back the slowdown D043 removed; a counter in a file
 would lose the paths, branches, and labels an app shows.
 
+### D051: private bytes are measured per file, not estimated
+
+`allocated_bytes` sums each file's allocation, which counts a block shared by
+a base and its clones in full for every one of them, so it cannot say what a
+worktree costs. Integrations that wanted a "saved" number asked the
+filesystem themselves. Riftri now reports `private_bytes` per worktree: on
+APFS, `getattrlist` with `ATTR_CMNEXT_PRIVATESIZE`; on Linux reflink volumes,
+`FIEMAP` extents without `FIEMAP_EXTENT_SHARED` (data not yet allocated is
+counted, since only a write made it); on OverlayFS, the private upper layer,
+which a first write fills with a whole-file copy. ReFS has no per-file answer
+and reports `null`. The queries live in `riftri-storage`, behind the storage
+boundary.
+
+`saved_bytes` compares the active worktrees with one plain checkout each:
+their logical bytes, less their private bytes, less one copy of each base they
+use. It is reported only when every worktree was measured, and it may be
+negative. Both are reporting only: no lifecycle step reads them, a file that
+cannot be measured makes its worktree's answer unknown rather than failing
+`status`, and volume-delta benchmarks remain the proof of physical sharing
+(D018).
+
+Rejected alternatives: estimating from `allocated_bytes` minus the base's
+allocation (the CoW-aware total `status` already prints) cannot see which
+blocks a view rewrote; a volume-delta measurement is exact but needs a quiet
+volume and cannot attribute bytes to one worktree.
+
 ## Open design questions
 
 - Which checkout-profile inputs need first-class names beyond the canonical raw

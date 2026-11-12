@@ -103,6 +103,7 @@ fn view(spec: &Value) -> riftri_core::ViewStorageAccounting {
         allocated_bytes: spec["allocated"].as_u64().expect("allocated"),
         metadata: Default::default(),
         created_unix_ms: None,
+        private_bytes: None,
     }
 }
 
@@ -152,6 +153,7 @@ fn accounting(spec: &Value) -> riftri_core::StorageAccountingReport {
         diagnostic_issues: items(&spec["issues"]).iter().map(issue).collect(),
         total_logical_bytes: spec["total_logical"].as_u64().expect("total logical"),
         total_allocated_bytes: spec["total_allocated"].as_u64().expect("total allocated"),
+        saved_bytes: None,
     }
 }
 

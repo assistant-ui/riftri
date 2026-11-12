@@ -23,6 +23,12 @@ for its Rust CLI and npm distribution packages as one synchronized release.
   listed after collection. `worktree list --json` and `status --json` report
   `created_at` for each worktree. The Node client adds `history()`
   (#788, D050).
+- `status --json` and `worktree list --json` report `private_bytes` per
+  worktree: the bytes of its file data no clone shares, from
+  `ATTR_CMNEXT_PRIVATESIZE` on APFS, unshared `FIEMAP` extents on Linux
+  reflink volumes, and the upper layer on OverlayFS (`null` on ReFS).
+  `status --json` adds `saved_bytes`, what the worktrees save against one
+  plain checkout each, and the human status prints it (#788, D051).
 
 ### Changed
 

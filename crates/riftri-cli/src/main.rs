@@ -2426,6 +2426,7 @@ fn worktree_view_json(view: &riftri_core::ViewStorageAccounting) -> serde_json::
         "allocated_bytes": view.allocated_bytes,
         "metadata": view.metadata,
         "created_at": view.created_unix_ms.map(rfc3339_utc),
+        "private_bytes": view.private_bytes,
     })
 }
 
@@ -2512,6 +2513,12 @@ fn print_worktree_view_details(view: &riftri_core::ViewStorageAccounting, state:
         "  Filesystem-accounted allocated: {}",
         display_byte_count(view.allocated_bytes)
     );
+    if let Some(private) = view.private_bytes {
+        outputln!(
+            "  Private (not shared with its base): {}",
+            display_byte_count(private)
+        );
+    }
     if let Some(created) = view.created_unix_ms {
         outputln!("  Created: {}", rfc3339_utc(created));
     }
@@ -2927,6 +2934,7 @@ fn print_storage_accounting(
             "diagnostic_issues": diagnostic_issues,
             "total_logical_bytes": report.total_logical_bytes,
             "total_allocated_bytes": report.total_allocated_bytes,
+            "saved_bytes": report.saved_bytes,
         });
         machineln!(
             "{}",
@@ -3024,6 +3032,17 @@ fn print_storage_accounting(
         "Total filesystem-accounted allocated: {}",
         display_byte_count(report.total_allocated_bytes)
     );
+    match report.saved_bytes {
+        Some(saved) if saved >= 0 => outputln!(
+            "Saved against one plain checkout per worktree: {}",
+            display_byte_count(saved.unsigned_abs())
+        ),
+        Some(saved) => outputln!(
+            "Cost beyond one plain checkout per worktree: {}",
+            display_byte_count(saved.unsigned_abs())
+        ),
+        None => {}
+    }
     print_allocation_note();
     Ok(())
 }

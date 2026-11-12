@@ -221,7 +221,9 @@ representable.
 Worktrees in `worktree add`, `worktree list`, and `status` reports carry a
 `metadata` object: the labels the caller recorded with `--meta`, empty when
 there are none. Worktrees in `worktree list` and `status` also carry
-`created_at`, when the add started. `riftri history --json`
+`created_at`, when the add started, and `private_bytes`, what each costs on
+top of its base, and `status` reports `saved_bytes` against one plain checkout
+per worktree (`null` where the filesystem cannot measure it). `riftri history --json`
 lists every worktree the state directory has recorded, including removed ones
 whose journals `gc --apply` retired, so an app can count and show them. To
 record which agent asked for each worktree, launch it as

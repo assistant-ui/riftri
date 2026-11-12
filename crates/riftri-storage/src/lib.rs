@@ -9,8 +9,11 @@ use thiserror::Error;
 mod exact_copy;
 #[cfg(any(test, target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod parallel;
+mod private_size;
 #[cfg(unix)]
 mod tree_removal;
+
+pub use private_size::private_data_bytes;
 
 /// Grant what deleting the directory tree at `path` needs, without deleting
 /// anything. Symlinks are never followed or changed.
