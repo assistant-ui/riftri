@@ -59,6 +59,7 @@ use crate::journal::{
     DecodedJournal, DecodedMoveJournal, DecodedPruneJournal, DecodedRemovalJournal, JournalError,
     JournalStore, MoveJournalStore, PruneJournalStore, RemovalJournalRecord, RemovalJournalStore,
 };
+use crate::metadata::WorktreeMetadata;
 use crate::progress::{self, ProgressEvent};
 use crate::{
     AddWorktreePhase, CompactJournalTransitionError, CompactWorktreePhase, GarbageCollectionPhase,
@@ -177,6 +178,8 @@ pub struct AddWorktreeResult {
     /// The repository's `post-checkout` hook run, when it has one Git would
     /// execute. None means there was no such hook.
     pub post_checkout: Option<PostCheckoutOutcome>,
+    /// The labels recorded in the add journal.
+    pub metadata: WorktreeMetadata,
 }
 
 /// What Riftri's `post-checkout` hook run did.
@@ -289,6 +292,9 @@ pub struct ViewStorageAccounting {
     pub prunable_reason: Option<Vec<u8>>,
     pub logical_bytes: u64,
     pub allocated_bytes: u64,
+    /// Labels recorded with `--meta` when the worktree was added, as stored in
+    /// its add journal. Empty when there are none.
+    pub metadata: BTreeMap<String, String>,
 }
 
 /// Whether a state diagnostic can conceal a base reference the surrounding
@@ -631,8 +637,18 @@ pub(crate) fn io_error_is_storage_full(_error: &std::io::Error) -> bool {
 }
 
 pub fn add_worktree(request: AddWorktreeRequest) -> Result<AddWorktreeResult, WorktreeError> {
+    add_worktree_with_metadata(request, WorktreeMetadata::new())
+}
+
+/// [`add_worktree`], recording caller-supplied labels in the add journal.
+/// The labels are reporting only: they never change the base, the checkout,
+/// or recovery.
+pub fn add_worktree_with_metadata(
+    request: AddWorktreeRequest,
+    metadata: WorktreeMetadata,
+) -> Result<AddWorktreeResult, WorktreeError> {
     validate_lifecycle_git_environment()?;
-    add_worktree_inner(request, None, true)
+    add_worktree_inner_with_metadata(request, metadata, None, true)
 }
 
 /// Refuse a proposed new-worktree destination with exactly the refusals
@@ -2044,6 +2060,7 @@ pub fn storage_accounting(
                 prunable_reason: worktree.prunable_reason.clone(),
                 logical_bytes: 0,
                 allocated_bytes: 0,
+                metadata: journal.metadata.clone(),
             });
         }
     }
@@ -4233,8 +4250,9 @@ fn prune_worktrees_resolved(
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn add_worktree_inner(
+fn add_worktree_inner_with_metadata(
     _request: AddWorktreeRequest,
+    _metadata: WorktreeMetadata,
     _fail_after: Option<AddWorktreePhase>,
     _rollback_on_error: bool,
 ) -> Result<AddWorktreeResult, WorktreeError> {
@@ -4243,9 +4261,28 @@ fn add_worktree_inner(
     ))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+/// The add without caller labels, which is how every test drives it.
+#[cfg(all(
+    test,
+    any(target_os = "macos", target_os = "linux", target_os = "windows")
+))]
 fn add_worktree_inner(
     request: AddWorktreeRequest,
+    fail_after: Option<AddWorktreePhase>,
+    rollback_on_error: bool,
+) -> Result<AddWorktreeResult, WorktreeError> {
+    add_worktree_inner_with_metadata(
+        request,
+        WorktreeMetadata::new(),
+        fail_after,
+        rollback_on_error,
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn add_worktree_inner_with_metadata(
+    request: AddWorktreeRequest,
+    metadata: WorktreeMetadata,
     fail_after: Option<AddWorktreePhase>,
     rollback_on_error: bool,
 ) -> Result<AddWorktreeResult, WorktreeError> {
@@ -4540,6 +4577,7 @@ fn add_worktree_inner(
             backend,
         )
     };
+    journal.metadata = metadata.as_map().clone();
     #[cfg(test)]
     crate::test_hooks::fire(
         crate::test_hooks::FilesystemRacePoint::AddIntentPersist,
@@ -4609,6 +4647,7 @@ fn add_worktree_inner(
                 reused_base,
                 backend,
                 post_checkout,
+                metadata,
             })
         }
         Err(operation_error) => {
@@ -15144,6 +15183,7 @@ mod tests {
             // per-tree allocation equals the base's allocation.
             logical_bytes: base_allocated,
             allocated_bytes: base_allocated,
+            metadata: Default::default(),
         };
 
         // One base plus three fresh views that share all of the base's blocks.
@@ -15247,6 +15287,7 @@ mod tests {
             prunable_reason: None,
             logical_bytes: private_layers,
             allocated_bytes: private_layers,
+            metadata: Default::default(),
         };
         assert_eq!(
             cow_aware_allocated_total(&bases, std::slice::from_ref(&overlay_view)),
@@ -17000,6 +17041,7 @@ mod tests {
                 backend: BackendKind::ApfsClone,
                 sparse_directories: Vec::new(),
                 overlayfs: None,
+                metadata: Default::default(),
                 phase,
                 last_forward_phase: phase,
             };

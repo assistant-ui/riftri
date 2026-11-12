@@ -119,6 +119,7 @@ pub(super) fn run(
     riftri_core::execute_scoped_command_in_worktree(
         &launch.worktree,
         &[launch.program.into_os_string()],
+        &riftri_core::WorktreeMetadata::new(),
     )
     .context("worktree is retained and repository remains enabled; could not launch the agent (no agent was installed)")
 }

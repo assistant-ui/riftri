@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -525,6 +526,11 @@ pub(crate) struct JournalRecord {
     pub sparse_directories: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     overlayfs: Option<OverlayFsJournalRecord>,
+    /// Caller-supplied labels from `--meta`, for reporting only. Recovery
+    /// never reads them, and older journals omit the field entirely. An older
+    /// Riftri ignores the field and drops it if it rewrites the journal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
     pub phase: AddWorktreePhase,
     pub last_forward_phase: AddWorktreePhase,
 }
@@ -568,6 +574,7 @@ pub(crate) struct DecodedJournal {
     pub backend: BackendKind,
     pub sparse_directories: Vec<String>,
     pub overlayfs: Option<DecodedOverlayFsJournal>,
+    pub metadata: BTreeMap<String, String>,
     pub phase: AddWorktreePhase,
     pub last_forward_phase: AddWorktreePhase,
 }
@@ -788,6 +795,7 @@ impl JournalRecord {
             backend,
             sparse_directories: paths.sparse_directories.to_vec(),
             overlayfs: None,
+            metadata: BTreeMap::new(),
             phase: AddWorktreePhase::IntentRecorded,
             last_forward_phase: AddWorktreePhase::IntentRecorded,
         }
@@ -950,6 +958,7 @@ impl JournalRecord {
             backend: self.backend,
             sparse_directories: self.sparse_directories,
             overlayfs,
+            metadata: self.metadata,
             phase: self.phase,
             last_forward_phase: self.last_forward_phase,
             journal_path,
@@ -2472,6 +2481,66 @@ mod tests {
                 .expect("raced path remains for inspection")
                 .file_type()
                 .is_symlink()
+        );
+    }
+
+    /// Labels are additive: an unlabeled add journal keeps exactly the shape
+    /// older releases wrote and read, and a labeled one round-trips.
+    #[test]
+    fn add_journal_metadata_is_omitted_when_empty_and_round_trips_otherwise() {
+        let directory = tempdir().expect("journal fixture");
+        let store = JournalStore::create(directory.path()).expect("create journal store");
+        let record = |operation_id: &str| {
+            JournalRecord::new(
+                operation_id.to_owned(),
+                JournalPaths {
+                    repository: Path::new("/repository"),
+                    destination: Path::new("/destination"),
+                    scratch: Path::new("/scratch"),
+                    base_staging: Path::new("/base-staging"),
+                    base_path: Path::new("/base"),
+                    temporary_index: Path::new("/index"),
+                    branch: None,
+                    branch_created: false,
+                    sparse_directories: &[],
+                },
+                "0123456789abcdef0123456789abcdef01234567".to_owned(),
+                riftri_storage::BackendKind::ApfsClone,
+            )
+        };
+        let raw = |path: &Path| -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(path).expect("read journal"))
+                .expect("parse journal")
+        };
+
+        let unlabeled = store
+            .persist(&record("unlabeled"))
+            .expect("persist journal");
+        assert!(raw(&unlabeled).get("metadata").is_none());
+        assert!(
+            store
+                .load_operation("unlabeled")
+                .expect("load journal")
+                .metadata
+                .is_empty()
+        );
+
+        let mut labeled = record("labeled");
+        labeled.metadata = std::collections::BTreeMap::from([
+            ("agent".to_owned(), "codex".to_owned()),
+            ("task".to_owned(), "42".to_owned()),
+        ]);
+        let labeled_path = store.persist(&labeled).expect("persist journal");
+        assert_eq!(
+            raw(&labeled_path)["metadata"],
+            serde_json::json!({"agent": "codex", "task": "42"})
+        );
+        assert_eq!(
+            store
+                .load_operation("labeled")
+                .expect("load journal")
+                .metadata,
+            labeled.metadata
         );
     }
 

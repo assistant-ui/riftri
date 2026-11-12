@@ -212,6 +212,7 @@ without any shell-level activation.
 | Flag | Effect |
 | --- | --- |
 | `--worktree <PATH>` | Start the command from this exact, registered Git worktree root |
+| `--meta <KEY=VALUE>` | Label every worktree the command creates through Riftri; repeatable. See [worktree labels](#worktree-labels) |
 
 Before starting the command, `riftri exec` checks that the Git it records is
 2.36 or newer and otherwise refuses with the `unsupported-git-version` policy
@@ -505,6 +506,31 @@ is locked.
 | `-b, --branch <BRANCH>` | Create and check out a new branch |
 | `--detach` | Create a detached worktree instead of a branch |
 | `--sparse-dir <DIR>` | Materialize only this directory (plus repository-root files) with Git cone-mode sparse checkout; repeatable, repository-relative with `/` separators. See [sparse-checkout.md](sparse-checkout.md) for the supported subset and refusals |
+| `--meta <KEY=VALUE>` | Record a label on the new worktree; repeatable. See [worktree labels](#worktree-labels) |
+
+#### Worktree labels
+
+`--meta` records caller-chosen labels, such as which agent asked for the
+worktree, in its add journal. `worktree add --json`, `worktree list --json`
+(both schemas), and `status --json` report them as a `metadata` object of
+string values, empty when there are none, and the human reports print a
+`Metadata:` line. Labels are reporting only: they never select a base, change
+the checkout, or affect recovery, and they survive `worktree move` and
+`worktree compact`.
+
+- A key is 1 to 64 ASCII letters, digits, `.`, `_`, or `-`, starting with a
+  letter or digit. A value is UTF-8 text of at most 1,024 bytes with no
+  control characters, and may be empty. A worktree carries at most 32 labels.
+- A malformed entry, or a key given twice, is refused as `invalid-request`
+  (exit 3) before anything is created.
+- `riftri exec --meta` passes its labels to the command in
+  `RIFTRI_WORKTREE_METADATA`, a JSON object of string values. Every worktree
+  that command's process tree creates through Riftri, through the Git shim or
+  an explicit `riftri worktree add`, records them. A `--meta` key on that add
+  replaces the inherited value. A set but malformed variable is refused like a
+  malformed flag.
+- An older Riftri ignores the labels, and drops them if it rewrites the
+  journal during a move or compaction.
 
 ### `riftri worktree remove [OPTIONS] <PATH>`
 

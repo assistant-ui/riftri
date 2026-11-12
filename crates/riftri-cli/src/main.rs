@@ -119,6 +119,13 @@ enum Command {
         #[arg(long, value_name = "PATH")]
         worktree: Option<PathBuf>,
 
+        /// Label every worktree the command creates through Riftri, as
+        /// KEY=VALUE. Repeatable. Passed to the command in
+        /// RIFTRI_WORKTREE_METADATA; a key given here replaces an inherited
+        /// value.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<OsString>,
+
         /// Command and arguments to run.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<OsString>,
@@ -557,6 +564,14 @@ enum WorktreeCommand {
         #[arg(long = "sparse-dir", value_name = "DIR")]
         sparse_dir: Vec<String>,
 
+        /// Record a label on the new worktree, as KEY=VALUE. Repeatable. Keys
+        /// are 1 to 64 ASCII letters, digits, `.`, `_`, or `-`; values are
+        /// text without control characters. `worktree list` and `status`
+        /// report labels; they never affect the checkout. Labels inherited
+        /// from RIFTRI_WORKTREE_METADATA are kept unless a key is given here.
+        #[arg(long = "meta", value_name = "KEY=VALUE")]
+        meta: Vec<OsString>,
+
         /// Repository in which Git should create linked-worktree metadata.
         #[arg(long, default_value = ".")]
         repository: PathBuf,
@@ -900,12 +915,17 @@ fn run(cli: Cli) -> Result<()> {
             let activation = riftri_core::disable_repository(&path)?;
             outputln!("Disabled Riftri for {}", activation.repository.display());
         }
-        Command::Exec { worktree, command } => {
+        Command::Exec {
+            worktree,
+            meta,
+            command,
+        } => {
+            let metadata = requested_metadata(&meta)?;
             let status = match worktree {
                 Some(worktree) => {
-                    riftri_core::execute_scoped_command_in_worktree(&worktree, &command)?
+                    riftri_core::execute_scoped_command_in_worktree(&worktree, &command, &metadata)?
                 }
-                None => riftri_core::execute_scoped_command(&command)?,
+                None => riftri_core::execute_scoped_command(&command, &metadata)?,
             };
             std::process::exit(status);
         }
@@ -1144,10 +1164,12 @@ fn run(cli: Cli) -> Result<()> {
                 detach,
                 revision,
                 sparse_dir,
+                meta,
                 repository,
                 state_dir,
                 json,
             } => {
+                let metadata = requested_metadata(&meta)?;
                 let (mode, revision) = match (branch, detach, revision) {
                     (Some(branch), false, revision) => (
                         riftri_core::WorktreeMode::NewBranch(branch),
@@ -1163,14 +1185,17 @@ fn run(cli: Cli) -> Result<()> {
                     ),
                     _ => unreachable!("Clap enforces exactly one worktree head mode"),
                 };
-                let result = riftri_core::add_worktree(riftri_core::AddWorktreeRequest {
-                    repository,
-                    destination: path,
-                    revision,
-                    mode,
-                    state_dir,
-                    sparse_directories: sparse_dir,
-                })?;
+                let result = riftri_core::add_worktree_with_metadata(
+                    riftri_core::AddWorktreeRequest {
+                        repository,
+                        destination: path,
+                        revision,
+                        mode,
+                        state_dir,
+                        sparse_directories: sparse_dir,
+                    },
+                    metadata,
+                )?;
                 print_add_result(&result, json)?;
                 // Git reports a failing post-checkout through its own exit
                 // code and leaves the worktree in place. Match that: the
@@ -2168,6 +2193,7 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
             })),
             "journal_path": result.journal_path.display().to_string(),
             "journal_path_native_hex": native_path_hex(&result.journal_path),
+            "metadata": result.metadata.as_map(),
         });
         machineln!(
             "{}",
@@ -2193,6 +2219,9 @@ fn print_add_result(result: &riftri_core::AddWorktreeResult, json: bool) -> Resu
         }
     );
     outputln!("Journal: {}", result.journal_path.display());
+    if !result.metadata.is_empty() {
+        outputln!("Metadata: {}", display_metadata(result.metadata.as_map()));
+    }
     if let Some(hook) = &result.post_checkout {
         outputln!(
             "post-checkout hook: {} ({})",
@@ -2351,6 +2380,7 @@ fn worktree_view_json(view: &riftri_core::ViewStorageAccounting) -> serde_json::
         "base_path_native_hex": native_path_hex(&view.base_path),
         "logical_bytes": view.logical_bytes,
         "allocated_bytes": view.allocated_bytes,
+        "metadata": view.metadata,
     })
 }
 
@@ -2437,6 +2467,26 @@ fn print_worktree_view_details(view: &riftri_core::ViewStorageAccounting, state:
         "  Filesystem-accounted allocated: {}",
         display_byte_count(view.allocated_bytes)
     );
+    if !view.metadata.is_empty() {
+        outputln!("  Metadata: {}", display_metadata(&view.metadata));
+    }
+}
+
+/// `--meta` entries for this invocation, on top of any inherited from
+/// `RIFTRI_WORKTREE_METADATA`. Refused before anything is created.
+fn requested_metadata(entries: &[OsString]) -> Result<riftri_core::WorktreeMetadata> {
+    let inherited = riftri_core::WorktreeMetadata::from_environment()?;
+    let explicit = riftri_core::WorktreeMetadata::parse_entries(entries)?;
+    Ok(inherited.overridden_by(explicit)?)
+}
+
+/// Metadata as `key=value, key=value`, with control characters escaped.
+fn display_metadata(metadata: &std::collections::BTreeMap<String, String>) -> String {
+    metadata
+        .iter()
+        .map(|(key, value)| format!("{key}={}", riftri_core::display_metadata_value(value)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn print_all_states_worktree_inventory(
@@ -4115,11 +4165,38 @@ mod tests {
     fn parses_process_scoped_activation_command() {
         let cli = Cli::try_parse_from(["riftri", "exec", "--", "agent", "--flag"])
             .expect("parse exec command");
-        let Command::Exec { worktree, command } = cli.command else {
+        let Command::Exec {
+            worktree,
+            meta,
+            command,
+        } = cli.command
+        else {
             panic!("unexpected exec command");
         };
         assert!(worktree.is_none());
+        assert!(meta.is_empty());
         assert_eq!(command, [OsStr::new("agent"), OsStr::new("--flag")]);
+
+        // `--meta` belongs to exec only before the command starts.
+        let labeled = Cli::try_parse_from([
+            "riftri",
+            "exec",
+            "--meta",
+            "agent=codex",
+            "--",
+            "agent",
+            "--meta",
+            "x",
+        ])
+        .expect("parse labeled exec command");
+        let Command::Exec { meta, command, .. } = labeled.command else {
+            panic!("unexpected labeled exec command");
+        };
+        assert_eq!(meta, [OsStr::new("agent=codex")]);
+        assert_eq!(
+            command,
+            [OsStr::new("agent"), OsStr::new("--meta"), OsStr::new("x")]
+        );
 
         let bound = Cli::try_parse_from([
             "riftri",
@@ -4131,7 +4208,10 @@ mod tests {
             "--flag",
         ])
         .expect("parse bound exec command");
-        let Command::Exec { worktree, command } = bound.command else {
+        let Command::Exec {
+            worktree, command, ..
+        } = bound.command
+        else {
             panic!("unexpected bound exec command");
         };
         assert_eq!(worktree.as_deref(), Some(Path::new("../app-auth")));

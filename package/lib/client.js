@@ -306,10 +306,14 @@ class Riftri {
   // Paths and revisions follow `--`: a relative path such as `-scratch` was
   // otherwise parsed as flags and the call failed as a usage error.
   #worktreeAdd(destination, options = {}) {
-    const { revision, ...rest } = options;
+    const { revision, meta, ...rest } = options;
     const positionals = ["--", destination];
     if (revision) positionals.push(revision);
-    return this.run(["worktree", "add", ...flagsFor(rest), ...this.#stateFlag(), ...positionals]);
+    // `{ agent: "codex" }` becomes `--meta=agent=codex`; Riftri validates it.
+    const labels = Object.entries(meta ?? {}).map(([key, value]) => `--meta=${key}=${value}`);
+    return this.run([
+      "worktree", "add", ...flagsFor(rest), ...labels, ...this.#stateFlag(), ...positionals,
+    ]);
   }
 
   #worktreeList(options = {}) {

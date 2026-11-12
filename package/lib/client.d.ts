@@ -87,6 +87,8 @@ export interface AddReport {
   post_checkout: { hook: string; started: boolean; exit_code: number | null } | null;
   journal_path: string;
   native_path_encoding: string;
+  /** Labels recorded with `meta`; empty when there are none. */
+  metadata: Record<string, string>;
 }
 
 export interface ManagedWorktree {
@@ -104,6 +106,8 @@ export interface ManagedWorktree {
   logical_bytes: number;
   locked_reason: string | null;
   prunable_reason: string | null;
+  /** Labels recorded with `--meta` when the worktree was added; empty when none. */
+  metadata: Record<string, string>;
 }
 
 export interface WorktreeInventory {
@@ -220,6 +224,12 @@ export interface AddOptions {
   revision?: string;
   /** Cone-mode sparse directories to include. */
   sparseDir?: string[];
+  /**
+   * Labels recorded with the worktree, passed as `--meta KEY=VALUE`. Keys are
+   * 1 to 64 ASCII letters, digits, `.`, `_`, or `-`; values are text without
+   * control characters. Reporting only: they never affect the checkout.
+   */
+  meta?: Record<string, string>;
 }
 
 export interface RiftriOptions {

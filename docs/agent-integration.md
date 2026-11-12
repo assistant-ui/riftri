@@ -218,6 +218,12 @@ Reports carry `schema_version`, display paths beside `*_native_hex` fields
 with the exact native encoding named in `native_path_encoding`, and raw Git
 ref bytes beside lossy display strings, so non-UTF-8 paths and refs remain
 representable.
+Worktrees in `worktree add`, `worktree list`, and `status` reports carry a
+`metadata` object: the labels the caller recorded with `--meta`, empty when
+there are none. To record which agent asked for each worktree, launch it as
+`riftri exec --meta agent=<name> -- <agent>`; every worktree that process
+tree creates through Riftri gets the label. See
+[worktree labels](cli.md#worktree-labels).
 The `doctor` report includes these path pairs for the destination, Git command,
 repository root, common Git directory, and storage probe paths. Its
 `destination_readiness.backend` and `destination_readiness.next_command` are

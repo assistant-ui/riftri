@@ -5,6 +5,17 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Added
+
+- `riftri worktree add --meta KEY=VALUE` records labels, such as which agent
+  asked for a worktree, in its add journal. `worktree add --json`,
+  `worktree list --json`, and `status --json` report them as a `metadata`
+  object, and the human reports print a `Metadata:` line. `riftri exec --meta`
+  labels every worktree its command creates through Riftri, including through
+  the Git shim, by passing `RIFTRI_WORKTREE_METADATA` to the command. Labels
+  are reporting only and survive move and compaction. The Node client takes
+  `worktree.add(path, { meta })` (#788, D049).
+
 ### Changed
 
 - `riftri doctor` now says its `repository-activation` notice applies only to
