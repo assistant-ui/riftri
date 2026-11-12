@@ -353,6 +353,46 @@ existing path or proposed destination, defaulting to `.`. Supports `--json`.
 Report retained bases, active views, reference counts, and disk use for one
 repository's Riftri state. Supports `--state-dir` and `--json`.
 
+Each worktree in `status --json` and `worktree list --json` carries
+`created_at`, when its add started (see [`riftri history`](#riftri-history-options-repository)).
+
+### `riftri history [OPTIONS] [REPOSITORY]`
+
+List every worktree one state directory has recorded, oldest first: the ones
+its journals still describe and the ones whose journals `riftri gc --apply`
+retired. Read-only, creates nothing, and reads no worktree contents. Supports
+`--repository`, `--state-dir`, and `--json`.
+
+Each entry has a `state`:
+
+| State | Meaning |
+| --- | --- |
+| `active` | Created and not removed |
+| `pending` | Its add has not finished or was interrupted; `riftri repair` decides |
+| `removed` | A removal of it completed |
+| `rolled-back` | Its add was rolled back, so it never became usable |
+
+With `--json`, the report (`schema_version` 1) has `counts` per state and a
+`worktrees` array. Each worktree carries `operation_id`, `repository`, `path`
+(after any managed move), `branch` (the full refname the add checked out, with
+a `branch_hex` twin), `backend`, `metadata` (see
+[worktree labels](#worktree-labels)), `state`, `created_at`, `ended_at`, and
+`archived`, which is `true` once the entry comes from the history file rather
+than live journals. Paths have `*_native_hex` twins.
+
+- `created_at` is when the add started and `ended_at` when the removal that
+  ended it started, as RFC 3339 UTC with milliseconds. Both come from the
+  operation IDs, which begin with each operation's start time; `ended_at` is
+  `null` for anything not removed.
+- Before `gc --apply` deletes a finished worktree's journals, it appends one
+  line describing that worktree to `<state>/history/v1.jsonl` and flushes it
+  to disk ([D050](decisions.md#d050-gc-keeps-a-record-of-every-worktree-it-retires)).
+  That file is a record for reporting only, never recovery authority. A
+  retirement interrupted after the append writes the line again; readers keep
+  one entry per operation. A line that cannot be read is reported in
+  `diagnostic_issues` and its worktree is left out. Deleting the file forgets
+  retired worktrees and nothing else.
+
 ## Maintenance
 
 ### `riftri repair [OPTIONS] [REPOSITORY]`
@@ -412,7 +452,10 @@ can, after which the base becomes collectible.
 reports `retirable_journals`): the journals of worktrees that are gone for
 good and finished prune and collection journals, so the state directory does
 not grow with every worktree ever created. Live worktrees and unfinished
-operations keep theirs. See D043 in [decisions.md](decisions.md).
+operations keep theirs. See D043 in [decisions.md](decisions.md). Each retired
+worktree is first recorded in the history file that
+[`riftri history`](#riftri-history-options-repository) reads, so it stays
+listed.
 
 | Flag | Effect |
 | --- | --- |

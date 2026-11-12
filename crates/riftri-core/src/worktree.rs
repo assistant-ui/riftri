@@ -59,6 +59,7 @@ use crate::journal::{
     DecodedJournal, DecodedMoveJournal, DecodedPruneJournal, DecodedRemovalJournal, JournalError,
     JournalStore, MoveJournalStore, PruneJournalStore, RemovalJournalRecord, RemovalJournalStore,
 };
+use crate::journal::{HistoryOutcome, HistoryRecord, HistoryStore, operation_started_unix_ms};
 use crate::metadata::WorktreeMetadata;
 use crate::progress::{self, ProgressEvent};
 use crate::{
@@ -295,6 +296,64 @@ pub struct ViewStorageAccounting {
     /// Labels recorded with `--meta` when the worktree was added, as stored in
     /// its add journal. Empty when there are none.
     pub metadata: BTreeMap<String, String>,
+    /// When its add started, in milliseconds since the Unix epoch, from the
+    /// add's operation ID. None for an ID that does not carry a time.
+    pub created_unix_ms: Option<u64>,
+}
+
+/// Where one worktree stands in a state directory's history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeHistoryState {
+    /// Created and not removed.
+    Active,
+    /// Its add has not finished, or was interrupted; `riftri repair` decides.
+    Pending,
+    /// A removal of it completed.
+    Removed,
+    /// Its add was rolled back, so it never became usable.
+    RolledBack,
+}
+
+impl WorktreeHistoryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Pending => "pending",
+            Self::Removed => "removed",
+            Self::RolledBack => "rolled-back",
+        }
+    }
+}
+
+/// One worktree a state directory has ever recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeHistoryEntry {
+    pub operation_id: String,
+    pub repository: PathBuf,
+    /// Its path, after any managed move.
+    pub destination: PathBuf,
+    /// Full refname of the branch the add checked out, as raw Git bytes; not
+    /// where HEAD is now.
+    pub branch: Option<Vec<u8>>,
+    pub backend: BackendKind,
+    pub metadata: BTreeMap<String, String>,
+    pub state: WorktreeHistoryState,
+    /// When its add started, in milliseconds since the Unix epoch.
+    pub created_unix_ms: Option<u64>,
+    /// When the removal that ended it started, for a removed worktree.
+    pub ended_unix_ms: Option<u64>,
+    /// True when `riftri gc --apply` retired its journals and this entry comes
+    /// from the history file.
+    pub archived: bool,
+}
+
+/// Every worktree a state directory records, live and retired, oldest first.
+#[derive(Debug, Clone, Default)]
+pub struct WorktreeHistoryReport {
+    pub entries: Vec<WorktreeHistoryEntry>,
+    /// Journals or history lines that could not be read. Entries they
+    /// describe are missing from `entries`.
+    pub diagnostic_issues: Vec<StateDiagnosticIssue>,
 }
 
 /// Whether a state diagnostic can conceal a base reference the surrounding
@@ -1843,6 +1902,127 @@ fn cow_aware_allocated_total(
 }
 
 /// Inventory retained immutable bases and active views from durable journals.
+/// Every worktree `state_directory` has recorded: the ones its journals still
+/// describe, and the ones whose journals `riftri gc --apply` retired into the
+/// history file (D050). Read-only, and reads no worktree contents.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+pub fn worktree_history(state_directory: &Path) -> Result<WorktreeHistoryReport, WorktreeError> {
+    let state_directory = absolute_path(state_directory)?;
+    let Some(state_directory) = resolve_real_state_directory_if_present(&state_directory)? else {
+        return Ok(WorktreeHistoryReport::default());
+    };
+    let adds = JournalStore::open(&state_directory).load_all_for_status()?;
+    let removals = RemovalJournalStore::open(&state_directory).load_all_for_status()?;
+    let archive = HistoryStore::open(&state_directory).load()?;
+    let diagnostic_issues = adds
+        .issues
+        .into_iter()
+        .chain(removals.issues)
+        .map(|issue| StateDiagnosticIssue {
+            path: issue.path,
+            base_count_impact: BaseCountImpact::MayHideReference,
+            reason: format!(
+                "malformed durable operation journal; its worktree is missing from the history: {}",
+                issue.reason
+            ),
+        })
+        .chain(
+            archive
+                .issues
+                .into_iter()
+                .map(|issue| StateDiagnosticIssue {
+                    path: issue.path,
+                    base_count_impact: BaseCountImpact::CountsUnaffected,
+                    reason: format!(
+                        "unreadable history record; its worktree is missing from the history: {}",
+                        issue.reason
+                    ),
+                }),
+        )
+        .collect();
+    let removals_by_add = index_journals_by(&removals.journals, |journal| {
+        journal.source_add_operation_id.as_str()
+    });
+
+    let mut entries = Vec::new();
+    let mut live = BTreeSet::new();
+    for add in &adds.journals {
+        live.insert(add.operation_id.as_str());
+        let completed_removal = removals_by_add
+            .get(add.operation_id.as_str())
+            .into_iter()
+            .flatten()
+            .find(|removal| removal.phase == RemoveWorktreePhase::Complete);
+        let state = match (add.phase, completed_removal) {
+            (AddWorktreePhase::RolledBack, _) => WorktreeHistoryState::RolledBack,
+            (AddWorktreePhase::Active, Some(_)) => WorktreeHistoryState::Removed,
+            (AddWorktreePhase::Active, None) => WorktreeHistoryState::Active,
+            _ => WorktreeHistoryState::Pending,
+        };
+        entries.push(WorktreeHistoryEntry {
+            operation_id: add.operation_id.clone(),
+            repository: add.repository.clone(),
+            destination: add.destination.clone(),
+            branch: add.branch.as_deref().map(local_branch_refname),
+            backend: add.backend,
+            metadata: add.metadata.clone(),
+            state,
+            created_unix_ms: operation_started_unix_ms(&add.operation_id),
+            ended_unix_ms: completed_removal
+                .filter(|_| state == WorktreeHistoryState::Removed)
+                .and_then(|removal| operation_started_unix_ms(&removal.operation_id)),
+            archived: false,
+        });
+    }
+    // A retirement interrupted after its record was written still has its
+    // journals; they describe it, so the archived copy is skipped.
+    for record in archive.records {
+        if live.contains(record.operation_id.as_str()) {
+            continue;
+        }
+        let state = match record.outcome {
+            HistoryOutcome::Removed => WorktreeHistoryState::Removed,
+            HistoryOutcome::RolledBack => WorktreeHistoryState::RolledBack,
+        };
+        entries.push(WorktreeHistoryEntry {
+            created_unix_ms: operation_started_unix_ms(&record.operation_id),
+            ended_unix_ms: record
+                .removal_operation_id
+                .as_deref()
+                .and_then(operation_started_unix_ms),
+            operation_id: record.operation_id,
+            repository: record.repository,
+            destination: record.destination,
+            branch: record.branch.as_deref().map(local_branch_refname),
+            backend: record.backend,
+            metadata: record.metadata,
+            state,
+            archived: true,
+        });
+    }
+    entries.sort_by(|left, right| {
+        (left.created_unix_ms, &left.operation_id)
+            .cmp(&(right.created_unix_ms, &right.operation_id))
+    });
+    Ok(WorktreeHistoryReport {
+        entries,
+        diagnostic_issues,
+    })
+}
+
+/// `refs/heads/<branch>` as raw Git bytes.
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+fn local_branch_refname(branch: &OsStr) -> Vec<u8> {
+    let mut reference = b"refs/heads/".to_vec();
+    reference.extend_from_slice(branch.as_encoded_bytes());
+    reference
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub fn worktree_history(_state_directory: &Path) -> Result<WorktreeHistoryReport, WorktreeError> {
+    Ok(WorktreeHistoryReport::default())
+}
+
 pub fn storage_accounting(
     state_directory: &Path,
 ) -> Result<StorageAccountingReport, WorktreeError> {
@@ -2061,6 +2241,7 @@ pub fn storage_accounting(
                 logical_bytes: 0,
                 allocated_bytes: 0,
                 metadata: journal.metadata.clone(),
+                created_unix_ms: operation_started_unix_ms(&journal.operation_id),
             });
         }
     }
@@ -2688,6 +2869,8 @@ struct RetirableLineage {
     removals: Vec<PathBuf>,
     /// Finished moves and compactions, deleted first.
     dependents: Vec<PathBuf>,
+    /// What the history file keeps once these journals are gone.
+    history: HistoryRecord,
 }
 
 /// The removal, move, and compaction journals of a state directory, read
@@ -2754,7 +2937,17 @@ fn locked_retirable_lineage(
     if !gone_for_good || !history_finished {
         return Ok(None);
     }
+    let history = if add.phase == AddWorktreePhase::RolledBack {
+        HistoryRecord::for_retired_add(&add, HistoryOutcome::RolledBack, None)
+    } else {
+        let completed = removals
+            .iter()
+            .find(|removal| removal.phase == RemoveWorktreePhase::Complete)
+            .map(|removal| removal.operation_id.as_str());
+        HistoryRecord::for_retired_add(&add, HistoryOutcome::Removed, completed)
+    };
     Ok(Some(RetirableLineage {
+        history,
         removals: removals
             .into_iter()
             .map(|journal| journal.journal_path.clone())
@@ -2986,13 +3179,24 @@ fn retire_locked_lineages(
     // snapshot knew left that one behind with no add journal, which then
     // failed every lifecycle command in the state directory.
     let lifecycle = LockedLifecycleJournals::load(state_directory)?;
-    let mut retired = 0;
+    let mut lineages = Vec::with_capacity(locked.len());
     for (add, lock) in locked {
-        let Some(lineage) =
+        if let Some(lineage) =
             locked_retirable_lineage(state_directory, &add.operation_id, &lifecycle)?
-        else {
-            continue;
-        };
+        {
+            lineages.push((add, lock, lineage));
+        }
+    }
+    // Keep a record of each worktree before deleting the journals that
+    // describe it (D050). If this run stops after the append, the next one
+    // appends the same records again, and readers keep one per operation.
+    let records = lineages
+        .iter()
+        .map(|(_, _, lineage)| lineage.history.clone())
+        .collect::<Vec<_>>();
+    HistoryStore::open(state_directory).append(&records)?;
+    let mut retired = 0;
+    for (add, lock, lineage) in lineages {
         for path in &lineage.dependents {
             remove_file_if_present(path)?;
         }
@@ -8035,6 +8239,7 @@ fn diagnose_state_paths(
     let mut issues = journal_issues.to_vec();
     let expected_roots = [
         "bases",
+        "history",
         "overlays",
         "operations",
         "removals",
@@ -15184,6 +15389,7 @@ mod tests {
             logical_bytes: base_allocated,
             allocated_bytes: base_allocated,
             metadata: Default::default(),
+            created_unix_ms: None,
         };
 
         // One base plus three fresh views that share all of the base's blocks.
@@ -15288,6 +15494,7 @@ mod tests {
             logical_bytes: private_layers,
             allocated_bytes: private_layers,
             metadata: Default::default(),
+            created_unix_ms: None,
         };
         assert_eq!(
             cow_aware_allocated_total(&bases, std::slice::from_ref(&overlay_view)),
@@ -23839,6 +24046,131 @@ mod tests {
                 .diagnostic_issues
                 .is_empty()
         );
+    }
+
+    /// `gc --apply` deleted finished journals, which were the only record that
+    /// a worktree had existed, so a removed or rolled-back worktree vanished
+    /// from every report. Its history is now kept (D050), labels and the path
+    /// after a move included, and a repeated collection adds nothing.
+    #[test]
+    fn worktree_history_keeps_worktrees_whose_journals_gc_retired() {
+        use super::{WorktreeHistoryState, worktree_history};
+
+        let (_fixture, repository, _state) = stable_root_fixture();
+        let root = repository.parent().unwrap().to_path_buf();
+        let state = root.join("state");
+        let request = |destination: &str, branch: &str| AddWorktreeRequest {
+            repository: repository.clone(),
+            destination: root.join(destination),
+            revision: OsString::from("HEAD"),
+            mode: WorktreeMode::NewBranch(OsString::from(branch)),
+            state_dir: Some(state.clone()),
+            sparse_directories: Vec::new(),
+        };
+
+        let labels = crate::WorktreeMetadata::parse_entries(["agent=codex"]).unwrap();
+        super::add_worktree_inner_with_metadata(request("first", "first"), labels, None, true)
+            .expect("add");
+        move_worktree_inner(
+            MoveWorktreeRequest {
+                repository: repository.clone(),
+                source: root.join("first"),
+                destination: root.join("moved"),
+                state_dir: Some(state.clone()),
+            },
+            None,
+        )
+        .expect("move");
+        super::remove_worktree(RemoveWorktreeRequest {
+            repository: repository.clone(),
+            destination: root.join("moved"),
+            state_dir: Some(state.clone()),
+        })
+        .expect("remove");
+        add_worktree_inner(
+            request("stopped", "stopped"),
+            Some(AddWorktreePhase::ViewCreated),
+            true,
+        )
+        .expect_err("stop and roll back the add");
+        let live = add_worktree_inner(request("live", "live"), None, true).expect("live add");
+
+        let summary = |report: &super::WorktreeHistoryReport| {
+            report
+                .entries
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.destination.file_name().unwrap().to_owned(),
+                        entry.state,
+                        entry.branch.clone(),
+                        entry.metadata.get("agent").cloned(),
+                        entry.archived,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let expected = |archived: bool| {
+            vec![
+                (
+                    OsString::from("moved"),
+                    WorktreeHistoryState::Removed,
+                    Some(b"refs/heads/first".to_vec()),
+                    Some("codex".to_owned()),
+                    archived,
+                ),
+                (
+                    OsString::from("stopped"),
+                    WorktreeHistoryState::RolledBack,
+                    Some(b"refs/heads/stopped".to_vec()),
+                    None,
+                    archived,
+                ),
+                (
+                    OsString::from("live"),
+                    WorktreeHistoryState::Active,
+                    Some(b"refs/heads/live".to_vec()),
+                    None,
+                    false,
+                ),
+            ]
+        };
+
+        let before = worktree_history(&state).expect("history");
+        assert_eq!(summary(&before), expected(false), "{before:?}");
+        assert!(before.diagnostic_issues.is_empty(), "{before:?}");
+        let created = before.entries[0].created_unix_ms.expect("creation time");
+        let ended = before.entries[0].ended_unix_ms.expect("removal time");
+        assert!(ended >= created, "{before:?}");
+        assert_eq!(
+            before.entries[2].created_unix_ms,
+            super::operation_started_unix_ms(
+                live.journal_path.file_stem().unwrap().to_str().unwrap()
+            )
+        );
+        assert!(before.entries[1].ended_unix_ms.is_none());
+
+        let applied = super::garbage_collect(&state, true).expect("apply");
+        assert!(applied.retired_journals >= 2, "{applied:?}");
+        let after = worktree_history(&state).expect("history after collection");
+        assert_eq!(summary(&after), expected(true), "{after:?}");
+        assert_eq!(after.entries[0].created_unix_ms, Some(created));
+        assert_eq!(after.entries[0].ended_unix_ms, Some(ended));
+        assert!(after.diagnostic_issues.is_empty(), "{after:?}");
+        assert!(
+            storage_accounting(&state)
+                .unwrap()
+                .diagnostic_issues
+                .is_empty(),
+            "the history directory is part of the state layout"
+        );
+
+        let history_file = state.join("history/v1.jsonl");
+        let lines = || fs::read_to_string(&history_file).unwrap().lines().count();
+        assert_eq!(lines(), 2);
+        super::garbage_collect(&state, true).expect("apply again");
+        assert_eq!(lines(), 2, "nothing new was retired");
+        assert_eq!(summary(&worktree_history(&state).unwrap()), expected(true));
     }
 
     /// A retirement interrupted after its add journal became `<id>.retired`

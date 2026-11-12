@@ -108,6 +108,40 @@ export interface ManagedWorktree {
   prunable_reason: string | null;
   /** Labels recorded with `--meta` when the worktree was added; empty when none. */
   metadata: Record<string, string>;
+  /** When its add started (RFC 3339, UTC), or null when unknown. */
+  created_at: string | null;
+}
+
+/** One worktree in `history()`, live or retired. */
+export interface HistoryWorktree {
+  operation_id: string;
+  repository: string;
+  repository_native_hex: string;
+  path: string;
+  path_native_hex: string;
+  /** Full refname the add checked out, or null for a detached worktree. */
+  branch: string | null;
+  branch_hex: string | null;
+  backend: string;
+  metadata: Record<string, string>;
+  state: "active" | "pending" | "removed" | "rolled-back";
+  /** When its add started (RFC 3339, UTC), or null when unknown. */
+  created_at: string | null;
+  /** When the removal that ended it started, for a removed worktree. */
+  ended_at: string | null;
+  /** True when `gc --apply` retired its journals and it comes from the history file. */
+  archived: boolean;
+}
+
+export interface HistoryReport {
+  schema_version: 1;
+  state_directory: string;
+  state_directory_native_hex: string;
+  native_path_encoding: string;
+  counts: { active: number; pending: number; removed: number; rolled_back: number };
+  /** Oldest first. */
+  worktrees: HistoryWorktree[];
+  diagnostic_issues: StateDiagnosticIssue[];
 }
 
 export interface WorktreeInventory {
@@ -268,6 +302,8 @@ export class Riftri {
   disable(): Promise<null>;
 
   status(): Promise<StatusReport>;
+  /** Every worktree the state directory has recorded, including removed ones. */
+  history(): Promise<HistoryReport>;
   repair(): Promise<RepairReport>;
   gc(options?: { apply?: boolean }): Promise<unknown>;
 

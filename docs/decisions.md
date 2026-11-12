@@ -784,7 +784,7 @@ removal whose add journal is simply missing is still reported, so manual
 damage stays visible. A run retires only history that was finished before it
 started, so the journals it resumes or writes stay visible until the next run.
 Counts of completed operations in `status` therefore describe the history
-since the last collection.
+since the last collection. `riftri history` keeps the full list (D050).
 
 ### D044: release tags are SSH-signed and the workflow enforces it
 
@@ -1009,6 +1009,34 @@ so worktrees made through the Git shim carry them too.
 Rejected alternatives: a fixed `--agent` flag would name one kind of caller
 in Riftri's interface; a side file next to the journals would be a second
 record to keep consistent through move, compaction, and retirement.
+
+### D050: gc keeps a record of every worktree it retires
+
+Retiring journals (D043) also deleted the only record that a worktree had
+existed, so a removed or rolled-back worktree disappeared from every report
+the first time anyone collected. An app that showed how many worktrees an
+agent had made could only count journals, and its own collection reset the
+count.
+
+Before `gc --apply` deletes a finished lineage, it appends one line to
+`<state>/history/v1.jsonl`: the add's operation ID, repository, current path,
+branch, backend, labels (D049), outcome, and the completed removal's
+operation ID. The batch's lines are flushed to disk before any journal of the
+batch is deleted. `riftri history` lists those lines and every lineage the
+journals still describe, live journals winning over a line for the same
+operation, so an interrupted retirement is never listed twice.
+
+The file is reporting only: no lifecycle step reads it, and an unreadable line
+is reported and skipped rather than failing the command. Lifecycle commands
+write nothing new, so add and removal keep their flush budget (D046). Times
+are not stored: operation IDs already begin with the time each operation
+started, so live and retired worktrees get creation times, and existing
+journals do too.
+
+Rejected alternatives: appending an event from every add and removal would
+add a durable write to each and need its own recovery; keeping completed
+journals forever brings back the slowdown D043 removed; a counter in a file
+would lose the paths, branches, and labels an app shows.
 
 ## Open design questions
 

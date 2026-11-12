@@ -209,6 +209,30 @@ enum Command {
         json: bool,
     },
 
+    /// List every worktree the state directory has recorded, including ones
+    /// since removed or rolled back.
+    History {
+        /// Repository whose default Riftri state should be read.
+        #[arg(default_value = ".")]
+        repository: PathBuf,
+
+        /// Repository to read (alternative to the positional repository).
+        #[arg(
+            long = "repository",
+            value_name = "PATH",
+            conflicts_with = "repository"
+        )]
+        repository_option: Option<PathBuf>,
+
+        /// Explicit Riftri state directory instead of <common-git-dir>/riftri.
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+
+        /// Emit stable machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Safely resume or roll back interrupted journaled operations.
     Repair {
         /// Repository whose default Riftri state should be repaired.
@@ -290,6 +314,7 @@ impl Command {
             | Self::Disable { .. }
             | Self::Doctor { .. }
             | Self::Status { .. }
+            | Self::History { .. }
             | Self::Repair { .. }
             | Self::Gc { .. }
             | Self::State { .. }
@@ -308,6 +333,7 @@ impl Command {
             Self::Doctor { json, .. }
             | Self::Backends { json, .. }
             | Self::Status { json, .. }
+            | Self::History { json, .. }
             | Self::Repair { json, .. }
             | Self::Gc { json, .. } => *json,
             Self::Worktree { command } => match command {
@@ -339,6 +365,7 @@ impl Command {
             Self::Doctor { .. } => "doctor",
             Self::Backends { .. } => "backends",
             Self::Status { .. } => "status",
+            Self::History { .. } => "history",
             Self::Repair { .. } => "repair",
             Self::Gc { .. } => "garbage-collection",
             Self::State { .. } => "state",
@@ -376,6 +403,12 @@ impl Command {
                 path, repository, ..
             } => InvocationContext::for_repository(repository.as_deref().unwrap_or(path)),
             Self::Status {
+                repository,
+                repository_option,
+                state_dir,
+                ..
+            }
+            | Self::History {
                 repository,
                 repository_option,
                 state_dir,
@@ -1042,6 +1075,17 @@ fn run(cli: Cli) -> Result<()> {
             let state_directory = resolve_state_directory(&repository, state_dir)?;
             let report = riftri_core::storage_accounting(&state_directory)?;
             print_storage_accounting(&state_directory, &report, json)?;
+        }
+        Command::History {
+            repository,
+            repository_option,
+            state_dir,
+            json,
+        } => {
+            let repository = repository_option.unwrap_or(repository);
+            let state_directory = resolve_state_directory(&repository, state_dir)?;
+            let report = riftri_core::worktree_history(&state_directory)?;
+            print_worktree_history(&state_directory, &report, json)?;
         }
         Command::Repair {
             repository,
@@ -2381,6 +2425,7 @@ fn worktree_view_json(view: &riftri_core::ViewStorageAccounting) -> serde_json::
         "logical_bytes": view.logical_bytes,
         "allocated_bytes": view.allocated_bytes,
         "metadata": view.metadata,
+        "created_at": view.created_unix_ms.map(rfc3339_utc),
     })
 }
 
@@ -2467,9 +2512,149 @@ fn print_worktree_view_details(view: &riftri_core::ViewStorageAccounting, state:
         "  Filesystem-accounted allocated: {}",
         display_byte_count(view.allocated_bytes)
     );
+    if let Some(created) = view.created_unix_ms {
+        outputln!("  Created: {}", rfc3339_utc(created));
+    }
     if !view.metadata.is_empty() {
         outputln!("  Metadata: {}", display_metadata(&view.metadata));
     }
+}
+
+fn print_worktree_history(
+    state_directory: &Path,
+    report: &riftri_core::WorktreeHistoryReport,
+    json: bool,
+) -> Result<()> {
+    let count = |state: riftri_core::WorktreeHistoryState| {
+        report
+            .entries
+            .iter()
+            .filter(|entry| entry.state == state)
+            .count()
+    };
+    let states = [
+        riftri_core::WorktreeHistoryState::Active,
+        riftri_core::WorktreeHistoryState::Pending,
+        riftri_core::WorktreeHistoryState::Removed,
+        riftri_core::WorktreeHistoryState::RolledBack,
+    ];
+    if json {
+        let worktrees = report
+            .entries
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "operation_id": entry.operation_id,
+                    "repository": entry.repository.display().to_string(),
+                    "repository_native_hex": native_path_hex(&entry.repository),
+                    "path": entry.destination.display().to_string(),
+                    "path_native_hex": native_path_hex(&entry.destination),
+                    "branch": entry.branch.as_deref().map(display_git_bytes),
+                    "branch_hex": entry.branch.as_deref().map(encode_hex),
+                    "backend": entry.backend,
+                    "metadata": entry.metadata,
+                    "state": entry.state.as_str(),
+                    "created_at": entry.created_unix_ms.map(rfc3339_utc),
+                    "ended_at": entry.ended_unix_ms.map(rfc3339_utc),
+                    "archived": entry.archived,
+                })
+            })
+            .collect::<Vec<_>>();
+        let counts = states
+            .iter()
+            .map(|state| {
+                (
+                    state.as_str().replace('-', "_"),
+                    serde_json::Value::from(count(*state)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "state_directory": state_directory.display().to_string(),
+            "state_directory_native_hex": native_path_hex(state_directory),
+            "native_path_encoding": native_path_encoding(),
+            "counts": counts,
+            "worktrees": worktrees,
+            "diagnostic_issues": report
+                .diagnostic_issues
+                .iter()
+                .map(diagnostic_issue_json)
+                .collect::<Vec<_>>(),
+        });
+        machineln!(
+            "{}",
+            serde_json::to_string_pretty(&output).context("serialize worktree history")?
+        );
+        return Ok(());
+    }
+
+    outputln!("Riftri worktree history");
+    outputln!("State: {}", state_directory.display());
+    outputln!(
+        "Worktrees: {} ({})",
+        report.entries.len(),
+        states
+            .iter()
+            .map(|state| format!("{} {}", count(*state), state.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    for entry in &report.entries {
+        outputln!(
+            "- {} [{}]",
+            entry.destination.display(),
+            entry.state.as_str()
+        );
+        if let Some(branch) = &entry.branch {
+            outputln!("  Branch: {}", display_git_bytes(branch));
+        }
+        if let Some(created) = entry.created_unix_ms {
+            outputln!("  Created: {}", rfc3339_utc(created));
+        }
+        if let Some(ended) = entry.ended_unix_ms {
+            outputln!("  Removed: {}", rfc3339_utc(ended));
+        }
+        if !entry.metadata.is_empty() {
+            outputln!("  Metadata: {}", display_metadata(&entry.metadata));
+        }
+    }
+    if !report.diagnostic_issues.is_empty() {
+        outputln!("Diagnostic issues: {}", report.diagnostic_issues.len());
+        for issue in &report.diagnostic_issues {
+            outputln!("- {}: {}", issue.path.display(), issue.reason);
+        }
+    }
+    Ok(())
+}
+
+/// `milliseconds` since the Unix epoch as an RFC 3339 UTC timestamp with
+/// millisecond precision, such as `2026-11-12T18:04:05.123Z`.
+fn rfc3339_utc(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1000;
+    let (days, second_of_day) = (seconds / 86_400, seconds % 86_400);
+    // Howard Hinnant's civil-from-days, for days since 1970-01-01.
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + u64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        second_of_day / 3600,
+        second_of_day % 3600 / 60,
+        second_of_day % 60,
+        milliseconds % 1000
+    )
 }
 
 /// `--meta` entries for this invocation, on top of any inherited from
@@ -3309,6 +3494,19 @@ mod doctor_hegel_tests;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn timestamps_render_as_rfc3339_utc() {
+        for (milliseconds, expected) in [
+            (0, "1970-01-01T00:00:00.000Z"),
+            (951_782_400_000, "2000-02-29T00:00:00.000Z"),
+            (1_794_508_063_807, "2026-11-12T18:27:43.807Z"),
+            (4_107_542_399_999, "2100-02-28T23:59:59.999Z"),
+            (253_402_300_799_999, "9999-12-31T23:59:59.999Z"),
+        ] {
+            assert_eq!(super::rfc3339_utc(milliseconds), expected);
+        }
+    }
 
     #[test]
     fn an_unconfirmed_base_count_does_not_blame_unreadable_journals() {

@@ -220,7 +220,11 @@ ref bytes beside lossy display strings, so non-UTF-8 paths and refs remain
 representable.
 Worktrees in `worktree add`, `worktree list`, and `status` reports carry a
 `metadata` object: the labels the caller recorded with `--meta`, empty when
-there are none. To record which agent asked for each worktree, launch it as
+there are none. Worktrees in `worktree list` and `status` also carry
+`created_at`, when the add started. `riftri history --json`
+lists every worktree the state directory has recorded, including removed ones
+whose journals `gc --apply` retired, so an app can count and show them. To
+record which agent asked for each worktree, launch it as
 `riftri exec --meta agent=<name> -- <agent>`; every worktree that process
 tree creates through Riftri gets the label. See
 [worktree labels](cli.md#worktree-labels).
