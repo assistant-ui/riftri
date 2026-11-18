@@ -208,6 +208,8 @@ jobs:
     needs: stage
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    # Protected environment: required reviewers; only release tags and main.
+    environment: npm
     permissions:
       contents: read
       id-token: write
