@@ -5,6 +5,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- On Windows, an attribute check during a worktree add retries once if Git
+  reports that it could not open the config file during a concurrent update.
+
 ## [0.7.0] - 2026-11-12
 
 ### Added
