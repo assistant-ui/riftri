@@ -26,8 +26,8 @@ $ pnpm run pack:check
 
 `.cargo/config.toml` gives every Cargo-run process the repository's own
 global Git configuration and no system one, so your own Git settings cannot
-change test results. A test binary started without Cargo does not get that
-isolation.
+change test results. The `riftri-git` repository fixtures also apply these
+settings to their Git commands when you run the test binary directly.
 
 Property tests use [Hegel](https://hegel.dev) and run with `cargo test`. A
 failing case prints a `#[hegel::reproduce_failure(...)]` attribute that replays

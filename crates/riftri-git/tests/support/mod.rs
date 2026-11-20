@@ -3,34 +3,13 @@
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use riftri_git::{Git, ObjectId};
 use tempfile::TempDir;
 
-pub(crate) fn isolated_git(repository: &Path) -> Command {
-    let mut command = Command::new("git");
-    command
-        .current_dir(repository)
-        .env(
-            "GIT_CONFIG_GLOBAL",
-            if cfg!(windows) { "NUL" } else { "/dev/null" },
-        )
-        .env("GIT_CONFIG_NOSYSTEM", "1");
-    for name in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_COMMON_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CONFIG_COUNT",
-        "GIT_CONFIG_PARAMETERS",
-    ] {
-        command.env_remove(name);
-    }
-    command
-}
+mod git_command;
+pub(crate) use git_command::isolated_git;
 
 pub(crate) fn git(repository: &Path, args: &[&str]) -> Output {
     let output = isolated_git(repository).args(args).output().unwrap();

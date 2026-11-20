@@ -3674,6 +3674,10 @@ mod parser_hegel_tests;
 mod exit_disposition_hegel_tests;
 
 #[cfg(test)]
+#[path = "../tests/support/git_command.rs"]
+mod fixture_command;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn object_id_normalization_reuses_owned_storage_and_preserves_validation() {
@@ -3725,6 +3729,7 @@ mod tests {
 
     use tempfile::{TempDir, tempdir};
 
+    use super::fixture_command::isolated_git;
     use super::{Git, WorktreeHead, parse_attribute_records, parse_worktree_porcelain};
 
     struct RepositoryFixture {
@@ -4003,9 +4008,8 @@ mod tests {
         let entries = handle.list_tree(fixture.path(), &revision.tree).unwrap();
         let object = entries[0].object_id.clone();
         fs::write(fixture.path().join("other.txt"), "abc").unwrap();
-        let other = Command::new("git")
+        let other = isolated_git(fixture.path())
             .args(["hash-object", "-w", "other.txt"])
-            .current_dir(fixture.path())
             .output()
             .unwrap();
         assert!(other.status.success());
@@ -4216,9 +4220,8 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         let repository = fixture.path().join("repository");
         fs::create_dir(&repository).expect("create repository");
-        let init = Command::new("git")
+        let init = isolated_git(&repository)
             .args(["init", "--quiet"])
-            .current_dir(&repository)
             .status()
             .expect("init");
         assert!(init.success());
@@ -4512,9 +4515,8 @@ mod tests {
     #[test]
     fn reads_exact_blob_bytes_and_size() {
         let fixture = RepositoryFixture::committed();
-        let object = Command::new("git")
+        let object = isolated_git(fixture.path())
             .args(["rev-parse", "HEAD:tracked.txt"])
-            .current_dir(fixture.path())
             .output()
             .expect("read object ID");
         assert!(object.status.success());
@@ -4535,8 +4537,7 @@ mod tests {
         let views = tempdir().unwrap();
         let linked = views.path().join("linked");
         let upper = views.path().join("upper");
-        let output = Command::new("git")
-            .current_dir(fixture.path())
+        let output = isolated_git(fixture.path())
             .args(["worktree", "add", "--detach"])
             .arg(&linked)
             .output()
@@ -4634,9 +4635,8 @@ mod tests {
     }
 
     fn git(path: &Path, arguments: &[&str]) {
-        let status = Command::new("git")
+        let status = isolated_git(path)
             .args(arguments)
-            .current_dir(path)
             .status()
             .expect("start Git fixture command");
         assert!(status.success(), "git {arguments:?} failed");
@@ -4742,9 +4742,8 @@ mod tests {
     fn a_corrupt_object_store_is_not_reported_as_an_unborn_head() {
         let fixture = RepositoryFixture::committed();
         let git = Git::default();
-        let head = Command::new("git")
+        let head = isolated_git(fixture.path())
             .args(["rev-parse", "HEAD"])
-            .current_dir(fixture.path())
             .output()
             .expect("read HEAD object ID");
         assert!(head.status.success());
@@ -7986,6 +7985,41 @@ mod tests {
     }
 
     #[test]
+    fn repository_fixture_ignores_external_git_config() {
+        let developer = tempdir().unwrap();
+        let config = developer.path().join("gitconfig");
+        let contents = "[checkout]\n\tworkers = invalid\n";
+        fs::write(&config, contents).unwrap();
+        fs::create_dir(developer.path().join("git")).unwrap();
+        fs::write(developer.path().join("git/ignore"), "tracked.txt\n").unwrap();
+
+        // Run the commit and linked-worktree fixture with a private parent
+        // environment so parallel tests keep their own configuration.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::main_and_linked_worktrees_share_repository_identity",
+            ])
+            .env("GIT_CONFIG", &config)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_SYSTEM", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "0")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "init.defaultBranch")
+            .env("GIT_CONFIG_VALUE_0", "invalid branch")
+            .env(
+                "GIT_CONFIG_PARAMETERS",
+                "'init.defaultBranch'='invalid branch'",
+            )
+            .env("XDG_CONFIG_HOME", developer.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        assert_eq!(fs::read_to_string(config).unwrap(), contents);
+    }
+
+    #[test]
     fn main_and_linked_worktrees_share_repository_identity() {
         let fixture = RepositoryFixture::committed();
         let linked_parent = tempdir().expect("linked parent");
@@ -8076,7 +8110,7 @@ mod tests {
         let linked = linked_parent
             .path()
             .join(OsString::from_vec(b"linked-\xff worktree".to_vec()));
-        let status = Command::new("git")
+        let status = isolated_git(fixture.path())
             .args([
                 OsStr::new("worktree"),
                 OsStr::new("add"),
@@ -8085,7 +8119,6 @@ mod tests {
             .arg("--detach")
             .arg(&linked)
             .arg("HEAD")
-            .current_dir(fixture.path())
             .status()
             .expect("create non-UTF-8 linked worktree");
         assert!(status.success());
