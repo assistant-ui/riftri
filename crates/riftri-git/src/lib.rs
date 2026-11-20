@@ -1780,7 +1780,7 @@ impl Git {
                 OsString::from("-z"),
                 OsString::from("--stdin"),
             ]);
-            let output = self.run_os_with_input(Some(path), &arguments, environment, input)?;
+            let output = self.run_check_attr(path, &arguments, environment, Some(input))?;
             parse_attribute_records(&output.stdout)
         } else {
             // Preserve the native-argument path for non-Unicode Windows input
@@ -1813,10 +1813,36 @@ impl Git {
                     .iter()
                     .map(|entry| entry.as_ref().as_os_str().to_os_string()),
             );
-            let output = self.run_os_with_env(Some(path), &arguments, environment)?;
+            let output = self.run_check_attr(path, &arguments, environment, None)?;
             attributes.extend(parse_attribute_records(&output.stdout)?);
         }
         Ok(attributes)
+    }
+
+    fn run_check_attr(
+        &self,
+        path: &Path,
+        arguments: &[OsString],
+        environment: &[(&OsStr, &OsStr)],
+        input: Option<&[u8]>,
+    ) -> Result<Output, GitError> {
+        #[cfg(windows)]
+        let environment = &[
+            environment,
+            &[
+                (OsStr::new("LC_ALL"), OsStr::new("C")),
+                (OsStr::new("LANGUAGE"), OsStr::new("C")),
+            ],
+        ]
+        .concat()[..];
+        let query = || match input {
+            Some(bytes) => self.run_os_with_input(Some(path), arguments, environment, bytes),
+            None => self.run_os_with_env(Some(path), arguments, environment),
+        };
+        #[cfg(windows)]
+        return retry_config_read(query);
+        #[cfg(not(windows))]
+        query()
     }
 
     /// Return whether Git resolves any attribute for the supplied tree paths.
@@ -2949,6 +2975,31 @@ impl Git {
         })?;
         Ok(output)
     }
+}
+
+#[cfg(any(windows, test))]
+fn retry_config_read<T>(mut query: impl FnMut() -> Result<T, GitError>) -> Result<T, GitError> {
+    // Git for Windows can lose an open of the repository config while another
+    // add registers its state directory. Only replay the read-only check-attr
+    // command, with the same arguments, environment and path input.
+    let first = query();
+    if let Err(GitError::CommandFailed {
+        stderr,
+        disposition,
+        ..
+    }) = &first
+    {
+        let denied = stderr.lines().any(|line| {
+            line.strip_prefix("warning: unable to access '")
+                .or_else(|| line.strip_prefix("fatal: unable to access '"))
+                .and_then(|line| line.strip_suffix("': Permission denied"))
+                .is_some_and(|path| Path::new(path).file_name() == Some(OsStr::new("config")))
+        });
+        if disposition == "exit code 128" && denied {
+            return query();
+        }
+    }
+    first
 }
 
 /// Parse one path that Git printed on a line of its own. Exactly one trailing
@@ -7243,6 +7294,88 @@ mod tests {
     fn installed_git_meets_the_minimum_version() {
         let info = Git::default().detect().unwrap();
         assert!(info.meets_minimum_version(), "{}", info.version);
+    }
+
+    #[test]
+    fn attribute_config_read_replays_only_a_denied_config_open() {
+        const DENIED: &str = "warning: unable to access '.git/config': Permission denied\nfatal: unknown error occurred while reading the configuration files";
+        let failure = |message: &str| super::GitError::CommandFailed {
+            arguments: "check-attr --all -z --stdin".to_owned(),
+            stderr: message.to_owned(),
+            disposition: "exit code 128".to_owned(),
+        };
+        let mut attempts = 0;
+        let attributes = super::retry_config_read(|| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(failure(DENIED))
+            } else {
+                Ok(b"file.txt\0text\0set\0")
+            }
+        })
+        .expect("read attributes after config replacement");
+        assert_eq!(attributes, b"file.txt\0text\0set\0");
+        assert_eq!(attempts, 2);
+
+        for (message, expected) in [
+            (DENIED, 2),
+            ("fatal: invalid object name", 1),
+            (
+                "warning: unable to access '.git/info/attributes': Permission denied",
+                1,
+            ),
+        ] {
+            let mut attempts = 0;
+            let error = super::retry_config_read(|| {
+                attempts += 1;
+                Err::<(), _>(failure(message))
+            })
+            .unwrap_err();
+            assert_eq!(attempts, expected, "{message}");
+            assert!(
+                matches!(error, super::GitError::CommandFailed { stderr, .. } if stderr == message)
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_check_attr_reads_the_paths_after_a_config_sharing_violation() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let fixture = RepositoryFixture::unborn();
+        fs::write(fixture.path().join(".gitattributes"), "*.txt text\n").unwrap();
+        git(fixture.path(), &["add", ".gitattributes"]);
+        let mut config = Some(
+            fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(fixture.path().join(".git/config"))
+                .unwrap(),
+        );
+        let handle = Git::default();
+        let arguments = ["check-attr", "--cached", "--all", "-z", "--stdin"].map(OsString::from);
+        let mut attempts = 0;
+        let output = super::retry_config_read(|| {
+            attempts += 1;
+            let result = handle.run_os_with_input(
+                Some(fixture.path()),
+                &arguments,
+                &[
+                    (OsStr::new("LC_ALL"), OsStr::new("C")),
+                    (OsStr::new("LANGUAGE"), OsStr::new("C")),
+                ],
+                b"one file.txt\0two.txt\0",
+            );
+            drop(config.take());
+            result
+        })
+        .unwrap();
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            output.stdout,
+            b"one file.txt\0text\0set\0two.txt\0text\0set\0"
+        );
     }
 
     #[test]
