@@ -1,0 +1,5 @@
+#!/bin/sh
+printf 'riftri-echo\0'
+for argument in "$@"; do
+    printf '%s\0' "$argument"
+done
