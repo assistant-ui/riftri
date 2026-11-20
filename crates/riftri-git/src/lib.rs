@@ -4107,7 +4107,20 @@ mod tests {
             let fixture = Self::unborn();
             fs::write(fixture.path().join("tracked.txt"), "tracked\n").expect("write fixture");
             git(fixture.path(), &["add", "--", "tracked.txt"]);
-            git(fixture.path(), &["commit", "--quiet", "-m", "initial"]);
+            // This commit is immediately followed by worktree setup. Detached
+            // maintenance can prune its new admin directory before Git writes
+            // the initial lock.
+            git(
+                fixture.path(),
+                &[
+                    "-c",
+                    "maintenance.auto=false",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "initial",
+                ],
+            );
             fixture
         }
 
