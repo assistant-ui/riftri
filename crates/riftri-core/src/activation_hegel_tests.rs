@@ -7,9 +7,7 @@
 //! of a command are compared against what Git actually executes.
 
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -61,27 +59,23 @@ struct GitOracle {
 
 impl GitOracle {
     fn new() -> Self {
-        let directory = tempdir().expect("oracle fixture");
-        let script = directory.path().join(format!("git-{ECHO}"));
-        fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf '{ECHO}\\0'\nfor argument in \"$@\"; do printf '%s\\0' \"$argument\"; done\n"
-            ),
-        )
-        .expect("write echo command");
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).expect("mark executable");
-        Self { directory }
+        Self {
+            directory: tempdir().expect("oracle fixture"),
+        }
     }
 
     /// The argv `git riftri-echo` received when Git ran `arguments`, or
     /// `None` when Git refused the command line or ran something else.
     fn echoed(&self, arguments: &[OsString]) -> Option<Vec<OsString>> {
-        let path =
-            std::env::join_paths(std::iter::once(self.directory.path().to_path_buf()).chain(
-                std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
-            ))
-            .expect("oracle PATH");
+        let path = std::env::join_paths(
+            std::iter::once(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/git-commands"),
+            )
+            .chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )),
+        )
+        .expect("oracle PATH");
         let output = run(real_git(self.directory.path())
             .args(arguments)
             .env("PATH", path));
