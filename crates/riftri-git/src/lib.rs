@@ -3283,10 +3283,14 @@ fn parse_object_output(bytes: &[u8]) -> Result<ObjectId, GitError> {
 }
 
 /// Whether a peel suffix cannot be appended to `revision`: in `:/<text>` it
-/// would join the search text, and in `<rev>:<path>` the path. Those spellings
-/// are resolved to an object first and peeled after. No refname contains `:`.
+/// would join the search text, and in `<rev>:<path>` the path. After a reflog
+/// selector Git reads everything up to the suffix's closing brace as the
+/// selector, so `HEAD@{0}~1^{commit}` becomes a date lookup. Those spellings
+/// are resolved to an object first and peeled after. No refname contains `:`
+/// or `@{`.
 fn must_resolve_before_peeling(revision: &OsStr) -> bool {
-    revision.as_encoded_bytes().contains(&b':')
+    let bytes = revision.as_encoded_bytes();
+    bytes.contains(&b':') || bytes.windows(2).any(|pair| pair == b"@{")
 }
 
 /// Whether `git show` would parse `revision` as a range or a negation. No
@@ -5932,6 +5936,44 @@ mod tests {
                 .resolve_requested_revision(fixture.path(), OsStr::new(":/no such message"))
                 .expect("classify a failed search"),
             None
+        );
+    }
+
+    #[test]
+    fn reflog_revisions_are_peeled_after_they_resolve() {
+        // Git reads a suffix appended after `@{...}~1` as part of the reflog
+        // selector, so `HEAD@{0}~1^{commit}` became a date lookup on
+        // `0}~1^{commit` and named the oldest reflog entry instead of HEAD's
+        // parent, which a single-commit history does not have.
+        let fixture = RepositoryFixture::committed();
+        let git_runner = Git::default();
+        let first = git_runner
+            .resolve_revision(fixture.path(), OsStr::new("HEAD"))
+            .expect("resolve HEAD");
+
+        for revision in ["HEAD@{0}~1", "@{0}~1", "HEAD@{now}~1"] {
+            assert_eq!(
+                git_runner
+                    .resolve_requested_revision(fixture.path(), OsStr::new(revision))
+                    .expect("classify a missing reflog parent"),
+                None,
+                "{revision} has no parent in a single-commit history"
+            );
+            let (_, cached) = git_runner
+                .inspect_repository_for_add(fixture.path(), OsStr::new(revision))
+                .expect("inspect for add");
+            assert_eq!(cached, None, "{revision} must not be cached");
+        }
+
+        git(
+            fixture.path(),
+            &["commit", "--quiet", "--allow-empty", "-m", "second"],
+        );
+        assert_eq!(
+            git_runner
+                .resolve_requested_revision(fixture.path(), OsStr::new("HEAD@{0}~1"))
+                .expect("resolve a reflog parent"),
+            Some(first)
         );
     }
 
