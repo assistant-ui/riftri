@@ -5,14 +5,13 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::support::writable_tempdir as tempdir;
 use riftri_core::{
     AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree, garbage_collect,
     remove_worktree, storage_accounting,
 };
 use riftri_git::Git;
 use riftri_storage::{BackendKind, CapabilityStatus, RefsBlockCloner};
-mod support;
-use support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

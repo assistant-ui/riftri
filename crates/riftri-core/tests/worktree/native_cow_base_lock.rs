@@ -20,8 +20,7 @@ use riftri_core::{
     remove_worktree, storage_accounting,
 };
 
-mod support;
-use support::writable_tempdir as tempdir;
+use crate::support::writable_tempdir as tempdir;
 
 fn git(repository: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

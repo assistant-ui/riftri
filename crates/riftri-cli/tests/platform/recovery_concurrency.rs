@@ -1,13 +1,12 @@
 #![cfg(any(target_os = "macos", target_os = "linux"))]
 
+use crate::support;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-#[path = "support/real_git.rs"]
-mod real_git;
-mod support;
+use crate::real_git;
 
 #[test]
 fn repair_does_not_roll_back_a_live_add() {

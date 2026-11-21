@@ -35,7 +35,7 @@ for those claims. The lookup probe runs on macOS, or with the
 `native-cow-integration` feature on supported Linux/Windows test volumes.
 
 To measure process reuse across pointer chunks, run
-`cargo test --release -p riftri-git reports_small_blob_session_latency -- --ignored --nocapture`.
+`cargo test --release -p riftri-git --lib reports_small_blob_session_latency -- --ignored --nocapture`.
 It alternates four pairs of 10,000 bounded blob reads, checks every returned
 body, and asserts 79 process starts versus one. The real-LFS harness below
 also checks one pointer-reader process at 127, 128, and 129 paths; its optional
@@ -275,7 +275,7 @@ retains the native-argument fallback. To compare the previous 128-path argument
 chunks with stdin against the same index and validate identical records:
 
 ```sh
-cargo test --release --locked -p riftri-git reports_attribute_stdin_latency \
+cargo test --release --locked -p riftri-git --lib reports_attribute_stdin_latency \
   -- --ignored --nocapture
 ```
 
@@ -586,7 +586,7 @@ sequential materialization with an explicitly supplied Git worker cap (at most
 four available CPUs, with a 1,024-file threshold):
 
 ```sh
-cargo test --release -p riftri-git reports_bounded_checkout_worker_latency \
+cargo test --release -p riftri-git --lib reports_bounded_checkout_worker_latency \
   -- --ignored --nocapture
 ```
 

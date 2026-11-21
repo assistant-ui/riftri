@@ -2,14 +2,12 @@
 //! The measured and CI-tested profile is macOS/APFS with built-in FSMonitor.
 #![cfg(target_os = "macos")]
 
+use crate::support;
 use std::fs::{self, File, FileTimes};
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-#[allow(dead_code)]
-mod support;
 
 fn isolated(program: &str, directory: &Path) -> Command {
     let mut command = Command::new(program);
