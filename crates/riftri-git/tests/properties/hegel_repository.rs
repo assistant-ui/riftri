@@ -1,7 +1,6 @@
 //! Property tests for repository inspection: wherever inside a repository
 //! Riftri is pointed, it must report the same identity Git does, and a path
 //! outside any repository must be named as such.
-#![cfg(unix)]
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -10,10 +9,7 @@ use hegel::TestCase;
 use hegel::generators::{self as gs, PrintableGenerator};
 use riftri_git::{Git, GitError, ObjectId};
 
-#[allow(dead_code)]
-mod support;
-
-use support::Fixture;
+use crate::support::{self, Fixture};
 
 /// Directory names a shell would mangle. The volume decides which bytes a
 /// name may hold, so these stay valid UTF-8.

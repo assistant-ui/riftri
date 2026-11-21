@@ -1,7 +1,6 @@
 //! Property tests that put a scripted stand-in between Riftri and Git: one
 //! invocation of a read-only operation is replaced with generated output or
 //! an abnormal end, and the operation must refuse it instead of answering.
-#![cfg(unix)]
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -10,10 +9,7 @@ use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
 use riftri_git::{Git, GitError, ObjectId};
 
-#[allow(dead_code)]
-mod support;
-
-use support::{End, Fixture, ScriptedGit};
+use crate::support::{self, End, Fixture, ScriptedGit};
 
 struct Scene {
     fixture: Fixture,

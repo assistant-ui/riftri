@@ -1,7 +1,6 @@
 //! Property tests that hand single Git replies to the operations parsing
 //! them, through a scripted stand-in, and compare the answer with what the
 //! reply says.
-#![cfg(unix)]
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
@@ -10,10 +9,7 @@ use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
 use riftri_git::{Git, GitError, ObjectId};
 
-#[allow(dead_code)]
-mod support;
-
-use support::{End, Fixture, ScriptedGit};
+use crate::support::{self, End, Fixture, ScriptedGit};
 
 struct Scene {
     fixture: Fixture,

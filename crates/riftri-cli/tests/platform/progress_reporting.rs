@@ -11,10 +11,8 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[path = "support/real_git.rs"]
-mod real_git;
-mod support;
-use support::writable_tempdir as tempdir;
+use crate::real_git;
+use crate::support::{self, writable_tempdir as tempdir};
 
 fn native_cow_supported(path: &Path) -> bool {
     riftri_storage::probe_backends(path).iter().any(|backend| {

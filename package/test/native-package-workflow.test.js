@@ -43,3 +43,17 @@ test("quality job test-executes both the tui and default/plain builds", async ()
   assert.match(quality, /cargo test --workspace --locked --features riftri-cli\/tui/);
   assert.match(quality, /^        run: cargo test --workspace --locked$/m);
 });
+
+test("Git library benchmarks select the library test binary", async () => {
+  const quality = jobSource(await ciWorkflow(), "quality");
+  for (const name of [
+    "reports_bounded_checkout_worker_latency",
+    "reports_attribute_stdin_latency",
+    "reports_direct_tree_attribute_latency",
+    "reports_add_revision_batch_latency",
+  ]) {
+    const command = quality.split("\n").find((line) => line.includes(name));
+    assert.ok(command, `missing benchmark ${name}`);
+    assert.match(command.split(" -- ")[0], / --lib\b/);
+  }
+});

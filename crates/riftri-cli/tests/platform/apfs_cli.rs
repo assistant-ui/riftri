@@ -5,10 +5,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
-mod support;
-use support::writable_tempdir as tempdir;
-#[path = "support/real_git.rs"]
-mod real_git;
+use crate::real_git;
+use crate::support::writable_tempdir as tempdir;
 
 fn command(program: &Path, path: &Path, arguments: &[&str]) -> Output {
     Command::new(program)

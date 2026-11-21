@@ -15,8 +15,7 @@ use riftri_core::{
     AddWorktreeRequest, CompactWorktreeRequest, WorktreeMode, add_worktree, compact_worktree,
 };
 
-mod support;
-use support::writable_tempdir as tempdir;
+use crate::support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

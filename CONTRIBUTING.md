@@ -29,6 +29,13 @@ global Git configuration and no system one, so your own Git settings cannot
 change test results. The `riftri-git` repository fixtures also apply these
 settings to their Git commands when you run the test binary directly.
 
+Put platform-specific integration cases in the crate's shared test target when
+they can run in the same process. Cargo builds and launches a separate binary
+for each top-level `tests/*.rs`, even when a platform gate removes every test.
+For example, run the CLI's APFS cases with
+`cargo test -p riftri-cli --test platform apfs_cli::`. Keep a separate target
+when CI runs it on its own or a test needs process isolation.
+
 Property tests use [Hegel](https://hegel.dev) and run with `cargo test`. A
 failing case prints a `#[hegel::reproduce_failure(...)]` attribute that replays
 it. To measure line coverage, install `cargo-llvm-cov` and run:

@@ -17,8 +17,7 @@ use std::process::{Command, Stdio};
 
 use riftri_core::{AddWorktreeRequest, WorktreeMode, add_worktree};
 
-mod support;
-use support::writable_tempdir as tempdir;
+use crate::support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

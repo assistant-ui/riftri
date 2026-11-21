@@ -1,8 +1,5 @@
 #![cfg(target_os = "macos")]
 
-#[allow(dead_code)]
-mod support;
-
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -13,7 +10,7 @@ use hegel::TestCase;
 use hegel::generators as gs;
 use riftri_storage::ApfsCloner;
 
-use support::{Fixture, draw_base, draw_name, files, set_mode, snapshot, with_modes};
+use crate::support::{self, Fixture, draw_base, draw_name, files, set_mode, snapshot, with_modes};
 
 // Each case builds and clones real trees, so run fewer of them.
 #[hegel::test(test_cases = 40)]

@@ -6,13 +6,12 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
+use crate::support::writable_tempdir as tempdir;
 use riftri_core::{
     AddWorktreeRequest, RemoveWorktreeRequest, WorktreeMode, add_worktree, garbage_collect,
     remove_worktree, storage_accounting,
 };
 use riftri_storage::{BackendKind, CapabilityStatus, ReflinkCloner};
-mod support;
-use support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

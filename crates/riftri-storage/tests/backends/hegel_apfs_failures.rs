@@ -1,8 +1,5 @@
 #![cfg(target_os = "macos")]
 
-#[allow(dead_code)]
-mod support;
-
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -11,7 +8,9 @@ use hegel::TestCase;
 use hegel::generators as gs;
 use riftri_storage::{ApfsCloner, StorageError};
 
-use support::{Entry, Fixture, directories, draw_base, make_fifo, set_mode, snapshot, with_modes};
+use crate::support::{
+    self, Entry, Fixture, directories, draw_base, make_fifo, set_mode, snapshot, with_modes,
+};
 
 // Longer than any generated name, so it cannot alias one.
 const BLOCKER: &str = "riftri-blocker";

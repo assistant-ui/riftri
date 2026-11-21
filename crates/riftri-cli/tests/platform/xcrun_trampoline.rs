@@ -4,14 +4,12 @@
 //! starts, so Git's Trace2 records which processes went through it.
 #![cfg(target_os = "macos")]
 
+use crate::support;
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-
-#[allow(dead_code)]
-mod support;
 
 const TRAMPOLINE: &str = "/usr/bin/git";
 /// Variables the trampoline adds for the tool it starts.

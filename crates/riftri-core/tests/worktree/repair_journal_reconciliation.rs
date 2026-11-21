@@ -24,8 +24,7 @@ use riftri_core::{
     recover_incomplete_operations, remove_worktree, storage_accounting,
 };
 
-mod support;
-use support::writable_tempdir as tempdir;
+use crate::support::writable_tempdir as tempdir;
 
 fn git(path: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")

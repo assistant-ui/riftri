@@ -1,7 +1,6 @@
 //! Property tests for populating a linked worktree's index: whichever way
 //! the index is built, Git must then see exactly the requested sparse cone
 //! and no staged change.
-#![cfg(unix)]
 
 use std::ffi::OsStr;
 
@@ -9,10 +8,7 @@ use hegel::TestCase;
 use hegel::generators as gs;
 use riftri_git::{Git, SparseCheckoutState, WorktreeHead};
 
-#[allow(dead_code)]
-mod support;
-
-use support::Fixture;
+use crate::support::{self, Fixture};
 
 const DIRECTORIES: [&str; 3] = ["alpha", "beta", "gamma/nested"];
 

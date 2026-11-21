@@ -1,6 +1,5 @@
 //! Property tests that compare attribute queries with a model of Git's
 //! attribute precedence, over generated rules and arbitrary path bytes.
-#![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -10,10 +9,7 @@ use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
 use riftri_git::{Git, GitAttribute, ObjectId};
 
-#[allow(dead_code)]
-mod support;
-
-use support::Fixture;
+use crate::support::{self, Fixture};
 
 /// One attributes line: a pattern and a single attribute state.
 #[derive(Debug, Clone)]

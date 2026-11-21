@@ -1,6 +1,5 @@
 //! Property tests that read trees and blobs written by the real Git and
 //! compare every byte with what was written.
-#![cfg(unix)]
 
 use std::os::unix::ffi::OsStrExt;
 
@@ -8,10 +7,7 @@ use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
 use riftri_git::{Git, GitError, ObjectId};
 
-#[allow(dead_code)]
-mod support;
-
-use support::Fixture;
+use crate::support::Fixture;
 
 fn fixture(tc: &TestCase) -> Fixture {
     Fixture::new(tc.draw(gs::sampled_from(vec!["sha1", "sha256"])))

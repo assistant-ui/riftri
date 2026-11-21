@@ -1,6 +1,5 @@
 //! Property tests that resolve revisions and branches against the real Git
 //! as the oracle: Riftri must name the same commit Git does, or none.
-#![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -10,10 +9,7 @@ use hegel::TestCase;
 use hegel::generators as gs;
 use riftri_git::{Git, ObjectId, ResolvedRevision};
 
-#[allow(dead_code)]
-mod support;
-
-use support::{Fixture, IDENTITY, isolated_git};
+use crate::support::{self, Fixture, IDENTITY, isolated_git};
 
 /// A repository with a short history, each commit with its own tree.
 fn history(tc: &TestCase) -> (Fixture, Vec<ObjectId>) {

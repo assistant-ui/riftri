@@ -1,7 +1,6 @@
 //! A state machine over the linked-worktree lifecycle: every operation goes
 //! through the real Git, and the inventory Riftri parses must match a model
 //! of what Git should now hold.
-#![cfg(unix)]
 
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -10,10 +9,7 @@ use hegel::generators as gs;
 use hegel::{HealthCheck, TestCase};
 use riftri_git::{Git, ObjectId, WorktreeHead};
 
-#[allow(dead_code)]
-mod support;
-
-use support::Fixture;
+use crate::support::{self, Fixture};
 
 #[derive(Debug, Clone)]
 struct Linked {

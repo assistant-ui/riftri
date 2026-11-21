@@ -1,6 +1,5 @@
 //! Property tests that write configuration through the real Git and check
 //! every reader returns exactly what Git stored.
-#![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
@@ -11,10 +10,7 @@ use hegel::TestCase;
 use hegel::generators::{self as gs, Generator, PrintableGenerator};
 use riftri_git::{Git, GitError};
 
-#[allow(dead_code)]
-mod support;
-
-use support::Fixture;
+use crate::support::{self, Fixture};
 
 fn name() -> impl PrintableGenerator<String> {
     gs::text().alphabet("abXY09-").max_size(3)
