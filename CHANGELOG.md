@@ -5,6 +5,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Changed
+
+- `riftri status` and `riftri worktree list` measure each view's logical,
+  allocated, and private bytes in one directory walk instead of two. On a
+  20,000-file APFS fixture with four views, the median run took 23 to 28%
+  less time. Reported values are unchanged.
+
 ### Fixed
 
 - On Windows, an attribute check during a worktree add retries once if Git

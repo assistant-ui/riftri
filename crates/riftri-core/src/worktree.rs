@@ -2255,20 +2255,15 @@ pub fn storage_accounting(
             });
         }
     }
-    for (view, (logical_bytes, allocated_bytes)) in
-        views.iter_mut().zip(tree_usages(&view_usage_requests)?)
+    for (view, (logical_bytes, allocated_bytes, private_bytes)) in
+        views.iter_mut().zip(view_usages(&view_usage_requests)?)
     {
         view.logical_bytes = logical_bytes;
         view.allocated_bytes = allocated_bytes;
-    }
-    for (view, private_bytes) in views
-        .iter_mut()
-        .zip(views_private_bytes(&view_usage_requests)?)
-    {
         // An OverlayFS view's private bytes are its upper layer, which is
         // what its allocated bytes already measure.
         view.private_bytes = if view.backend == BackendKind::OverlayFs {
-            Some(view.allocated_bytes)
+            Some(allocated_bytes)
         } else {
             private_bytes
         };
@@ -9271,6 +9266,19 @@ fn retained_base_paths(
 /// counts as nothing; failing instead made `status` and `worktree list` exit 1
 /// whenever another operation happened to be in flight.
 fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
+    tree_usage_with_private(path, &mut None)
+}
+
+/// [`tree_usage`], also adding every regular file's private bytes to
+/// `private` while it is `Some`, so a view is walked once for all three
+/// figures. Private bytes are reporting only: a file whose private bytes
+/// cannot be measured sets `private` to `None` instead of failing the report,
+/// and the walk stops measuring them. Vanished entries count as nothing here
+/// too.
+fn tree_usage_with_private(
+    path: &Path,
+    private: &mut Option<u64>,
+) -> Result<(u64, u64), WorktreeError> {
     let vanished = |source: &std::io::Error| source.kind() == std::io::ErrorKind::NotFound;
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -9283,6 +9291,15 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
         Err(WorktreeError::Io { source, .. }) if vanished(&source) => return Ok((0, 0)),
         Err(error) => return Err(error),
     };
+    if metadata.is_file()
+        && let Some(total) = *private
+    {
+        *private = match riftri_storage::private_data_bytes(path) {
+            Ok(bytes) => bytes.map(|bytes| total.saturating_add(bytes)),
+            Err(source) if vanished(&source) => Some(total),
+            Err(_) => None,
+        };
+    }
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
         let entries = match fs::read_dir(path) {
             Ok(entries) => entries,
@@ -9303,7 +9320,7 @@ fn tree_usage(path: &Path) -> Result<(u64, u64), WorktreeError> {
                 Err(source) => return Err(io("read storage accounting entry", path, source)),
             };
             child.push(name);
-            let (entry_logical, entry_allocated) = tree_usage(&child)?;
+            let (entry_logical, entry_allocated) = tree_usage_with_private(&child, private)?;
             child.pop();
             logical_bytes = logical_bytes.saturating_add(entry_logical);
             allocated_bytes = allocated_bytes.saturating_add(entry_allocated);
@@ -9332,58 +9349,24 @@ fn tree_usages(requests: &[TreeUsageRequest]) -> Result<Vec<(u64, u64)>, Worktre
     measure_trees(requests, &measure_tree_usage)
 }
 
-/// Each view's private bytes, concurrently as [`tree_usages`] measures them.
-/// OverlayFS views are measured from their upper layer by the caller, so
-/// their requests are skipped here.
+/// Each view's logical, allocated and private bytes, concurrently as
+/// [`tree_usages`] measures trees and in one walk of each view. An OverlayFS
+/// view's private bytes come from its upper layer, which the caller already
+/// has as allocated bytes, so its merged tree is not measured for them.
 #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn views_private_bytes(requests: &[TreeUsageRequest]) -> Result<Vec<Option<u64>>, WorktreeError> {
+fn view_usages(
+    requests: &[TreeUsageRequest],
+) -> Result<Vec<(u64, u64, Option<u64>)>, WorktreeError> {
     measure_trees(requests, &|request: &TreeUsageRequest| {
-        if request.allocated_path.is_some() {
-            return Ok(None);
-        }
-        Ok(tree_private_bytes(&request.path))
-    })
-}
-
-/// The private bytes of every regular file below `path`, or None as soon as
-/// one of them cannot be measured. Reporting only, so an unreadable entry
-/// makes the answer unknown rather than failing the report. Entries that
-/// vanish while the walk runs are skipped, as [`tree_usage`] skips them.
-#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-fn tree_private_bytes(path: &Path) -> Option<u64> {
-    let vanished = |source: &std::io::Error| source.kind() == std::io::ErrorKind::NotFound;
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(source) if vanished(&source) => return Some(0),
-        Err(_) => return None,
-    };
-    if metadata.is_file() {
-        return match riftri_storage::private_data_bytes(path) {
-            Ok(bytes) => bytes,
-            Err(source) if vanished(&source) => Some(0),
-            Err(_) => None,
+        let mut private = request.allocated_path.is_none().then_some(0);
+        let (logical_bytes, allocated_bytes) =
+            tree_usage_with_private(&request.path, &mut private)?;
+        let allocated_bytes = match &request.allocated_path {
+            Some(path) => tree_usage(path)?.1,
+            None => allocated_bytes,
         };
-    }
-    if !metadata.is_dir() {
-        return Some(0);
-    }
-    let names = match fs::read_dir(path) {
-        Ok(entries) => entries
-            .map(|entry| entry.map(|entry| entry.file_name()))
-            .collect::<Result<Vec<_>, _>>()
-            .ok()?,
-        Err(source) if vanished(&source) => return Some(0),
-        Err(_) => return None,
-    };
-    let mut total = 0_u64;
-    let mut child = path.to_path_buf();
-    for name in names {
-        child.push(name);
-        let bytes = tree_private_bytes(&child);
-        child.pop();
-        total = total.saturating_add(bytes?);
-    }
-    Some(total)
+        Ok((logical_bytes, allocated_bytes, private))
+    })
 }
 
 /// See [`StorageAccountingReport::saved_bytes`].
@@ -15614,6 +15597,47 @@ mod tests {
         }
 
         assert_eq!(tree_usages(&requests).expect("measure trees"), expected);
+    }
+
+    #[test]
+    fn view_usages_measure_private_bytes_in_the_same_walk() {
+        let fixture = tempdir().expect("view-usage fixture");
+        let view = fixture.path().join("view");
+        let nested = view.join("package").join("source");
+        fs::create_dir_all(&nested).expect("nested view directories");
+        fs::create_dir(view.join("empty")).expect("empty view directory");
+        let files = [nested.join("deep"), view.join("package").join("shallow")];
+        for (index, file) in files.iter().enumerate() {
+            fs::write(file, vec![b'a' + index as u8; 12_289 + index * 4_096]).expect("view file");
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("package/shallow", view.join("link")).expect("view symlink");
+        let upper = fixture.path().join("upper");
+        fs::create_dir(&upper).expect("upper layer");
+        fs::write(upper.join("changed"), vec![b'z'; 8_193]).expect("upper file");
+
+        let usages = super::view_usages(&[
+            TreeUsageRequest {
+                path: view.clone(),
+                allocated_path: None,
+            },
+            TreeUsageRequest {
+                path: view.clone(),
+                allocated_path: Some(upper.clone()),
+            },
+        ])
+        .expect("measure views");
+
+        let (logical, allocated) = tree_usage(&view).expect("measure view tree");
+        let private = files
+            .iter()
+            .map(|file| riftri_storage::private_data_bytes(file).expect("file private bytes"))
+            .sum::<Option<u64>>();
+        assert_eq!(usages[0], (logical, allocated, private));
+        // OverlayFS private bytes come from the upper layer's allocation, so
+        // the merged view is not measured for them.
+        let upper_allocated = tree_usage(&upper).expect("measure upper layer").1;
+        assert_eq!(usages[1], (logical, upper_allocated, None));
     }
 
     #[test]
