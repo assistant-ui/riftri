@@ -52,8 +52,12 @@ versioned report on stdout — `doctor`, `backends`, `status`, `repair`, `gc`,
 and every `worktree` subcommand. Any command accepts `--json-errors`, which
 emits one failure receipt on stderr instead of human text.
 
+Report fields use `snake_case` (`schema_version`). Failure receipt fields
+use `camelCase` (`schemaVersion`). When using both flags, check the exit code
+to select the stream and schema.
+
 ```sh
-riftri worktree add ../app-auth -b feature/auth --json
+riftri worktree add ../app-auth -b feature/auth --json --json-errors
 ```
 
 ## Exit codes
