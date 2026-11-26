@@ -166,6 +166,13 @@ test('full comparison verifies a thousand-file fixture and ten concurrent CLI vi
     assert.equal(summary.concurrentViewSeconds.samples, 10);
     assert.equal(summary.concurrentBatchSeconds.samples, 1);
   }
+  // Concurrent plain Git registers one worktree at a time, as Riftri does.
+  const registrations = result.cases.filter(record => record.version === 'git' && record.label.startsWith('parallel-'))
+    .map(record => record.registration).sort((left, right) => left.started.localeCompare(right.started));
+  assert.equal(registrations.length, 10);
+  for (const [index, registration] of registrations.entries()) {
+    if (index) assert.ok(registration.started > registrations[index - 1].exited, `overlapping registrations: ${JSON.stringify(registrations)}`);
+  }
   assert.equal(git(['status', '--porcelain=v1']), '');
   // A fully successful harness has removed all views and collected all bases.
   fs.rmSync(root, { recursive: true });

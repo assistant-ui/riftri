@@ -391,6 +391,17 @@ impl SmallBlobReader {
             }
             Ok(blobs)
         })();
+        let result = match result {
+            // Git closes its input by exiting, so a refused request means Git
+            // has ended. Report how, as `finish` does, rather than the pipe;
+            // unread output is drained so a Git blocked writing it can exit.
+            Err(error @ GitError::WriteInput { .. }) => {
+                drop(self.input.take());
+                let _ = std::io::copy(&mut self.output, &mut std::io::sink());
+                self.wait_for_success().and(Err(error))
+            }
+            other => other,
+        };
         if result.is_err() {
             self.abort();
         }
@@ -399,7 +410,7 @@ impl SmallBlobReader {
 
     /// Close input and require no trailing response bytes and a successful exit.
     pub fn finish(mut self) -> Result<(), GitError> {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::Read;
         if self.child.is_none() {
             return Err(invalid_blob_batch("closed session"));
         }
@@ -413,6 +424,12 @@ impl SmallBlobReader {
         {
             return Err(invalid_blob_batch("unexpected trailing response bytes"));
         }
+        self.wait_for_success()
+    }
+
+    /// Reap the live Git and refuse an unsuccessful exit with its diagnostic.
+    fn wait_for_success(&mut self) -> Result<(), GitError> {
+        use std::io::{Read, Seek, SeekFrom};
         let status = self
             .child
             .as_mut()

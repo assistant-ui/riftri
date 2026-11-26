@@ -1,5 +1,6 @@
 //! Property tests for how a finished Git process is described in an error.
 
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, ExitStatus};
 use std::sync::LazyLock;
@@ -7,7 +8,7 @@ use std::sync::LazyLock;
 use hegel::TestCase;
 use hegel::generators::{self as gs, Generator};
 
-use super::{GitError, command_failed, describe_exit_disposition};
+use super::{Git, GitError, ObjectId, command_failed, describe_exit_disposition};
 
 /// The shell's own signal table, so the names are checked against this
 /// platform's numbering instead of a second copy of the list under test.
@@ -91,4 +92,56 @@ fn a_failed_command_always_reports_how_it_ended(tc: TestCase) {
     };
     assert!(matches!(error, GitError::CommandFailed { .. }));
     assert_eq!(error.to_string(), expected);
+}
+
+/// A Git that ends before reading a blob request leaves the request writing
+/// into a broken pipe. The caller must still learn how Git ended. Usually the
+/// request reaches the pipe buffer before Git ends, so each case waits for
+/// the end first and takes the broken-pipe path every time.
+#[hegel::test(test_cases = 40)]
+fn a_blob_request_git_never_read_reports_how_git_ended(tc: TestCase) {
+    let (ending, expected) = tc.draw(hegel::one_of!(
+        gs::integers::<u8>()
+            .min_value(1)
+            .map(|code| (format!("exit {code}"), format!("exit code {code}"))),
+        gs::sampled_from(vec![libc::SIGHUP, libc::SIGKILL, libc::SIGTERM]).map(|signal| (
+            format!("kill -{signal} $$"),
+            format!("killed by signal {signal}")
+        ))
+    ));
+    let directory = tempfile::tempdir().unwrap();
+    let script = directory.path().join("git");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nprintf refused >&2\n{ending}\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut reader = Git::new(&script)
+        .small_blob_reader(directory.path())
+        .unwrap();
+    let pid = reader.child.as_ref().unwrap().id();
+    // SAFETY: `waitid` writes only into the zeroed `siginfo_t` it is given,
+    // and `WNOWAIT` leaves the ended child for the reader to reap.
+    let waited = unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOWAIT,
+        )
+    };
+    assert_eq!(waited, 0);
+
+    let error = reader
+        .read(&[ObjectId::parse("a".repeat(40)).unwrap()], 1)
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("refused") && error.contains(&expected),
+        "{error}"
+    );
+    assert!(reader.child.is_none(), "the ended Git was not reaped");
 }

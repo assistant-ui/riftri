@@ -5,6 +5,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- When Git exits before reading a blob request, the error now reports how Git
+  ended instead of a broken pipe.
+
 ## [0.7.1] - 2026-11-25
 
 ### Changed
