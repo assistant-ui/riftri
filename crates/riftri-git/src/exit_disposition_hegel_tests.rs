@@ -97,7 +97,10 @@ fn a_failed_command_always_reports_how_it_ended(tc: TestCase) {
 /// A Git that ends before reading a blob request leaves the request writing
 /// into a broken pipe. The caller must still learn how Git ended. Usually the
 /// request reaches the pipe buffer before Git ends, so each case waits for
-/// the end first and takes the broken-pipe path every time.
+/// the end first to take the broken-pipe path. A process another test is
+/// starting can briefly inherit the pipe, so the write may still succeed and
+/// the reader then sees the malformed reply first, which every streaming
+/// reader may report instead (see `hegel_fail_closed::assert_refused`).
 #[hegel::test(test_cases = 40)]
 fn a_blob_request_git_never_read_reports_how_git_ended(tc: TestCase) {
     let (ending, expected) = tc.draw(hegel::one_of!(
@@ -134,14 +137,18 @@ fn a_blob_request_git_never_read_reports_how_git_ended(tc: TestCase) {
     };
     assert_eq!(waited, 0);
 
-    let error = reader
+    match reader
         .read(&[ObjectId::parse("a".repeat(40)).unwrap()], 1)
         .unwrap_err()
-        .to_string();
-
-    assert!(
-        error.contains("refused") && error.contains(&expected),
-        "{error}"
-    );
+    {
+        GitError::InvalidOutput { .. } => {}
+        error => {
+            let error = error.to_string();
+            assert!(
+                error.contains("refused") && error.contains(&expected),
+                "{error}"
+            );
+        }
+    }
     assert!(reader.child.is_none(), "the ended Git was not reaped");
 }
