@@ -5,6 +5,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+## [0.7.1] - 2026-11-25
+
 ### Changed
 
 - `riftri status` and `riftri worktree list` measure each view's logical,
@@ -16,6 +18,13 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 - On Windows, an attribute check during a worktree add retries once if Git
   reports that it could not open the config file during a concurrent update.
+- Worktree adds resolve reflog revisions such as `HEAD@{0}~1` to the commit
+  Git selects, including reporting a missing parent in a single-commit history.
+
+### Documentation
+
+- The CLI guides document the JSON field names for success reports and failure
+  receipts, including `schema_version` and `schemaVersion`.
 
 ## [0.7.0] - 2026-11-12
 
