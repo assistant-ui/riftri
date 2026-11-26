@@ -387,10 +387,27 @@ impl SmallBlobReader {
                     command: self.command.clone(),
                     source,
                 })?;
-                blobs.push(read_batch_blob(&mut self.output, object, max_bytes)?);
+                let Some(blob) = read_batch_blob(&mut self.output, object, max_bytes)? else {
+                    // The request reached the pipe, but Git closed stdout before replying.
+                    drop(self.input.take());
+                    self.wait_for_success()?;
+                    return Err(invalid_blob_sizes());
+                };
+                blobs.push(blob);
             }
             Ok(blobs)
         })();
+        let result = match result {
+            // Git closes its input by exiting, so a refused request means Git
+            // has ended. Report how, as `finish` does, rather than the pipe;
+            // unread output is drained so a Git blocked writing it can exit.
+            Err(error @ GitError::WriteInput { .. }) => {
+                drop(self.input.take());
+                let _ = std::io::copy(&mut self.output, &mut std::io::sink());
+                self.wait_for_success().and(Err(error))
+            }
+            other => other,
+        };
         if result.is_err() {
             self.abort();
         }
@@ -399,7 +416,7 @@ impl SmallBlobReader {
 
     /// Close input and require no trailing response bytes and a successful exit.
     pub fn finish(mut self) -> Result<(), GitError> {
-        use std::io::{Read, Seek, SeekFrom};
+        use std::io::Read;
         if self.child.is_none() {
             return Err(invalid_blob_batch("closed session"));
         }
@@ -413,6 +430,12 @@ impl SmallBlobReader {
         {
             return Err(invalid_blob_batch("unexpected trailing response bytes"));
         }
+        self.wait_for_success()
+    }
+
+    /// Reap the live Git and refuse an unsuccessful exit with its diagnostic.
+    fn wait_for_success(&mut self) -> Result<(), GitError> {
+        use std::io::{Read, Seek, SeekFrom};
         let status = self
             .child
             .as_mut()
@@ -3053,13 +3076,16 @@ fn read_batch_blob(
     reader: &mut impl std::io::BufRead,
     object: &ObjectId,
     max_bytes: usize,
-) -> Result<Vec<u8>, GitError> {
+) -> Result<Option<Vec<u8>>, GitError> {
     use std::io::{BufRead, Read};
     let mut header = Vec::new();
     reader
         .take(128)
         .read_until(b'\n', &mut header)
         .map_err(|error| invalid_blob_batch(error.to_string()))?;
+    if header.is_empty() {
+        return Ok(None);
+    }
     let line = std::str::from_utf8(&header)
         .map_err(|_| invalid_blob_sizes())?
         .strip_suffix('\n')
@@ -3082,7 +3108,7 @@ fn read_batch_blob(
     if delimiter != *b"\n" {
         return Err(invalid_blob_batch("missing blob body delimiter"));
     }
-    Ok(bytes)
+    Ok(Some(bytes))
 }
 
 fn invalid_blob_sizes() -> GitError {
@@ -3943,8 +3969,8 @@ mod tests {
         let id = super::ObjectId::parse("a".repeat(40)).unwrap();
         let decode =
             |bytes: Vec<u8>| super::read_batch_blob(&mut std::io::Cursor::new(bytes), &id, 8);
+        assert_eq!(decode(Vec::new()).unwrap(), None);
         for data in [
-            Vec::new(),
             vec![b'x'; 1000],
             format!("{} missing\n", id.as_str()).into_bytes(),
             format!("{} tree 1\nx\n", id.as_str()).into_bytes(),
@@ -3960,14 +3986,21 @@ mod tests {
         assert_eq!(oversized.position(), header.len() as u64);
         let mut binary = format!("{} blob 3\n", id.as_str()).into_bytes();
         binary.extend_from_slice(b"a\0\n\n");
-        assert_eq!(decode(binary).unwrap(), b"a\0\n");
+        assert_eq!(decode(binary).unwrap().as_deref(), Some(&b"a\0\n"[..]));
         assert_eq!(
-            decode(format!("{} blob 0\n\n", id.as_str()).into_bytes()).unwrap(),
-            b""
+            decode(format!("{} blob 0\n\n", id.as_str()).into_bytes())
+                .unwrap()
+                .as_deref(),
+            Some(&b""[..])
         );
         let sha256 = super::ObjectId::parse("b".repeat(64)).unwrap();
         let mut body = std::io::Cursor::new(format!("{} blob 1\nx\n", sha256.as_str()));
-        assert_eq!(super::read_batch_blob(&mut body, &sha256, 1).unwrap(), b"x");
+        assert_eq!(
+            super::read_batch_blob(&mut body, &sha256, 1)
+                .unwrap()
+                .as_deref(),
+            Some(&b"x"[..])
+        );
     }
 
     #[cfg(unix)]

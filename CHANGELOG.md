@@ -5,6 +5,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- When Git exits unsuccessfully before answering a blob request, Riftri
+  reports its exit status and diagnostic.
+
 ## [0.7.1] - 2026-11-25
 
 ### Changed
