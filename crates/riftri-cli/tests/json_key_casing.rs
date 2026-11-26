@@ -8,10 +8,8 @@
 //! `repositoryNativeHex` and `nextCommand` — so the split is easy to cross
 //! without noticing, in either direction.
 //!
-//! These tests do not endorse the split. They pin it, so that a new key cannot
-//! quietly land in the wrong style while the question of unifying the two is
-//! still open, and so that unifying them later is a deliberate, visible change
-//! rather than a drift nobody reviewed.
+//! The CLI reference documents both conventions. Keep the field names stable
+//! for harnesses that parse both streams.
 
 use std::fs;
 use std::path::Path;

@@ -16,6 +16,12 @@ Two conventions apply everywhere:
   (`doctor`, `backends`, `status`, `repair`, `gc`, and all `worktree`
   subcommands). It emits stable machine-readable JSON on success.
 
+When using both flags, check the exit code before parsing the output. On
+success, read the report from stdout. Its fields use `snake_case`, including
+`schema_version`. On failure, read the receipt from stderr. Its fields use
+`camelCase`, including `schemaVersion`. Both spellings are part of the CLI
+contract.
+
 The interactive-only `setup` command rejects `--json-errors` with a single JSON
 receipt before prompting or making changes; use the explicit commands for
 automation. It has no `--json` or `--yes` mode.
