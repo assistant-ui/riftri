@@ -5,6 +5,15 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ## Unreleased
 
+### Fixed
+
+- Conditional Git includes (`includeIf`) that define configured hooks
+  (`hook.<name>.command`, `hook.<name>.event`, and the rest of the `hook.*`
+  section) no longer block a repository. Hooks never change checkout bytes.
+- A `post-checkout` hook registered in configuration (`hook.<name>.event`) now
+  refuses an optimized add instead of being skipped. `git worktree add` runs
+  it, and Riftri runs only the hooks directory's script.
+
 ## [0.7.1] - 2026-11-25
 
 ### Changed

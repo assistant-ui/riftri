@@ -811,12 +811,28 @@ fn config_values_keep_the_last_raw_value_for_each_requested_key(tc: TestCase) {
     let mut output = Vec::new();
     let mut expected = std::collections::BTreeMap::new();
     let mut has_conditional_includes = false;
+    let mut has_post_checkout_config_hooks = false;
     for _ in 0..tc.draw(gs::integers::<usize>().max_value(6)) {
-        if tc.draw(gs::booleans()) {
-            let condition = bytes_without(&tc, b"\0\n", 0);
-            output.extend([b"includeif.", &condition[..], b".path\n/included\0"].concat());
-            has_conditional_includes = true;
-            continue;
+        match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => {
+                let condition = bytes_without(&tc, b"\0\n", 0);
+                output.extend([b"includeif.", &condition[..], b".path\n/included\0"].concat());
+                has_conditional_includes = true;
+                continue;
+            }
+            1 => {
+                let name = bytes_without(&tc, b"\0\n", 1);
+                let event = tc.draw(gs::sampled_from(vec![
+                    "post-checkout",
+                    "pre-push",
+                    "post-checkout-x",
+                    "",
+                ]));
+                output.extend([b"hook.", &name[..], b".event\n", event.as_bytes(), b"\0"].concat());
+                has_post_checkout_config_hooks |= event == "post-checkout";
+                continue;
+            }
+            _ => {}
         }
         let key = tc.draw(gs::sampled_from(keys.clone()));
         // An implicit boolean has no value separator at all.
@@ -836,6 +852,10 @@ fn config_values_keep_the_last_raw_value_for_each_requested_key(tc: TestCase) {
 
     assert_eq!(config.values, expected);
     assert_eq!(config.has_conditional_includes, has_conditional_includes);
+    assert_eq!(
+        config.has_post_checkout_config_hooks,
+        has_post_checkout_config_hooks
+    );
 
     tc.assume(!output.is_empty());
     let unterminated = &output[..output.len() - 1];

@@ -6681,8 +6681,10 @@ fn analyze_compatibility_with_git_info(
     if config.has_conditional_includes
         && !git.conditional_config_has_only(
             repository,
-            // Identity, signing, and SSH transport keys: none of them can
-            // change the bytes a checkout writes.
+            // Identity, signing, SSH transport, and configured hook keys:
+            // none of them can change the bytes a checkout writes. A
+            // configured post-checkout hook would change what an add runs,
+            // and is refused below whichever scope defines it.
             &[
                 "user.name",
                 "user.email",
@@ -6695,12 +6697,22 @@ fn analyze_compatibility_with_git_info(
                 "gpg.ssh.program",
                 "gpg.ssh.allowedsignersfile",
                 "core.sshcommand",
+                "hook.*",
             ],
         )?
     {
         blockers.push(RepositoryCompatibilityBlocker {
             kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
-            explanation: "conditional Git configuration includes must contain only identity, signing, and SSH settings (user.name, user.email, user.signingKey, user.useConfigOnly, commit.gpgSign, tag.gpgSign, gpg.format, gpg.program, gpg.ssh.program, gpg.ssh.allowedSignersFile, core.sshCommand); other keys, nested includes, and unreadable targets are not supported"
+            explanation: "conditional Git configuration includes must contain only identity, signing, SSH, and hook settings (user.name, user.email, user.signingKey, user.useConfigOnly, commit.gpgSign, tag.gpgSign, gpg.format, gpg.program, gpg.ssh.program, gpg.ssh.allowedSignersFile, core.sshCommand, hook.*); other keys, nested includes, and unreadable targets are not supported"
+                .to_owned(),
+        });
+    }
+    // Riftri runs only the hooks directory's post-checkout script, so a
+    // hook registered in configuration would silently not run.
+    if config.has_post_checkout_config_hooks {
+        blockers.push(RepositoryCompatibilityBlocker {
+            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+            explanation: "a hook.<name>.event setting registers a post-checkout hook, which Riftri does not run; use ordinary git worktree add"
                 .to_owned(),
         });
     }

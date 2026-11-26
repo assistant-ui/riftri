@@ -295,7 +295,14 @@ fn conditional_includes_pass_only_when_every_included_key_is_allowed(tc: TestCas
     let fixture = Fixture::new("sha1");
     let repository = fixture.repository();
     let git = Git::default();
-    let pool = ["core.autocrlf", "core.eol", "filter.lfs.clean", "user.name"];
+    // `hook.*` is an allowlist pattern; a target gets a concrete hook key for it.
+    let pool = [
+        "core.autocrlf",
+        "core.eol",
+        "filter.lfs.clean",
+        "user.name",
+        "hook.*",
+    ];
     let allowed = tc.draw(gs::subsequences(pool.to_vec()));
     assert!(
         git.conditional_config_has_only(&repository, &allowed)
@@ -335,7 +342,10 @@ fn conditional_includes_pass_only_when_every_included_key_is_allowed(tc: TestCas
             } else {
                 (*key).to_owned()
             };
-            let recased = recased.replace(".LFS.", ".lfs.");
+            let recased = recased.replace(".LFS.", ".lfs.").replace(
+                ".*",
+                tc.draw(gs::sampled_from(vec![".tracer.command", ".Tracer.event"])),
+            );
             support::git(
                 &repository,
                 &[
@@ -356,7 +366,9 @@ fn conditional_includes_pass_only_when_every_included_key_is_allowed(tc: TestCas
         .iter()
         .map(|key| {
             if tc.draw(gs::booleans()) {
-                key.replace("core.", "Core.").replace(".eol", ".EOL")
+                key.replace("core.", "Core.")
+                    .replace(".eol", ".EOL")
+                    .replace("hook.", "Hook.")
             } else {
                 (*key).to_owned()
             }

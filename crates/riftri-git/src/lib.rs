@@ -185,11 +185,15 @@ pub struct TreeAttributeIndex {
     index: PathBuf,
 }
 
-/// Effective values and conditional includes discovered in one configuration read.
+/// Effective values, conditional includes, and configured `post-checkout`
+/// hooks discovered in one configuration read.
 #[derive(Debug, Default)]
 pub struct ConfigValues {
     pub values: BTreeMap<String, Vec<u8>>,
     pub has_conditional_includes: bool,
+    /// Some `hook.<name>.event` names `post-checkout`. Git 2.54 and later run
+    /// such a hook on `git worktree add` next to the hooks directory's script.
+    pub has_post_checkout_config_hooks: bool,
 }
 
 /// One source contributing a value to Git's effective configuration.
@@ -1182,6 +1186,8 @@ impl Git {
 
     /// Read every distinct conditional target, including conditions that do not match.
     /// Nested includes and unreadable targets cannot satisfy the key allowlist.
+    /// An allowed key ending in `*` admits every key it prefixes, so `hook.*`
+    /// admits the whole `hook` section.
     pub fn conditional_config_has_only(
         &self,
         path: &Path,
@@ -1252,7 +1258,12 @@ impl Git {
                     .any(|key| {
                         !allowed_keys
                             .iter()
-                            .any(|allowed| key.eq_ignore_ascii_case(allowed.as_bytes()))
+                            .any(|allowed| match allowed.strip_suffix('*') {
+                                Some(prefix) => key.get(..prefix.len()).is_some_and(|start| {
+                                    start.eq_ignore_ascii_case(prefix.as_bytes())
+                                }),
+                                None => key.eq_ignore_ascii_case(allowed.as_bytes()),
+                            })
                     })
             {
                 return Ok(false);
@@ -1344,7 +1355,7 @@ impl Git {
         // Validation above excludes regexp metacharacters other than the one
         // separating dot. Anchor the allowlist so unrelated settings cannot match.
         let pattern = format!(
-            r"^({}|includeif\..*\.path)$",
+            r"^({}|includeif\..*\.path|hook\..*\.event)$",
             keys.iter()
                 .map(|key| key.replace('.', r"\."))
                 .collect::<Vec<_>>()
@@ -3532,6 +3543,13 @@ fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, G
         };
         if name.starts_with(b"includeif.") && name.ends_with(b".path") {
             config.has_conditional_includes = true;
+            continue;
+        }
+        if name.starts_with(b"hook.") && name.ends_with(b".event") {
+            // A later empty value or `hook.<name>.enabled = false` can switch
+            // this registration off again. Counting it anyway can only refuse
+            // an add, never skip a hook Git would run.
+            config.has_post_checkout_config_hooks |= value == b"post-checkout";
             continue;
         }
         let key = keys

@@ -53,10 +53,11 @@ enum UnsafeCheckoutCase {
     SubmoduleGitlink,
     SourceBranchConfiguration,
     LinkedWorktreeConfiguration,
+    ConfiguredPostCheckoutHook,
 }
 
 impl UnsafeCheckoutCase {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::NonCanonicalGitLfs,
         Self::NestedEncoding,
         Self::RepositoryAttributes,
@@ -64,6 +65,7 @@ impl UnsafeCheckoutCase {
         Self::SubmoduleGitlink,
         Self::SourceBranchConfiguration,
         Self::LinkedWorktreeConfiguration,
+        Self::ConfiguredPostCheckoutHook,
     ];
 
     fn name(self) -> &'static str {
@@ -75,6 +77,7 @@ impl UnsafeCheckoutCase {
             Self::SubmoduleGitlink => "submodule-gitlink",
             Self::SourceBranchConfiguration => "source-branch-configuration",
             Self::LinkedWorktreeConfiguration => "linked-worktree-configuration",
+            Self::ConfiguredPostCheckoutHook => "configured-post-checkout-hook",
         }
     }
 
@@ -85,9 +88,9 @@ impl UnsafeCheckoutCase {
             Self::RepositoryAttributes => "effective-attributes",
             Self::SparseCheckout => "sparse-checkout",
             Self::SubmoduleGitlink => "submodules",
-            Self::SourceBranchConfiguration | Self::LinkedWorktreeConfiguration => {
-                "checkout-configuration"
-            }
+            Self::SourceBranchConfiguration
+            | Self::LinkedWorktreeConfiguration
+            | Self::ConfiguredPostCheckoutHook => "checkout-configuration",
         }
     }
 
@@ -180,6 +183,16 @@ impl UnsafeCheckoutCase {
                         included.to_str().expect("UTF-8 configuration path"),
                     ],
                 );
+            }
+            // `git worktree add` runs a hook registered for post-checkout in
+            // configuration; Riftri runs only the hooks directory's script.
+            Self::ConfiguredPostCheckoutHook => {
+                for (key, value) in [
+                    ("hook.riftri-test.event", "post-checkout"),
+                    ("hook.riftri-test.command", "touch hook-ran"),
+                ] {
+                    assert_git_success(&fixture.repository, &["config", key, value]);
+                }
             }
         }
     }
@@ -708,6 +721,11 @@ fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
             ),
             (
                 "[user]\n signingKey = key\n[commit]\n gpgSign = false\n[tag]\n gpgSign = false\n[gpg]\n format = ssh\n program = gpg\n[gpg \"ssh\"]\n program = ssh-keygen\n allowedSignersFile = signers\n[core]\n sshCommand = ssh -i work-key\n",
+                true,
+            ),
+            // Configured hooks for events an add never fires.
+            (
+                "[user]\n email = work@example.invalid\n[hook \"Tracer\"]\n command = tracer\n event = pre-push\n event = prepare-commit-msg\n",
                 true,
             ),
             ("[core]\n eol = crlf\n", false),

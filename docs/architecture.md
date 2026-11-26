@@ -123,7 +123,9 @@ Optimized creation suppresses Git's checkout, which also suppresses its
 active. It uses Git's contract: the null object id, the new HEAD, and `1` for a
 branch checkout, executed from inside the new worktree without Riftri's own
 `GIT_DIR` exported into it. `core.hooksPath` is honored, resolved against the
-invoking worktree the way Git resolves it.
+invoking worktree the way Git resolves it. A `post-checkout` hook registered in
+configuration (`hook.<name>.event`) is not run, so its presence refuses
+optimized creation.
 
 The hook runs after activation rather than inside the creation transaction,
 because Git does not treat it as part of the checkout either: a failing
