@@ -596,12 +596,16 @@ fn bounded_blob_reads_return_the_body_or_refuse_without_overreading(tc: TestCase
         assert_eq!(reader.len(), body.len() + 1 + following.len());
         return;
     }
-    assert_eq!(result.expect("blob within the limit"), body);
+    assert_eq!(result.expect("blob within the limit"), Some(body.clone()));
     assert_eq!(reader, &following[..]);
 
     let cut = tc.draw(gs::integers::<usize>().max_value(header.len() + body.len()));
     let truncated = read_batch_blob(&mut &stream[..cut], &id, max_bytes);
-    assert!(is_invalid_output(&truncated), "cut at {cut}: {truncated:?}");
+    if cut == 0 {
+        assert_eq!(truncated.unwrap(), None);
+    } else {
+        assert!(is_invalid_output(&truncated), "cut at {cut}: {truncated:?}");
+    }
 
     let delimiter = tc.draw(gs::integers::<u8>().filter(|byte| *byte != b'\n'));
     let mut undelimited = stream.clone();

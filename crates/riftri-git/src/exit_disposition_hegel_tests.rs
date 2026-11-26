@@ -94,10 +94,9 @@ fn a_failed_command_always_reports_how_it_ended(tc: TestCase) {
     assert_eq!(error.to_string(), expected);
 }
 
-/// A Git that ends before reading a blob request leaves the request writing
-/// into a broken pipe. The caller must still learn how Git ended. Usually the
-/// request reaches the pipe buffer before Git ends, so each case waits for
-/// the end first and takes the broken-pipe path every time.
+/// Git exits before the request. Whether the write gets a broken pipe or is
+/// buffered while another process still holds a read descriptor, the caller
+/// must learn how Git ended.
 #[hegel::test(test_cases = 40)]
 fn a_blob_request_git_never_read_reports_how_git_ended(tc: TestCase) {
     let (ending, expected) = tc.draw(hegel::one_of!(
@@ -144,4 +143,33 @@ fn a_blob_request_git_never_read_reports_how_git_ended(tc: TestCase) {
         "{error}"
     );
     assert!(reader.child.is_none(), "the ended Git was not reaped");
+}
+
+#[test]
+fn a_blob_request_accepted_without_a_response_reports_the_exit() {
+    let directory = tempfile::tempdir().unwrap();
+    let script = directory.path().join("git");
+    let object = ObjectId::parse("a".repeat(40)).unwrap();
+    for code in [0, 42] {
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nread -r request || exit 99\nprintf refused >&2\nexit {code}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut reader = Git::new(&script)
+            .small_blob_reader(directory.path())
+            .unwrap();
+        let error = reader.read(std::slice::from_ref(&object), 1).unwrap_err();
+        if code == 0 {
+            assert!(matches!(error, GitError::InvalidOutput { .. }), "{error}");
+        } else {
+            let message = error.to_string();
+            assert!(
+                message.contains("refused") && message.contains("exit code 42"),
+                "{message}"
+            );
+        }
+        assert!(reader.child.is_none());
+    }
 }
