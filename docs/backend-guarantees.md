@@ -72,8 +72,8 @@ accepted, along with checkout-neutral GitHub linguist metadata
 reads but Git's checkout machinery never consults. The `whitespace` attribute is
 accepted with any value for the same reason: only `git diff --check` and
 `git apply` read it. Global, system, and in-tree `diff` and `merge` records
-accept nonempty driver names such as `diff=objc`. Riftri reserves the `lfs`
-driver for canonical Git LFS paths. Those paths must use strict v1
+accept nonempty driver names such as `diff=objc`. Canonical Git LFS paths
+are the only paths that may use the `lfs` driver. They must use strict v1
 pointers backed by SHA-256-verified objects already present in the default
 local LFS store. Custom LFS storage, pointer extensions, custom filters,
 working-tree encodings, ident substitution, legacy or unknown attributes,
