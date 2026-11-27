@@ -58,11 +58,12 @@ mutation and uses the same journaled lifecycle. Riftri still has no forced move
 lifecycle path, automatic orphan-state repair, ordinary-NTFS
 backend, managed-environment integration, or daemon.
 The native COW checkout path accepts an allowlisted deterministic subset of
-in-tree attributes (`text`, `eol`, and `binary` semantics) plus canonical Git
-LFS paths backed by strict v1 pointers and verified objects already present in
-the default local LFS store. External attributes, custom LFS storage or pointer
-extensions, custom filters, encodings, ident substitution, legacy attributes,
-and unknown attribute names remain fail-closed.
+in-tree attributes (`text`, `eol`, and `binary` semantics, plus checkout-neutral
+`diff` and `merge` drivers) plus canonical Git LFS paths backed by strict v1
+pointers and verified objects already present in the default local LFS store.
+External attributes that set more than checkout-neutral records, custom LFS
+storage or pointer extensions, custom filters, encodings, ident substitution,
+legacy attributes, and unknown attribute names remain fail-closed.
 
 Milestone 6 is substantially complete. Exact-tree ASCII case and Unicode alias
 candidates are replayed against the real destination volume before any durable

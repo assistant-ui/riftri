@@ -137,9 +137,11 @@ kept. Riftri never silently skips a hook.
 
 The current native COW policy asks Git to resolve attributes from the exact
 requested tree through an isolated temporary index. Built-in `text`, `eol`, and
-`binary` checkout semantics are allowlisted; `diff` and `merge` records emitted
-by the built-in binary macro are checkout-neutral, as are `linguist-*` metadata
-and the `whitespace` attribute. A narrow Git LFS profile is
+`binary` checkout semantics are allowlisted; `diff` and `merge` records, whether
+unset by the built-in binary macro or naming a diff or merge driver, are
+checkout-neutral, as are `linguist-*` metadata and the `whitespace` attribute.
+Global and system attributes that set only these checkout-neutral records do
+not block creation, because materialization reads attributes from the tree. A narrow Git LFS profile is
 also supported when each affected path resolves to the canonical
 `filter=lfs diff=lfs merge=lfs -text` quartet, the installed filter
 configuration is standard, and the strict v1 pointer names an exact object in

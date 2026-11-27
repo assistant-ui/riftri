@@ -154,12 +154,13 @@ fn attribute(tc: &TestCase, path: &Path) -> GitAttribute {
 /// The allowlist as a flat table, written from the documented policy rather
 /// than from the implementation's match arms.
 fn allowed(name: &[u8], value: &[u8]) -> bool {
+    if matches!(name, b"diff" | b"merge") {
+        return !value.is_empty();
+    }
     let table: &[(&[u8], &[&[u8]])] = &[
         (b"text", &[b"set", b"unset", b"auto"]),
         (b"eol", &[b"lf", b"crlf"]),
         (b"binary", &[b"set"]),
-        (b"diff", &[b"unset"]),
-        (b"merge", &[b"unset"]),
         (
             b"linguist-generated",
             &[b"set", b"unset", b"true", b"false"],

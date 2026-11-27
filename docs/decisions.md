@@ -242,8 +242,8 @@ change what a prune would remove.
 Riftri asks the installed Git executable to resolve attributes from the exact
 requested tree through an isolated temporary index; it does not parse attribute
 patterns itself. Native backends accept the built-in `text`, `eol`, and `binary`
-checkout semantics, including the checkout-neutral `diff` and `merge` records
-emitted by `binary`, plus GitHub's linguist metadata attributes
+checkout semantics, the checkout-neutral `diff` and `merge` records (unset by
+`binary` or naming a diff or merge driver), plus GitHub's linguist metadata attributes
 (`linguist-generated`, `linguist-vendored`, `linguist-documentation`,
 `linguist-detectable`, `linguist-language`) and Git's `whitespace` attribute,
 which never participate in checkout and therefore cannot change materialized

@@ -292,8 +292,8 @@ never silently falls back to a full-copy checkout. Use ordinary Git explicitly
 when a destination or checkout profile is unsupported.
 
 Deterministic in-tree text, line-ending, and binary attributes are supported,
-along with checkout-neutral GitHub linguist hints and Git's `whitespace`
-attribute. Canonical
+along with checkout-neutral GitHub linguist hints, Git's `whitespace`
+attribute, and named `diff` and `merge` drivers. Canonical
 Git LFS paths need verified objects already present in the default local LFS
 store; Riftri does not fetch them during creation. Custom filters, custom LFS
 storage or pointer extensions, external attributes, a repository's own

@@ -6591,7 +6591,7 @@ fn analyze_compatibility_with_git_info(
         // query below: global and system attributes must still be detected
         // and refused rather than becoming part of a supposedly immutable
         // checkout profile.
-        let (mut in_tree, mut effective) = git.attribute_pair_for_tree(
+        let (in_tree, effective) = git.attribute_pair_for_tree(
             repository,
             &resolved.tree,
             &paths,
@@ -6608,6 +6608,8 @@ fn analyze_compatibility_with_git_info(
             }
         }
 
+        let mut in_tree = checkout_affecting(in_tree);
+        let mut effective = checkout_affecting(effective);
         in_tree.sort_unstable();
         effective.sort_unstable();
         if effective != in_tree {
@@ -6961,9 +6963,30 @@ fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
         b"text" => matches!(attribute.value.as_slice(), b"set" | b"unset" | b"auto"),
         b"eol" => matches!(attribute.value.as_slice(), b"lf" | b"crlf"),
         b"binary" => attribute.value == b"set",
-        b"diff" | b"merge" => attribute.value == b"unset",
-        name => is_checkout_neutral_metadata_attribute(name, &attribute.value),
+        name => is_checkout_neutral_attribute(name, &attribute.value),
     }
+}
+
+/// `diff` and `merge` select the driver `git diff` and merges use; checkout
+/// never consults them, so any value (unset, set, or a named driver such as
+/// `diff=objc` or a custom merge driver) leaves worktree bytes unchanged.
+/// `lfs` values never reach here: LFS records are classified as a set first.
+fn is_checkout_neutral_attribute(name: &[u8], value: &[u8]) -> bool {
+    match name {
+        b"diff" | b"merge" => !value.is_empty(),
+        name => is_checkout_neutral_metadata_attribute(name, value),
+    }
+}
+
+/// External attributes may only differ from the tree's in records checkout
+/// never reads, such as the `diff=objc` and `diff=swift` defaults Apple's
+/// Command Line Tools Git ships as system attributes.
+fn checkout_affecting(mut attributes: Vec<GitAttribute>) -> Vec<GitAttribute> {
+    attributes.retain(|attribute| {
+        attribute.value == b"lfs"
+            || !is_checkout_neutral_attribute(&attribute.name, &attribute.value)
+    });
+    attributes
 }
 
 fn checkout_config_source_diagnostic(git: &Git, repository: &Path, key: &str) -> String {
@@ -15751,6 +15774,45 @@ mod tests {
     }
 
     #[test]
+    fn attribute_allowlist_accepts_named_diff_and_merge_drivers() {
+        let attribute = |name: &str, value: &str| riftri_git::GitAttribute {
+            path: PathBuf::from("Sources/View.mm"),
+            name: name.as_bytes().to_vec(),
+            value: value.as_bytes().to_vec(),
+        };
+
+        for accepted in [
+            attribute("diff", "set"),
+            attribute("diff", "unset"),
+            attribute("diff", "objc"),
+            attribute("merge", "set"),
+            attribute("merge", "union"),
+            attribute("merge", "keyed-json-rows"),
+        ] {
+            assert!(
+                classify_in_tree_attributes(std::slice::from_ref(&accepted)).is_ok(),
+                "rejected checkout-neutral attribute {:?}={:?}",
+                String::from_utf8_lossy(&accepted.name),
+                String::from_utf8_lossy(&accepted.value),
+            );
+        }
+
+        for rejected in [
+            attribute("diff", ""),
+            attribute("merge", ""),
+            attribute("merge", "lfs"),
+            attribute("filter", "objc"),
+        ] {
+            assert!(
+                classify_in_tree_attributes(std::slice::from_ref(&rejected)).is_err(),
+                "accepted unsupported attribute {:?}={:?}",
+                String::from_utf8_lossy(&rejected.name),
+                String::from_utf8_lossy(&rejected.value),
+            );
+        }
+    }
+
+    #[test]
     fn attribute_allowlist_accepts_every_whitespace_value_but_not_lookalikes() {
         let attribute = |name: &str, value: &str| riftri_git::GitAttribute {
             path: PathBuf::from("fixtures/structure.pdb"),
@@ -18076,6 +18138,82 @@ mod tests {
 
         assert!(!report.compatible);
         assert!(report.blockers.iter().any(|blocker| {
+            blocker.kind == super::RepositoryCompatibilityBlockerKind::EffectiveAttributes
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_diff_and_merge_drivers_do_not_block_compatibility() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = tempdir().expect("fixture");
+        let repository = fixture.path().join("repository");
+        fs::create_dir(&repository).expect("repository");
+        git(&repository, &["init", "--quiet"]);
+        fs::write(repository.join("tracked.txt"), "tracked\n").expect("tracked file");
+        fs::write(repository.join(".gitattributes"), "*.txt merge=union\n")
+            .expect("in-tree attributes");
+        git(&repository, &["add", "--", "tracked.txt", ".gitattributes"]);
+        git(
+            &repository,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        let real = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("locate git");
+        let real = String::from_utf8(real.stdout).expect("UTF-8 git path");
+
+        // Git's default global attributes file, `$XDG_CONFIG_HOME/git/attributes`,
+        // is set only on the stand-in so parallel tests keep their own.
+        // `diff=objc` mirrors the system attributes Apple's Command Line Tools
+        // Git ships for `*.m`, `*.mm`, and `*.swift`.
+        let report_with_global_attributes = |contents: &str| {
+            let home = tempdir().expect("config home");
+            fs::create_dir(home.path().join("git")).expect("git config directory");
+            fs::write(home.path().join("git/attributes"), contents).expect("global attributes");
+            let stand_in = home.path().join("git-stand-in");
+            fs::write(
+                &stand_in,
+                format!(
+                    "#!/bin/sh\nXDG_CONFIG_HOME='{}' exec '{}' \"$@\"\n",
+                    home.path().display(),
+                    real.trim()
+                ),
+            )
+            .expect("write stand-in");
+            fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("chmod");
+            let git = Git::new(&stand_in);
+            let common_git_dir = git
+                .inspect_repository(&repository)
+                .expect("inspect repository")
+                .identity
+                .common_git_dir;
+            super::inspect_repository_compatibility(
+                &git,
+                &repository,
+                &common_git_dir,
+                OsStr::new("HEAD"),
+            )
+            .expect("compatibility report")
+        };
+
+        let neutral = report_with_global_attributes("*.txt diff=objc merge=binary\n");
+        assert!(neutral.compatible, "blockers: {:?}", neutral.blockers);
+
+        let filtered = report_with_global_attributes("*.txt filter=external\n");
+        assert!(!filtered.compatible);
+        assert!(filtered.blockers.iter().any(|blocker| {
             blocker.kind == super::RepositoryCompatibilityBlockerKind::EffectiveAttributes
         }));
     }

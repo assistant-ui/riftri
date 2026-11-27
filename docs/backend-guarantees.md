@@ -71,7 +71,10 @@ accepted, along with checkout-neutral GitHub linguist metadata
 `linguist-detectable`, and `linguist-language`), which hosting-side tooling
 reads but Git's checkout machinery never consults. The `whitespace` attribute is
 accepted with any value for the same reason: only `git diff --check` and
-`git apply` read it. Canonical Git LFS paths are
+`git apply` read it. `diff` and `merge` records are accepted with any value,
+including named drivers such as `diff=objc` or a custom merge driver, because
+only diffs and merges consult them; the same records in global or system
+attributes do not block creation. Canonical Git LFS paths are
 also accepted when they use strict v1
 pointers and the referenced SHA-256-verified objects are already present in the
 default local LFS store. Custom LFS storage, pointer extensions, custom filters,
