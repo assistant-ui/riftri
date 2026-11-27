@@ -242,8 +242,8 @@ change what a prune would remove.
 Riftri asks the installed Git executable to resolve attributes from the exact
 requested tree through an isolated temporary index; it does not parse attribute
 patterns itself. Native backends accept the built-in `text`, `eol`, and `binary`
-checkout semantics, including the checkout-neutral `diff` and `merge` records
-emitted by `binary`, plus GitHub's linguist metadata attributes
+checkout semantics, the checkout-neutral `diff` and `merge` records (unset by
+`binary` or naming a diff or merge driver), plus GitHub's linguist metadata attributes
 (`linguist-generated`, `linguist-vendored`, `linguist-documentation`,
 `linguist-detectable`, `linguist-language`) and Git's `whitespace` attribute,
 which never participate in checkout and therefore cannot change materialized
@@ -273,8 +273,9 @@ verification cache is introduced, and no live worktree file is replaced by
 this optimization. Staging remains owned by the existing add journal.
 
 Custom filters, pointer extensions, custom LFS storage, working-tree encodings,
-ident substitution, legacy or unknown attributes, and any effective
-repository-local, global, or system attribute source remain fail-closed. The
+ident substitution, legacy or unknown attributes, a nonempty repository-local
+`info/attributes` file, and global or system differences outside the
+checkout-neutral allowlist remain fail-closed. The
 new checkout-profile namespace prevents reuse of bases built under the earlier
 policy.
 

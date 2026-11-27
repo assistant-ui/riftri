@@ -7,6 +7,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Named `diff` and `merge` drivers, in the tree or in global and system
+  attributes, no longer block an optimized add. This includes the `diff=objc`
+  and `diff=swift` system attributes Apple's Command Line Tools Git ships,
+  which blocked any repository tracking `.m`, `.mm`, or `.swift` files.
 - Conditional Git includes can configure commands for the `pre-push` and
   `prepare-commit-msg` events without blocking an optimized add.
 - Optimized adds now refuse configured `post-checkout`, `post-index-change`,

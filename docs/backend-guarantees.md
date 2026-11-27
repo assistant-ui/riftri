@@ -71,13 +71,14 @@ accepted, along with checkout-neutral GitHub linguist metadata
 `linguist-detectable`, and `linguist-language`), which hosting-side tooling
 reads but Git's checkout machinery never consults. The `whitespace` attribute is
 accepted with any value for the same reason: only `git diff --check` and
-`git apply` read it. Canonical Git LFS paths are
-also accepted when they use strict v1
-pointers and the referenced SHA-256-verified objects are already present in the
-default local LFS store. Custom LFS storage, pointer extensions, custom filters,
+`git apply` read it. Global, system, and in-tree `diff` and `merge` records
+accept nonempty driver names such as `diff=objc`. Canonical Git LFS paths
+are the only paths that may use the `lfs` driver. They must use strict v1
+pointers backed by SHA-256-verified objects already present in the default
+local LFS store. Custom LFS storage, pointer extensions, custom filters,
 working-tree encodings, ident substitution, legacy or unknown attributes,
-external attributes, sparse checkout, and submodules remain outside this
-profile and fail closed.
+external differences outside the checkout-neutral allowlist, sparse checkout, and
+submodules remain outside this profile and fail closed.
 
 Git does not store arbitrary extended attributes. Riftri therefore does not
 promise to reproduce a source directory's xattrs from a commit. The native

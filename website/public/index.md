@@ -292,11 +292,13 @@ never silently falls back to a full-copy checkout. Use ordinary Git explicitly
 when a destination or checkout profile is unsupported.
 
 Deterministic in-tree text, line-ending, and binary attributes are supported,
-along with checkout-neutral GitHub linguist hints and Git's `whitespace`
-attribute. Canonical
+along with checkout-neutral GitHub linguist hints, Git's `whitespace`
+attribute, and named `diff` and `merge` drivers. These checkout-neutral
+records can also come from global or system attributes. Canonical
 Git LFS paths need verified objects already present in the default local LFS
 store; Riftri does not fetch them during creation. Custom filters, custom LFS
-storage or pointer extensions, external attributes, a repository's own
+storage or pointer extensions, external differences outside the checkout-neutral
+allowlist, a repository's own
 sparse-checkout profile, and submodules remain outside the supported checkout
 profile. Sparse worktrees are supported only as an explicit cone-mode request
 through `riftri worktree add --sparse-dir <DIR>`.
