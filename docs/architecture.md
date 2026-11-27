@@ -141,13 +141,13 @@ requested tree through an isolated temporary index. Built-in `text`, `eol`, and
 unset by the built-in binary macro or naming a diff or merge driver, are
 checkout-neutral, as are `linguist-*` metadata and the `whitespace` attribute.
 Global and system attributes that set only these checkout-neutral records do
-not block creation, because materialization reads attributes from the tree. A narrow Git LFS profile is
-also supported when each affected path resolves to the canonical
+not block creation, because materialization reads attributes from the tree.
+A narrow Git LFS profile is also supported when each affected path resolves to the canonical
 `filter=lfs diff=lfs merge=lfs -text` quartet, the installed filter
 configuration is standard, and the strict v1 pointer names an exact object in
-the repository's default local LFS store. Repository-local, global, and system
-attribute sources remain unsupported because they are mutable outside the tree
-identity.
+the repository's default local LFS store. Riftri refuses a nonempty repository-local
+`info/attributes` file and any global or system difference outside the
+checkout-neutral allowlist.
 
 An explicit `riftri worktree add --sparse-dir` request selects a cone-mode
 sparse view. The canonical directory list — sorted, deduplicated, and with

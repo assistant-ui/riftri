@@ -273,8 +273,9 @@ verification cache is introduced, and no live worktree file is replaced by
 this optimization. Staging remains owned by the existing add journal.
 
 Custom filters, pointer extensions, custom LFS storage, working-tree encodings,
-ident substitution, legacy or unknown attributes, and any effective
-repository-local, global, or system attribute source remain fail-closed. The
+ident substitution, legacy or unknown attributes, a nonempty repository-local
+`info/attributes` file, and global or system differences outside the
+checkout-neutral allowlist remain fail-closed. The
 new checkout-profile namespace prevents reuse of bases built under the earlier
 policy.
 

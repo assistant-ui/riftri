@@ -6588,9 +6588,7 @@ fn analyze_compatibility_with_git_info(
     if info_attributes_safe && !paths.is_empty() {
         // With no `.gitattributes` entry anywhere in the exact tree, the
         // isolated in-tree result is necessarily empty. Keep the effective
-        // query below: global and system attributes must still be detected
-        // and refused rather than becoming part of a supposedly immutable
-        // checkout profile.
+        // query to detect global and system attributes that affect checkout.
         let (in_tree, effective) = git.attribute_pair_for_tree(
             repository,
             &resolved.tree,
@@ -6970,10 +6968,10 @@ fn is_supported_in_tree_attribute(attribute: &GitAttribute) -> bool {
 /// `diff` and `merge` select the driver `git diff` and merges use; checkout
 /// never consults them, so any value (unset, set, or a named driver such as
 /// `diff=objc` or a custom merge driver) leaves worktree bytes unchanged.
-/// `lfs` values never reach here: LFS records are classified as a set first.
+/// The reserved LFS drivers must match the canonical in-tree profile.
 fn is_checkout_neutral_attribute(name: &[u8], value: &[u8]) -> bool {
     match name {
-        b"diff" | b"merge" => !value.is_empty(),
+        b"diff" | b"merge" => !value.is_empty() && value != b"lfs",
         name => is_checkout_neutral_metadata_attribute(name, value),
     }
 }
@@ -6982,10 +6980,8 @@ fn is_checkout_neutral_attribute(name: &[u8], value: &[u8]) -> bool {
 /// never reads, such as the `diff=objc` and `diff=swift` defaults Apple's
 /// Command Line Tools Git ships as system attributes.
 fn checkout_affecting(mut attributes: Vec<GitAttribute>) -> Vec<GitAttribute> {
-    attributes.retain(|attribute| {
-        attribute.value == b"lfs"
-            || !is_checkout_neutral_attribute(&attribute.name, &attribute.value)
-    });
+    attributes
+        .retain(|attribute| !is_checkout_neutral_attribute(&attribute.name, &attribute.value));
     attributes
 }
 
@@ -18152,8 +18148,11 @@ mod tests {
         fs::create_dir(&repository).expect("repository");
         git(&repository, &["init", "--quiet"]);
         fs::write(repository.join("tracked.txt"), "tracked\n").expect("tracked file");
-        fs::write(repository.join(".gitattributes"), "*.txt merge=union\n")
-            .expect("in-tree attributes");
+        fs::write(
+            repository.join(".gitattributes"),
+            ".gitattributes merge=union\n",
+        )
+        .expect("in-tree attributes");
         git(&repository, &["add", "--", "tracked.txt", ".gitattributes"]);
         git(
             &repository,
@@ -18168,11 +18167,6 @@ mod tests {
                 "initial",
             ],
         );
-        let real = Command::new("sh")
-            .args(["-c", "command -v git"])
-            .output()
-            .expect("locate git");
-        let real = String::from_utf8(real.stdout).expect("UTF-8 git path");
 
         // Git's default global attributes file, `$XDG_CONFIG_HOME/git/attributes`,
         // is set only on the stand-in so parallel tests keep their own.
@@ -18185,11 +18179,7 @@ mod tests {
             let stand_in = home.path().join("git-stand-in");
             fs::write(
                 &stand_in,
-                format!(
-                    "#!/bin/sh\nXDG_CONFIG_HOME='{}' exec '{}' \"$@\"\n",
-                    home.path().display(),
-                    real.trim()
-                ),
+                "#!/bin/sh\nexport XDG_CONFIG_HOME=\"${0%/*}\"\nexec git \"$@\"\n",
             )
             .expect("write stand-in");
             fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).expect("chmod");
@@ -18208,14 +18198,20 @@ mod tests {
             .expect("compatibility report")
         };
 
-        let neutral = report_with_global_attributes("*.txt diff=objc merge=binary\n");
+        let neutral =
+            report_with_global_attributes("*.txt diff=objc merge=binary whitespace=lfs\n");
         assert!(neutral.compatible, "blockers: {:?}", neutral.blockers);
 
-        let filtered = report_with_global_attributes("*.txt filter=external\n");
-        assert!(!filtered.compatible);
-        assert!(filtered.blockers.iter().any(|blocker| {
-            blocker.kind == super::RepositoryCompatibilityBlockerKind::EffectiveAttributes
-        }));
+        for rule in ["*.txt filter=external\n", "*.txt diff=lfs\n"] {
+            let report = report_with_global_attributes(rule);
+            assert!(!report.compatible, "accepted {rule:?}");
+            assert!(
+                report.blockers.iter().any(|blocker| {
+                    blocker.kind == super::RepositoryCompatibilityBlockerKind::EffectiveAttributes
+                }),
+                "expected an external attribute blocker for {rule:?}"
+            );
+        }
     }
 
     #[cfg(unix)]
