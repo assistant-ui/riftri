@@ -13,6 +13,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 - A `post-checkout` hook registered in configuration (`hook.<name>.event`) now
   refuses an optimized add instead of being skipped. `git worktree add` runs
   it, and Riftri runs only the hooks directory's script.
+- When Git exits unsuccessfully before answering a blob request, Riftri
+  reports its exit status and diagnostic.
 
 ## [0.7.1] - 2026-11-25
 
