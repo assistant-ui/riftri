@@ -7,6 +7,8 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- When Git exits unsuccessfully before answering a blob request, Riftri
+  reports its exit status and diagnostic.
 - Conditional Git includes (`includeIf`) that define configured hooks
   (`hook.<name>.command`, `hook.<name>.event`, and the rest of the `hook.*`
   section) no longer block a repository. Hooks never change checkout bytes.

@@ -567,8 +567,11 @@ RIFTRI_BENCH_WORKERS=10 node docs/benchmarks/checkout-config-batching.mjs \
 
 Use matching build profiles and a quiet volume with ample free space. The
 harness also runs ordinary Git as a control, alternating its position between
-rounds. It defaults to ten workers and writes nearest-rank p50/p95 summaries
-for serial adds, concurrent views, and batch wall times, retaining every sample.
+rounds. Concurrent `git worktree add` in one repository can fail, so in
+concurrent batches the control registers worktrees one at a time, as Riftri
+does, and checks them out concurrently. It defaults to ten workers and writes
+nearest-rank p50/p95 summaries for serial adds, concurrent views, and batch
+wall times, retaining every sample.
 Cold samples and the warm-up anchor are excluded from cached summaries.
 
 `RIFTRI_BENCH_COLD_ROUNDS=4` repeats empty-base-cache creation in alternating

@@ -77,7 +77,21 @@ function verify(directory) {
   assert.equal(exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], directory).length, 0);
   for (const expected of manifest) assert.deepEqual(fingerprint(directory, expected.name), expected);
 }
-async function create(version, mode, label, warm = true) {
+// Concurrent plain `git worktree add` in one repository is unsafe: each add
+// reads every peer's `worktrees/<name>/commondir`, which a peer creates empty
+// before writing it, and a reader in between dies with "failed to read ...
+// commondir" (D025). Riftri serializes exactly that registration and runs the
+// rest concurrently, so the concurrent Git lane holds the same lock around
+// `worktree add --no-checkout` and then runs the `reset --hard` checkout Git's
+// own add would run, outside it. The fixture has no post-checkout hook, the
+// only other step `--no-checkout` skips. Lock waits count in both lanes.
+let registration = Promise.resolve();
+function registered(task) {
+  const next = registration.then(task);
+  registration = next.catch(() => {});
+  return next;
+}
+async function create(version, mode, label, { warm = true, concurrent = false } = {}) {
   const destination = path.join(output, label);
   assert.ok(!fs.existsSync(destination));
   const trace = path.join(output, `${label}.trace2.jsonl`);
@@ -85,32 +99,48 @@ async function create(version, mode, label, warm = true) {
     ? ['worktree', 'add', '--detach', '--repository', repository, destination, checkoutRevision]
     : ['exec', '--', 'git', 'worktree', 'add', '--detach', destination, checkoutRevision];
   const started = process.hrtime.bigint();
-  const child = spawn(version === 'git' ? 'git' : binaries[version], args, { cwd: repository, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: commandTimeoutMs });
   let stdout = '', stderr = '';
-  let partial = '';
   const phases = [];
-  child.stdout.on('data', data => { stdout += data; });
-  child.stderr.on('data', data => {
-    stderr += data;
-    partial += data;
-    const lines = partial.split('\n');
-    partial = lines.pop();
-    for (const line of lines) {
-      if (line.startsWith('riftri: ')) phases.push({ line, seconds: Number(process.hrtime.bigint() - started) / 1e9 });
-    }
-  });
-  let launchError;
-  const code = await new Promise(resolve => {
-    child.on('error', error => { launchError = error; });
-    child.on('close', resolve);
-  });
+  async function launch(command, commandArgs, cwd = repository) {
+    const child = spawn(command, commandArgs, { cwd, env: { ...env, GIT_TRACE2_EVENT: trace }, timeout: commandTimeoutMs });
+    let partial = '';
+    child.stdout.on('data', data => { stdout += data; });
+    child.stderr.on('data', data => {
+      stderr += data;
+      partial += data;
+      const lines = partial.split('\n');
+      partial = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('riftri: ')) phases.push({ line, seconds: Number(process.hrtime.bigint() - started) / 1e9 });
+      }
+    });
+    let launchError;
+    const code = await new Promise(resolve => {
+      child.on('error', error => { launchError = error; });
+      child.on('close', resolve);
+    });
+    return { code, launchError };
+  }
+  let outcome;
+  if (version !== 'git') outcome = await launch(binaries[version], args);
+  else if (!concurrent) outcome = await launch('git', args);
+  else {
+    outcome = await registered(() => launch('git', ['worktree', 'add', '--no-checkout', '--detach', destination, checkoutRevision]));
+    if (outcome.code === 0 && !outcome.launchError) outcome = await launch('git', ['reset', '--hard', '--no-recurse-submodules'], destination);
+  }
   const seconds = Number(process.hrtime.bigint() - started) / 1e9;
   fs.writeFileSync(path.join(output, `${label}.log`), stdout + stderr);
-  if (launchError) throw launchError;
-  assert.equal(code, 0, stderr);
-  const starts = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse).filter(event => event.event === 'start');
+  if (outcome.launchError) throw outcome.launchError;
+  assert.equal(outcome.code, 0, stderr);
+  const events = fs.readFileSync(trace, 'utf8').trim().split('\n').map(JSON.parse);
+  const starts = events.filter(event => event.event === 'start');
   if (version === 'git') {
-    const record = { version, mode, label, seconds, destination, gitStarts: starts.length };
+    // Git's own clock for its top-level `worktree add`, so concurrent
+    // registrations can be shown not to overlap. Trace2 times are fixed-width
+    // UTC with microseconds, so they compare as strings.
+    const add = starts.find(event => !event.sid.includes('/') && event.argv.includes('worktree'));
+    const exit = events.find(event => event.event === 'exit' && event.sid === add.sid);
+    const record = { version, mode, label, seconds, destination, gitStarts: starts.length, registration: { started: add.time, exited: exit.time } };
     result.cases.push(record); save();
     return record;
   }
@@ -145,14 +175,14 @@ function remove(record) {
 result.coldRounds = coldRounds;
 for (let round = 0; round < coldRounds; round++) {
   for (const version of round % 2 ? ['after', 'before'] : ['before', 'after']) {
-    const cold = await create(version, 'explicit', round === 0 ? `cold-${version}` : `cold-${round}-${version}`, false);
+    const cold = await create(version, 'explicit', round === 0 ? `cold-${version}` : `cold-${round}-${version}`, { warm: false });
     remove(cold);
     exec(binaries[version], ['gc', repository, '--apply']);
     console.log(`${cold.label}: ${cold.seconds.toFixed(3)}s`);
   }
 }
 // Keep a baseline-created anchor alive: both versions must reuse its exact base.
-const anchor = await create('before', 'explicit', 'anchor', false);
+const anchor = await create('before', 'explicit', 'anchor', { warm: false });
 verify(anchor.destination);
 for (let round = 0; round < singleRounds; round++) {
   for (const mode of round % 2 ? ['git', 'shim', 'explicit'] : ['explicit', 'shim', 'git']) {
@@ -171,7 +201,7 @@ for (let round = 0; round < batchRounds; round++) {
     const freeBefore = fs.statfsSync(output);
     const started = process.hrtime.bigint();
     const labels = Array.from({ length: workers }, (_, worker) => `parallel-${round}-${mode}-${version}-${worker}`);
-    const records = await settleWorkers(labels, label => create(version, mode, label), outcomes => {
+    const records = await settleWorkers(labels, label => create(version, mode, label, { concurrent: true }), outcomes => {
       result.failedBatches ??= [];
       result.failedBatches.push({ round, version, mode, workers,
         seconds: Number(process.hrtime.bigint() - started) / 1e9,
