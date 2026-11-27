@@ -13,8 +13,15 @@ and in the repository documentation and Markdown overview described below.
 and its pixel-border theme. `docs.config.ts` owns the grouped sidebar, search,
 table of contents, copy actions, and dark theme. `src/app/docs-theme.css`
 adapts those components to the homepage's Geist typography, orange accents,
-square controls, and dashed borders. AI chat, telemetry, and MCP are disabled;
-reading and searching docs need no API key.
+square controls, and dashed borders. The docs adapter disables AI chat,
+telemetry, and MCP. Reading and searching the docs requires no API key.
+
+To collect server request metrics, set `FARMJS_API_KEY` in the Riftri Vercel
+project's Production environment. Use a Farm **Site analytics** key scoped to
+the Assistant UI organization's **riftri** project and **Production**. Redeploy,
+open a dynamic page such as `/docs`, and check the project's Production activity.
+The homepage, installers, and other files served directly by the CDN bypass the
+Farm.js server. Removing the key and redeploying stops collection.
 
 There are two reading paths for every topic:
 
