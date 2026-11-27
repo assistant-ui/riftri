@@ -800,10 +800,11 @@ impl Git {
     pub fn inspect_repository_for_report(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
         let mut info = self.inspect_repository_with_head_tree(path)?;
         if !info.is_bare {
-            // `worktree_is_clean` passes `--untracked-files=all`, which
-            // overrides a `status.showUntrackedFiles=no` that would otherwise
-            // hide untracked content.
-            info.clean = Some(self.worktree_is_clean(path)?);
+            // A report must not refresh the on-disk index and fire post-index-change.
+            info.clean = Some(self.worktree_is_clean_with_env(
+                path,
+                &[(OsStr::new("GIT_OPTIONAL_LOCKS"), OsStr::new("0"))],
+            )?);
         } else {
             // Preserve the report contract: cleanliness and tree are
             // worktree-only diagnostics even though the combined resolution
@@ -2435,10 +2436,17 @@ impl Git {
     }
 
     pub fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, GitError> {
-        let output = self.run(
-            Some(worktree),
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        )?;
+        self.worktree_is_clean_with_env(worktree, &[])
+    }
+
+    fn worktree_is_clean_with_env(
+        &self,
+        worktree: &Path,
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<bool, GitError> {
+        let arguments =
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"].map(OsString::from);
+        let output = self.run_os_with_env(Some(worktree), &arguments, environment)?;
         Ok(output.stdout.is_empty())
     }
 
