@@ -68,11 +68,10 @@ behavior, not a partial creation, so the worktree is usable and
 Read the hook's own output to see what failed. Nothing needs repairing on
 Riftri's side.
 
-A hook is no longer a reason for Riftri to refuse a repository, so hook
-managers that set `core.hooksPath`, such as husky, work normally. The exception
-is a `post-checkout` hook registered in configuration (`hook.<name>.event`),
-which Riftri does not run, so it refuses the add instead of skipping the hook.
-Use `RIFTRI_BYPASS=1 git worktree add` for those repositories.
+Riftri honors `core.hooksPath`, including directories installed by hook managers
+such as husky. If `hook.<name>.event` registers `post-checkout`,
+`post-index-change`, or `reference-transaction`, use
+`RIFTRI_BYPASS=1 git worktree add` to preserve Git's hook behavior.
 
 ### Creation fails on a repository with sparse checkout, submodules, or custom filters
 
@@ -109,12 +108,12 @@ the floor. If you downloaded an archive by hand, take the
 
 ### Conditional Git configuration is rejected
 
-Riftri accepts conditional includes that contain only identity, signing, SSH,
-and hook settings, none of which change checkout bytes: `user.name`,
-`user.email`, `user.signingKey`, `user.useConfigOnly`, `commit.gpgSign`,
-`tag.gpgSign`, `gpg.format`, `gpg.program`, `gpg.ssh.program`,
-`gpg.ssh.allowedSignersFile`, `core.sshCommand`, and any `hook.*` key. This
-includes identity files from system, global, and repository configuration.
+Conditional includes can contain `user.name`, `user.email`, `user.signingKey`,
+`user.useConfigOnly`, `commit.gpgSign`, `tag.gpgSign`, `gpg.format`,
+`gpg.program`, `gpg.ssh.program`, `gpg.ssh.allowedSignersFile`, and
+`core.sshCommand`. They can also define `hook.<name>.command` and one or more
+`hook.<name>.event` entries for `pre-push` or `prepare-commit-msg`. Git does
+not run either event during a worktree add.
 
 Riftri reads each conditional target even when its condition does not match the
 source worktree. Other keys, nested includes, and unreadable targets remain

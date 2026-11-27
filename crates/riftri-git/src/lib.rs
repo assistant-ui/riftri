@@ -1,6 +1,6 @@
 //! Interaction with the user's installed Git executable.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
@@ -185,15 +185,13 @@ pub struct TreeAttributeIndex {
     index: PathBuf,
 }
 
-/// Effective values, conditional includes, and configured `post-checkout`
-/// hooks discovered in one configuration read.
+/// Effective values, conditional includes, and configured hook events from one read.
 #[derive(Debug, Default)]
 pub struct ConfigValues {
     pub values: BTreeMap<String, Vec<u8>>,
     pub has_conditional_includes: bool,
-    /// Some `hook.<name>.event` names `post-checkout`. Git 2.54 and later run
-    /// such a hook on `git worktree add` next to the hooks directory's script.
-    pub has_post_checkout_config_hooks: bool,
+    /// Includes earlier registrations even if a later setting disables the hook.
+    pub hook_events: BTreeSet<Vec<u8>>,
 }
 
 /// One source contributing a value to Git's effective configuration.
@@ -1209,12 +1207,23 @@ impl Git {
 
     /// Read every distinct conditional target, including conditions that do not match.
     /// Nested includes and unreadable targets cannot satisfy the key allowlist.
-    /// An allowed key ending in `*` admits every key it prefixes, so `hook.*`
-    /// admits the whole `hook` section.
     pub fn conditional_config_has_only(
         &self,
         path: &Path,
         allowed_keys: &[&str],
+    ) -> Result<bool, GitError> {
+        self.conditional_config_matches(path, |key, _| {
+            allowed_keys
+                .iter()
+                .any(|allowed| key.eq_ignore_ascii_case(allowed.as_bytes()))
+        })
+    }
+
+    /// Check every entry in each conditional target, including inactive targets.
+    pub fn conditional_config_matches(
+        &self,
+        path: &Path,
+        accepts: impl Fn(&[u8], &[u8]) -> bool,
     ) -> Result<bool, GitError> {
         let arguments = [
             OsString::from("config"),
@@ -1269,7 +1278,6 @@ impl Git {
                 git_path_argument(&Path::new(".").join(name)),
                 OsString::from("--no-includes"),
                 OsString::from("--null"),
-                OsString::from("--name-only"),
                 OsString::from("--list"),
             ];
             let output = self.query_output_os(Some(&path.join(parent)), &arguments)?;
@@ -1277,16 +1285,10 @@ impl Git {
                 || output
                     .stdout
                     .split(|byte| *byte == 0)
-                    .filter(|key| !key.is_empty())
-                    .any(|key| {
-                        !allowed_keys
-                            .iter()
-                            .any(|allowed| match allowed.strip_suffix('*') {
-                                Some(prefix) => key.get(..prefix.len()).is_some_and(|start| {
-                                    start.eq_ignore_ascii_case(prefix.as_bytes())
-                                }),
-                                None => key.eq_ignore_ascii_case(allowed.as_bytes()),
-                            })
+                    .filter(|record| !record.is_empty())
+                    .any(|record| {
+                        let (key, value) = split_config_record(record);
+                        !accepts(key, value)
                     })
             {
                 return Ok(false);
@@ -3550,6 +3552,14 @@ fn os_string_from_git(bytes: &[u8], context: &'static str) -> Result<OsString, G
         })
 }
 
+// Git emits key\nvalue\0 or key\0 for an implicit boolean. The value may contain newlines.
+fn split_config_record(record: &[u8]) -> (&[u8], &[u8]) {
+    match record.iter().position(|byte| *byte == b'\n') {
+        Some(index) => (&record[..index], &record[index + 1..]),
+        None => (record, &[]),
+    }
+}
+
 fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, GitError> {
     let invalid = || GitError::InvalidOutput {
         context: "configuration values",
@@ -3561,27 +3571,19 @@ fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, G
     }
     let records = output.strip_suffix(&[0]).ok_or_else(invalid)?;
     for record in records.split(|byte| *byte == 0) {
-        // Git emits key\nvalue\0, or key\0 for an implicit boolean. Split only
-        // the first newline: values may themselves contain newlines or non-UTF-8.
-        let (name, value) = match record.iter().position(|byte| *byte == b'\n') {
-            Some(index) => (&record[..index], &record[index + 1..]),
-            None => (record, &[][..]),
+        let (name, value) = split_config_record(record);
+        let is_include = name.starts_with(b"includeif.") && name.ends_with(b".path");
+        let is_hook_event = name.starts_with(b"hook.") && name.ends_with(b".event");
+        config.has_conditional_includes |= is_include;
+        if is_hook_event {
+            config.hook_events.insert(value.to_vec());
+        }
+        let Some(key) = keys.iter().find(|key| key.as_bytes() == name) else {
+            if is_include || is_hook_event {
+                continue;
+            }
+            return Err(invalid());
         };
-        if name.starts_with(b"includeif.") && name.ends_with(b".path") {
-            config.has_conditional_includes = true;
-            continue;
-        }
-        if name.starts_with(b"hook.") && name.ends_with(b".event") {
-            // A later empty value or `hook.<name>.enabled = false` can switch
-            // this registration off again. Counting it anyway can only refuse
-            // an add, never skip a hook Git would run.
-            config.has_post_checkout_config_hooks |= value == b"post-checkout";
-            continue;
-        }
-        let key = keys
-            .iter()
-            .find(|key| key.as_bytes() == name)
-            .ok_or_else(invalid)?;
         // --get-regexp returns all occurrences in Git's precedence order;
         // --get returns the last one. Preserve that exact behavior.
         config.values.insert(key.clone(), value.to_vec());

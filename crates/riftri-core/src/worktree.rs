@@ -6438,6 +6438,35 @@ fn stderr_for_child_stdout() -> Option<std::process::Stdio> {
     }
 }
 
+fn supported_conditional_setting(key: &[u8], value: &[u8]) -> bool {
+    if let Some(hook) = key.strip_prefix(b"hook.") {
+        let Some(separator) = hook.iter().rposition(|&byte| byte == b'.') else {
+            return false;
+        };
+        return separator > 0
+            && match &hook[separator + 1..] {
+                b"command" => true,
+                b"event" => matches!(value, b"pre-push" | b"prepare-commit-msg"),
+                _ => false,
+            };
+    }
+    [
+        "user.name",
+        "user.email",
+        "user.signingkey",
+        "user.useconfigonly",
+        "commit.gpgsign",
+        "tag.gpgsign",
+        "gpg.format",
+        "gpg.program",
+        "gpg.ssh.program",
+        "gpg.ssh.allowedsignersfile",
+        "core.sshcommand",
+    ]
+    .iter()
+    .any(|allowed| key.eq_ignore_ascii_case(allowed.as_bytes()))
+}
+
 /// Riftri runs `post-checkout` itself after creating a worktree, so a hook is
 /// no longer a reason to refuse the repository. What remains a blocker is a
 /// hook Riftri cannot decide about: a `core.hooksPath` value this platform
@@ -6678,41 +6707,24 @@ fn analyze_compatibility_with_git_info(
         Some(config) => config,
         None => git.config_values(repository, &config_keys)?,
     };
+    for event in [
+        "post-checkout",
+        "post-index-change",
+        "reference-transaction",
+    ] {
+        if config.hook_events.contains(event.as_bytes()) {
+            blockers.push(RepositoryCompatibilityBlocker {
+                kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
+                explanation: format!("a hook.<name>.event setting registers a {event} hook whose invocation Riftri cannot reproduce; use ordinary git worktree add"),
+            });
+        }
+    }
     if config.has_conditional_includes
-        && !git.conditional_config_has_only(
-            repository,
-            // Identity, signing, SSH transport, and configured hook keys:
-            // none of them can change the bytes a checkout writes. A
-            // configured post-checkout hook would change what an add runs,
-            // and is refused below whichever scope defines it.
-            &[
-                "user.name",
-                "user.email",
-                "user.signingkey",
-                "user.useconfigonly",
-                "commit.gpgsign",
-                "tag.gpgsign",
-                "gpg.format",
-                "gpg.program",
-                "gpg.ssh.program",
-                "gpg.ssh.allowedsignersfile",
-                "core.sshcommand",
-                "hook.*",
-            ],
-        )?
+        && !git.conditional_config_matches(repository, supported_conditional_setting)?
     {
         blockers.push(RepositoryCompatibilityBlocker {
             kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
-            explanation: "conditional Git configuration includes must contain only identity, signing, SSH, and hook settings (user.name, user.email, user.signingKey, user.useConfigOnly, commit.gpgSign, tag.gpgSign, gpg.format, gpg.program, gpg.ssh.program, gpg.ssh.allowedSignersFile, core.sshCommand, hook.*); other keys, nested includes, and unreadable targets are not supported"
-                .to_owned(),
-        });
-    }
-    // Riftri runs only the hooks directory's post-checkout script, so a
-    // hook registered in configuration would silently not run.
-    if config.has_post_checkout_config_hooks {
-        blockers.push(RepositoryCompatibilityBlocker {
-            kind: RepositoryCompatibilityBlockerKind::CheckoutConfiguration,
-            explanation: "a hook.<name>.event setting registers a post-checkout hook, which Riftri does not run; use ordinary git worktree add"
+            explanation: "conditional Git configuration includes must contain only supported identity, signing, SSH, or hook settings (hook.<name>.command and hook.<name>.event for pre-push or prepare-commit-msg); use ordinary git worktree add for other keys, events, nested includes, or unreadable targets"
                 .to_owned(),
         });
     }

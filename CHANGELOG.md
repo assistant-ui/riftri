@@ -7,12 +7,10 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
-- Conditional Git includes (`includeIf`) that define configured hooks
-  (`hook.<name>.command`, `hook.<name>.event`, and the rest of the `hook.*`
-  section) no longer block a repository. Hooks never change checkout bytes.
-- A `post-checkout` hook registered in configuration (`hook.<name>.event`) now
-  refuses an optimized add instead of being skipped. `git worktree add` runs
-  it, and Riftri runs only the hooks directory's script.
+- Conditional Git includes can configure commands for the `pre-push` and
+  `prepare-commit-msg` events without blocking an optimized add.
+- Optimized adds now refuse configured `post-checkout`, `post-index-change`,
+  and `reference-transaction` hooks to preserve Git's invocation behavior.
 - When Git exits unsuccessfully before answering a blob request, Riftri
   reports its exit status and diagnostic.
 

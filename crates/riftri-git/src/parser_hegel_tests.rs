@@ -802,6 +802,18 @@ fn config_keys_refuse_anything_git_could_read_as_a_pattern(tc: TestCase) {
     assert!(is_invalid_output(&result), "{invalid:?}: {result:?}");
 }
 
+#[test]
+fn explicitly_requested_hook_event_keeps_its_last_value() {
+    let key = "hook.Tracer.event".to_owned();
+    let config = parse_config_values(
+        b"hook.Tracer.event\npost-index-change\0hook.Tracer.event\npre-push\0",
+        std::slice::from_ref(&key),
+    )
+    .unwrap();
+    assert_eq!(config.values[&key], b"pre-push");
+    assert!(config.hook_events.contains(b"post-index-change".as_slice()));
+}
+
 #[hegel::test]
 fn config_values_keep_the_last_raw_value_for_each_requested_key(tc: TestCase) {
     let mut keys: Vec<String> = Vec::new();
@@ -815,7 +827,7 @@ fn config_values_keep_the_last_raw_value_for_each_requested_key(tc: TestCase) {
     let mut output = Vec::new();
     let mut expected = std::collections::BTreeMap::new();
     let mut has_conditional_includes = false;
-    let mut has_post_checkout_config_hooks = false;
+    let mut hook_events = std::collections::BTreeSet::new();
     for _ in 0..tc.draw(gs::integers::<usize>().max_value(6)) {
         match tc.draw(gs::integers::<u8>().max_value(2)) {
             0 => {
@@ -833,7 +845,7 @@ fn config_values_keep_the_last_raw_value_for_each_requested_key(tc: TestCase) {
                     "",
                 ]));
                 output.extend([b"hook.", &name[..], b".event\n", event.as_bytes(), b"\0"].concat());
-                has_post_checkout_config_hooks |= event == "post-checkout";
+                hook_events.insert(event.as_bytes().to_vec());
                 continue;
             }
             _ => {}
@@ -856,10 +868,7 @@ fn config_values_keep_the_last_raw_value_for_each_requested_key(tc: TestCase) {
 
     assert_eq!(config.values, expected);
     assert_eq!(config.has_conditional_includes, has_conditional_includes);
-    assert_eq!(
-        config.has_post_checkout_config_hooks,
-        has_post_checkout_config_hooks
-    );
+    assert_eq!(config.hook_events, hook_events);
 
     tc.assume(!output.is_empty());
     let unterminated = &output[..output.len() - 1];
