@@ -1,6 +1,6 @@
 //! Interaction with the user's installed Git executable.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output};
@@ -185,11 +185,13 @@ pub struct TreeAttributeIndex {
     index: PathBuf,
 }
 
-/// Effective values and conditional includes discovered in one configuration read.
+/// Effective values, conditional includes, and configured hook events from one read.
 #[derive(Debug, Default)]
 pub struct ConfigValues {
     pub values: BTreeMap<String, Vec<u8>>,
     pub has_conditional_includes: bool,
+    /// Includes earlier registrations even if a later setting disables the hook.
+    pub hook_events: BTreeSet<Vec<u8>>,
 }
 
 /// One source contributing a value to Git's effective configuration.
@@ -798,10 +800,11 @@ impl Git {
     pub fn inspect_repository_for_report(&self, path: &Path) -> Result<RepositoryInfo, GitError> {
         let mut info = self.inspect_repository_with_head_tree(path)?;
         if !info.is_bare {
-            // `worktree_is_clean` passes `--untracked-files=all`, which
-            // overrides a `status.showUntrackedFiles=no` that would otherwise
-            // hide untracked content.
-            info.clean = Some(self.worktree_is_clean(path)?);
+            // A report must not refresh the on-disk index and fire post-index-change.
+            info.clean = Some(self.worktree_is_clean_with_env(
+                path,
+                &[(OsStr::new("GIT_OPTIONAL_LOCKS"), OsStr::new("0"))],
+            )?);
         } else {
             // Preserve the report contract: cleanliness and tree are
             // worktree-only diagnostics even though the combined resolution
@@ -1210,6 +1213,19 @@ impl Git {
         path: &Path,
         allowed_keys: &[&str],
     ) -> Result<bool, GitError> {
+        self.conditional_config_matches(path, |key, _| {
+            allowed_keys
+                .iter()
+                .any(|allowed| key.eq_ignore_ascii_case(allowed.as_bytes()))
+        })
+    }
+
+    /// Check every entry in each conditional target, including inactive targets.
+    pub fn conditional_config_matches(
+        &self,
+        path: &Path,
+        accepts: impl Fn(&[u8], &[u8]) -> bool,
+    ) -> Result<bool, GitError> {
         let arguments = [
             OsString::from("config"),
             OsString::from("--null"),
@@ -1263,7 +1279,6 @@ impl Git {
                 git_path_argument(&Path::new(".").join(name)),
                 OsString::from("--no-includes"),
                 OsString::from("--null"),
-                OsString::from("--name-only"),
                 OsString::from("--list"),
             ];
             let output = self.query_output_os(Some(&path.join(parent)), &arguments)?;
@@ -1271,11 +1286,10 @@ impl Git {
                 || output
                     .stdout
                     .split(|byte| *byte == 0)
-                    .filter(|key| !key.is_empty())
-                    .any(|key| {
-                        !allowed_keys
-                            .iter()
-                            .any(|allowed| key.eq_ignore_ascii_case(allowed.as_bytes()))
+                    .filter(|record| !record.is_empty())
+                    .any(|record| {
+                        let (key, value) = split_config_record(record);
+                        !accepts(key, value)
                     })
             {
                 return Ok(false);
@@ -1367,7 +1381,7 @@ impl Git {
         // Validation above excludes regexp metacharacters other than the one
         // separating dot. Anchor the allowlist so unrelated settings cannot match.
         let pattern = format!(
-            r"^({}|includeif\..*\.path)$",
+            r"^({}|includeif\..*\.path|hook\..*\.event)$",
             keys.iter()
                 .map(|key| key.replace('.', r"\."))
                 .collect::<Vec<_>>()
@@ -2422,10 +2436,17 @@ impl Git {
     }
 
     pub fn worktree_is_clean(&self, worktree: &Path) -> Result<bool, GitError> {
-        let output = self.run(
-            Some(worktree),
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        )?;
+        self.worktree_is_clean_with_env(worktree, &[])
+    }
+
+    fn worktree_is_clean_with_env(
+        &self,
+        worktree: &Path,
+        environment: &[(&OsStr, &OsStr)],
+    ) -> Result<bool, GitError> {
+        let arguments =
+            ["status", "--porcelain=v1", "-z", "--untracked-files=all"].map(OsString::from);
+        let output = self.run_os_with_env(Some(worktree), &arguments, environment)?;
         Ok(output.stdout.is_empty())
     }
 
@@ -3539,6 +3560,14 @@ fn os_string_from_git(bytes: &[u8], context: &'static str) -> Result<OsString, G
         })
 }
 
+// Git emits key\nvalue\0 or key\0 for an implicit boolean. The value may contain newlines.
+fn split_config_record(record: &[u8]) -> (&[u8], &[u8]) {
+    match record.iter().position(|byte| *byte == b'\n') {
+        Some(index) => (&record[..index], &record[index + 1..]),
+        None => (record, &[]),
+    }
+}
+
 fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, GitError> {
     let invalid = || GitError::InvalidOutput {
         context: "configuration values",
@@ -3550,20 +3579,19 @@ fn parse_config_values(output: &[u8], keys: &[String]) -> Result<ConfigValues, G
     }
     let records = output.strip_suffix(&[0]).ok_or_else(invalid)?;
     for record in records.split(|byte| *byte == 0) {
-        // Git emits key\nvalue\0, or key\0 for an implicit boolean. Split only
-        // the first newline: values may themselves contain newlines or non-UTF-8.
-        let (name, value) = match record.iter().position(|byte| *byte == b'\n') {
-            Some(index) => (&record[..index], &record[index + 1..]),
-            None => (record, &[][..]),
-        };
-        if name.starts_with(b"includeif.") && name.ends_with(b".path") {
-            config.has_conditional_includes = true;
-            continue;
+        let (name, value) = split_config_record(record);
+        let is_include = name.starts_with(b"includeif.") && name.ends_with(b".path");
+        let is_hook_event = name.starts_with(b"hook.") && name.ends_with(b".event");
+        config.has_conditional_includes |= is_include;
+        if is_hook_event {
+            config.hook_events.insert(value.to_vec());
         }
-        let key = keys
-            .iter()
-            .find(|key| key.as_bytes() == name)
-            .ok_or_else(invalid)?;
+        let Some(key) = keys.iter().find(|key| key.as_bytes() == name) else {
+            if is_include || is_hook_event {
+                continue;
+            }
+            return Err(invalid());
+        };
         // --get-regexp returns all occurrences in Git's precedence order;
         // --get returns the last one. Preserve that exact behavior.
         config.values.insert(key.clone(), value.to_vec());

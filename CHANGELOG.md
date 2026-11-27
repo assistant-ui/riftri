@@ -7,6 +7,11 @@ for its Rust CLI and npm distribution packages as one synchronized release.
 
 ### Fixed
 
+- Conditional Git includes can configure commands for the `pre-push` and
+  `prepare-commit-msg` events without blocking an optimized add.
+- Optimized adds now refuse configured `post-checkout`, `post-index-change`,
+  and `reference-transaction` hooks to preserve Git's invocation behavior.
+  The cleanliness check in `riftri doctor` also avoids firing `post-index-change`.
 - When Git exits unsuccessfully before answering a blob request, Riftri
   reports its exit status and diagnostic.
 

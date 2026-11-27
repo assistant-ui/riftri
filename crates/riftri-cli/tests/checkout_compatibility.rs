@@ -53,10 +53,11 @@ enum UnsafeCheckoutCase {
     SubmoduleGitlink,
     SourceBranchConfiguration,
     LinkedWorktreeConfiguration,
+    ConfiguredHook(&'static str),
 }
 
 impl UnsafeCheckoutCase {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 10] = [
         Self::NonCanonicalGitLfs,
         Self::NestedEncoding,
         Self::RepositoryAttributes,
@@ -64,6 +65,9 @@ impl UnsafeCheckoutCase {
         Self::SubmoduleGitlink,
         Self::SourceBranchConfiguration,
         Self::LinkedWorktreeConfiguration,
+        Self::ConfiguredHook("post-checkout"),
+        Self::ConfiguredHook("post-index-change"),
+        Self::ConfiguredHook("reference-transaction"),
     ];
 
     fn name(self) -> &'static str {
@@ -75,6 +79,7 @@ impl UnsafeCheckoutCase {
             Self::SubmoduleGitlink => "submodule-gitlink",
             Self::SourceBranchConfiguration => "source-branch-configuration",
             Self::LinkedWorktreeConfiguration => "linked-worktree-configuration",
+            Self::ConfiguredHook(event) => event,
         }
     }
 
@@ -85,9 +90,9 @@ impl UnsafeCheckoutCase {
             Self::RepositoryAttributes => "effective-attributes",
             Self::SparseCheckout => "sparse-checkout",
             Self::SubmoduleGitlink => "submodules",
-            Self::SourceBranchConfiguration | Self::LinkedWorktreeConfiguration => {
-                "checkout-configuration"
-            }
+            Self::SourceBranchConfiguration
+            | Self::LinkedWorktreeConfiguration
+            | Self::ConfiguredHook(_) => "checkout-configuration",
         }
     }
 
@@ -180,6 +185,14 @@ impl UnsafeCheckoutCase {
                         included.to_str().expect("UTF-8 configuration path"),
                     ],
                 );
+            }
+            Self::ConfiguredHook(event) => {
+                for (key, value) in [
+                    ("hook.riftri-test.event", event),
+                    ("hook.riftri-test.command", "touch hook-ran"),
+                ] {
+                    assert_git_success(&fixture.repository, &["config", key, value]);
+                }
             }
         }
     }
@@ -710,6 +723,16 @@ fn global_identity_includes_do_not_block_checkout_but_other_keys_do() {
                 "[user]\n signingKey = key\n[commit]\n gpgSign = false\n[tag]\n gpgSign = false\n[gpg]\n format = ssh\n program = gpg\n[gpg \"ssh\"]\n program = ssh-keygen\n allowedSignersFile = signers\n[core]\n sshCommand = ssh -i work-key\n",
                 true,
             ),
+            // Configured hooks for events an add never fires.
+            (
+                "[user]\n email = work@example.invalid\n[hook \"Tracer\"]\n command = tracer\n event = pre-push\n event = prepare-commit-msg\n",
+                true,
+            ),
+            ("[hook \"Tracer\"]\n event = pre-push\n event = post-index-change\n", false),
+            ("[hook \"Tracer\"]\n event = reference-transaction\n", false),
+            ("[hook \"Tracer\"]\n event = post-checkout\n", false),
+            ("[hook \"post-checkout\"]\n enabled = false\n", false),
+            ("[hook \"Tracer\"]\n event = unknown-event\n", false),
             ("[core]\n eol = crlf\n", false),
             ("[include]\n path = hidden-config\n", false),
         ]
@@ -834,6 +857,13 @@ fn unsafe_checkout_inputs_are_diagnosed_and_rejected_without_mutation() {
             "unsafe add succeeded for {case:?}: {}",
             String::from_utf8_lossy(&add.stdout),
         );
+        if let UnsafeCheckoutCase::ConfiguredHook(event) = case {
+            assert!(
+                String::from_utf8_lossy(&add.stderr).contains(event),
+                "{add:?}"
+            );
+            assert!(!fixture.repository.join("hook-ran").exists());
+        }
         assert!(
             !destination.exists(),
             "add created destination for {case:?}"
