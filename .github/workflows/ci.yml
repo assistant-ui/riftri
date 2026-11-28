@@ -821,7 +821,8 @@ jobs:
           # time on ReFS, so one runner takes them while a second takes the
           # rest. package/test/native-package-workflow.test.js keeps the two
           # filters complementary, so every test still runs exactly once. The
-          # installed npm workflow and the benchmark run on the lighter part.
+          # installed npm workflow and the benchmark each run on one part, which
+          # keeps the two runners about even.
           - part: lifecycle
             test-filter: "worktree::tests::"
           - part: rest
@@ -875,7 +876,7 @@ jobs:
         run: cargo test --workspace --locked --features riftri-core/native-cow-integration -- ${{ matrix.test-filter }}
 
       - name: Run installed npm workflow on ReFS
-        if: matrix.part == 'rest'
+        if: matrix.part == 'lifecycle'
         shell: pwsh
         env:
           RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
