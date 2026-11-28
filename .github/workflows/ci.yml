@@ -17,7 +17,7 @@ concurrency:
 # pull request until GitHub's six-hour default expires and produces no
 # diagnostic at all: `npm test` on ubuntu has stalled this way, and the
 # cancel-and-rerun habit it encourages destroys the evidence each time
-# (#399). The slowest job here runs about five minutes, so 30 surfaces a
+# (#399). The slowest job here runs about eight minutes, so 30 surfaces a
 # stall while leaving ample room for a slow runner.
 jobs:
   quality:
