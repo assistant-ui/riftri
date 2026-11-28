@@ -17,7 +17,7 @@ concurrency:
 # pull request until GitHub's six-hour default expires and produces no
 # diagnostic at all: `npm test` on ubuntu has stalled this way, and the
 # cancel-and-rerun habit it encourages destroys the evidence each time
-# (#399). The slowest job here runs about five minutes, so 30 surfaces a
+# (#399). The slowest job here runs about eight minutes, so 30 surfaces a
 # stall while leaving ample room for a slow runner.
 jobs:
   quality:
@@ -31,6 +31,13 @@ jobs:
           - ubuntu-24.04
           - macos-15
           - windows-2025
+        include:
+          # The property tests are four fifths of the macOS test time, so that
+          # runner leaves them to `macos-properties`, which runs them in
+          # parallel. package/test/native-package-workflow.test.js keeps the two
+          # filters complementary, so every test still runs exactly once.
+          - os: macos-15
+            test-filter: --skip hegel
 
     steps:
       - name: Check out source
@@ -61,7 +68,48 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run Rust tests (tui feature)
-        run: cargo test --workspace --locked --features riftri-cli/tui
+        run: cargo test --workspace --locked --features riftri-cli/tui -- ${{ matrix.test-filter }}
+
+      # The tui feature deselects crates/riftri-cli/src/ui/plain.rs, so the
+      # default/plain build shipped by `cargo install riftri-cli` and
+      # `pnpm run build:native` is never test-executed by the run above. Exercise
+      # it explicitly on one runner so plain.rs and the non-interactive setup
+      # fallback stay covered.
+      - name: Run Rust tests (default/plain features)
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo test --workspace --locked
+
+      - name: Run npm launcher tests
+        run: pnpm test
+
+      - name: Inspect npm package contents
+        run: pnpm run pack:check
+
+  benchmarks:
+    # Release-mode measurements and the APFS benchmark harnesses. They need
+    # release builds of their own, so they run beside Quality instead of after
+    # its tests: run one after the other, the two made the macOS job about 16
+    # minutes long.
+    name: Benchmarks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-15
+          - windows-2025
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        if: matrix.os == 'macos-15'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.13.0
 
       - name: Measure bounded cold checkout workers
         run: cargo test --release --locked -p riftri-git --lib reports_bounded_checkout_worker_latency -- --ignored --nocapture
@@ -75,15 +123,6 @@ jobs:
 
       - name: Measure add revision batching
         run: cargo test --release --locked -p riftri-git --lib reports_add_revision_batch_latency -- --ignored --nocapture
-
-      # The tui feature deselects crates/riftri-cli/src/ui/plain.rs, so the
-      # default/plain build shipped by `cargo install riftri-cli` and
-      # `pnpm run build:native` is never test-executed by the run above. Exercise
-      # it explicitly on one runner so plain.rs and the non-interactive setup
-      # fallback stay covered.
-      - name: Run Rust tests (default/plain features)
-        if: matrix.os == 'ubuntu-24.04'
-        run: cargo test --workspace --locked
 
       - name: Create disposable APFS benchmark volume
         if: matrix.os == 'macos-15'
@@ -136,14 +175,6 @@ jobs:
           reports_cached_creation_baseline_serial_and_concurrent
           -- --ignored --exact --nocapture
 
-      - name: Upload cached creation baseline
-        if: always() && matrix.os == 'macos-15'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: cached-creation-baseline-macos-apfs
-          path: ${{ runner.temp }}/riftri-cached-baseline-macos.json
-          if-no-files-found: error
-
       - name: Record sparse monorepo benchmark
         if: matrix.os == 'macos-15'
         env:
@@ -153,22 +184,6 @@ jobs:
           cargo test -p riftri-core --test native_cow_benchmark
           reports_sparse_cone_costs_on_a_monorepo_shape
           -- --ignored --exact --nocapture
-
-      - name: Upload sparse monorepo benchmark
-        if: always() && matrix.os == 'macos-15'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: sparse-monorepo-benchmark-macos-apfs
-          path: ${{ runner.temp }}/riftri-sparse-monorepo-macos.json
-          if-no-files-found: error
-
-      - name: Upload native COW benchmark
-        if: always() && matrix.os == 'macos-15'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: native-cow-benchmark-macos-apfs
-          path: ${{ runner.temp }}/riftri-native-cow-macos.json
-          if-no-files-found: error
 
       - name: Detach disposable APFS benchmark volume
         if: always() && matrix.os == 'macos-15'
@@ -241,11 +256,45 @@ jobs:
           echo "::error::Could not detach $volume after 5 attempts over 20s: still busy. The holder is listed above (#431)."
           exit 1
 
-      - name: Run npm launcher tests
-        run: pnpm test
+      - name: Upload cached creation baseline
+        if: always() && matrix.os == 'macos-15'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cached-creation-baseline-macos-apfs
+          path: ${{ runner.temp }}/riftri-cached-baseline-macos.json
+          if-no-files-found: error
 
-      - name: Inspect npm package contents
-        run: pnpm run pack:check
+      - name: Upload sparse monorepo benchmark
+        if: always() && matrix.os == 'macos-15'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sparse-monorepo-benchmark-macos-apfs
+          path: ${{ runner.temp }}/riftri-sparse-monorepo-macos.json
+          if-no-files-found: error
+
+      - name: Upload native COW benchmark
+        if: always() && matrix.os == 'macos-15'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-cow-benchmark-macos-apfs
+          path: ${{ runner.temp }}/riftri-native-cow-macos.json
+          if-no-files-found: error
+
+  macos-properties:
+    # Every test whose name contains `hegel`, which by convention is every
+    # Hegel property test. Quality's macOS runner skips exactly these, so the
+    # two macOS jobs together run the same tests the Linux and Windows
+    # Quality runners do.
+    name: Property tests (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run Rust property tests (tui feature)
+        run: cargo test --workspace --locked --features riftri-cli/tui hegel
 
   supply-chain:
     name: Supply chain (cargo-deny)
