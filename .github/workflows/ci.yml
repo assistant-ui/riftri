@@ -17,7 +17,7 @@ concurrency:
 # pull request until GitHub's six-hour default expires and produces no
 # diagnostic at all: `npm test` on ubuntu has stalled this way, and the
 # cancel-and-rerun habit it encourages destroys the evidence each time
-# (#399). The slowest job here runs about eight minutes, so 30 surfaces a
+# (#399). The slowest job here runs about seven minutes, so 30 surfaces a
 # stall while leaving ample room for a slow runner.
 jobs:
   quality:
@@ -810,9 +810,23 @@ jobs:
           exit 1
 
   windows-refs:
-    name: Windows ReFS block-clone integration
+    name: Windows ReFS block-clone integration (${{ matrix.part }})
     runs-on: windows-2025
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # riftri-core's worktree lifecycle tests are half of this suite on
+          # ReFS, so one runner takes them while a second takes the rest.
+          # package/test/native-package-workflow.test.js keeps the two filters
+          # complementary, so every test still runs exactly once. The installed
+          # npm workflow and the benchmark each run on one part, which keeps
+          # the two runners about even.
+          - part: lifecycle
+            test-filter: "worktree::tests::"
+          - part: rest
+            test-filter: "--skip worktree::tests::"
 
     steps:
       - name: Check out source
@@ -859,9 +873,10 @@ jobs:
           RIFTRI_REQUIRE_REFS: "1"
           TEMP: R:\riftri-temp
           TMP: R:\riftri-temp
-        run: cargo test --workspace --locked --features riftri-core/native-cow-integration
+        run: cargo test --workspace --locked --features riftri-core/native-cow-integration -- ${{ matrix.test-filter }}
 
       - name: Run installed npm workflow on ReFS
+        if: matrix.part == 'lifecycle'
         shell: pwsh
         env:
           RIFTRI_REQUIRE_INSTALLED_LIFECYCLE: "1"
@@ -870,6 +885,7 @@ jobs:
         run: pnpm run smoke:installed
 
       - name: Record native COW benchmark
+        if: matrix.part == 'rest'
         shell: pwsh
         env:
           RIFTRI_BENCHMARK_OUTPUT: ${{ runner.temp }}\riftri-native-cow-refs.json
@@ -884,7 +900,7 @@ jobs:
           -- --ignored --exact --nocapture
 
       - name: Upload native COW benchmark
-        if: always()
+        if: always() && matrix.part == 'rest'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: native-cow-benchmark-windows-refs

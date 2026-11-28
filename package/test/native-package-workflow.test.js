@@ -68,6 +68,29 @@ test("macOS runs every Rust test exactly once across its two test jobs", async (
   );
 });
 
+test("Windows ReFS runs every Rust test exactly once across its two parts", async () => {
+  const refs = jobSource(await ciWorkflow(), "windows-refs");
+
+  // One part runs the tests whose names contain the filter and the other skips
+  // exactly those, so a test renamed out of one part still runs in the other.
+  // The filters are quoted because YAML reads a trailing `::` as a mapping.
+  const parts = [...refs.matchAll(/- part: (\S+)\n\s+test-filter: "(.+)"\n/g)];
+  assert.equal(parts.length, 2, "windows-refs must split its suite into two parts");
+  const [[, , selected], [, , skipped]] = parts;
+  assert.match(selected, /^\S+$/, "the first part must select by a single filter");
+  assert.equal(skipped, `--skip ${selected}`, "the second part must skip exactly what the first runs");
+  assert.match(
+    refs,
+    /run: cargo test --workspace --locked --features riftri-core\/native-cow-integration -- \$\{\{ matrix\.test-filter \}\}\n/,
+  );
+
+  // A step limited to one part must name a part that exists, or it never runs.
+  const names = parts.map(([, name]) => name);
+  for (const [, name] of refs.matchAll(/matrix\.part == '([^']*)'/g)) {
+    assert.ok(names.includes(name), `windows-refs has no part named ${name}`);
+  }
+});
+
 test("Git library benchmarks select the library test binary", async () => {
   const benchmarks = jobSource(await ciWorkflow(), "benchmarks");
   for (const name of [
